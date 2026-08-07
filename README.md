@@ -1,0 +1,135 @@
+# TableSide POS
+
+An adaptive Flutter foundation for a multi-restaurant restaurant POS. It targets Android, iOS, web, and Windows, uses Riverpod for UI state, and is structured to use Firebase Authentication, Cloud Firestore, and Cloud Storage.
+
+The starter deliberately runs with local demo data before Firebase has been configured. This makes it safe to review the responsive POS workflow first; the repository classes and deployment files describe the production connection points.
+
+## What is included
+
+- A responsive POS: a three-panel desktop layout at 1100px+, and a compact table/menu/order layout below that.
+- Tenant-aware organisation profile controls, including a cross-platform image picker for a company logo.
+- Menu sections and products, including products that belong to multiple sections and route to a bar or kitchen production area.
+- Riverpod controllers for menu category, table selection, open order lines, and the tenant profile.
+- A print-worker contract for Android/Windows printer devices, plus its Firestore index and initial security rules.
+- Menu, daily-sales, open-tab, settings, and split-bill UI foundations.
+
+## Recommended data model
+
+All tenant data lives beneath an immutable tenant boundary. Never put a tenant ID in a mutable client-side preference and trust it: derive the active tenant from a signed-in user's membership.
+
+```text
+tenants/{tenantId}
+  members/{uid}                  userId, roles: [owner, manager, waiter, printer]
+  venues/{venueId}               timezone, business-day cutoff, address
+  menuSections/{sectionId}       name, sortOrder, active
+  products/{productId}           sectionIds[], priceMinor, productionArea, stockMode
+  tables/{tableId}               label, area, seats, currentOrderId
+  orders/{orderId}               status, tableId, openedBusinessDate, source
+  bills/{billId}                 orderId, allocations, payments, closedBusinessDate
+  paymentRequests/{requestId}    billId, amountMinor, method, status, idempotencyKey
+  printJobs/{jobId}              targetDeviceId, status, payload, idempotencyKey
+  devices/{deviceId}             platform, venueId, printer profile, lastHeartbeat
+```
+
+Use integer minor units (`priceMinor`) for every money value; never store prices as floating point. Order lines must contain immutable snapshots of the product name, tax rate, unit price, and production area, so later menu changes do not change a historical bill.
+
+### Multi-venue and company branding
+
+A tenant represents a restaurant company. A venue is one physical restaurant beneath it. Store the logo and legal/trading details at `tenants/{tenantId}`; then copy them into a closed receipt snapshot. This allows the company profile to change without altering a past receipt, and lets each venue provide its own address, tax registration, and printer routing.
+
+`TenantProfileRepository` uploads branding to:
+
+```text
+tenants/{tenantId}/branding/{timestamp}-{fileName}
+```
+
+The supplied storage rules limit this to authenticated tenant members and image files below 2 MB.
+
+### Bills, tabs, and business-day rollover
+
+Keep the order open until all of its bill allocations are paid or written off. To split a bill, create one or more `bills` documents that each reference specific line quantities or a proportional allocation; validate on the server that allocations never exceed the original ordered quantity.
+
+An open tab should retain `openedBusinessDate` and be visible in an aged-tabs report. When it is closed, set `closedBusinessDate` to the current venue business day. Daily sales reports aggregate **closed bills by `closedBusinessDate`**, not by the original order date. That makes overnight and multi-day tabs auditable while preserving the intended daily revenue report.
+
+### Stock
+
+`stockMode` should be `none`, `product`, or `recipe`. For the first release, product-level stock is enough. On a server-validated order transition (usually `sent` or `closed`, depending on the restaurant policy), add an immutable stock movement instead of only decrementing a counter:
+
+```text
+stockMovements/{movementId}: productId, delta, reason, orderId, occurredAt
+```
+
+The current on-hand value can be maintained by a Cloud Function transaction, but the movement log is the source of truth for reconciliation and corrections.
+
+## Native print-worker design
+
+This is the recommended approach for your Android/Windows-only physical printers:
+
+1. A waiter sends an `orderEvent` with only the newly approved lines.
+2. A trusted Cloud Function maps each line's `productionArea` to a venue printer route, then creates one deterministic `printJobs` document per target device.
+3. The Android/Windows app signed in as that registered device queries only its queued jobs.
+4. It claims a job in a Firestore transaction, prints it through the platform printer integration, then marks it `printed` or `failed`.
+5. Retries use the job's `idempotencyKey`; a device must never print that key twice without an explicit reprint action.
+
+Use a deterministic ID such as `{orderId}_{eventId}_{deviceId}` for server-created jobs. This prevents duplicate tickets when a function retries. A background worker should also abandon stale `claimed` jobs after a timeout and return them to `queued`.
+
+Do **not** let a web client directly write a completed print job, and do not make a printer device responsible for routing. Routing, prices, discounts, stock, and payments belong in trusted Cloud Functions or a server API. The provided `PrintJobRepository` is the native client-side claim/acknowledge portion; job creation should be server-only.
+
+`NativePrintWorker` is now the platform-neutral worker loop. Implement `NativeReceiptPrinter` separately for the printer protocol you deploy; the app deliberately does not pretend USB and Bluetooth APIs are portable across Android and Windows. Register each device through `PrinterDeviceRepository`, issue a device-specific custom claim from a trusted server, and only then start the worker for that device.
+
+## Payments
+
+The app now creates a `paymentRequests` document rather than changing a bill from the client. A Cloud Function must load and validate the bill, enforce the remaining balance, use the request's idempotency key with the selected payment provider, and only then write the payment and close the bill.
+
+This is intentionally provider-neutral: choose a provider that supports your countries, currencies, and physical terminal hardware before implementation. Common choices have materially different onboarding, terminal, offline, and refund flows, so no real money movement is enabled by this starter.
+
+## Future customer QR ordering
+
+Customer orders should use a separate public session, for example `tableSessions/{publicToken}`, rather than exposing a raw table ID in a QR code. The public service writes a customer order as `pendingApproval`; it must not create print jobs or commit stock. A waiter accepts/rejects it in this app. Acceptance creates the normal order event, which then releases the appropriate bar/kitchen tickets.
+
+This means the customer app can be built later without changing the core order, bill, stock, or print model.
+
+## Firebase setup
+
+1. Create a Firebase project and enable **Email/Password** in Authentication, Cloud Firestore, and Storage.
+2. Create a user, then use a trusted admin script or Cloud Function to create `tenants/{tenantId}/members/{uid}`. The membership document must contain `userId: <uid>` and a `roles` array. Do not permit a client to grant itself a role.
+3. This app has a no-secret, compile-time Firebase configuration. Supply the platform-specific values from your Firebase app configuration with Dart defines. For example:
+
+```powershell
+flutter run -d windows `
+  --dart-define=TABLESIDE_USE_FIREBASE=true `
+  --dart-define=FIREBASE_API_KEY=<api-key> `
+  --dart-define=FIREBASE_APP_ID=<windows-app-id> `
+  --dart-define=FIREBASE_MESSAGING_SENDER_ID=<sender-id> `
+  --dart-define=FIREBASE_PROJECT_ID=<project-id> `
+  --dart-define=FIREBASE_STORAGE_BUCKET=<bucket>
+```
+
+Use a separate launch configuration for each platform because Firebase app IDs differ. The default, without `TABLESIDE_USE_FIREBASE=true`, is the demo mode used for UI review and tests.
+
+4. Install the Firebase CLI, select your project, and deploy the supplied initial rules and index:
+
+```powershell
+firebase use <your-project-id>
+firebase deploy --only firestore:rules,firestore:indexes,storage
+```
+
+5. Add Cloud Functions for tenant provisioning, server-authoritative bill/payment/stock transitions, printer device claims, and print-job creation. Run Firestore emulator tests against the rules before production.
+
+The current Firestore rules are a starting point only. In particular, production order updates must be limited to safe state transitions, and payment/stock mutations must remain server-only.
+
+## Run locally
+
+```powershell
+flutter pub get
+flutter run -d windows
+```
+
+For the web target use `flutter run -d chrome`; for an Android device use `flutter devices` then select its ID. Firebase mode shows the sign-in screen, then streams the user's tenant/venue, menu, products, and tables from Firestore.
+
+## Next implementation slice
+
+1. Implement menu/table CRUD with role checks and Firestore emulator tests.
+2. Create server functions for line snapshots, stock movements, split-bill validation, payment capture, and printer routing.
+3. Select the payment provider and printer protocol, then implement the respective terminal adapter and `NativeReceiptPrinter` adapters.
+4. Add device provisioning, a print retry dashboard, and end-to-end hardware tests.

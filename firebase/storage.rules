@@ -1,0 +1,27 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(tenantId) {
+      return signedIn() &&
+        firestore.exists(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid));
+    }
+
+    match /tenants/{tenantId}/branding/{fileName} {
+      allow read: if isMember(tenantId);
+      allow write: if isMember(tenantId)
+        && request.resource.size < 2 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    match /tenants/{tenantId}/products/{fileName} {
+      allow read: if isMember(tenantId);
+      allow write: if isMember(tenantId)
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+  }
+}
