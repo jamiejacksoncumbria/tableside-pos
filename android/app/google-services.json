@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "33541448236",
+    "project_id": "table-pos",
+    "storage_bucket": "table-pos.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:33541448236:android:5fd6ef5e9c4d500518e789",
+        "android_client_info": {
+          "package_name": "com.tableside.tableside_pos"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAfE04TymKUy_y8mpGJSExnY6sHKD0JX6M"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
