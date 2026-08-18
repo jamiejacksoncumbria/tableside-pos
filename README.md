@@ -91,32 +91,31 @@ This means the customer app can be built later without changing the core order, 
 
 ## Firebase setup
 
-1. Create a Firebase project and enable **Email/Password** in Authentication, Cloud Firestore, and Storage.
-2. Create a user, then use a trusted admin script or Cloud Function to create `tenants/{tenantId}/members/{uid}`. The membership document must contain `userId: <uid>` and a `roles` array. Do not permit a client to grant itself a role.
-3. This app has a no-secret, compile-time Firebase configuration. Supply the platform-specific values from your Firebase app configuration with Dart defines. For example:
+1. This repository is connected to the Firebase project `table-pos`. In the Firebase Console, enable **Email/Password** in Authentication, Cloud Firestore, and Storage.
+2. The generated [`lib/firebase_options.dart`](lib/firebase_options.dart) contains the public, platform-specific app identifiers for Android, iOS, web, and Windows. Regenerate it whenever an app or Firebase product is added:
 
 ```powershell
-flutter run -d windows `
-  --dart-define=TABLESIDE_USE_FIREBASE=true `
-  --dart-define=FIREBASE_API_KEY=<api-key> `
-  --dart-define=FIREBASE_APP_ID=<windows-app-id> `
-  --dart-define=FIREBASE_MESSAGING_SENDER_ID=<sender-id> `
-  --dart-define=FIREBASE_PROJECT_ID=<project-id> `
-  --dart-define=FIREBASE_STORAGE_BUCKET=<bucket>
+flutterfire configure --project table-pos --platforms android,ios,web,windows
 ```
 
-Use a separate launch configuration for each platform because Firebase app IDs differ. The default, without `TABLESIDE_USE_FIREBASE=true`, is the demo mode used for UI review and tests.
+The default remains demo mode. To use Firebase, only enable the mode flag; no API keys or app IDs need to be supplied manually:
+
+```powershell
+flutter run -d windows --dart-define=TABLESIDE_USE_FIREBASE=true
+```
+
+3. Create a user, then use a trusted admin script or Cloud Function to create `tenants/{tenantId}/members/{uid}`. The membership document must contain `userId: <uid>` and a `roles` array. Do not permit a client to grant itself a role.
 
 4. Install the Firebase CLI, select your project, and deploy the supplied initial rules and index:
 
 ```powershell
-firebase use <your-project-id>
+firebase use table-pos
 firebase deploy --only firestore:rules,firestore:indexes,storage
 ```
 
 5. Add Cloud Functions for tenant provisioning, server-authoritative bill/payment/stock transitions, printer device claims, and print-job creation. Run Firestore emulator tests against the rules before production.
 
-The current Firestore rules are a starting point only. In particular, production order updates must be limited to safe state transitions, and payment/stock mutations must remain server-only.
+The deployed rules make tenant provisioning and membership assignment server-only, prevent staff from changing their own roles, and restrict profile/image changes to owners and managers. Production order updates must still be limited to safe state transitions, while payment and stock mutations remain server-only.
 
 ## Run locally
 
