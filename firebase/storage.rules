@@ -10,16 +10,21 @@ service firebase.storage {
         firestore.exists(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid));
     }
 
+    function managesTenant(tenantId) {
+      return isMember(tenantId) &&
+        firestore.get(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid)).data.roles.hasAny(['owner', 'manager']);
+    }
+
     match /tenants/{tenantId}/branding/{fileName} {
       allow read: if isMember(tenantId);
-      allow write: if isMember(tenantId)
+      allow write: if managesTenant(tenantId)
         && request.resource.size < 2 * 1024 * 1024
         && request.resource.contentType.matches('image/.*');
     }
 
     match /tenants/{tenantId}/products/{fileName} {
       allow read: if isMember(tenantId);
-      allow write: if isMember(tenantId)
+      allow write: if managesTenant(tenantId)
         && request.resource.size < 5 * 1024 * 1024
         && request.resource.contentType.matches('image/.*');
     }

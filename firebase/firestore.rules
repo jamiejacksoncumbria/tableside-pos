@@ -17,6 +17,18 @@ service cloud.firestore {
       return isMember(tenantId) && membership(tenantId).data.roles.hasAny(['owner', 'manager']);
     }
 
+    function changesOnlyTenantProfile() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'displayName',
+        'legalName',
+        'currencyCode',
+        'logoUrl',
+        'address',
+        'phone',
+        'receiptFooter'
+      ]);
+    }
+
     function isAssignedPrintDevice() {
       return signedIn()
         && request.auth.token.deviceId == resource.data.targetDeviceId;
@@ -27,14 +39,17 @@ service cloud.firestore {
     }
 
     match /tenants/{tenantId} {
-      allow create: if signedIn();
+      // Tenant provisioning and membership assignment are server-only. This
+      // prevents a signed-in client from creating a tenant or granting itself
+      // an owner role.
+      allow create: if false;
       allow get: if isMember(tenantId);
-      allow update: if managesTenant(tenantId);
+      allow update: if managesTenant(tenantId) && changesOnlyTenantProfile();
       allow delete: if false;
 
       match /members/{userId} {
         allow read: if isMember(tenantId);
-        allow write: if managesTenant(tenantId);
+        allow write: if false;
       }
 
       match /venues/{venueId} {

@@ -48,7 +48,7 @@ class _FirebaseBootstrapGateState extends State<_FirebaseBootstrapGate> {
               child: Padding(
                 padding: const EdgeInsets.all(24),
                 child: Text(
-                  'Firebase could not start. Check the TABLESIDE_USE_FIREBASE configuration.\n\n${snapshot.error}',
+                  'Firebase could not start. Verify the generated FlutterFire configuration and the TABLESIDE_USE_FIREBASE flag.\n\n${snapshot.error}',
                   textAlign: TextAlign.center,
                 ),
               ),
