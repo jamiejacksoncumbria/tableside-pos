@@ -1,0 +1,173 @@
+import 'dart:convert';
+
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
+
+import '../firebase_options.dart';
+
+final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
+  (ref) => PlatformAdminRepository(),
+);
+
+class PlatformAdminRepository {
+  Future<void> bootstrapPlatformAdmin() async {
+    await _call('bootstrapPlatformAdmin');
+  }
+
+  Future<List<PlatformAuthUser>> listAuthUsers() async {
+    final data = await _call('listAuthUsers');
+    final values = List<Object?>.from(data['users'] as List? ?? const []);
+    return values
+        .map(
+          (value) =>
+              PlatformAuthUser.fromMap(Map<String, Object?>.from(value as Map)),
+        )
+        .toList(growable: false);
+  }
+
+  Future<List<PlatformTenantSummary>> listTenants() async {
+    final data = await _call('listTenants');
+    final values = List<Object?>.from(data['tenants'] as List? ?? const []);
+    return values
+        .map(
+          (value) => PlatformTenantSummary.fromMap(
+            Map<String, Object?>.from(value as Map),
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  Future<void> createTenant({
+    required String displayName,
+    required String legalName,
+    required String venueName,
+    required String timeZone,
+    required String ownerUid,
+    String currencyCode = 'GBP',
+  }) async {
+    await _call('createTenant', {
+      'displayName': displayName,
+      'legalName': legalName,
+      'currencyCode': currencyCode,
+      'venueName': venueName,
+      'timeZone': timeZone,
+      'ownerUid': ownerUid,
+    });
+  }
+
+  Future<PlatformAuthUser> createStaffUser({
+    required String email,
+    required String displayName,
+  }) async {
+    final data = await _call('createStaffUser', {
+      'email': email,
+      'displayName': displayName,
+    });
+    return PlatformAuthUser(
+      uid: data['uid'] as String,
+      email: data['email'] as String,
+      displayName: displayName,
+      disabled: false,
+      isPlatformAdmin: false,
+    );
+  }
+
+  Future<void> assignUserToTenant({
+    required String tenantId,
+    required String userUid,
+    required String role,
+  }) async {
+    await _call('assignUserToTenant', {
+      'tenantId': tenantId,
+      'userUid': userUid,
+      'roles': [role],
+    });
+  }
+
+  Future<Map<String, Object?>> _call(
+    String name, [
+    Map<String, Object?> data = const {},
+  ]) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      throw StateError('Sign in before using platform administration.');
+    }
+    final idToken = await user.getIdToken();
+    if (idToken == null || idToken.isEmpty) {
+      throw StateError('Could not obtain a Firebase sign-in token.');
+    }
+    final projectId = DefaultFirebaseOptions.currentPlatform.projectId;
+    final endpoint = Uri.https(
+      'europe-west2-$projectId.cloudfunctions.net',
+      'platformAdminApi',
+    );
+    final response = await http.post(
+      endpoint,
+      headers: {
+        'Authorization': 'Bearer $idToken',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({'action': name, 'data': data}),
+    );
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map) {
+      throw StateError('The platform server returned an invalid response.');
+    }
+    final body = Map<String, Object?>.from(decoded);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final error = body['error'];
+      if (error is Map) {
+        final details = Map<String, Object?>.from(error);
+        final message = details['message'];
+        throw StateError(
+          message is String ? message : 'Platform action failed.',
+        );
+      }
+      throw StateError('Platform action failed (${response.statusCode}).');
+    }
+    final result = body['data'];
+    if (result is! Map) return const {};
+    return Map<String, Object?>.from(result);
+  }
+}
+
+class PlatformAuthUser {
+  const PlatformAuthUser({
+    required this.uid,
+    required this.email,
+    required this.displayName,
+    required this.disabled,
+    required this.isPlatformAdmin,
+  });
+
+  factory PlatformAuthUser.fromMap(Map<String, Object?> data) {
+    return PlatformAuthUser(
+      uid: data['uid'] as String? ?? '',
+      email: data['email'] as String? ?? '',
+      displayName: data['displayName'] as String? ?? '',
+      disabled: data['disabled'] as bool? ?? false,
+      isPlatformAdmin: data['platformAdmin'] as bool? ?? false,
+    );
+  }
+
+  final String uid;
+  final String email;
+  final String displayName;
+  final bool disabled;
+  final bool isPlatformAdmin;
+}
+
+class PlatformTenantSummary {
+  const PlatformTenantSummary({required this.id, required this.displayName});
+
+  factory PlatformTenantSummary.fromMap(Map<String, Object?> data) {
+    return PlatformTenantSummary(
+      id: data['id'] as String? ?? '',
+      displayName: data['displayName'] as String? ?? 'Unnamed restaurant',
+    );
+  }
+
+  final String id;
+  final String displayName;
+}

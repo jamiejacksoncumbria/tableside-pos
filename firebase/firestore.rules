@@ -5,6 +5,12 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // This claim is issued only by the Admin SDK in functions/index.js. It is
+    // never accepted from a client write or an ordinary tenant membership.
+    function isPlatformAdmin() {
+      return signedIn() && request.auth.token.platformAdmin == true;
+    }
+
     function membership(tenantId) {
       return get(/databases/$(database)/documents/tenants/$(tenantId)/members/$(request.auth.uid));
     }
@@ -43,50 +49,51 @@ service cloud.firestore {
       // prevents a signed-in client from creating a tenant or granting itself
       // an owner role.
       allow create: if false;
-      allow get: if isMember(tenantId);
-      allow update: if managesTenant(tenantId) && changesOnlyTenantProfile();
+      allow get: if isPlatformAdmin() || isMember(tenantId);
+      allow update: if isPlatformAdmin()
+        || (managesTenant(tenantId) && changesOnlyTenantProfile());
       allow delete: if false;
 
       match /members/{userId} {
-        allow read: if isMember(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
         allow write: if false;
       }
 
       match /venues/{venueId} {
-        allow read: if isMember(tenantId);
-        allow write: if managesTenant(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if isPlatformAdmin() || managesTenant(tenantId);
       }
 
       match /menuSections/{sectionId} {
-        allow read: if isMember(tenantId);
-        allow write: if managesTenant(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if isPlatformAdmin() || managesTenant(tenantId);
       }
 
       match /products/{productId} {
-        allow read: if isMember(tenantId);
-        allow write: if managesTenant(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if isPlatformAdmin() || managesTenant(tenantId);
       }
 
       match /tables/{tableId} {
-        allow read, write: if isMember(tenantId);
+        allow read, write: if isPlatformAdmin() || isMember(tenantId);
       }
 
       match /orders/{orderId} {
-        allow read, write: if isMember(tenantId);
+        allow read, write: if isPlatformAdmin() || isMember(tenantId);
       }
 
       match /bills/{billId} {
-        allow read: if isMember(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
         // Payment, tax, stock, and close-of-day writes must be made by a
         // trusted Cloud Function using the Admin SDK, not by a client.
         allow write: if false;
       }
 
       match /paymentRequests/{requestId} {
-        allow read: if isMember(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
         // A server function validates the bill amount, creates the provider
         // payment intent, and is the only actor allowed to change its status.
-        allow create: if isMember(tenantId)
+        allow create: if (isPlatformAdmin() || isMember(tenantId))
           && request.resource.data.keys().hasAll([
             'venueId', 'billId', 'amountMinor', 'method', 'status', 'idempotencyKey', 'requestedAt'
           ]);
@@ -94,22 +101,36 @@ service cloud.firestore {
       }
 
       match /devices/{deviceId} {
-        allow read: if managesTenant(tenantId) || isNamedDevice(deviceId);
-        allow create: if managesTenant(tenantId);
-        allow delete: if managesTenant(tenantId);
-        allow update: if managesTenant(tenantId)
+        allow read: if isPlatformAdmin()
+          || managesTenant(tenantId)
+          || isNamedDevice(deviceId);
+        allow create, delete: if isPlatformAdmin() || managesTenant(tenantId);
+        allow update: if isPlatformAdmin()
+          || managesTenant(tenantId)
           || (isNamedDevice(deviceId)
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastHeartbeatAt']));
       }
 
       match /printJobs/{jobId} {
-        allow read: if managesTenant(tenantId) || isAssignedPrintDevice();
+        allow read: if isPlatformAdmin()
+          || managesTenant(tenantId)
+          || isAssignedPrintDevice();
         allow create, delete: if false;
         allow update: if isAssignedPrintDevice()
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'status', 'claimedByDeviceId', 'claimedAt', 'completedAt', 'failureReason', 'attempts'
           ]);
       }
+    }
+
+    match /platformAdmins/{userId} {
+      allow get: if isPlatformAdmin() && request.auth.uid == userId;
+      allow list, create, update, delete: if false;
+    }
+
+    match /platformAdminAudit/{auditId} {
+      allow read: if isPlatformAdmin();
+      allow write: if false;
     }
   }
 }
