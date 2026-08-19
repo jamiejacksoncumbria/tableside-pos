@@ -190,11 +190,15 @@ Future<void> _showCreateRestaurantDialog(
   WidgetRef ref,
   List<PlatformAuthUser> users,
 ) async {
+  final repository = ref.read(platformAdminRepositoryProvider);
+  final timeZones = await _loadSupportedTimeZones(context, repository);
+  if (timeZones == null || !context.mounted) return;
+
   final formKey = GlobalKey<FormState>();
   final tradingName = TextEditingController();
   final legalName = TextEditingController();
   final venueName = TextEditingController();
-  final timeZone = TextEditingController(text: 'Europe/London');
+  var timeZone = _preferredTimeZone(timeZones);
   var ownerUid = users.first.uid;
   var submitting = false;
 
@@ -230,9 +234,20 @@ Future<void> _showCreateRestaurantDialog(
                     validator: (value) => _requiredField(value, 'First venue'),
                   ),
                   const SizedBox(height: 12),
-                  TextFormField(
-                    controller: timeZone,
-                    decoration: const InputDecoration(labelText: 'Time zone'),
+                  DropdownButtonFormField<String>(
+                    initialValue: timeZone,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Time zone',
+                      helperText: 'Choose the venue’s IANA time zone',
+                    ),
+                    items: [
+                      for (final option in timeZones)
+                        DropdownMenuItem(value: option, child: Text(option)),
+                    ],
+                    onChanged: submitting
+                        ? null
+                        : (value) => setDialogState(() => timeZone = value!),
                   ),
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
@@ -271,15 +286,13 @@ Future<void> _showCreateRestaurantDialog(
                     if (!(formKey.currentState?.validate() ?? false)) return;
                     setDialogState(() => submitting = true);
                     try {
-                      await ref
-                          .read(platformAdminRepositoryProvider)
-                          .createTenant(
-                            displayName: tradingName.text.trim(),
-                            legalName: legalName.text.trim(),
-                            venueName: venueName.text.trim(),
-                            timeZone: timeZone.text.trim(),
-                            ownerUid: ownerUid,
-                          );
+                      await repository.createTenant(
+                        displayName: tradingName.text.trim(),
+                        legalName: legalName.text.trim(),
+                        venueName: venueName.text.trim(),
+                        timeZone: timeZone,
+                        ownerUid: ownerUid,
+                      );
                       ref.invalidate(platformTenantsProvider);
                       if (context.mounted) Navigator.pop(context);
                       if (dialogContext.mounted) {
@@ -314,7 +327,6 @@ Future<void> _showCreateRestaurantDialog(
   tradingName.dispose();
   legalName.dispose();
   venueName.dispose();
-  timeZone.dispose();
 }
 
 Future<void> _showEditRestaurantDialog(
@@ -342,6 +354,7 @@ Future<void> _showEditRestaurantDialog(
   final legalName = TextEditingController(text: tenant.legalName);
   final currencyCode = TextEditingController(text: tenant.currencyCode);
   var savingCompany = false;
+  var changingVenues = false;
 
   await showDialog<void>(
     context: context,
@@ -393,30 +406,104 @@ Future<void> _showEditRestaurantDialog(
                       leading: const Icon(Icons.location_on_outlined),
                       title: Text(venue.name),
                       subtitle: Text(venue.timeZone),
-                      trailing: TextButton(
-                        onPressed: savingCompany
-                            ? null
-                            : () async {
-                                final saved = await _showVenueDialog(
-                                  context,
-                                  ref,
-                                  tenant.id,
-                                  venue: venue,
-                                );
-                                if (saved == null || !context.mounted) return;
-                                setDialogState(() {
-                                  final index = venues.indexWhere(
-                                    (item) => item.id == saved.id,
-                                  );
-                                  if (index >= 0) venues[index] = saved;
-                                });
-                              },
-                        child: const Text('Edit'),
+                      trailing: Wrap(
+                        spacing: 4,
+                        children: [
+                          TextButton(
+                            onPressed: savingCompany || changingVenues
+                                ? null
+                                : () async {
+                                    final saved = await _showVenueDialog(
+                                      context,
+                                      ref,
+                                      tenant.id,
+                                      venue: venue,
+                                    );
+                                    if (saved == null || !context.mounted) {
+                                      return;
+                                    }
+                                    setDialogState(() {
+                                      final index = venues.indexWhere(
+                                        (item) => item.id == saved.id,
+                                      );
+                                      if (index >= 0) venues[index] = saved;
+                                    });
+                                  },
+                            child: const Text('Edit'),
+                          ),
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              foregroundColor: Theme.of(
+                                context,
+                              ).colorScheme.error,
+                            ),
+                            onPressed: savingCompany || changingVenues
+                                ? null
+                                : () async {
+                                    final confirmed = await _confirmDeleteVenue(
+                                      context,
+                                      venue,
+                                    );
+                                    if (!confirmed || !context.mounted) return;
+                                    setDialogState(() => changingVenues = true);
+                                    AppLogger.info(
+                                      'Delete venue: checking ${venue.id}.',
+                                    );
+                                    try {
+                                      await repository.deleteVenue(
+                                        tenantId: tenant.id,
+                                        venueId: venue.id,
+                                      );
+                                      ref.invalidate(platformTenantsProvider);
+                                      if (context.mounted) {
+                                        setDialogState(
+                                          () => venues.removeWhere(
+                                            (item) => item.id == venue.id,
+                                          ),
+                                        );
+                                      }
+                                      ScaffoldMessenger.of(
+                                        dialogContext,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                            'Venue deleted safely.',
+                                          ),
+                                        ),
+                                      );
+                                    } on Object catch (error, stackTrace) {
+                                      AppLogger.error(
+                                        'Delete venue',
+                                        error,
+                                        stackTrace,
+                                      );
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(
+                                          context,
+                                        ).showSnackBar(
+                                          SnackBar(
+                                            content: Text(
+                                              'Could not delete venue: $error',
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                    } finally {
+                                      if (context.mounted) {
+                                        setDialogState(
+                                          () => changingVenues = false,
+                                        );
+                                      }
+                                    }
+                                  },
+                            child: const Text('Delete'),
+                          ),
+                        ],
                       ),
                     ),
                   const SizedBox(height: 4),
                   OutlinedButton.icon(
-                    onPressed: savingCompany
+                    onPressed: savingCompany || changingVenues
                         ? null
                         : () async {
                             final added = await _showVenueDialog(
@@ -437,11 +524,13 @@ Future<void> _showEditRestaurantDialog(
         ),
         actions: [
           TextButton(
-            onPressed: savingCompany ? null : () => Navigator.pop(context),
+            onPressed: savingCompany || changingVenues
+                ? null
+                : () => Navigator.pop(context),
             child: const Text('Cancel'),
           ),
           FilledButton(
-            onPressed: savingCompany
+            onPressed: savingCompany || changingVenues
                 ? null
                 : () async {
                     if (!(formKey.currentState?.validate() ?? false)) return;
@@ -497,11 +586,13 @@ Future<PlatformVenueSummary?> _showVenueDialog(
   String tenantId, {
   PlatformVenueSummary? venue,
 }) async {
+  final repository = ref.read(platformAdminRepositoryProvider);
+  final timeZones = await _loadSupportedTimeZones(context, repository);
+  if (timeZones == null || !context.mounted) return null;
+
   final formKey = GlobalKey<FormState>();
   final name = TextEditingController(text: venue?.name ?? '');
-  final timeZone = TextEditingController(
-    text: venue?.timeZone ?? 'Europe/London',
-  );
+  var timeZone = _preferredTimeZone(timeZones, venue?.timeZone);
   var saving = false;
   final saved = await showDialog<PlatformVenueSummary>(
     context: context,
@@ -521,13 +612,20 @@ Future<PlatformVenueSummary?> _showVenueDialog(
                   validator: (value) => _requiredField(value, 'Venue name'),
                 ),
                 const SizedBox(height: 12),
-                TextFormField(
-                  controller: timeZone,
+                DropdownButtonFormField<String>(
+                  initialValue: timeZone,
+                  isExpanded: true,
                   decoration: const InputDecoration(
                     labelText: 'Time zone',
-                    helperText: 'For example Europe/London',
+                    helperText: 'Choose from the supported IANA time zones',
                   ),
-                  validator: (value) => _requiredField(value, 'Time zone'),
+                  items: [
+                    for (final option in timeZones)
+                      DropdownMenuItem(value: option, child: Text(option)),
+                  ],
+                  onChanged: saving
+                      ? null
+                      : (value) => setDialogState(() => timeZone = value!),
                 ),
               ],
             ),
@@ -544,21 +642,18 @@ Future<PlatformVenueSummary?> _showVenueDialog(
                 : () async {
                     if (!(formKey.currentState?.validate() ?? false)) return;
                     setDialogState(() => saving = true);
-                    final repository = ref.read(
-                      platformAdminRepositoryProvider,
-                    );
                     try {
                       final savedVenue = venue == null
                           ? await repository.createVenue(
                               tenantId: tenantId,
                               name: name.text.trim(),
-                              timeZone: timeZone.text.trim(),
+                              timeZone: timeZone,
                             )
                           : await repository.updateVenue(
                               tenantId: tenantId,
                               venueId: venue.id,
                               name: name.text.trim(),
-                              timeZone: timeZone.text.trim(),
+                              timeZone: timeZone,
                             );
                       ref.invalidate(platformTenantsProvider);
                       if (context.mounted) Navigator.pop(context, savedVenue);
@@ -585,8 +680,37 @@ Future<PlatformVenueSummary?> _showVenueDialog(
     ),
   );
   name.dispose();
-  timeZone.dispose();
   return saved;
+}
+
+Future<bool> _confirmDeleteVenue(
+  BuildContext context,
+  PlatformVenueSummary venue,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text('Delete ${venue.name}?'),
+      content: const Text(
+        'This action is permanent. The app will only delete the venue when it has no tables, orders, bills, payment requests, print jobs, or printer devices. A restaurant must always keep at least one venue.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: Theme.of(dialogContext).colorScheme.error,
+            foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+          ),
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text('Delete venue'),
+        ),
+      ],
+    ),
+  );
+  return confirmed ?? false;
 }
 
 Future<void> _showCreateStaffDialog(BuildContext context, WidgetRef ref) async {
@@ -694,6 +818,30 @@ String? _currencyCodeValidator(String? value) {
     return 'Enter a three-letter currency code, for example GBP.';
   }
   return null;
+}
+
+Future<List<String>?> _loadSupportedTimeZones(
+  BuildContext context,
+  PlatformAdminRepository repository,
+) async {
+  try {
+    AppLogger.info('Load supported time zones for venue editing.');
+    return await repository.listSupportedTimeZones();
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('Load supported time zones', error, stackTrace);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load time zones: $error')),
+      );
+    }
+    return null;
+  }
+}
+
+String _preferredTimeZone(List<String> timeZones, [String? current]) {
+  if (current != null && timeZones.contains(current)) return current;
+  if (timeZones.contains('Europe/London')) return 'Europe/London';
+  return timeZones.first;
 }
 
 Future<void> _sendPasswordReset(

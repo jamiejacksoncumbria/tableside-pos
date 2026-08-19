@@ -29,6 +29,16 @@ service cloud.firestore {
       return isMember(tenantId) && membership(tenantId).data.roles.hasAny(['owner', 'manager']);
     }
 
+    // Venue records are server-managed. A venue marked as `deleting` rejects
+    // new client writes while the trusted delete function checks whether any
+    // operational or historical documents still reference it.
+    function isActiveVenue(tenantId, venueId) {
+      return venueId is string
+        && exists(/databases/$(database)/documents/tenants/$(tenantId)/venues/$(venueId))
+        && get(/databases/$(database)/documents/tenants/$(tenantId)/venues/$(venueId))
+          .data.get('status', 'active') == 'active';
+    }
+
     function changesOnlyTenantProfile() {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
         'displayName',
@@ -73,7 +83,10 @@ service cloud.firestore {
 
       match /venues/{venueId} {
         allow read: if isPlatformAdmin() || isMember(tenantId);
-        allow write: if isPlatformAdmin() || managesTenant(tenantId);
+        // Creation, editing, and deletion use trusted server functions so
+        // time zones, unique venue names, and deletion safeguards cannot be
+        // bypassed by a client.
+        allow write: if false;
       }
 
       match /menuSections/{sectionId} {
@@ -87,11 +100,15 @@ service cloud.firestore {
       }
 
       match /tables/{tableId} {
-        allow read, write: if isPlatformAdmin() || isMember(tenantId);
+        allow read, delete: if isPlatformAdmin() || isMember(tenantId);
+        allow create, update: if (isPlatformAdmin() || isMember(tenantId))
+          && isActiveVenue(tenantId, request.resource.data.venueId);
       }
 
       match /orders/{orderId} {
-        allow read, write: if isPlatformAdmin() || isMember(tenantId);
+        allow read, delete: if isPlatformAdmin() || isMember(tenantId);
+        allow create, update: if (isPlatformAdmin() || isMember(tenantId))
+          && isActiveVenue(tenantId, request.resource.data.venueId);
       }
 
       match /bills/{billId} {
@@ -108,7 +125,8 @@ service cloud.firestore {
         allow create: if (isPlatformAdmin() || isMember(tenantId))
           && request.resource.data.keys().hasAll([
             'venueId', 'billId', 'amountMinor', 'method', 'status', 'idempotencyKey', 'requestedAt'
-          ]);
+          ])
+          && isActiveVenue(tenantId, request.resource.data.venueId);
         allow update, delete: if false;
       }
 
@@ -116,10 +134,13 @@ service cloud.firestore {
         allow read: if isPlatformAdmin()
           || managesTenant(tenantId)
           || isNamedDevice(deviceId);
-        allow create, delete: if isPlatformAdmin() || managesTenant(tenantId);
-        allow update: if isPlatformAdmin()
-          || managesTenant(tenantId)
+        allow create: if (isPlatformAdmin() || managesTenant(tenantId))
+          && isActiveVenue(tenantId, request.resource.data.venueId);
+        allow delete: if isPlatformAdmin() || managesTenant(tenantId);
+        allow update: if ((isPlatformAdmin() || managesTenant(tenantId))
+            && isActiveVenue(tenantId, request.resource.data.venueId))
           || (isNamedDevice(deviceId)
+            && isActiveVenue(tenantId, resource.data.venueId)
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastHeartbeatAt']));
       }
 
