@@ -1,4 +1,3 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -125,9 +124,20 @@ class PlatformAdminPage extends ConsumerWidget {
                             ],
                           ),
                           isThreeLine: true,
-                          trailing: tenantItems.isEmpty
-                              ? null
-                              : TextButton(
+                          trailing: Wrap(
+                            spacing: 4,
+                            children: [
+                              if (user.email.isNotEmpty)
+                                TextButton(
+                                  onPressed: () => _sendPasswordReset(
+                                    context,
+                                    ref,
+                                    user.email,
+                                  ),
+                                  child: const Text('Send reset'),
+                                ),
+                              if (tenantItems.isNotEmpty)
+                                TextButton(
                                   onPressed: () => _showAssignUserDialog(
                                     context,
                                     ref,
@@ -136,6 +146,8 @@ class PlatformAdminPage extends ConsumerWidget {
                                   ),
                                   child: const Text('Assign'),
                                 ),
+                            ],
+                          ),
                         ),
                     ],
                   ),
@@ -151,6 +163,7 @@ Future<void> _showCreateRestaurantDialog(
   WidgetRef ref,
   List<PlatformAuthUser> users,
 ) async {
+  final formKey = GlobalKey<FormState>();
   final tradingName = TextEditingController();
   final legalName = TextEditingController();
   final venueName = TextEditingController();
@@ -163,50 +176,56 @@ Future<void> _showCreateRestaurantDialog(
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
         title: const Text('Create restaurant company'),
-        content: SingleChildScrollView(
-          child: SizedBox(
-            width: 420,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: tradingName,
-                  decoration: const InputDecoration(labelText: 'Trading name'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: legalName,
-                  decoration: const InputDecoration(labelText: 'Legal name'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: venueName,
-                  decoration: const InputDecoration(labelText: 'First venue'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: timeZone,
-                  decoration: const InputDecoration(labelText: 'Time zone'),
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  initialValue: ownerUid,
-                  decoration: const InputDecoration(labelText: 'Company owner'),
-                  items: [
-                    for (final user in users)
-                      DropdownMenuItem(
-                        value: user.uid,
-                        child: Text(
-                          user.email.isEmpty ? user.uid : user.email,
-                          overflow: TextOverflow.ellipsis,
+        content: Form(
+          key: formKey,
+          child: SingleChildScrollView(
+            child: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextFormField(
+                    controller: tradingName,
+                    decoration: const InputDecoration(labelText: 'Trading name'),
+                    validator: (value) =>
+                        _requiredField(value, 'Trading name'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: legalName,
+                    decoration: const InputDecoration(labelText: 'Legal name'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: venueName,
+                    decoration: const InputDecoration(labelText: 'First venue'),
+                    validator: (value) => _requiredField(value, 'First venue'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: timeZone,
+                    decoration: const InputDecoration(labelText: 'Time zone'),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: ownerUid,
+                    decoration: const InputDecoration(labelText: 'Company owner'),
+                    items: [
+                      for (final user in users)
+                        DropdownMenuItem(
+                          value: user.uid,
+                          child: Text(
+                            user.email.isEmpty ? user.uid : user.email,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                      ),
-                  ],
-                  onChanged: submitting
-                      ? null
-                      : (value) => setDialogState(() => ownerUid = value!),
-                ),
-              ],
+                    ],
+                    onChanged: submitting
+                        ? null
+                        : (value) => setDialogState(() => ownerUid = value!),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -219,6 +238,7 @@ Future<void> _showCreateRestaurantDialog(
             onPressed: submitting
                 ? null
                 : () async {
+                    if (!(formKey.currentState?.validate() ?? false)) return;
                     setDialogState(() => submitting = true);
                     try {
                       await ref
@@ -316,18 +336,25 @@ Future<void> _showCreateStaffDialog(BuildContext context, WidgetRef ref) async {
                             email: email.text.trim(),
                             displayName: displayName.text.trim(),
                           );
-                      await FirebaseAuth.instance.sendPasswordResetEmail(
-                        email: user.email,
-                      );
                       ref.invalidate(platformAuthUsersProvider);
-                      if (context.mounted) Navigator.pop(context);
-                      if (dialogContext.mounted) {
-                        ScaffoldMessenger.of(dialogContext).showSnackBar(
-                          SnackBar(
-                            content: Text('Account created for ${user.email}.'),
-                          ),
+                      var message =
+                          'Account created for ${user.email}. Firebase accepted the password-reset email request.';
+                      try {
+                        await ref
+                            .read(platformAdminRepositoryProvider)
+                            .sendPasswordResetEmail(user.email);
+                      } on Exception catch (error, stackTrace) {
+                        AppLogger.error(
+                          'Send initial password reset email',
+                          error,
+                          stackTrace,
                         );
+                        message =
+                            'Account created, but Firebase could not request the password-reset email: $error. Use Send reset after closing this dialog to retry.';
                       }
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      if (context.mounted) Navigator.pop(context);
+                      messenger.showSnackBar(SnackBar(content: Text(message)));
                     } on Exception catch (error, stackTrace) {
                       AppLogger.error(
                         'Create staff account',
@@ -352,6 +379,37 @@ Future<void> _showCreateStaffDialog(BuildContext context, WidgetRef ref) async {
   );
   email.dispose();
   displayName.dispose();
+}
+
+String? _requiredField(String? value, String label) {
+  if (value == null || value.trim().isEmpty) return '$label is required.';
+  return null;
+}
+
+Future<void> _sendPasswordReset(
+  BuildContext context,
+  WidgetRef ref,
+  String email,
+) async {
+  try {
+    await ref
+        .read(platformAdminRepositoryProvider)
+        .sendPasswordResetEmail(email);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Firebase accepted the password-reset email request.'),
+        ),
+      );
+    }
+  } on Exception catch (error, stackTrace) {
+    AppLogger.error('Send password reset email', error, stackTrace);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not request a password reset: $error')),
+      );
+    }
+  }
 }
 
 Future<void> _showAssignUserDialog(
