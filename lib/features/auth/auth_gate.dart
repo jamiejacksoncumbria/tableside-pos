@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/home_shell.dart';
+import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
@@ -55,7 +56,8 @@ class _SignInPageState extends ConsumerState<SignInPage> {
       await ref
           .read(authRepositoryProvider)
           .signIn(email: _email.text.trim(), password: _password.text);
-    } on Exception catch (error) {
+    } on Exception catch (error, stackTrace) {
+      AppLogger.error('Sign in', error, stackTrace);
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -81,7 +83,8 @@ class _SignInPageState extends ConsumerState<SignInPage> {
           const SnackBar(content: Text('Password reset email sent.')),
         );
       }
-    } on Exception catch (error) {
+    } on Exception catch (error, stackTrace) {
+      AppLogger.error('Send password reset email', error, stackTrace);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not send reset email: $error')),
@@ -429,7 +432,8 @@ class _NoMembershipScreenState extends ConsumerState<_NoMembershipScreen> {
         await currentUser.getIdToken(true);
       }
       ref.invalidate(platformAdminProvider);
-    } on Exception catch (error) {
+    } on Exception catch (error, stackTrace) {
+      AppLogger.error('Bootstrap platform administrator', error, stackTrace);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not set up platform admin: $error')),

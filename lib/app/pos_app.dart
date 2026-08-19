@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/app_theme.dart';
+import '../core/app_logger.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/firebase_runtime_config.dart';
 import '../features/auth/auth_gate.dart';
@@ -30,7 +31,16 @@ class _FirebaseBootstrapGate extends StatefulWidget {
 }
 
 class _FirebaseBootstrapGateState extends State<_FirebaseBootstrapGate> {
-  late final Future<void> _bootstrap = initializeFirebase();
+  late final Future<void> _bootstrap = _initialize();
+
+  Future<void> _initialize() async {
+    try {
+      await initializeFirebase();
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Firebase startup', error, stackTrace);
+      rethrow;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

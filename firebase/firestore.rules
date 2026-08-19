@@ -138,5 +138,14 @@ service cloud.firestore {
       allow read: if isPlatformAdmin();
       allow write: if false;
     }
+
+    // The app uses collectionGroup('members') to discover the signed-in
+    // person's restaurant memberships. Collection-group queries require a
+    // version-2 recursive match, and the same userId condition as the query.
+    match /{path=**}/members/{userId} {
+      allow read: if isPlatformAdmin()
+        || (signedIn() && resource.data.userId == request.auth.uid);
+      allow write: if false;
+    }
   }
 }

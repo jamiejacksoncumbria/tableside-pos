@@ -6,6 +6,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/app_logger.dart';
 import '../../data/tenant_profile_repository.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
@@ -112,7 +113,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         );
       }
-    } on Exception catch (error) {
+    } on Exception catch (error, stackTrace) {
+      AppLogger.error('Save company profile', error, stackTrace);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not save company profile: $error')),

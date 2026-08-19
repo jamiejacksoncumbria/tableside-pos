@@ -1,3 +1,4 @@
+import '../../core/app_logger.dart';
 import '../../data/print_job_repository.dart';
 
 /// Implement this in the Android and Windows apps using the printer protocol
@@ -44,7 +45,8 @@ class NativePrintWorker {
       );
       await queue.complete(job: job, printed: true);
       return PrintWorkerResult.printed;
-    } on Object catch (error) {
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Print ticket ${job.idempotencyKey}', error, stackTrace);
       await queue.complete(
         job: job,
         printed: false,
