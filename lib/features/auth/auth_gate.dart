@@ -1,4 +1,3 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -426,12 +425,20 @@ class _NoMembershipScreenState extends ConsumerState<_NoMembershipScreen> {
     if (_claiming) return;
     setState(() => _claiming = true);
     try {
-      await ref.read(platformAdminRepositoryProvider).bootstrapPlatformAdmin();
-      final currentUser = FirebaseAuth.instance.currentUser;
-      if (currentUser != null) {
-        await currentUser.getIdToken(true);
-      }
+      final claimAvailable = await ref
+          .read(platformAdminRepositoryProvider)
+          .bootstrapPlatformAdmin();
       ref.invalidate(platformAdminProvider);
+      ref.invalidate(authStateProvider);
+      if (!claimAvailable && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Your administrator account was created, but Firebase has not refreshed its permissions yet. Please sign out and sign in again.',
+            ),
+          ),
+        );
+      }
     } on Exception catch (error, stackTrace) {
       AppLogger.error('Bootstrap platform administrator', error, stackTrace);
       if (mounted) {

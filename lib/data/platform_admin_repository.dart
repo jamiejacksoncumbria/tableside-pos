@@ -11,8 +11,15 @@ final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
 );
 
 class PlatformAdminRepository {
-  Future<void> bootstrapPlatformAdmin() async {
+  /// Creates the first administrator, then waits for its custom claim to be
+  /// present in the locally held Firebase ID token.
+  ///
+  /// Firebase Auth updates custom claims asynchronously.  A forced refresh is
+  /// normally sufficient, but retrying for a few seconds prevents the UI from
+  /// returning to the setup screen with a just-stale token.
+  Future<bool> bootstrapPlatformAdmin() async {
     await _call('bootstrapPlatformAdmin');
+    return _waitForPlatformAdminClaim();
   }
 
   Future<List<PlatformAuthUser>> listAuthUsers() async {
@@ -129,6 +136,25 @@ class PlatformAdminRepository {
     final result = body['data'];
     if (result is! Map) return const {};
     return Map<String, Object?>.from(result);
+  }
+
+  Future<bool> _waitForPlatformAdminClaim() async {
+    const attempts = 5;
+    for (var attempt = 0; attempt < attempts; attempt++) {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return false;
+
+      await user.reload();
+      final token = await user.getIdTokenResult(true);
+      if (token.claims?['platformAdmin'] == true) return true;
+
+      if (attempt < attempts - 1) {
+        await Future<void>.delayed(
+          Duration(milliseconds: 400 * (attempt + 1)),
+        );
+      }
+    }
+    return false;
   }
 }
 
