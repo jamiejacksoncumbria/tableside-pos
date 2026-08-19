@@ -86,6 +86,16 @@ class PlatformAdminRepository {
     );
   }
 
+  /// Requests Firebase Authentication's standard password-reset email.
+  ///
+  /// Firebase processes delivery asynchronously; this confirms only that
+  /// Firebase accepted the request, never that an inbox received it.
+  Future<void> sendPasswordResetEmail(String email) async {
+    AppLogger.info('Password reset: requesting a Firebase email.');
+    await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+    AppLogger.info('Password reset: Firebase accepted the request.');
+  }
+
   Future<void> assignUserToTenant({
     required String tenantId,
     required String userUid,
