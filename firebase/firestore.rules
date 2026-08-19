@@ -20,7 +20,9 @@ service cloud.firestore {
     }
 
     function isMember(tenantId) {
-      return signedIn() && exists(/databases/$(database)/documents/tenants/$(tenantId)/members/$(request.auth.uid));
+      return signedIn()
+        && exists(/databases/$(database)/documents/tenants/$(tenantId)/members/$(request.auth.uid))
+        && membership(tenantId).data.get('active', true) != false;
     }
 
     function managesTenant(tenantId) {
@@ -137,6 +139,14 @@ service cloud.firestore {
       // A person may read only their own server-managed access record.  It
       // lets the app recognise a platform admin even before a claim refresh.
       allow get: if signedIn() && request.auth.uid == userId;
+      allow list, create, update, delete: if false;
+    }
+
+    // Staff identities are server-managed and retained as historical
+    // attribution when an account is retired.
+    match /staffProfiles/{userId} {
+      allow get: if isPlatformAdmin()
+        || (signedIn() && request.auth.uid == userId);
       allow list, create, update, delete: if false;
     }
 

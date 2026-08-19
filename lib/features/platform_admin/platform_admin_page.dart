@@ -120,6 +120,10 @@ class PlatformAdminPage extends ConsumerWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               if (user.email.isNotEmpty) Text(user.email),
+                              if (user.disabled)
+                                const Text(
+                                  'Retired — sign-in and restaurant access disabled',
+                                ),
                               SelectableText(user.uid),
                             ],
                           ),
@@ -127,7 +131,7 @@ class PlatformAdminPage extends ConsumerWidget {
                           trailing: Wrap(
                             spacing: 4,
                             children: [
-                              if (user.email.isNotEmpty)
+                              if (!user.disabled && user.email.isNotEmpty)
                                 TextButton(
                                   onPressed: () => _sendPasswordReset(
                                     context,
@@ -136,7 +140,7 @@ class PlatformAdminPage extends ConsumerWidget {
                                   ),
                                   child: const Text('Send reset'),
                                 ),
-                              if (tenantItems.isNotEmpty)
+                              if (!user.disabled && tenantItems.isNotEmpty)
                                 TextButton(
                                   onPressed: () => _showAssignUserDialog(
                                     context,
@@ -145,6 +149,15 @@ class PlatformAdminPage extends ConsumerWidget {
                                     tenantItems,
                                   ),
                                   child: const Text('Assign'),
+                                ),
+                              if (!user.disabled && !user.isPlatformAdmin)
+                                TextButton(
+                                  onPressed: () => _confirmRetireStaffUser(
+                                    context,
+                                    ref,
+                                    user,
+                                  ),
+                                  child: const Text('Delete'),
                                 ),
                             ],
                           ),
@@ -412,6 +425,68 @@ Future<void> _sendPasswordReset(
   }
 }
 
+Future<void> _confirmRetireStaffUser(
+  BuildContext context,
+  WidgetRef ref,
+  PlatformAuthUser user,
+) async {
+  var retiring = false;
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: const Text('Delete staff account?'),
+        content: Text(
+          'Delete ${user.email.isEmpty ? user.uid : user.email}? This safely disables sign-in and removes restaurant access. The UID and staff profile are retained so past orders, bills, and sales remain attributed correctly.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: retiring ? null : () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: retiring
+                ? null
+                : () async {
+                    setDialogState(() => retiring = true);
+                    try {
+                      await ref
+                          .read(platformAdminRepositoryProvider)
+                          .retireStaffUser(user.uid);
+                      ref.invalidate(platformAuthUsersProvider);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      if (context.mounted) Navigator.pop(context);
+                      messenger.showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Staff account deleted safely. Historical records were retained.',
+                          ),
+                        ),
+                      );
+                    } on Exception catch (error, stackTrace) {
+                      AppLogger.error('Delete staff account', error, stackTrace);
+                      setDialogState(() => retiring = false);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Could not delete account: $error'),
+                          ),
+                        );
+                      }
+                    }
+                  },
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              foregroundColor: Theme.of(context).colorScheme.onError,
+            ),
+            child: Text(retiring ? 'Deleting…' : 'Delete safely'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 Future<void> _showAssignUserDialog(
   BuildContext context,
   WidgetRef ref,
@@ -419,7 +494,7 @@ Future<void> _showAssignUserDialog(
   List<PlatformTenantSummary> tenants,
 ) async {
   var tenantId = tenants.first.id;
-  var role = 'waiter';
+  final roles = <String>{'waiter'};
   var submitting = false;
 
   await showDialog<void>(
@@ -427,45 +502,56 @@ Future<void> _showAssignUserDialog(
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
         title: Text('Assign ${user.email.isEmpty ? user.uid : user.email}'),
-        content: SizedBox(
-          width: 420,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              DropdownButtonFormField<String>(
-                initialValue: tenantId,
-                decoration: const InputDecoration(
-                  labelText: 'Restaurant company',
-                ),
-                items: [
-                  for (final tenant in tenants)
-                    DropdownMenuItem(
-                      value: tenant.id,
-                      child: Text(tenant.displayName),
-                    ),
-                ],
-                onChanged: submitting
-                    ? null
-                    : (value) => setDialogState(() => tenantId = value!),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: role,
-                decoration: const InputDecoration(labelText: 'Role'),
-                items: const [
-                  DropdownMenuItem(value: 'owner', child: Text('Owner')),
-                  DropdownMenuItem(value: 'manager', child: Text('Manager')),
-                  DropdownMenuItem(value: 'waiter', child: Text('Waiter')),
-                  DropdownMenuItem(
-                    value: 'printer',
-                    child: Text('Printer device'),
+        content: SingleChildScrollView(
+          child: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<String>(
+                  initialValue: tenantId,
+                  decoration: const InputDecoration(
+                    labelText: 'Restaurant company',
                   ),
-                ],
-                onChanged: submitting
-                    ? null
-                    : (value) => setDialogState(() => role = value!),
-              ),
-            ],
+                  items: [
+                    for (final tenant in tenants)
+                      DropdownMenuItem(
+                        value: tenant.id,
+                        child: Text(tenant.displayName),
+                      ),
+                  ],
+                  onChanged: submitting
+                      ? null
+                      : (value) => setDialogState(() => tenantId = value!),
+                ),
+                const SizedBox(height: 16),
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Roles — select one or more'),
+                ),
+                const SizedBox(height: 4),
+                for (final entry in _staffRoleLabels.entries)
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: Text(entry.value),
+                    value: roles.contains(entry.key),
+                    onChanged: submitting
+                        ? null
+                        : (selected) => setDialogState(() {
+                            if (selected ?? false) {
+                              roles.add(entry.key);
+                            } else {
+                              roles.remove(entry.key);
+                            }
+                          }),
+                  ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Assign this user again to add them to another restaurant. Saving replaces their roles for the selected restaurant.',
+                ),
+              ],
+            ),
           ),
         ),
         actions: [
@@ -477,6 +563,14 @@ Future<void> _showAssignUserDialog(
             onPressed: submitting
                 ? null
                 : () async {
+                    if (roles.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Select at least one role.'),
+                        ),
+                      );
+                      return;
+                    }
                     setDialogState(() => submitting = true);
                     try {
                       await ref
@@ -484,14 +578,13 @@ Future<void> _showAssignUserDialog(
                           .assignUserToTenant(
                             tenantId: tenantId,
                             userUid: user.uid,
-                            role: role,
+                            roles: roles.toList(growable: false),
                           );
+                      final messenger = ScaffoldMessenger.of(dialogContext);
                       if (context.mounted) Navigator.pop(context);
-                      if (dialogContext.mounted) {
-                        ScaffoldMessenger.of(dialogContext).showSnackBar(
-                          const SnackBar(content: Text('Access assigned.')),
-                        );
-                      }
+                      messenger.showSnackBar(
+                        const SnackBar(content: Text('Access assigned.')),
+                      );
                     } on Exception catch (error, stackTrace) {
                       AppLogger.error('Assign staff access', error, stackTrace);
                       setDialogState(() => submitting = false);
@@ -511,6 +604,15 @@ Future<void> _showAssignUserDialog(
     ),
   );
 }
+
+const _staffRoleLabels = <String, String>{
+  'owner': 'Owner',
+  'manager': 'Manager',
+  'waiter': 'Waiter',
+  'cashier': 'Cashier',
+  'kitchen': 'Kitchen',
+  'printer': 'Printer device',
+};
 
 class _SectionCard extends StatelessWidget {
   const _SectionCard({required this.title, required this.child});

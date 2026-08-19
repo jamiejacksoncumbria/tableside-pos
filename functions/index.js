@@ -72,7 +72,9 @@ function optionalText(data, name, maxLength = 500) {
 }
 
 function validRoles(value) {
-  const supported = new Set(["owner", "manager", "waiter", "printer"]);
+  const supported = new Set([
+    "owner", "manager", "waiter", "cashier", "kitchen", "printer",
+  ]);
   if (!Array.isArray(value) || value.length === 0) {
     throw new HttpsError("invalid-argument", "At least one role is required.");
   }
@@ -81,6 +83,55 @@ function validRoles(value) {
     throw new HttpsError("invalid-argument", "One or more roles are invalid.");
   }
   return roles;
+}
+
+function actorSnapshot(user) {
+  // Retain a minimal immutable attribution record on business data. The Auth
+  // user may later be retired, but this UID/name pair remains meaningful.
+  return {
+    uid: user.uid,
+    displayName: user.displayName ?? "",
+  };
+}
+
+async function createOrUpdateStaffProfile(user, actorUid, status = "active") {
+  const profileRef = db.doc(`staffProfiles/${user.uid}`);
+  const existing = await profileRef.get();
+  const updates = {
+    uid: user.uid,
+    displayName: user.displayName ?? "",
+    email: user.email ?? "",
+    status,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedBy: actorUid,
+  };
+  if (!existing.exists) {
+    updates.createdAt = FieldValue.serverTimestamp();
+    updates.createdBy = actorUid;
+  }
+  await profileRef.set(updates, {merge: true});
+}
+
+async function revokeMembershipsFor(userUid, actorUid) {
+  const memberships = await db.collectionGroup("members")
+    .where("userId", "==", userUid)
+    .get();
+
+  // A Firestore batch may contain at most 500 writes. Chunks keep retirement
+  // safe even if a staff member is assigned to many restaurant companies.
+  const documents = memberships.docs;
+  for (let start = 0; start < documents.length; start += 450) {
+    const batch = db.batch();
+    for (const document of documents.slice(start, start + 450)) {
+      batch.set(document.ref, {
+        active: false,
+        retiredAt: FieldValue.serverTimestamp(),
+        retiredBy: actorUid,
+      }, {merge: true});
+    }
+    await batch.commit();
+  }
+  return documents.length;
 }
 
 async function writeAudit(callerUid, action, target, details = {}) {
@@ -117,6 +168,7 @@ async function bootstrapPlatformAdminFor(caller) {
     email: user.email ?? callerEmail,
     createdAt: FieldValue.serverTimestamp(),
   }, {merge: true});
+  await createOrUpdateStaffProfile(user, caller.uid);
   await writeAudit(caller.uid, "bootstrapPlatformAdmin", caller.uid);
   return {claimUpdated: true};
 }
@@ -158,7 +210,14 @@ async function createTenantFor(caller, rawData) {
   const venueName = requiredText(data, "venueName");
   const timeZone = optionalText(data, "timeZone", 80) || "Europe/London";
   const ownerUid = requiredText(data, "ownerUid", 128);
-  const owner = await auth.getUser(ownerUid);
+  const [owner, creator] = await Promise.all([
+    auth.getUser(ownerUid),
+    auth.getUser(caller.uid),
+  ]);
+  if (owner.disabled) {
+    throw new HttpsError("failed-precondition", "A retired user cannot own a restaurant.");
+  }
+  const creatorSnapshot = actorSnapshot(creator);
   const tenantRef = db.collection("tenants").doc();
   const venueRef = tenantRef.collection("venues").doc();
   const memberRef = tenantRef.collection("members").doc(ownerUid);
@@ -170,6 +229,7 @@ async function createTenantFor(caller, rawData) {
       currencyCode,
       createdAt: FieldValue.serverTimestamp(),
       createdBy: caller.uid,
+      createdByActor: creatorSnapshot,
     });
     transaction.create(venueRef, {
       name: venueName,
@@ -181,10 +241,14 @@ async function createTenantFor(caller, rawData) {
       roles: ["owner"],
       defaultVenueId: venueRef.id,
       email: owner.email ?? "",
+      active: true,
       createdAt: FieldValue.serverTimestamp(),
       createdBy: caller.uid,
+      createdByActor: creatorSnapshot,
     });
   });
+
+  await createOrUpdateStaffProfile(owner, caller.uid);
 
   await writeAudit(caller.uid, "createTenant", tenantRef.id, {ownerUid, venueId: venueRef.id});
   return {tenantId: tenantRef.id, venueId: venueRef.id};
@@ -201,6 +265,7 @@ async function createStaffUserFor(caller, rawData) {
     displayName: displayName || undefined,
     password: randomBytes(32).toString("base64url"),
   });
+  await createOrUpdateStaffProfile(user, caller.uid);
   await writeAudit(caller.uid, "createStaffUser", user.uid, {email});
   return {uid: user.uid, email: user.email ?? email};
 }
@@ -219,17 +284,54 @@ async function assignUserToTenantFor(caller, rawData) {
   if (!tenant.exists) {
     throw new HttpsError("not-found", "The restaurant was not found.");
   }
+  if (user.disabled) {
+    throw new HttpsError("failed-precondition", "A retired user cannot be assigned access.");
+  }
 
   await db.doc(`tenants/${tenantId}/members/${user.uid}`).set({
     userId: user.uid,
     roles,
     defaultVenueId,
     email: user.email ?? "",
+    active: true,
+    retiredAt: FieldValue.delete(),
+    retiredBy: FieldValue.delete(),
     updatedAt: FieldValue.serverTimestamp(),
     updatedBy: caller.uid,
   }, {merge: true});
+  await createOrUpdateStaffProfile(user, caller.uid);
   await writeAudit(caller.uid, "assignUserToTenant", user.uid, {tenantId, roles});
   return {assigned: true};
+}
+
+async function retireStaffUserFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const userUid = requiredText(data, "userUid", 128);
+  const [user, platformAdmin] = await Promise.all([
+    auth.getUser(userUid),
+    db.doc(`platformAdmins/${userUid}`).get(),
+  ]);
+
+  // The master account remains the recovery route for the whole SaaS. Never
+  // permit retirement through either the durable record or custom claim.
+  if (platformAdmin.exists || user.customClaims?.platformAdmin === true) {
+    throw new HttpsError(
+      "failed-precondition",
+      "A platform administrator cannot be deleted or retired.",
+    );
+  }
+
+  const membershipsRevoked = await revokeMembershipsFor(userUid, caller.uid);
+  await auth.updateUser(userUid, {disabled: true});
+  await auth.revokeRefreshTokens(userUid);
+  await createOrUpdateStaffProfile(user, caller.uid, "retired");
+  await db.doc(`staffProfiles/${userUid}`).set({
+    retiredAt: FieldValue.serverTimestamp(),
+    retiredBy: caller.uid,
+  }, {merge: true});
+  await writeAudit(caller.uid, "retireStaffUser", userUid, {membershipsRevoked});
+  return {retired: true, membershipsRevoked};
 }
 
 async function setPlatformAdminFor(caller, rawData) {
@@ -257,6 +359,7 @@ async function setPlatformAdminFor(caller, rawData) {
       grantedBy: caller.uid,
       createdAt: FieldValue.serverTimestamp(),
     }, {merge: true});
+    await createOrUpdateStaffProfile(user, caller.uid);
   } else {
     await ref.delete();
   }
@@ -278,6 +381,8 @@ async function invokePlatformAction(action, caller, data) {
       return createStaffUserFor(caller, data);
     case "assignUserToTenant":
       return assignUserToTenantFor(caller, data);
+    case "retireStaffUser":
+      return retireStaffUserFor(caller, data);
     case "setPlatformAdmin":
       return setPlatformAdminFor(caller, data);
     default:
@@ -352,5 +457,7 @@ export const createStaffUser = onCall((request) =>
   createStaffUserFor(callerFromCall(request), request.data));
 export const assignUserToTenant = onCall((request) =>
   assignUserToTenantFor(callerFromCall(request), request.data));
+export const retireStaffUser = onCall((request) =>
+  retireStaffUserFor(callerFromCall(request), request.data));
 export const setPlatformAdmin = onCall((request) =>
   setPlatformAdminFor(callerFromCall(request), request.data));
