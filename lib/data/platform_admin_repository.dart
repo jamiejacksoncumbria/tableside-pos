@@ -51,6 +51,32 @@ class PlatformAdminRepository {
         .toList(growable: false);
   }
 
+  Future<List<PlatformVenueSummary>> listTenantVenues(String tenantId) async {
+    final data = await _call('listTenantVenues', {'tenantId': tenantId});
+    final values = List<Object?>.from(data['venues'] as List? ?? const []);
+    return values
+        .map(
+          (value) => PlatformVenueSummary.fromMap(
+            Map<String, Object?>.from(value as Map),
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  Future<List<PlatformStaffMembership>> listUserMemberships(
+    String userUid,
+  ) async {
+    final data = await _call('listUserMemberships', {'userUid': userUid});
+    final values = List<Object?>.from(data['memberships'] as List? ?? const []);
+    return values
+        .map(
+          (value) => PlatformStaffMembership.fromMap(
+            Map<String, Object?>.from(value as Map),
+          ),
+        )
+        .toList(growable: false);
+  }
+
   Future<void> createTenant({
     required String displayName,
     required String legalName,
@@ -67,6 +93,48 @@ class PlatformAdminRepository {
       'timeZone': timeZone,
       'ownerUid': ownerUid,
     });
+  }
+
+  Future<void> updateTenant({
+    required String tenantId,
+    required String displayName,
+    required String legalName,
+    required String currencyCode,
+  }) {
+    return _call('updateTenant', {
+      'tenantId': tenantId,
+      'displayName': displayName,
+      'legalName': legalName,
+      'currencyCode': currencyCode,
+    });
+  }
+
+  Future<PlatformVenueSummary> createVenue({
+    required String tenantId,
+    required String name,
+    required String timeZone,
+  }) async {
+    final data = await _call('createVenue', {
+      'tenantId': tenantId,
+      'name': name,
+      'timeZone': timeZone,
+    });
+    return PlatformVenueSummary.fromMap(data);
+  }
+
+  Future<PlatformVenueSummary> updateVenue({
+    required String tenantId,
+    required String venueId,
+    required String name,
+    required String timeZone,
+  }) async {
+    final data = await _call('updateVenue', {
+      'tenantId': tenantId,
+      'venueId': venueId,
+      'name': name,
+      'timeZone': timeZone,
+    });
+    return PlatformVenueSummary.fromMap(data);
   }
 
   Future<PlatformAuthUser> createStaffUser({
@@ -99,13 +167,19 @@ class PlatformAdminRepository {
   Future<void> assignUserToTenant({
     required String tenantId,
     required String userUid,
-    required String role,
+    required List<String> roles,
   }) async {
     await _call('assignUserToTenant', {
       'tenantId': tenantId,
       'userUid': userUid,
-      'roles': [role],
+      'roles': roles,
     });
+  }
+
+  /// Safely removes a staff member's ability to sign in while preserving their
+  /// UID and staff profile for historical order, bill, and sales attribution.
+  Future<void> retireStaffUser(String userUid) {
+    return _call('retireStaffUser', {'userUid': userUid});
   }
 
   Future<Map<String, Object?>> _call(
@@ -171,9 +245,7 @@ class PlatformAdminRepository {
       if (hasClaim) return true;
 
       if (attempt < attempts - 1) {
-        await Future<void>.delayed(
-          Duration(milliseconds: 400 * (attempt + 1)),
-        );
+        await Future<void>.delayed(Duration(milliseconds: 400 * (attempt + 1)));
       }
     }
     return false;
@@ -207,15 +279,64 @@ class PlatformAuthUser {
 }
 
 class PlatformTenantSummary {
-  const PlatformTenantSummary({required this.id, required this.displayName});
+  const PlatformTenantSummary({
+    required this.id,
+    required this.displayName,
+    required this.legalName,
+    required this.currencyCode,
+  });
 
   factory PlatformTenantSummary.fromMap(Map<String, Object?> data) {
     return PlatformTenantSummary(
       id: data['id'] as String? ?? '',
       displayName: data['displayName'] as String? ?? 'Unnamed restaurant',
+      legalName: data['legalName'] as String? ?? '',
+      currencyCode: data['currencyCode'] as String? ?? 'GBP',
     );
   }
 
   final String id;
   final String displayName;
+  final String legalName;
+  final String currencyCode;
+}
+
+class PlatformVenueSummary {
+  const PlatformVenueSummary({
+    required this.id,
+    required this.name,
+    required this.timeZone,
+  });
+
+  factory PlatformVenueSummary.fromMap(Map<String, Object?> data) {
+    return PlatformVenueSummary(
+      id: data['id'] as String? ?? '',
+      name: data['name'] as String? ?? 'Unnamed venue',
+      timeZone: data['timeZone'] as String? ?? 'Europe/London',
+    );
+  }
+
+  final String id;
+  final String name;
+  final String timeZone;
+}
+
+class PlatformStaffMembership {
+  const PlatformStaffMembership({
+    required this.tenantId,
+    required this.roles,
+    this.defaultVenueId,
+  });
+
+  factory PlatformStaffMembership.fromMap(Map<String, Object?> data) {
+    return PlatformStaffMembership(
+      tenantId: data['tenantId'] as String? ?? '',
+      roles: List<String>.from(data['roles'] as List? ?? const []),
+      defaultVenueId: data['defaultVenueId'] as String?,
+    );
+  }
+
+  final String tenantId;
+  final List<String> roles;
+  final String? defaultVenueId;
 }

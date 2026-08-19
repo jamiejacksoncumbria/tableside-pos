@@ -6,12 +6,16 @@ service firebase.storage {
     }
 
     function isPlatformAdmin() {
-      return signedIn() && request.auth.token.platformAdmin == true;
+      return signedIn() && (
+        request.auth.token.platformAdmin == true
+        || firestore.exists(/databases/(default)/documents/platformAdmins/$(request.auth.uid))
+      );
     }
 
     function isMember(tenantId) {
-      return signedIn() &&
-        firestore.exists(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid));
+      return signedIn()
+        && firestore.exists(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid))
+        && firestore.get(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid)).data.get('active', true) != false;
     }
 
     function managesTenant(tenantId) {

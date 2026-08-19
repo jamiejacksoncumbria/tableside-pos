@@ -55,7 +55,7 @@ class _SignInPageState extends ConsumerState<SignInPage> {
       await ref
           .read(authRepositoryProvider)
           .signIn(email: _email.text.trim(), password: _password.text);
-    } on Exception catch (error, stackTrace) {
+    } on Object catch (error, stackTrace) {
       AppLogger.error('Sign in', error, stackTrace);
       if (mounted) {
         ScaffoldMessenger.of(
@@ -82,7 +82,7 @@ class _SignInPageState extends ConsumerState<SignInPage> {
           const SnackBar(content: Text('Password reset email sent.')),
         );
       }
-    } on Exception catch (error, stackTrace) {
+    } on Object catch (error, stackTrace) {
       AppLogger.error('Send password reset email', error, stackTrace);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -443,7 +443,7 @@ class _NoMembershipScreenState extends ConsumerState<_NoMembershipScreen> {
           ),
         );
       }
-    } on Exception catch (error, stackTrace) {
+    } on Object catch (error, stackTrace) {
       AppLogger.error('Bootstrap platform administrator', error, stackTrace);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
