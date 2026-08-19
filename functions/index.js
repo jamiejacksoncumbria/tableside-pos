@@ -14,6 +14,8 @@ const auth = getAuth();
 const db = getFirestore();
 const region = "europe-west2";
 const initialPlatformAdminEmail = defineString("INITIAL_PLATFORM_ADMIN_EMAIL");
+const supportedTimeZones = Object.freeze(Intl.supportedValuesOf("timeZone"));
+const supportedTimeZoneSet = new Set(supportedTimeZones);
 
 setGlobalOptions({region, maxInstances: 10});
 
@@ -91,6 +93,40 @@ function validCurrencyCode(data) {
     throw new HttpsError("invalid-argument", "currencyCode must be a three-letter ISO code.");
   }
   return currencyCode;
+}
+
+function validTimeZone(data) {
+  const timeZone = optionalText(data, "timeZone", 80) || "Europe/London";
+  if (!supportedTimeZoneSet.has(timeZone)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "timeZone must be selected from the supported IANA time-zone list.",
+    );
+  }
+  return timeZone;
+}
+
+function venueNameKey(name) {
+  return name
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("en-GB");
+}
+
+function throwIfVenueNameExists(venues, nameKey, ignoredVenueId = null) {
+  const duplicate = venues.docs.find((document) => {
+    const storedName = document.data().name;
+    return document.id !== ignoredVenueId
+      && typeof storedName === "string"
+      && venueNameKey(storedName) === nameKey;
+  });
+  if (duplicate != null) {
+    throw new HttpsError(
+      "already-exists",
+      "A venue with that name already exists in this restaurant.",
+    );
+  }
 }
 
 function actorSnapshot(user) {
@@ -211,6 +247,11 @@ async function listTenantsFor(caller) {
   };
 }
 
+async function listSupportedTimeZonesFor(caller) {
+  await requirePlatformAdmin(caller);
+  return {timeZones: supportedTimeZones};
+}
+
 async function listTenantVenuesFor(caller, rawData) {
   await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
@@ -255,7 +296,7 @@ async function createTenantFor(caller, rawData) {
   const legalName = optionalText(data, "legalName");
   const currencyCode = validCurrencyCode(data);
   const venueName = requiredText(data, "venueName");
-  const timeZone = optionalText(data, "timeZone", 80) || "Europe/London";
+  const timeZone = validTimeZone(data);
   const ownerUid = requiredText(data, "ownerUid", 128);
   const [owner, creator] = await Promise.all([
     auth.getUser(ownerUid),
@@ -280,7 +321,9 @@ async function createTenantFor(caller, rawData) {
     });
     transaction.create(venueRef, {
       name: venueName,
+      nameKey: venueNameKey(venueName),
       timeZone,
+      status: "active",
       createdAt: FieldValue.serverTimestamp(),
     });
     transaction.create(memberRef, {
@@ -329,18 +372,27 @@ async function createVenueFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const name = requiredText(data, "name");
-  const timeZone = optionalText(data, "timeZone", 80) || "Europe/London";
+  const nameKey = venueNameKey(name);
+  const timeZone = validTimeZone(data);
   const tenantRef = db.doc(`tenants/${tenantId}`);
-  const tenant = await tenantRef.get();
-  if (!tenant.exists) {
-    throw new HttpsError("not-found", "The restaurant was not found.");
-  }
   const venueRef = tenantRef.collection("venues").doc();
-  await venueRef.create({
-    name,
-    timeZone,
-    createdAt: FieldValue.serverTimestamp(),
-    createdBy: caller.uid,
+  await db.runTransaction(async (transaction) => {
+    const [tenant, venues] = await Promise.all([
+      transaction.get(tenantRef),
+      transaction.get(tenantRef.collection("venues")),
+    ]);
+    if (!tenant.exists) {
+      throw new HttpsError("not-found", "The restaurant was not found.");
+    }
+    throwIfVenueNameExists(venues, nameKey);
+    transaction.create(venueRef, {
+      name,
+      nameKey,
+      timeZone,
+      status: "active",
+      createdAt: FieldValue.serverTimestamp(),
+      createdBy: caller.uid,
+    });
   });
   await writeAudit(caller.uid, "createVenue", venueRef.id, {tenantId});
   return {id: venueRef.id, name, timeZone};
@@ -352,20 +404,137 @@ async function updateVenueFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const name = requiredText(data, "name");
-  const timeZone = optionalText(data, "timeZone", 80) || "Europe/London";
+  const nameKey = venueNameKey(name);
+  const timeZone = validTimeZone(data);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
-  const venue = await venueRef.get();
-  if (!venue.exists) {
-    throw new HttpsError("not-found", "The venue was not found.");
-  }
-  await venueRef.set({
-    name,
-    timeZone,
-    updatedAt: FieldValue.serverTimestamp(),
-    updatedBy: caller.uid,
-  }, {merge: true});
+  await db.runTransaction(async (transaction) => {
+    const [venue, venues] = await Promise.all([
+      transaction.get(venueRef),
+      transaction.get(tenantRef.collection("venues")),
+    ]);
+    if (!venue.exists) {
+      throw new HttpsError("not-found", "The venue was not found.");
+    }
+    if (venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "This venue is currently being deleted.");
+    }
+    throwIfVenueNameExists(venues, nameKey, venueId);
+    transaction.set(venueRef, {
+      name,
+      nameKey,
+      timeZone,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedBy: caller.uid,
+    }, {merge: true});
+  });
   await writeAudit(caller.uid, "updateVenue", venueId, {tenantId});
   return {id: venueId, name, timeZone};
+}
+
+// Any future tenant-root collection that stores a venueId must be added here
+// before it is deployed, so deleting a venue never leaves orphaned records.
+const venueDependencyCollections = Object.freeze([
+  "tables",
+  "orders",
+  "bills",
+  "paymentRequests",
+  "devices",
+  "printJobs",
+]);
+
+async function clearDefaultVenuePointers(memberships) {
+  const documents = memberships.docs;
+  for (let start = 0; start < documents.length; start += 450) {
+    const batch = db.batch();
+    for (const document of documents.slice(start, start + 450)) {
+      batch.set(document.ref, {defaultVenueId: FieldValue.delete()}, {merge: true});
+    }
+    await batch.commit();
+  }
+  return documents.length;
+}
+
+async function deleteVenueFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  // The transaction makes the deletion lock exclusive. The status then makes
+  // security rules reject new venue-bound client writes while the dependency
+  // check runs, closing the gap between checking and deleting.
+  await db.runTransaction(async (transaction) => {
+    const venue = await transaction.get(venueRef);
+    if (!venue.exists) {
+      throw new HttpsError("not-found", "The venue was not found.");
+    }
+    if (venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "This venue is already being deleted.");
+    }
+    transaction.set(venueRef, {
+      status: "deleting",
+      deletionRequestedAt: FieldValue.serverTimestamp(),
+      deletionRequestedBy: caller.uid,
+    }, {merge: true});
+  });
+
+  let deleted = false;
+  try {
+    const venues = await tenantRef.collection("venues").limit(2).get();
+    if (venues.size < 2) {
+      throw new HttpsError(
+        "failed-precondition",
+        "A restaurant must retain at least one venue. Add another venue before deleting this one.",
+      );
+    }
+    const [memberships, ...dependencies] = await Promise.all([
+      tenantRef.collection("members")
+        .where("defaultVenueId", "==", venueId)
+        .get(),
+      ...venueDependencyCollections.map(async (collectionName) => ({
+        collectionName,
+        snapshot: await tenantRef.collection(collectionName)
+          .where("venueId", "==", venueId)
+          .limit(1)
+          .get(),
+      })),
+    ]);
+    const blockers = dependencies
+      .filter((dependency) => !dependency.snapshot.empty)
+      .map((dependency) => dependency.collectionName);
+    if (blockers.length > 0) {
+      throw new HttpsError(
+        "failed-precondition",
+        `The venue cannot be deleted because it still has ${blockers.join(", ")} data.`,
+      );
+    }
+
+    const clearedDefaultVenuePointers = await clearDefaultVenuePointers(memberships);
+    await venueRef.delete();
+    deleted = true;
+    try {
+      await writeAudit(caller.uid, "deleteVenue", venueId, {
+        tenantId,
+        clearedDefaultVenuePointers,
+      });
+    } catch (auditError) {
+      // The delete has already completed safely. Log a failed audit write
+      // without incorrectly telling the caller that the venue still exists.
+      console.error("Could not write deleteVenue audit record", auditError);
+    }
+    return {deleted: true, clearedDefaultVenuePointers};
+  } catch (error) {
+    if (!deleted) {
+      await venueRef.set({
+        status: "active",
+        deletionRequestedAt: FieldValue.delete(),
+        deletionRequestedBy: FieldValue.delete(),
+      }, {merge: true});
+    }
+    throw error;
+  }
 }
 
 async function createStaffUserFor(caller, rawData) {
@@ -489,6 +658,8 @@ async function invokePlatformAction(action, caller, data) {
       return listAuthUsersFor(caller, data);
     case "listTenants":
       return listTenantsFor(caller);
+    case "listSupportedTimeZones":
+      return listSupportedTimeZonesFor(caller);
     case "listTenantVenues":
       return listTenantVenuesFor(caller, data);
     case "listUserMemberships":
@@ -501,6 +672,8 @@ async function invokePlatformAction(action, caller, data) {
       return createVenueFor(caller, data);
     case "updateVenue":
       return updateVenueFor(caller, data);
+    case "deleteVenue":
+      return deleteVenueFor(caller, data);
     case "createStaffUser":
       return createStaffUserFor(caller, data);
     case "assignUserToTenant":
@@ -575,6 +748,8 @@ export const listAuthUsers = onCall((request) =>
   listAuthUsersFor(callerFromCall(request), request.data));
 export const listTenants = onCall((request) =>
   listTenantsFor(callerFromCall(request)));
+export const listSupportedTimeZones = onCall((request) =>
+  listSupportedTimeZonesFor(callerFromCall(request)));
 export const listTenantVenues = onCall((request) =>
   listTenantVenuesFor(callerFromCall(request), request.data));
 export const listUserMemberships = onCall((request) =>
@@ -587,6 +762,8 @@ export const createVenue = onCall((request) =>
   createVenueFor(callerFromCall(request), request.data));
 export const updateVenue = onCall((request) =>
   updateVenueFor(callerFromCall(request), request.data));
+export const deleteVenue = onCall((request) =>
+  deleteVenueFor(callerFromCall(request), request.data));
 export const createStaffUser = onCall((request) =>
   createStaffUserFor(callerFromCall(request), request.data));
 export const assignUserToTenant = onCall((request) =>
