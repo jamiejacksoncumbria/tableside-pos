@@ -55,7 +55,13 @@ service cloud.firestore {
       allow delete: if false;
 
       match /members/{userId} {
-        allow read: if isPlatformAdmin() || isMember(tenantId);
+        // `resource.data.userId` makes the collection-group membership query
+        // provably safe: a signed-in user can stream only their own
+        // membership records. Managers can still inspect their tenant's
+        // members, while membership changes remain server-only.
+        allow read: if isPlatformAdmin()
+          || (signedIn() && resource.data.userId == request.auth.uid)
+          || managesTenant(tenantId);
         allow write: if false;
       }
 
