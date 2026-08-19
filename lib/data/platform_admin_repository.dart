@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/app_logger.dart';
 import '../firebase_options.dart';
 
 final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
@@ -18,8 +19,13 @@ class PlatformAdminRepository {
   /// normally sufficient, but retrying for a few seconds prevents the UI from
   /// returning to the setup screen with a just-stale token.
   Future<bool> bootstrapPlatformAdmin() async {
+    AppLogger.info('Initial platform admin setup: calling the server.');
     await _call('bootstrapPlatformAdmin');
-    return _waitForPlatformAdminClaim();
+    final claimAvailable = await _waitForPlatformAdminClaim();
+    AppLogger.info(
+      'Initial platform admin setup: token claim available=$claimAvailable.',
+    );
+    return claimAvailable;
   }
 
   Future<List<PlatformAuthUser>> listAuthUsers() async {
@@ -109,6 +115,7 @@ class PlatformAdminRepository {
       'europe-west2-$projectId.cloudfunctions.net',
       'platformAdminApi',
     );
+    AppLogger.info('Platform API $name: sending request.');
     final response = await http.post(
       endpoint,
       headers: {
@@ -117,6 +124,7 @@ class PlatformAdminRepository {
       },
       body: jsonEncode({'action': name, 'data': data}),
     );
+    AppLogger.info('Platform API $name: HTTP ${response.statusCode}.');
     final decoded = jsonDecode(response.body);
     if (decoded is! Map) {
       throw StateError('The platform server returned an invalid response.');
@@ -146,7 +154,11 @@ class PlatformAdminRepository {
 
       await user.reload();
       final token = await user.getIdTokenResult(true);
-      if (token.claims?['platformAdmin'] == true) return true;
+      final hasClaim = token.claims?['platformAdmin'] == true;
+      AppLogger.info(
+        'Platform admin token refresh ${attempt + 1}/$attempts: claim present=$hasClaim.',
+      );
+      if (hasClaim) return true;
 
       if (attempt < attempts - 1) {
         await Future<void>.delayed(

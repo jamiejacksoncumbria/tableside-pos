@@ -425,9 +425,13 @@ class _NoMembershipScreenState extends ConsumerState<_NoMembershipScreen> {
     if (_claiming) return;
     setState(() => _claiming = true);
     try {
+      AppLogger.info('Initial platform admin setup: button pressed.');
       final claimAvailable = await ref
           .read(platformAdminRepositoryProvider)
           .bootstrapPlatformAdmin();
+      AppLogger.info(
+        'Initial platform admin setup: refreshing access state; token claim available=$claimAvailable.',
+      );
       ref.invalidate(platformAdminProvider);
       ref.invalidate(authStateProvider);
       if (!claimAvailable && mounted) {

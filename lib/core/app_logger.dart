@@ -5,6 +5,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 /// or the terminal while developing. Do not add customer, payment, or secret
 /// values to log messages.
 abstract final class AppLogger {
+  static void info(String message) {
+    if (!kDebugMode) return;
+    debugPrint('TABLESIDE DEBUG $message');
+  }
+
   static void error(String operation, Object error, [StackTrace? stackTrace]) {
     if (!kDebugMode) return;
     debugPrint('TABLESIDE ERROR [$operation] ${error.runtimeType}: $error');
