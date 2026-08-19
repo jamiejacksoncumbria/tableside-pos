@@ -99,13 +99,19 @@ class PlatformAdminRepository {
   Future<void> assignUserToTenant({
     required String tenantId,
     required String userUid,
-    required String role,
+    required List<String> roles,
   }) async {
     await _call('assignUserToTenant', {
       'tenantId': tenantId,
       'userUid': userUid,
-      'roles': [role],
+      'roles': roles,
     });
+  }
+
+  /// Safely removes a staff member's ability to sign in while preserving their
+  /// UID and staff profile for historical order, bill, and sales attribution.
+  Future<void> retireStaffUser(String userUid) {
+    return _call('retireStaffUser', {'userUid': userUid});
   }
 
   Future<Map<String, Object?>> _call(
