@@ -84,7 +84,21 @@ class PlatformAdminPage extends ConsumerWidget {
                         ListTile(
                           leading: const Icon(Icons.storefront_outlined),
                           title: Text(tenant.displayName),
-                          subtitle: SelectableText(tenant.id),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (tenant.legalName.isNotEmpty)
+                                Text(tenant.legalName),
+                              Text('Currency: ${tenant.currencyCode}'),
+                              SelectableText(tenant.id),
+                            ],
+                          ),
+                          isThreeLine: true,
+                          trailing: TextButton(
+                            onPressed: () =>
+                                _showEditRestaurantDialog(context, ref, tenant),
+                            child: const Text('Edit'),
+                          ),
                         ),
                     ],
                   ),
@@ -148,7 +162,7 @@ class PlatformAdminPage extends ConsumerWidget {
                                     user,
                                     tenantItems,
                                   ),
-                                  child: const Text('Assign'),
+                                  child: const Text('Manage roles'),
                                 ),
                               if (!user.disabled && !user.isPlatformAdmin)
                                 TextButton(
@@ -199,9 +213,10 @@ Future<void> _showCreateRestaurantDialog(
                 children: [
                   TextFormField(
                     controller: tradingName,
-                    decoration: const InputDecoration(labelText: 'Trading name'),
-                    validator: (value) =>
-                        _requiredField(value, 'Trading name'),
+                    decoration: const InputDecoration(
+                      labelText: 'Trading name',
+                    ),
+                    validator: (value) => _requiredField(value, 'Trading name'),
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
@@ -222,7 +237,9 @@ Future<void> _showCreateRestaurantDialog(
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
                     initialValue: ownerUid,
-                    decoration: const InputDecoration(labelText: 'Company owner'),
+                    decoration: const InputDecoration(
+                      labelText: 'Company owner',
+                    ),
                     items: [
                       for (final user in users)
                         DropdownMenuItem(
@@ -270,7 +287,7 @@ Future<void> _showCreateRestaurantDialog(
                           const SnackBar(content: Text('Restaurant created.')),
                         );
                       }
-                    } on Exception catch (error, stackTrace) {
+                    } on Object catch (error, stackTrace) {
                       AppLogger.error(
                         'Create restaurant company',
                         error,
@@ -298,6 +315,278 @@ Future<void> _showCreateRestaurantDialog(
   legalName.dispose();
   venueName.dispose();
   timeZone.dispose();
+}
+
+Future<void> _showEditRestaurantDialog(
+  BuildContext context,
+  WidgetRef ref,
+  PlatformTenantSummary tenant,
+) async {
+  final repository = ref.read(platformAdminRepositoryProvider);
+  late final List<PlatformVenueSummary> venues;
+  try {
+    venues = (await repository.listTenantVenues(tenant.id)).toList();
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('Load restaurant venues for editing', error, stackTrace);
+    if (context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not load venues: $error')));
+    }
+    return;
+  }
+  if (!context.mounted) return;
+
+  final formKey = GlobalKey<FormState>();
+  final tradingName = TextEditingController(text: tenant.displayName);
+  final legalName = TextEditingController(text: tenant.legalName);
+  final currencyCode = TextEditingController(text: tenant.currencyCode);
+  var savingCompany = false;
+
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: Text('Edit ${tenant.displayName}'),
+        content: Form(
+          key: formKey,
+          child: SingleChildScrollView(
+            child: SizedBox(
+              width: 460,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextFormField(
+                    controller: tradingName,
+                    decoration: const InputDecoration(
+                      labelText: 'Trading name',
+                    ),
+                    validator: (value) => _requiredField(value, 'Trading name'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: legalName,
+                    decoration: const InputDecoration(labelText: 'Legal name'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: currencyCode,
+                    textCapitalization: TextCapitalization.characters,
+                    decoration: const InputDecoration(
+                      labelText: 'Currency code',
+                      helperText: 'Three-letter code, for example GBP',
+                    ),
+                    validator: _currencyCodeValidator,
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'Venues',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 4),
+                  if (venues.isEmpty)
+                    const Text('No venues have been created yet.'),
+                  for (final venue in venues)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.location_on_outlined),
+                      title: Text(venue.name),
+                      subtitle: Text(venue.timeZone),
+                      trailing: TextButton(
+                        onPressed: savingCompany
+                            ? null
+                            : () async {
+                                final saved = await _showVenueDialog(
+                                  context,
+                                  ref,
+                                  tenant.id,
+                                  venue: venue,
+                                );
+                                if (saved == null || !context.mounted) return;
+                                setDialogState(() {
+                                  final index = venues.indexWhere(
+                                    (item) => item.id == saved.id,
+                                  );
+                                  if (index >= 0) venues[index] = saved;
+                                });
+                              },
+                        child: const Text('Edit'),
+                      ),
+                    ),
+                  const SizedBox(height: 4),
+                  OutlinedButton.icon(
+                    onPressed: savingCompany
+                        ? null
+                        : () async {
+                            final added = await _showVenueDialog(
+                              context,
+                              ref,
+                              tenant.id,
+                            );
+                            if (added == null || !context.mounted) return;
+                            setDialogState(() => venues.add(added));
+                          },
+                    icon: const Icon(Icons.add_location_alt_outlined),
+                    label: const Text('Add venue'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: savingCompany ? null : () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: savingCompany
+                ? null
+                : () async {
+                    if (!(formKey.currentState?.validate() ?? false)) return;
+                    setDialogState(() => savingCompany = true);
+                    AppLogger.info(
+                      'Update restaurant company: saving ${tenant.id}.',
+                    );
+                    try {
+                      await repository.updateTenant(
+                        tenantId: tenant.id,
+                        displayName: tradingName.text.trim(),
+                        legalName: legalName.text.trim(),
+                        currencyCode: currencyCode.text.trim(),
+                      );
+                      ref.invalidate(platformTenantsProvider);
+                      final messenger = ScaffoldMessenger.of(dialogContext);
+                      if (context.mounted) Navigator.pop(context);
+                      messenger.showSnackBar(
+                        const SnackBar(content: Text('Restaurant updated.')),
+                      );
+                    } on Object catch (error, stackTrace) {
+                      AppLogger.error(
+                        'Update restaurant company',
+                        error,
+                        stackTrace,
+                      );
+                      setDialogState(() => savingCompany = false);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'Could not update restaurant: $error',
+                            ),
+                          ),
+                        );
+                      }
+                    }
+                  },
+            child: Text(savingCompany ? 'Saving…' : 'Save restaurant'),
+          ),
+        ],
+      ),
+    ),
+  );
+  tradingName.dispose();
+  legalName.dispose();
+  currencyCode.dispose();
+}
+
+Future<PlatformVenueSummary?> _showVenueDialog(
+  BuildContext context,
+  WidgetRef ref,
+  String tenantId, {
+  PlatformVenueSummary? venue,
+}) async {
+  final formKey = GlobalKey<FormState>();
+  final name = TextEditingController(text: venue?.name ?? '');
+  final timeZone = TextEditingController(
+    text: venue?.timeZone ?? 'Europe/London',
+  );
+  var saving = false;
+  final saved = await showDialog<PlatformVenueSummary>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: Text(venue == null ? 'Add venue' : 'Edit venue'),
+        content: Form(
+          key: formKey,
+          child: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: name,
+                  decoration: const InputDecoration(labelText: 'Venue name'),
+                  validator: (value) => _requiredField(value, 'Venue name'),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: timeZone,
+                  decoration: const InputDecoration(
+                    labelText: 'Time zone',
+                    helperText: 'For example Europe/London',
+                  ),
+                  validator: (value) => _requiredField(value, 'Time zone'),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: saving ? null : () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: saving
+                ? null
+                : () async {
+                    if (!(formKey.currentState?.validate() ?? false)) return;
+                    setDialogState(() => saving = true);
+                    final repository = ref.read(
+                      platformAdminRepositoryProvider,
+                    );
+                    try {
+                      final savedVenue = venue == null
+                          ? await repository.createVenue(
+                              tenantId: tenantId,
+                              name: name.text.trim(),
+                              timeZone: timeZone.text.trim(),
+                            )
+                          : await repository.updateVenue(
+                              tenantId: tenantId,
+                              venueId: venue.id,
+                              name: name.text.trim(),
+                              timeZone: timeZone.text.trim(),
+                            );
+                      ref.invalidate(platformTenantsProvider);
+                      if (context.mounted) Navigator.pop(context, savedVenue);
+                    } on Object catch (error, stackTrace) {
+                      AppLogger.error(
+                        venue == null ? 'Create venue' : 'Update venue',
+                        error,
+                        stackTrace,
+                      );
+                      setDialogState(() => saving = false);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Could not save venue: $error'),
+                          ),
+                        );
+                      }
+                    }
+                  },
+            child: Text(saving ? 'Saving…' : 'Save venue'),
+          ),
+        ],
+      ),
+    ),
+  );
+  name.dispose();
+  timeZone.dispose();
+  return saved;
 }
 
 Future<void> _showCreateStaffDialog(BuildContext context, WidgetRef ref) async {
@@ -356,7 +645,7 @@ Future<void> _showCreateStaffDialog(BuildContext context, WidgetRef ref) async {
                         await ref
                             .read(platformAdminRepositoryProvider)
                             .sendPasswordResetEmail(user.email);
-                      } on Exception catch (error, stackTrace) {
+                      } on Object catch (error, stackTrace) {
                         AppLogger.error(
                           'Send initial password reset email',
                           error,
@@ -368,7 +657,7 @@ Future<void> _showCreateStaffDialog(BuildContext context, WidgetRef ref) async {
                       final messenger = ScaffoldMessenger.of(dialogContext);
                       if (context.mounted) Navigator.pop(context);
                       messenger.showSnackBar(SnackBar(content: Text(message)));
-                    } on Exception catch (error, stackTrace) {
+                    } on Object catch (error, stackTrace) {
                       AppLogger.error(
                         'Create staff account',
                         error,
@@ -399,6 +688,14 @@ String? _requiredField(String? value, String label) {
   return null;
 }
 
+String? _currencyCodeValidator(String? value) {
+  final code = value?.trim() ?? '';
+  if (!RegExp(r'^[a-zA-Z]{3}$').hasMatch(code)) {
+    return 'Enter a three-letter currency code, for example GBP.';
+  }
+  return null;
+}
+
 Future<void> _sendPasswordReset(
   BuildContext context,
   WidgetRef ref,
@@ -415,7 +712,7 @@ Future<void> _sendPasswordReset(
         ),
       );
     }
-  } on Exception catch (error, stackTrace) {
+  } on Object catch (error, stackTrace) {
     AppLogger.error('Send password reset email', error, stackTrace);
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -463,8 +760,12 @@ Future<void> _confirmRetireStaffUser(
                           ),
                         ),
                       );
-                    } on Exception catch (error, stackTrace) {
-                      AppLogger.error('Delete staff account', error, stackTrace);
+                    } on Object catch (error, stackTrace) {
+                      AppLogger.error(
+                        'Delete staff account',
+                        error,
+                        stackTrace,
+                      );
                       setDialogState(() => retiring = false);
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -493,15 +794,42 @@ Future<void> _showAssignUserDialog(
   PlatformAuthUser user,
   List<PlatformTenantSummary> tenants,
 ) async {
-  var tenantId = tenants.first.id;
-  final roles = <String>{'waiter'};
+  final repository = ref.read(platformAdminRepositoryProvider);
+  late final List<PlatformStaffMembership> memberships;
+  try {
+    memberships = await repository.listUserMemberships(user.uid);
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('Load staff roles for editing', error, stackTrace);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load staff roles: $error')),
+      );
+    }
+    return;
+  }
+  if (!context.mounted) return;
+
+  final membershipByTenant = <String, PlatformStaffMembership>{
+    for (final membership in memberships) membership.tenantId: membership,
+  };
+  PlatformTenantSummary? firstAssignedTenant;
+  for (final tenant in tenants) {
+    if (membershipByTenant.containsKey(tenant.id)) {
+      firstAssignedTenant = tenant;
+      break;
+    }
+  }
+  var tenantId = firstAssignedTenant?.id ?? tenants.first.id;
+  var roles = <String>{...?membershipByTenant[tenantId]?.roles};
   var submitting = false;
 
   await showDialog<void>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
-        title: Text('Assign ${user.email.isEmpty ? user.uid : user.email}'),
+        title: Text(
+          'Manage roles: ${user.email.isEmpty ? user.uid : user.email}',
+        ),
         content: SingleChildScrollView(
           child: SizedBox(
             width: 420,
@@ -522,9 +850,23 @@ Future<void> _showAssignUserDialog(
                   ],
                   onChanged: submitting
                       ? null
-                      : (value) => setDialogState(() => tenantId = value!),
+                      : (value) => setDialogState(() {
+                          tenantId = value!;
+                          roles = <String>{
+                            ...?membershipByTenant[tenantId]?.roles,
+                          };
+                        }),
                 ),
                 const SizedBox(height: 16),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    membershipByTenant.containsKey(tenantId)
+                        ? 'Saved roles: ${membershipByTenant[tenantId]!.roles.map((role) => _staffRoleLabels[role] ?? role).join(', ')}'
+                        : 'No access has been assigned to this restaurant yet.',
+                  ),
+                ),
+                const SizedBox(height: 8),
                 const Align(
                   alignment: Alignment.centerLeft,
                   child: Text('Roles — select one or more'),
@@ -548,7 +890,7 @@ Future<void> _showAssignUserDialog(
                   ),
                 const SizedBox(height: 8),
                 const Text(
-                  'Assign this user again to add them to another restaurant. Saving replaces their roles for the selected restaurant.',
+                  'Saving replaces this user’s roles for the selected restaurant. Choose another restaurant to give them access there too.',
                 ),
               ],
             ),
@@ -573,20 +915,18 @@ Future<void> _showAssignUserDialog(
                     }
                     setDialogState(() => submitting = true);
                     try {
-                      await ref
-                          .read(platformAdminRepositoryProvider)
-                          .assignUserToTenant(
-                            tenantId: tenantId,
-                            userUid: user.uid,
-                            roles: roles.toList(growable: false),
-                          );
+                      await repository.assignUserToTenant(
+                        tenantId: tenantId,
+                        userUid: user.uid,
+                        roles: roles.toList(growable: false),
+                      );
                       final messenger = ScaffoldMessenger.of(dialogContext);
                       if (context.mounted) Navigator.pop(context);
                       messenger.showSnackBar(
-                        const SnackBar(content: Text('Access assigned.')),
+                        const SnackBar(content: Text('Staff roles saved.')),
                       );
-                    } on Exception catch (error, stackTrace) {
-                      AppLogger.error('Assign staff access', error, stackTrace);
+                    } on Object catch (error, stackTrace) {
+                      AppLogger.error('Save staff roles', error, stackTrace);
                       setDialogState(() => submitting = false);
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -597,7 +937,7 @@ Future<void> _showAssignUserDialog(
                       }
                     }
                   },
-            child: Text(submitting ? 'Assigning…' : 'Assign'),
+            child: Text(submitting ? 'Saving…' : 'Save roles'),
           ),
         ],
       ),

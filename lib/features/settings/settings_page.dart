@@ -113,7 +113,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         );
       }
-    } on Exception catch (error, stackTrace) {
+    } on Object catch (error, stackTrace) {
       AppLogger.error('Save company profile', error, stackTrace);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

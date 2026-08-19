@@ -85,6 +85,14 @@ function validRoles(value) {
   return roles;
 }
 
+function validCurrencyCode(data) {
+  const currencyCode = (optionalText(data, "currencyCode", 3) || "GBP").toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currencyCode)) {
+    throw new HttpsError("invalid-argument", "currencyCode must be a three-letter ISO code.");
+  }
+  return currencyCode;
+}
+
 function actorSnapshot(user) {
   // Retain a minimal immutable attribution record on business data. The Auth
   // user may later be retired, but this UID/name pair remains meaningful.
@@ -197,7 +205,46 @@ async function listTenantsFor(caller) {
     tenants: snapshot.docs.map((document) => ({
       id: document.id,
       displayName: document.data().displayName ?? "Unnamed restaurant",
+      legalName: document.data().legalName ?? "",
+      currencyCode: document.data().currencyCode ?? "GBP",
     })),
+  };
+}
+
+async function listTenantVenuesFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const tenant = await tenantRef.get();
+  if (!tenant.exists) {
+    throw new HttpsError("not-found", "The restaurant was not found.");
+  }
+  const snapshot = await tenantRef.collection("venues").orderBy("name").limit(200).get();
+  return {
+    venues: snapshot.docs.map((document) => ({
+      id: document.id,
+      name: document.data().name ?? "Unnamed venue",
+      timeZone: document.data().timeZone ?? "Europe/London",
+    })),
+  };
+}
+
+async function listUserMembershipsFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const userUid = requiredText(data, "userUid", 128);
+  const snapshot = await db.collectionGroup("members")
+    .where("userId", "==", userUid)
+    .get();
+  return {
+    memberships: snapshot.docs
+      .filter((document) => document.data().active !== false)
+      .map((document) => ({
+        tenantId: document.ref.parent.parent.id,
+        roles: Array.isArray(document.data().roles) ? document.data().roles : [],
+        defaultVenueId: document.data().defaultVenueId ?? null,
+      })),
   };
 }
 
@@ -206,7 +253,7 @@ async function createTenantFor(caller, rawData) {
   const data = requireObject(rawData);
   const displayName = requiredText(data, "displayName");
   const legalName = optionalText(data, "legalName");
-  const currencyCode = (optionalText(data, "currencyCode", 3) || "GBP").toUpperCase();
+  const currencyCode = validCurrencyCode(data);
   const venueName = requiredText(data, "venueName");
   const timeZone = optionalText(data, "timeZone", 80) || "Europe/London";
   const ownerUid = requiredText(data, "ownerUid", 128);
@@ -252,6 +299,73 @@ async function createTenantFor(caller, rawData) {
 
   await writeAudit(caller.uid, "createTenant", tenantRef.id, {ownerUid, venueId: venueRef.id});
   return {tenantId: tenantRef.id, venueId: venueRef.id};
+}
+
+async function updateTenantFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const displayName = requiredText(data, "displayName");
+  const legalName = optionalText(data, "legalName");
+  const currencyCode = validCurrencyCode(data);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const tenant = await tenantRef.get();
+  if (!tenant.exists) {
+    throw new HttpsError("not-found", "The restaurant was not found.");
+  }
+  await tenantRef.set({
+    displayName,
+    legalName,
+    currencyCode,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedBy: caller.uid,
+  }, {merge: true});
+  await writeAudit(caller.uid, "updateTenant", tenantId);
+  return {updated: true};
+}
+
+async function createVenueFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const name = requiredText(data, "name");
+  const timeZone = optionalText(data, "timeZone", 80) || "Europe/London";
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const tenant = await tenantRef.get();
+  if (!tenant.exists) {
+    throw new HttpsError("not-found", "The restaurant was not found.");
+  }
+  const venueRef = tenantRef.collection("venues").doc();
+  await venueRef.create({
+    name,
+    timeZone,
+    createdAt: FieldValue.serverTimestamp(),
+    createdBy: caller.uid,
+  });
+  await writeAudit(caller.uid, "createVenue", venueRef.id, {tenantId});
+  return {id: venueRef.id, name, timeZone};
+}
+
+async function updateVenueFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const name = requiredText(data, "name");
+  const timeZone = optionalText(data, "timeZone", 80) || "Europe/London";
+  const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
+  const venue = await venueRef.get();
+  if (!venue.exists) {
+    throw new HttpsError("not-found", "The venue was not found.");
+  }
+  await venueRef.set({
+    name,
+    timeZone,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedBy: caller.uid,
+  }, {merge: true});
+  await writeAudit(caller.uid, "updateVenue", venueId, {tenantId});
+  return {id: venueId, name, timeZone};
 }
 
 async function createStaffUserFor(caller, rawData) {
@@ -375,8 +489,18 @@ async function invokePlatformAction(action, caller, data) {
       return listAuthUsersFor(caller, data);
     case "listTenants":
       return listTenantsFor(caller);
+    case "listTenantVenues":
+      return listTenantVenuesFor(caller, data);
+    case "listUserMemberships":
+      return listUserMembershipsFor(caller, data);
     case "createTenant":
       return createTenantFor(caller, data);
+    case "updateTenant":
+      return updateTenantFor(caller, data);
+    case "createVenue":
+      return createVenueFor(caller, data);
+    case "updateVenue":
+      return updateVenueFor(caller, data);
     case "createStaffUser":
       return createStaffUserFor(caller, data);
     case "assignUserToTenant":
@@ -451,8 +575,18 @@ export const listAuthUsers = onCall((request) =>
   listAuthUsersFor(callerFromCall(request), request.data));
 export const listTenants = onCall((request) =>
   listTenantsFor(callerFromCall(request)));
+export const listTenantVenues = onCall((request) =>
+  listTenantVenuesFor(callerFromCall(request), request.data));
+export const listUserMemberships = onCall((request) =>
+  listUserMembershipsFor(callerFromCall(request), request.data));
 export const createTenant = onCall((request) =>
   createTenantFor(callerFromCall(request), request.data));
+export const updateTenant = onCall((request) =>
+  updateTenantFor(callerFromCall(request), request.data));
+export const createVenue = onCall((request) =>
+  createVenueFor(callerFromCall(request), request.data));
+export const updateVenue = onCall((request) =>
+  updateVenueFor(callerFromCall(request), request.data));
 export const createStaffUser = onCall((request) =>
   createStaffUserFor(callerFromCall(request), request.data));
 export const assignUserToTenant = onCall((request) =>
