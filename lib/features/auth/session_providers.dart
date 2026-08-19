@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,7 +10,16 @@ final platformAdminProvider = FutureProvider<bool>((ref) async {
   final user = FirebaseAuth.instance.currentUser;
   if (user == null) return false;
   final token = await user.getIdTokenResult();
-  return token.claims?['platformAdmin'] == true;
+  if (token.claims?['platformAdmin'] == true) return true;
+
+  // The matching Firestore rule permits this person to read only their own
+  // record. It is written exclusively by trusted server code and bridges the
+  // short period before Firebase Auth exposes a new custom claim on native
+  // clients.
+  final record = await FirebaseFirestore.instance
+      .doc('platformAdmins/${user.uid}')
+      .get();
+  return record.exists;
 });
 
 final platformAuthUsersProvider =

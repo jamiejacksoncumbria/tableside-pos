@@ -5,10 +5,14 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // This claim is issued only by the Admin SDK in functions/index.js. It is
-    // never accepted from a client write or an ordinary tenant membership.
+    // The server-issued custom claim is the normal authentication route. The
+    // platformAdmins record is a server-only, trusted fallback for native
+    // clients while Firebase Auth refreshes a newly granted claim.
     function isPlatformAdmin() {
-      return signedIn() && request.auth.token.platformAdmin == true;
+      return signedIn() && (
+        request.auth.token.platformAdmin == true
+        || exists(/databases/$(database)/documents/platformAdmins/$(request.auth.uid))
+      );
     }
 
     function membership(tenantId) {
@@ -130,7 +134,9 @@ service cloud.firestore {
     }
 
     match /platformAdmins/{userId} {
-      allow get: if isPlatformAdmin() && request.auth.uid == userId;
+      // A person may read only their own server-managed access record.  It
+      // lets the app recognise a platform admin even before a claim refresh.
+      allow get: if signedIn() && request.auth.uid == userId;
       allow list, create, update, delete: if false;
     }
 
