@@ -128,7 +128,7 @@ The first deployment prompts for `INITIAL_PLATFORM_ADMIN_EMAIL`. Enter the email
 
 The platform role is deliberately **not** Firebase-project Owner access. It has comprehensive TableSide data access while Firebase project administration, billing, and server credentials remain outside the app. User creation, Auth-user listing, membership assignment, tenant creation, and platform-admin promotion run only in authenticated Cloud Functions using the Firebase Admin SDK. This avoids a client being able to give itself privileges.
 
-Cloud Functions deployment requires the Firebase project to be on the Blaze plan. The functions are configured for Node.js 20 and `europe-west2` (London), alongside the existing Firestore and Storage location.
+Cloud Functions deployment requires the Firebase project to be on the Blaze plan. The functions are configured for Node.js 22 and `europe-west2` (London), alongside the existing Firestore and Storage location.
 
 The deployed rules prevent staff from changing their own roles, and restrict profile/image changes to owners and managers. Production order updates must still be limited to safe state transitions, while payment and stock mutations remain server-only.
 

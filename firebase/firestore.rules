@@ -5,10 +5,14 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // This claim is issued only by the Admin SDK in functions/index.js. It is
-    // never accepted from a client write or an ordinary tenant membership.
+    // The server-issued custom claim is the normal authentication route. The
+    // platformAdmins record is a server-only, trusted fallback for native
+    // clients while Firebase Auth refreshes a newly granted claim.
     function isPlatformAdmin() {
-      return signedIn() && request.auth.token.platformAdmin == true;
+      return signedIn() && (
+        request.auth.token.platformAdmin == true
+        || exists(/databases/$(database)/documents/platformAdmins/$(request.auth.uid))
+      );
     }
 
     function membership(tenantId) {
@@ -55,7 +59,13 @@ service cloud.firestore {
       allow delete: if false;
 
       match /members/{userId} {
-        allow read: if isPlatformAdmin() || isMember(tenantId);
+        // `resource.data.userId` makes the collection-group membership query
+        // provably safe: a signed-in user can stream only their own
+        // membership records. Managers can still inspect their tenant's
+        // members, while membership changes remain server-only.
+        allow read: if isPlatformAdmin()
+          || (signedIn() && resource.data.userId == request.auth.uid)
+          || managesTenant(tenantId);
         allow write: if false;
       }
 
@@ -124,12 +134,23 @@ service cloud.firestore {
     }
 
     match /platformAdmins/{userId} {
-      allow get: if isPlatformAdmin() && request.auth.uid == userId;
+      // A person may read only their own server-managed access record.  It
+      // lets the app recognise a platform admin even before a claim refresh.
+      allow get: if signedIn() && request.auth.uid == userId;
       allow list, create, update, delete: if false;
     }
 
     match /platformAdminAudit/{auditId} {
       allow read: if isPlatformAdmin();
+      allow write: if false;
+    }
+
+    // The app uses collectionGroup('members') to discover the signed-in
+    // person's restaurant memberships. Collection-group queries require a
+    // version-2 recursive match, and the same userId condition as the query.
+    match /{path=**}/members/{userId} {
+      allow read: if isPlatformAdmin()
+        || (signedIn() && resource.data.userId == request.auth.uid);
       allow write: if false;
     }
   }

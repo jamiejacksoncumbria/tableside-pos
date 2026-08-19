@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/app_logger.dart';
 import '../firebase_options.dart';
 
 final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
@@ -11,8 +12,20 @@ final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
 );
 
 class PlatformAdminRepository {
-  Future<void> bootstrapPlatformAdmin() async {
+  /// Creates the first administrator, then waits for its custom claim to be
+  /// present in the locally held Firebase ID token.
+  ///
+  /// Firebase Auth updates custom claims asynchronously.  A forced refresh is
+  /// normally sufficient, but retrying for a few seconds prevents the UI from
+  /// returning to the setup screen with a just-stale token.
+  Future<bool> bootstrapPlatformAdmin() async {
+    AppLogger.info('Initial platform admin setup: calling the server.');
     await _call('bootstrapPlatformAdmin');
+    final claimAvailable = await _waitForPlatformAdminClaim();
+    AppLogger.info(
+      'Initial platform admin setup: token claim available=$claimAvailable.',
+    );
+    return claimAvailable;
   }
 
   Future<List<PlatformAuthUser>> listAuthUsers() async {
@@ -102,6 +115,7 @@ class PlatformAdminRepository {
       'europe-west2-$projectId.cloudfunctions.net',
       'platformAdminApi',
     );
+    AppLogger.info('Platform API $name: sending request.');
     final response = await http.post(
       endpoint,
       headers: {
@@ -110,6 +124,7 @@ class PlatformAdminRepository {
       },
       body: jsonEncode({'action': name, 'data': data}),
     );
+    AppLogger.info('Platform API $name: HTTP ${response.statusCode}.');
     final decoded = jsonDecode(response.body);
     if (decoded is! Map) {
       throw StateError('The platform server returned an invalid response.');
@@ -129,6 +144,29 @@ class PlatformAdminRepository {
     final result = body['data'];
     if (result is! Map) return const {};
     return Map<String, Object?>.from(result);
+  }
+
+  Future<bool> _waitForPlatformAdminClaim() async {
+    const attempts = 5;
+    for (var attempt = 0; attempt < attempts; attempt++) {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return false;
+
+      await user.reload();
+      final token = await user.getIdTokenResult(true);
+      final hasClaim = token.claims?['platformAdmin'] == true;
+      AppLogger.info(
+        'Platform admin token refresh ${attempt + 1}/$attempts: claim present=$hasClaim.',
+      );
+      if (hasClaim) return true;
+
+      if (attempt < attempts - 1) {
+        await Future<void>.delayed(
+          Duration(milliseconds: 400 * (attempt + 1)),
+        );
+      }
+    }
+    return false;
   }
 }
 

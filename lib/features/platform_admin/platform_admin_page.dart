@@ -2,6 +2,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/app_logger.dart';
 import '../../data/platform_admin_repository.dart';
 import '../auth/session_providers.dart';
 
@@ -236,7 +237,12 @@ Future<void> _showCreateRestaurantDialog(
                           const SnackBar(content: Text('Restaurant created.')),
                         );
                       }
-                    } on Exception catch (error) {
+                    } on Exception catch (error, stackTrace) {
+                      AppLogger.error(
+                        'Create restaurant company',
+                        error,
+                        stackTrace,
+                      );
                       setDialogState(() => submitting = false);
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -322,7 +328,12 @@ Future<void> _showCreateStaffDialog(BuildContext context, WidgetRef ref) async {
                           ),
                         );
                       }
-                    } on Exception catch (error) {
+                    } on Exception catch (error, stackTrace) {
+                      AppLogger.error(
+                        'Create staff account',
+                        error,
+                        stackTrace,
+                      );
                       setDialogState(() => submitting = false);
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -423,7 +434,8 @@ Future<void> _showAssignUserDialog(
                           const SnackBar(content: Text('Access assigned.')),
                         );
                       }
-                    } on Exception catch (error) {
+                    } on Exception catch (error, stackTrace) {
+                      AppLogger.error('Assign staff access', error, stackTrace);
                       setDialogState(() => submitting = false);
                       if (context.mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(

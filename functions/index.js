@@ -24,8 +24,17 @@ function callerFromCall(request) {
   return request.auth;
 }
 
-function requirePlatformAdmin(caller) {
-  if (caller.token.platformAdmin !== true) {
+async function isPlatformAdmin(caller) {
+  if (caller.token.platformAdmin === true) return true;
+  // The record is written only by this trusted Admin SDK code.  It is a safe
+  // fallback when a native client has not yet received a refreshed custom
+  // claim token.
+  const record = await db.doc(`platformAdmins/${caller.uid}`).get();
+  return record.exists;
+}
+
+async function requirePlatformAdmin(caller) {
+  if (!(await isPlatformAdmin(caller))) {
     throw new HttpsError(
       "permission-denied",
       "This action is restricted to TableSide platform administrators.",
@@ -113,7 +122,7 @@ async function bootstrapPlatformAdminFor(caller) {
 }
 
 async function listAuthUsersFor(caller, rawData) {
-  requirePlatformAdmin(caller);
+  await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
   const pageToken = optionalText(data, "pageToken", 2000) || undefined;
   const page = await auth.listUsers(100, pageToken);
@@ -130,7 +139,7 @@ async function listAuthUsersFor(caller, rawData) {
 }
 
 async function listTenantsFor(caller) {
-  requirePlatformAdmin(caller);
+  await requirePlatformAdmin(caller);
   const snapshot = await db.collection("tenants").orderBy("displayName").limit(200).get();
   return {
     tenants: snapshot.docs.map((document) => ({
@@ -141,7 +150,7 @@ async function listTenantsFor(caller) {
 }
 
 async function createTenantFor(caller, rawData) {
-  requirePlatformAdmin(caller);
+  await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
   const displayName = requiredText(data, "displayName");
   const legalName = optionalText(data, "legalName");
@@ -182,7 +191,7 @@ async function createTenantFor(caller, rawData) {
 }
 
 async function createStaffUserFor(caller, rawData) {
-  requirePlatformAdmin(caller);
+  await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
   const email = requiredText(data, "email", 320).toLowerCase();
   const displayName = optionalText(data, "displayName");
@@ -197,7 +206,7 @@ async function createStaffUserFor(caller, rawData) {
 }
 
 async function assignUserToTenantFor(caller, rawData) {
-  requirePlatformAdmin(caller);
+  await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const userUid = requiredText(data, "userUid", 128);
@@ -224,7 +233,7 @@ async function assignUserToTenantFor(caller, rawData) {
 }
 
 async function setPlatformAdminFor(caller, rawData) {
-  requirePlatformAdmin(caller);
+  await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
   const userUid = requiredText(data, "userUid", 128);
   const enabled = data.enabled === true;
