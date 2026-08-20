@@ -5,9 +5,10 @@ import '../core/money.dart';
 import '../features/pos/domain.dart';
 import '../features/pos/pos_controller.dart';
 import '../features/pos/pos_page.dart';
+import '../features/platform_admin/platform_admin_page.dart';
 import '../features/settings/settings_page.dart';
 
-enum HomeSection { pos, menu, reports, settings }
+enum HomeSection { pos, menu, reports, settings, platformAdmin }
 
 final homeSectionProvider =
     NotifierProvider<HomeSectionController, HomeSection>(
@@ -27,12 +28,14 @@ class HomeShell extends ConsumerWidget {
     this.profileOverride,
     this.venueOverride,
     this.persistCompanyProfile = false,
+    this.isPlatformAdmin = false,
     this.onSignOut,
   });
 
   final TenantProfile? profileOverride;
   final Venue? venueOverride;
   final bool persistCompanyProfile;
+  final bool isPlatformAdmin;
   final VoidCallback? onSignOut;
 
   @override
@@ -41,11 +44,29 @@ class HomeShell extends ConsumerWidget {
     final TenantProfile profile =
         profileOverride ?? ref.watch(tenantProfileProvider);
     final wide = MediaQuery.sizeOf(context).width >= 840;
-    final destinations = const [
-      _Destination(HomeSection.pos, Icons.point_of_sale_rounded, 'POS'),
-      _Destination(HomeSection.menu, Icons.restaurant_menu_rounded, 'Menu'),
-      _Destination(HomeSection.reports, Icons.bar_chart_rounded, 'Reports'),
-      _Destination(HomeSection.settings, Icons.settings_outlined, 'Settings'),
+    final destinations = [
+      const _Destination(HomeSection.pos, Icons.point_of_sale_rounded, 'POS'),
+      const _Destination(
+        HomeSection.menu,
+        Icons.restaurant_menu_rounded,
+        'Menu',
+      ),
+      const _Destination(
+        HomeSection.reports,
+        Icons.bar_chart_rounded,
+        'Reports',
+      ),
+      const _Destination(
+        HomeSection.settings,
+        Icons.settings_outlined,
+        'Settings',
+      ),
+      if (isPlatformAdmin)
+        const _Destination(
+          HomeSection.platformAdmin,
+          Icons.admin_panel_settings_outlined,
+          'Platform',
+        ),
     ];
     final index = destinations.indexWhere(
       (destination) => destination.section == section,
@@ -143,6 +164,7 @@ class HomeShell extends ConsumerWidget {
       profileOverride: profileOverride,
       persistToFirebase: persistCompanyProfile,
     ),
+    HomeSection.platformAdmin => const PlatformAdminPage(),
   };
 }
 

@@ -32,6 +32,12 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+.firebase-cli-config/
+functions/node_modules/
+functions/.env
+functions/.env.*
+functions/.runtimeconfig.json
+.npm-cache/
 
 # Symbolication related
 app.*.symbols

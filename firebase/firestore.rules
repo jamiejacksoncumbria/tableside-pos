@@ -5,16 +5,50 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // The server-issued custom claim is the normal authentication route. The
+    // platformAdmins record is a server-only, trusted fallback for native
+    // clients while Firebase Auth refreshes a newly granted claim.
+    function isPlatformAdmin() {
+      return signedIn() && (
+        request.auth.token.platformAdmin == true
+        || exists(/databases/$(database)/documents/platformAdmins/$(request.auth.uid))
+      );
+    }
+
     function membership(tenantId) {
       return get(/databases/$(database)/documents/tenants/$(tenantId)/members/$(request.auth.uid));
     }
 
     function isMember(tenantId) {
-      return signedIn() && exists(/databases/$(database)/documents/tenants/$(tenantId)/members/$(request.auth.uid));
+      return signedIn()
+        && exists(/databases/$(database)/documents/tenants/$(tenantId)/members/$(request.auth.uid))
+        && membership(tenantId).data.get('active', true) != false;
     }
 
     function managesTenant(tenantId) {
       return isMember(tenantId) && membership(tenantId).data.roles.hasAny(['owner', 'manager']);
+    }
+
+    // Venue records are server-managed. A venue marked as `deleting` rejects
+    // new client writes while the trusted delete function checks whether any
+    // operational or historical documents still reference it.
+    function isActiveVenue(tenantId, venueId) {
+      return venueId is string
+        && exists(/databases/$(database)/documents/tenants/$(tenantId)/venues/$(venueId))
+        && get(/databases/$(database)/documents/tenants/$(tenantId)/venues/$(venueId))
+          .data.get('status', 'active') == 'active';
+    }
+
+    function changesOnlyTenantProfile() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'displayName',
+        'legalName',
+        'currencyCode',
+        'logoUrl',
+        'address',
+        'phone',
+        'receiptFooter'
+      ]);
     }
 
     function isAssignedPrintDevice() {
@@ -27,74 +61,128 @@ service cloud.firestore {
     }
 
     match /tenants/{tenantId} {
-      allow create: if signedIn();
-      allow get: if isMember(tenantId);
-      allow update: if managesTenant(tenantId);
+      // Tenant provisioning and membership assignment are server-only. This
+      // prevents a signed-in client from creating a tenant or granting itself
+      // an owner role.
+      allow create: if false;
+      allow get: if isPlatformAdmin() || isMember(tenantId);
+      allow update: if isPlatformAdmin()
+        || (managesTenant(tenantId) && changesOnlyTenantProfile());
       allow delete: if false;
 
       match /members/{userId} {
-        allow read: if isMember(tenantId);
-        allow write: if managesTenant(tenantId);
+        // `resource.data.userId` makes the collection-group membership query
+        // provably safe: a signed-in user can stream only their own
+        // membership records. Managers can still inspect their tenant's
+        // members, while membership changes remain server-only.
+        allow read: if isPlatformAdmin()
+          || (signedIn() && resource.data.userId == request.auth.uid)
+          || managesTenant(tenantId);
+        allow write: if false;
       }
 
       match /venues/{venueId} {
-        allow read: if isMember(tenantId);
-        allow write: if managesTenant(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        // Creation, editing, and deletion use trusted server functions so
+        // time zones, unique venue names, and deletion safeguards cannot be
+        // bypassed by a client.
+        allow write: if false;
       }
 
       match /menuSections/{sectionId} {
-        allow read: if isMember(tenantId);
-        allow write: if managesTenant(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if isPlatformAdmin() || managesTenant(tenantId);
       }
 
       match /products/{productId} {
-        allow read: if isMember(tenantId);
-        allow write: if managesTenant(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if isPlatformAdmin() || managesTenant(tenantId);
       }
 
       match /tables/{tableId} {
-        allow read, write: if isMember(tenantId);
+        allow read, delete: if isPlatformAdmin() || isMember(tenantId);
+        allow create, update: if (isPlatformAdmin() || isMember(tenantId))
+          && isActiveVenue(tenantId, request.resource.data.venueId);
       }
 
       match /orders/{orderId} {
-        allow read, write: if isMember(tenantId);
+        allow read, delete: if isPlatformAdmin() || isMember(tenantId);
+        allow create, update: if (isPlatformAdmin() || isMember(tenantId))
+          && isActiveVenue(tenantId, request.resource.data.venueId);
       }
 
       match /bills/{billId} {
-        allow read: if isMember(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
         // Payment, tax, stock, and close-of-day writes must be made by a
         // trusted Cloud Function using the Admin SDK, not by a client.
         allow write: if false;
       }
 
       match /paymentRequests/{requestId} {
-        allow read: if isMember(tenantId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
         // A server function validates the bill amount, creates the provider
         // payment intent, and is the only actor allowed to change its status.
-        allow create: if isMember(tenantId)
+        allow create: if (isPlatformAdmin() || isMember(tenantId))
           && request.resource.data.keys().hasAll([
             'venueId', 'billId', 'amountMinor', 'method', 'status', 'idempotencyKey', 'requestedAt'
-          ]);
+          ])
+          && isActiveVenue(tenantId, request.resource.data.venueId);
         allow update, delete: if false;
       }
 
       match /devices/{deviceId} {
-        allow read: if managesTenant(tenantId) || isNamedDevice(deviceId);
-        allow create: if managesTenant(tenantId);
-        allow delete: if managesTenant(tenantId);
-        allow update: if managesTenant(tenantId)
+        allow read: if isPlatformAdmin()
+          || managesTenant(tenantId)
+          || isNamedDevice(deviceId);
+        allow create: if (isPlatformAdmin() || managesTenant(tenantId))
+          && isActiveVenue(tenantId, request.resource.data.venueId);
+        allow delete: if isPlatformAdmin() || managesTenant(tenantId);
+        allow update: if ((isPlatformAdmin() || managesTenant(tenantId))
+            && isActiveVenue(tenantId, request.resource.data.venueId))
           || (isNamedDevice(deviceId)
+            && isActiveVenue(tenantId, resource.data.venueId)
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastHeartbeatAt']));
       }
 
       match /printJobs/{jobId} {
-        allow read: if managesTenant(tenantId) || isAssignedPrintDevice();
+        allow read: if isPlatformAdmin()
+          || managesTenant(tenantId)
+          || isAssignedPrintDevice();
         allow create, delete: if false;
         allow update: if isAssignedPrintDevice()
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'status', 'claimedByDeviceId', 'claimedAt', 'completedAt', 'failureReason', 'attempts'
           ]);
       }
+    }
+
+    match /platformAdmins/{userId} {
+      // A person may read only their own server-managed access record.  It
+      // lets the app recognise a platform admin even before a claim refresh.
+      allow get: if signedIn() && request.auth.uid == userId;
+      allow list, create, update, delete: if false;
+    }
+
+    // Staff identities are server-managed and retained as historical
+    // attribution when an account is retired.
+    match /staffProfiles/{userId} {
+      allow get: if isPlatformAdmin()
+        || (signedIn() && request.auth.uid == userId);
+      allow list, create, update, delete: if false;
+    }
+
+    match /platformAdminAudit/{auditId} {
+      allow read: if isPlatformAdmin();
+      allow write: if false;
+    }
+
+    // The app uses collectionGroup('members') to discover the signed-in
+    // person's restaurant memberships. Collection-group queries require a
+    // version-2 recursive match, and the same userId condition as the query.
+    match /{path=**}/members/{userId} {
+      allow read: if isPlatformAdmin()
+        || (signedIn() && resource.data.userId == request.auth.uid);
+      allow write: if false;
     }
   }
 }

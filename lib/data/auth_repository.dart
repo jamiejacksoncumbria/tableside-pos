@@ -14,7 +14,10 @@ class AuthRepository {
 
   final FirebaseAuth _auth;
 
-  Stream<User?> authStateChanges() => _auth.authStateChanges();
+  // Custom claims (such as `platformAdmin`) arrive in a refreshed ID token.
+  // Watching token changes ensures the UI reevaluates access immediately after
+  // a claim is granted, rather than waiting for a later sign-in.
+  Stream<User?> authStateChanges() => _auth.idTokenChanges();
 
   Future<void> signIn({required String email, required String password}) {
     return _auth.signInWithEmailAndPassword(email: email, password: password);

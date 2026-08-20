@@ -91,32 +91,46 @@ This means the customer app can be built later without changing the core order, 
 
 ## Firebase setup
 
-1. Create a Firebase project and enable **Email/Password** in Authentication, Cloud Firestore, and Storage.
-2. Create a user, then use a trusted admin script or Cloud Function to create `tenants/{tenantId}/members/{uid}`. The membership document must contain `userId: <uid>` and a `roles` array. Do not permit a client to grant itself a role.
-3. This app has a no-secret, compile-time Firebase configuration. Supply the platform-specific values from your Firebase app configuration with Dart defines. For example:
+1. This repository is connected to the Firebase project `table-pos`. In the Firebase Console, enable **Email/Password** in Authentication, Cloud Firestore, and Storage.
+2. The generated [`lib/firebase_options.dart`](lib/firebase_options.dart) contains the public, platform-specific app identifiers for Android, iOS, web, and Windows. Regenerate it whenever an app or Firebase product is added:
 
 ```powershell
-flutter run -d windows `
-  --dart-define=TABLESIDE_USE_FIREBASE=true `
-  --dart-define=FIREBASE_API_KEY=<api-key> `
-  --dart-define=FIREBASE_APP_ID=<windows-app-id> `
-  --dart-define=FIREBASE_MESSAGING_SENDER_ID=<sender-id> `
-  --dart-define=FIREBASE_PROJECT_ID=<project-id> `
-  --dart-define=FIREBASE_STORAGE_BUCKET=<bucket>
+flutterfire configure --project table-pos --platforms android,ios,web,windows
 ```
 
-Use a separate launch configuration for each platform because Firebase app IDs differ. The default, without `TABLESIDE_USE_FIREBASE=true`, is the demo mode used for UI review and tests.
-
-4. Install the Firebase CLI, select your project, and deploy the supplied initial rules and index:
+The default remains demo mode. To use Firebase, only enable the mode flag; no API keys or app IDs need to be supplied manually:
 
 ```powershell
-firebase use <your-project-id>
-firebase deploy --only firestore:rules,firestore:indexes,storage
+flutter run -d windows --dart-define=TABLESIDE_USE_FIREBASE=true
 ```
 
-5. Add Cloud Functions for tenant provisioning, server-authoritative bill/payment/stock transitions, printer device claims, and print-job creation. Run Firestore emulator tests against the rules before production.
+3. Install the Firebase CLI, select your project, and deploy the supplied rules, indexes, Storage rules, and the platform-administration functions:
 
-The current Firestore rules are a starting point only. In particular, production order updates must be limited to safe state transitions, and payment/stock mutations must remain server-only.
+```powershell
+firebase use table-pos
+cd functions
+npm install
+cd ..
+firebase deploy --only functions,firestore:rules,firestore:indexes,storage
+```
+
+The first deployment prompts for `INITIAL_PLATFORM_ADMIN_EMAIL`. Enter the email address for your own Firebase Authentication account. The CLI stores that deployment value in `functions/.env.table-pos`; it is deliberately ignored by Git.
+
+4. Sign in to the app with that account in Firebase mode. Because it has no restaurant membership yet, it displays **Set up the initial platform admin**. Press it once. The server verifies the configured email, grants the `platformAdmin` custom claim, and the app refreshes the sign-in token.
+
+5. The new **Platform** section then lets that super user:
+
+- create an email/password staff account;
+- send its password-reset email, so the staff member chooses their own password;
+- select any existing Firebase Auth account as a restaurant company owner;
+- create the restaurant company and its first venue; and
+- assign an existing account an owner, manager, waiter, or printer-device role for a restaurant.
+
+The platform role is deliberately **not** Firebase-project Owner access. It has comprehensive TableSide data access while Firebase project administration, billing, and server credentials remain outside the app. User creation, Auth-user listing, membership assignment, tenant creation, and platform-admin promotion run only in authenticated Cloud Functions using the Firebase Admin SDK. This avoids a client being able to give itself privileges.
+
+Cloud Functions deployment requires the Firebase project to be on the Blaze plan. The functions are configured for Node.js 22 and `europe-west2` (London), alongside the existing Firestore and Storage location.
+
+The deployed rules prevent staff from changing their own roles, and restrict profile/image changes to owners and managers. Production order updates must still be limited to safe state transitions, while payment and stock mutations remain server-only.
 
 ## Run locally
 

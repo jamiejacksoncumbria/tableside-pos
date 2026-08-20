@@ -5,23 +5,36 @@ service firebase.storage {
       return request.auth != null;
     }
 
+    function isPlatformAdmin() {
+      return signedIn() && (
+        request.auth.token.platformAdmin == true
+        || firestore.exists(/databases/(default)/documents/platformAdmins/$(request.auth.uid))
+      );
+    }
+
     function isMember(tenantId) {
-      return signedIn() &&
-        firestore.exists(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid));
+      return signedIn()
+        && firestore.exists(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid))
+        && firestore.get(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid)).data.get('active', true) != false;
+    }
+
+    function managesTenant(tenantId) {
+      return isMember(tenantId) &&
+        firestore.get(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid)).data.roles.hasAny(['owner', 'manager']);
     }
 
     match /tenants/{tenantId}/branding/{fileName} {
-      allow read: if isMember(tenantId);
-      allow write: if isMember(tenantId)
+      allow read: if isPlatformAdmin() || isMember(tenantId);
+      allow write: if isPlatformAdmin() || (managesTenant(tenantId)
         && request.resource.size < 2 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*');
+        && request.resource.contentType.matches('image/.*'));
     }
 
     match /tenants/{tenantId}/products/{fileName} {
-      allow read: if isMember(tenantId);
-      allow write: if isMember(tenantId)
+      allow read: if isPlatformAdmin() || isMember(tenantId);
+      allow write: if isPlatformAdmin() || (managesTenant(tenantId)
         && request.resource.size < 5 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*');
+        && request.resource.contentType.matches('image/.*'));
     }
   }
 }

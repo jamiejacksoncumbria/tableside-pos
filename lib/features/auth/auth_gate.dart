@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/home_shell.dart';
+import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/auth_repository.dart';
+import '../../data/platform_admin_repository.dart';
+import '../platform_admin/platform_admin_page.dart';
 import '../pos/domain.dart';
 import 'session_providers.dart';
 
@@ -52,7 +55,8 @@ class _SignInPageState extends ConsumerState<SignInPage> {
       await ref
           .read(authRepositoryProvider)
           .signIn(email: _email.text.trim(), password: _password.text);
-    } on Exception catch (error) {
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Sign in', error, stackTrace);
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -78,7 +82,8 @@ class _SignInPageState extends ConsumerState<SignInPage> {
           const SnackBar(content: Text('Password reset email sent.')),
         );
       }
-    } on Exception catch (error) {
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Send password reset email', error, stackTrace);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not send reset email: $error')),
@@ -193,17 +198,35 @@ class AuthenticatedWorkspace extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final platformAdmin = ref.watch(platformAdminProvider);
+    if (platformAdmin.isLoading) {
+      return const _LoadingScreen(label: 'Checking your access…');
+    }
+    if (platformAdmin.hasError) {
+      return const _ErrorScreen(message: 'Could not verify account access.');
+    }
+    final isPlatformAdmin = platformAdmin.requireValue;
     final memberships = ref.watch(membershipsProvider(userId));
     return memberships.when(
-      loading: () => const _LoadingScreen(label: 'Loading your restaurants…'),
+      loading: () => isPlatformAdmin
+          ? _PlatformAdminScaffold(
+              onSignOut: () => ref.read(authRepositoryProvider).signOut(),
+            )
+          : const _NoMembershipScreen(checkingMembership: true),
       error: (error, _) =>
           _ErrorScreen(message: 'Could not load restaurant access: $error'),
       data: (items) {
-        if (items.isEmpty) return const _NoMembershipScreen();
+        if (items.isEmpty) {
+          return isPlatformAdmin
+              ? _PlatformAdminScaffold(
+                  onSignOut: () => ref.read(authRepositoryProvider).signOut(),
+                )
+              : const _NoMembershipScreen();
+        }
         final scope = ref.watch(activeVenueScopeProvider);
         return scope == null
             ? VenuePicker(memberships: items)
-            : _TenantWorkspace(scope: scope);
+            : _TenantWorkspace(scope: scope, isPlatformAdmin: isPlatformAdmin);
       },
     );
   }
@@ -312,9 +335,10 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
 }
 
 class _TenantWorkspace extends ConsumerWidget {
-  const _TenantWorkspace({required this.scope});
+  const _TenantWorkspace({required this.scope, required this.isPlatformAdmin});
 
   final VenueScope scope;
+  final bool isPlatformAdmin;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -339,6 +363,7 @@ class _TenantWorkspace extends ConsumerWidget {
       profileOverride: profile.requireValue,
       venueOverride: venue,
       persistCompanyProfile: true,
+      isPlatformAdmin: isPlatformAdmin,
       onSignOut: () {
         ref.read(activeVenueScopeProvider.notifier).clear();
         ref.read(authRepositoryProvider).signOut();
@@ -383,19 +408,115 @@ class _ErrorScreen extends StatelessWidget {
   );
 }
 
-class _NoMembershipScreen extends StatelessWidget {
-  const _NoMembershipScreen();
+class _NoMembershipScreen extends ConsumerStatefulWidget {
+  const _NoMembershipScreen({this.checkingMembership = false});
+
+  final bool checkingMembership;
 
   @override
-  Widget build(BuildContext context) => const Scaffold(
+  ConsumerState<_NoMembershipScreen> createState() =>
+      _NoMembershipScreenState();
+}
+
+class _NoMembershipScreenState extends ConsumerState<_NoMembershipScreen> {
+  bool _claiming = false;
+
+  Future<void> _claimInitialPlatformAdmin() async {
+    if (_claiming) return;
+    setState(() => _claiming = true);
+    try {
+      AppLogger.info('Initial platform admin setup: button pressed.');
+      final claimAvailable = await ref
+          .read(platformAdminRepositoryProvider)
+          .bootstrapPlatformAdmin();
+      AppLogger.info(
+        'Initial platform admin setup: refreshing access state; token claim available=$claimAvailable.',
+      );
+      ref.invalidate(platformAdminProvider);
+      ref.invalidate(authStateProvider);
+      if (!claimAvailable && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Your administrator account was created, but Firebase has not refreshed its permissions yet. Please sign out and sign in again.',
+            ),
+          ),
+        );
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Bootstrap platform administrator', error, stackTrace);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not set up platform admin: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _claiming = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
     body: Center(
       child: Padding(
-        padding: EdgeInsets.all(24),
-        child: Text(
-          'Your account has no restaurant access yet. Ask an owner to invite you to a tenant and venue.',
-          textAlign: TextAlign.center,
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.admin_panel_settings_outlined, size: 42),
+              const SizedBox(height: 16),
+              Text(
+                widget.checkingMembership
+                    ? 'Checking restaurant access. If this is the first TableSide account, you can set up the platform administrator now.'
+                    : 'Your account has no restaurant access yet. Ask an owner to invite you to a tenant and venue.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: _claiming ? null : _claimInitialPlatformAdmin,
+                icon: const Icon(Icons.verified_user_outlined),
+                label: Text(
+                  _claiming
+                      ? 'Setting up…'
+                      : 'Set up the initial platform admin',
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'This succeeds only for the email configured during function deployment.',
+                textAlign: TextAlign.center,
+              ),
+              TextButton(
+                onPressed: () => ref.read(authRepositoryProvider).signOut(),
+                child: const Text('Sign out'),
+              ),
+            ],
+          ),
         ),
       ),
     ),
+  );
+}
+
+class _PlatformAdminScaffold extends StatelessWidget {
+  const _PlatformAdminScaffold({required this.onSignOut});
+
+  final VoidCallback onSignOut;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('TableSide platform'),
+      actions: [
+        IconButton(
+          tooltip: 'Sign out',
+          onPressed: onSignOut,
+          icon: const Icon(Icons.logout_rounded),
+        ),
+      ],
+    ),
+    body: const PlatformAdminPage(),
   );
 }
