@@ -253,6 +253,7 @@ class PaymentRequest {
     required this.venueId,
     required this.billId,
     required this.amountMinor,
+    required this.currencyCode,
     required this.method,
     required this.status,
     required this.idempotencyKey,
@@ -264,6 +265,9 @@ class PaymentRequest {
   final String venueId;
   final String billId;
   final int amountMinor;
+
+  /// The bill's functional currency, not a guest's foreign cash tender.
+  final String currencyCode;
   final PaymentMethod method;
   final PaymentRequestStatus status;
   final String idempotencyKey;

@@ -7,23 +7,28 @@ import 'domain.dart';
 import 'pos_controller.dart';
 
 class PosPage extends ConsumerWidget {
-  const PosPage({super.key});
+  const PosPage({super.key, required this.currencyCode});
+
+  final String currencyCode;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return LayoutBuilder(
       builder: (context, constraints) {
         if (constraints.maxWidth >= 1100) {
-          return const Padding(
-            padding: EdgeInsets.all(20),
+          return Padding(
+            padding: const EdgeInsets.all(20),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                SizedBox(width: 238, child: _TablesPanel()),
-                SizedBox(width: 16),
-                Expanded(child: _MenuPanel()),
-                SizedBox(width: 16),
-                SizedBox(width: 360, child: _OrderPanel()),
+                const SizedBox(width: 238, child: _TablesPanel()),
+                const SizedBox(width: 16),
+                Expanded(child: _MenuPanel(currencyCode: currencyCode)),
+                const SizedBox(width: 16),
+                SizedBox(
+                  width: 360,
+                  child: _OrderPanel(currencyCode: currencyCode),
+                ),
               ],
             ),
           );
@@ -33,13 +38,13 @@ class PosPage extends ConsumerWidget {
         // interaction model: stacking all three panels would make the order
         // panel inaccessible. Let the operator switch panels instead.
         if (constraints.maxHeight < 620) {
-          return const Padding(
-            padding: EdgeInsets.all(12),
+          return Padding(
+            padding: const EdgeInsets.all(12),
             child: DefaultTabController(
               length: 3,
               child: Column(
                 children: [
-                  TabBar(
+                  const TabBar(
                     tabs: [
                       Tab(
                         icon: Icon(Icons.table_restaurant_rounded),
@@ -55,13 +60,13 @@ class PosPage extends ConsumerWidget {
                       ),
                     ],
                   ),
-                  SizedBox(height: 12),
+                  const SizedBox(height: 12),
                   Expanded(
                     child: TabBarView(
                       children: [
-                        _TablesPanel(compact: true),
-                        _MenuPanel(),
-                        _OrderPanel(),
+                        const _TablesPanel(compact: true),
+                        _MenuPanel(currencyCode: currencyCode),
+                        _OrderPanel(currencyCode: currencyCode),
                       ],
                     ),
                   ),
@@ -71,15 +76,18 @@ class PosPage extends ConsumerWidget {
           );
         }
 
-        return const Padding(
-          padding: EdgeInsets.all(12),
+        return Padding(
+          padding: const EdgeInsets.all(12),
           child: Column(
             children: [
-              SizedBox(height: 170, child: _TablesPanel(compact: true)),
-              SizedBox(height: 12),
-              Expanded(child: _MenuPanel()),
-              SizedBox(height: 12),
-              SizedBox(height: 280, child: _OrderPanel()),
+              const SizedBox(height: 170, child: _TablesPanel(compact: true)),
+              const SizedBox(height: 12),
+              Expanded(child: _MenuPanel(currencyCode: currencyCode)),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 280,
+                child: _OrderPanel(currencyCode: currencyCode),
+              ),
             ],
           ),
         );
@@ -217,7 +225,9 @@ class _TableButton extends StatelessWidget {
 }
 
 class _MenuPanel extends ConsumerWidget {
-  const _MenuPanel();
+  const _MenuPanel({required this.currencyCode});
+
+  final String currencyCode;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -314,6 +324,7 @@ class _MenuPanel extends ConsumerWidget {
                     ),
                     itemBuilder: (context, index) => _ProductTile(
                       product: products[index],
+                      currencyCode: currencyCode,
                       onTap: () => ref
                           .read(activeOrderProvider.notifier)
                           .addProduct(products[index]),
@@ -330,9 +341,14 @@ class _MenuPanel extends ConsumerWidget {
 }
 
 class _ProductTile extends StatelessWidget {
-  const _ProductTile({required this.product, required this.onTap});
+  const _ProductTile({
+    required this.product,
+    required this.currencyCode,
+    required this.onTap,
+  });
 
   final MenuProduct product;
+  final String currencyCode;
   final VoidCallback onTap;
 
   @override
@@ -375,7 +391,12 @@ class _ProductTile extends StatelessWidget {
                 const SizedBox(height: 4),
                 Row(
                   children: [
-                    Text(formatMoney(product.priceMinor)),
+                    Text(
+                      formatMoney(
+                        product.priceMinor,
+                        currencyCode: currencyCode,
+                      ),
+                    ),
                     const Spacer(),
                     if (product.trackStock)
                       Text(
@@ -394,7 +415,9 @@ class _ProductTile extends StatelessWidget {
 }
 
 class _OrderPanel extends ConsumerWidget {
-  const _OrderPanel();
+  const _OrderPanel({required this.currencyCode});
+
+  final String currencyCode;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -454,7 +477,7 @@ class _OrderPanel extends ConsumerWidget {
                                     overflow: TextOverflow.ellipsis,
                                   ),
                                   Text(
-                                    '${line.quantity} × ${formatMoney(line.unitPriceMinor)}',
+                                    '${line.quantity} × ${formatMoney(line.unitPriceMinor, currencyCode: currencyCode)}',
                                     style: Theme.of(
                                       context,
                                     ).textTheme.bodySmall,
@@ -462,7 +485,12 @@ class _OrderPanel extends ConsumerWidget {
                                 ],
                               ),
                             ),
-                            Text(formatMoney(line.totalMinor)),
+                            Text(
+                              formatMoney(
+                                line.totalMinor,
+                                currencyCode: currencyCode,
+                              ),
+                            ),
                           ],
                         );
                       },
@@ -474,7 +502,7 @@ class _OrderPanel extends ConsumerWidget {
                 Text('Total', style: Theme.of(context).textTheme.titleMedium),
                 const Spacer(),
                 Text(
-                  formatMoney(order.totalMinor),
+                  formatMoney(order.totalMinor, currencyCode: currencyCode),
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.w800,
                   ),

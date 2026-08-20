@@ -33,6 +33,12 @@ tenants/{tenantId}
 
 Use integer minor units (`priceMinor`) for every money value; never store prices as floating point. Order lines must contain immutable snapshots of the product name, tax rate, unit price, and production area, so later menu changes do not change a historical bill.
 
+### Currency and foreign tender
+
+`tenants/{tenantId}.currencyCode` is the restaurant's **functional currency**: menu prices, tax, bills, and daily sales reporting use it. It is not the currency a guest happens to tender. It is selected when the restaurant is created and is then permanent. This avoids a concurrent menu change or a later price record being silently reinterpreted in another currency; create a new restaurant company for a separate trading currency instead.
+
+Every payment request already records the bill's `currencyCode`; it is validated against its restaurant's functional currency. When multi-currency payments are implemented, each bill must snapshot `billCurrencyCode`. Each payment/tender must separately record `tenderCurrencyCode`, `tenderAmountMinor`, `functionalAmountMinor`, the locked exchange rate, rate source (for example terminal quote or manager-approved cash rate), and timestamp. Reports should aggregate `functionalAmountMinor` while retaining foreign-tender totals for reconciliation. Never recalculate a historic payment with a newer exchange rate or overwrite a bill's currency.
+
 ### Multi-venue and company branding
 
 A tenant represents a restaurant company. A venue is one physical restaurant beneath it. Store the logo and legal/trading details at `tenants/{tenantId}`; then copy them into a closed receipt snapshot. This allows the company profile to change without altering a past receipt, and lets each venue provide its own address, tax registration, and printer routing.

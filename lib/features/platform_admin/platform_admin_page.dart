@@ -193,12 +193,15 @@ Future<void> _showCreateRestaurantDialog(
   final repository = ref.read(platformAdminRepositoryProvider);
   final timeZones = await _loadSupportedTimeZones(context, repository);
   if (timeZones == null || !context.mounted) return;
+  final currencyCodes = await _loadSupportedCurrencyCodes(context, repository);
+  if (currencyCodes == null || !context.mounted) return;
 
   final formKey = GlobalKey<FormState>();
   final tradingName = TextEditingController();
   final legalName = TextEditingController();
   final venueName = TextEditingController();
   var timeZone = _preferredTimeZone(timeZones);
+  var currencyCode = _preferredCurrencyCode(currencyCodes);
   var ownerUid = users.first.uid;
   var submitting = false;
 
@@ -226,6 +229,24 @@ Future<void> _showCreateRestaurantDialog(
                   TextFormField(
                     controller: legalName,
                     decoration: const InputDecoration(labelText: 'Legal name'),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: currencyCode,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Functional currency',
+                      helperText:
+                          'Used for menu prices, bills, tax and reports',
+                    ),
+                    items: [
+                      for (final option in currencyCodes)
+                        DropdownMenuItem(value: option, child: Text(option)),
+                    ],
+                    onChanged: submitting
+                        ? null
+                        : (value) =>
+                              setDialogState(() => currencyCode = value!),
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
@@ -289,6 +310,7 @@ Future<void> _showCreateRestaurantDialog(
                       await repository.createTenant(
                         displayName: tradingName.text.trim(),
                         legalName: legalName.text.trim(),
+                        currencyCode: currencyCode,
                         venueName: venueName.text.trim(),
                         timeZone: timeZone,
                         ownerUid: ownerUid,
@@ -352,7 +374,6 @@ Future<void> _showEditRestaurantDialog(
   final formKey = GlobalKey<FormState>();
   final tradingName = TextEditingController(text: tenant.displayName);
   final legalName = TextEditingController(text: tenant.legalName);
-  final currencyCode = TextEditingController(text: tenant.currencyCode);
   var savingCompany = false;
   var changingVenues = false;
 
@@ -383,14 +404,13 @@ Future<void> _showEditRestaurantDialog(
                     decoration: const InputDecoration(labelText: 'Legal name'),
                   ),
                   const SizedBox(height: 12),
-                  TextFormField(
-                    controller: currencyCode,
-                    textCapitalization: TextCapitalization.characters,
+                  InputDecorator(
                     decoration: const InputDecoration(
-                      labelText: 'Currency code',
-                      helperText: 'Three-letter code, for example GBP',
+                      labelText: 'Functional currency',
+                      helperText:
+                          'Used for prices, bills, tax and reports. It cannot be changed after restaurant creation.',
                     ),
-                    validator: _currencyCodeValidator,
+                    child: Text(tenant.currencyCode),
                   ),
                   const SizedBox(height: 20),
                   Text(
@@ -543,7 +563,7 @@ Future<void> _showEditRestaurantDialog(
                         tenantId: tenant.id,
                         displayName: tradingName.text.trim(),
                         legalName: legalName.text.trim(),
-                        currencyCode: currencyCode.text.trim(),
+                        currencyCode: tenant.currencyCode,
                       );
                       ref.invalidate(platformTenantsProvider);
                       final messenger = ScaffoldMessenger.of(dialogContext);
@@ -577,7 +597,6 @@ Future<void> _showEditRestaurantDialog(
   );
   tradingName.dispose();
   legalName.dispose();
-  currencyCode.dispose();
 }
 
 Future<PlatformVenueSummary?> _showVenueDialog(
@@ -812,14 +831,6 @@ String? _requiredField(String? value, String label) {
   return null;
 }
 
-String? _currencyCodeValidator(String? value) {
-  final code = value?.trim() ?? '';
-  if (!RegExp(r'^[a-zA-Z]{3}$').hasMatch(code)) {
-    return 'Enter a three-letter currency code, for example GBP.';
-  }
-  return null;
-}
-
 Future<List<String>?> _loadSupportedTimeZones(
   BuildContext context,
   PlatformAdminRepository repository,
@@ -838,10 +849,34 @@ Future<List<String>?> _loadSupportedTimeZones(
   }
 }
 
+Future<List<String>?> _loadSupportedCurrencyCodes(
+  BuildContext context,
+  PlatformAdminRepository repository,
+) async {
+  try {
+    AppLogger.info('Load supported currencies for restaurant editing.');
+    return await repository.listSupportedCurrencyCodes();
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('Load supported currencies', error, stackTrace);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load currencies: $error')),
+      );
+    }
+    return null;
+  }
+}
+
 String _preferredTimeZone(List<String> timeZones, [String? current]) {
   if (current != null && timeZones.contains(current)) return current;
   if (timeZones.contains('Europe/London')) return 'Europe/London';
   return timeZones.first;
+}
+
+String _preferredCurrencyCode(List<String> currencyCodes, [String? current]) {
+  if (current != null && currencyCodes.contains(current)) return current;
+  if (currencyCodes.contains('GBP')) return 'GBP';
+  return currencyCodes.first;
 }
 
 Future<void> _sendPasswordReset(
