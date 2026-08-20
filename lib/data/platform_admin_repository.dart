@@ -13,6 +13,7 @@ final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
 
 class PlatformAdminRepository {
   List<String>? _supportedTimeZones;
+  List<String>? _supportedCurrencyCodes;
 
   /// Creates the first administrator, then waits for its custom claim to be
   /// present in the locally held Firebase ID token.
@@ -64,6 +65,23 @@ class PlatformAdminRepository {
     }
     _supportedTimeZones = List.unmodifiable(timeZones);
     return _supportedTimeZones!;
+  }
+
+  Future<List<String>> listSupportedCurrencyCodes() async {
+    final cached = _supportedCurrencyCodes;
+    if (cached != null) return cached;
+
+    final data = await _call('listSupportedCurrencies');
+    final currencyCodes = List<String>.from(
+      data['currencyCodes'] as List? ?? const [],
+    );
+    if (currencyCodes.isEmpty) {
+      throw StateError(
+        'The platform server returned no supported currency codes.',
+      );
+    }
+    _supportedCurrencyCodes = List.unmodifiable(currencyCodes);
+    return _supportedCurrencyCodes!;
   }
 
   Future<List<PlatformVenueSummary>> listTenantVenues(String tenantId) async {

@@ -16,6 +16,8 @@ const region = "europe-west2";
 const initialPlatformAdminEmail = defineString("INITIAL_PLATFORM_ADMIN_EMAIL");
 const supportedTimeZones = Object.freeze(Intl.supportedValuesOf("timeZone"));
 const supportedTimeZoneSet = new Set(supportedTimeZones);
+const supportedCurrencyCodes = Object.freeze(Intl.supportedValuesOf("currency"));
+const supportedCurrencyCodeSet = new Set(supportedCurrencyCodes);
 
 setGlobalOptions({region, maxInstances: 10});
 
@@ -89,8 +91,11 @@ function validRoles(value) {
 
 function validCurrencyCode(data) {
   const currencyCode = (optionalText(data, "currencyCode", 3) || "GBP").toUpperCase();
-  if (!/^[A-Z]{3}$/.test(currencyCode)) {
-    throw new HttpsError("invalid-argument", "currencyCode must be a three-letter ISO code.");
+  if (!supportedCurrencyCodeSet.has(currencyCode)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "currencyCode must be selected from the supported ISO currency list.",
+    );
   }
   return currencyCode;
 }
@@ -252,6 +257,11 @@ async function listSupportedTimeZonesFor(caller) {
   return {timeZones: supportedTimeZones};
 }
 
+async function listSupportedCurrenciesFor(caller) {
+  await requirePlatformAdmin(caller);
+  return {currencyCodes: supportedCurrencyCodes};
+}
+
 async function listTenantVenuesFor(caller, rawData) {
   await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
@@ -355,6 +365,17 @@ async function updateTenantFor(caller, rawData) {
   const tenant = await tenantRef.get();
   if (!tenant.exists) {
     throw new HttpsError("not-found", "The restaurant was not found.");
+  }
+  const currentCurrencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
+  if (currencyCode !== currentCurrencyCode) {
+    // Currency is picked while creating a restaurant and then immutable. A
+    // price is stored as a bare integer in the currency's minor units, so an
+    // apparently harmless later change can reinterpret money created during
+    // a concurrent menu edit. A new restaurant is the safe migration path.
+    throw new HttpsError(
+      "failed-precondition",
+      "The functional currency is permanent once a restaurant is created. Create a new restaurant company for a different trading currency; existing amounts are never converted automatically.",
+    );
   }
   await tenantRef.set({
     displayName,
@@ -660,6 +681,8 @@ async function invokePlatformAction(action, caller, data) {
       return listTenantsFor(caller);
     case "listSupportedTimeZones":
       return listSupportedTimeZonesFor(caller);
+    case "listSupportedCurrencies":
+      return listSupportedCurrenciesFor(caller);
     case "listTenantVenues":
       return listTenantVenuesFor(caller, data);
     case "listUserMemberships":
@@ -750,6 +773,8 @@ export const listTenants = onCall((request) =>
   listTenantsFor(callerFromCall(request)));
 export const listSupportedTimeZones = onCall((request) =>
   listSupportedTimeZonesFor(callerFromCall(request)));
+export const listSupportedCurrencies = onCall((request) =>
+  listSupportedCurrenciesFor(callerFromCall(request)));
 export const listTenantVenues = onCall((request) =>
   listTenantVenuesFor(callerFromCall(request), request.data));
 export const listUserMemberships = onCall((request) =>

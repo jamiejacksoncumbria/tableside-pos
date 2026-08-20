@@ -135,7 +135,7 @@ class HomeShell extends ConsumerWidget {
                   ),
               ],
             ),
-          Expanded(child: _buildBody(section)),
+          Expanded(child: _buildBody(section, profile)),
         ],
       ),
       bottomNavigationBar: wide
@@ -156,16 +156,19 @@ class HomeShell extends ConsumerWidget {
     );
   }
 
-  Widget _buildBody(HomeSection section) => switch (section) {
-    HomeSection.pos => const PosPage(),
-    HomeSection.menu => const _MenuManagementPage(),
-    HomeSection.reports => const _ReportsPage(),
-    HomeSection.settings => SettingsPage(
-      profileOverride: profileOverride,
-      persistToFirebase: persistCompanyProfile,
-    ),
-    HomeSection.platformAdmin => const PlatformAdminPage(),
-  };
+  Widget _buildBody(HomeSection section, TenantProfile profile) =>
+      switch (section) {
+        HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
+        HomeSection.menu => _MenuManagementPage(
+          currencyCode: profile.currencyCode,
+        ),
+        HomeSection.reports => const _ReportsPage(),
+        HomeSection.settings => SettingsPage(
+          profileOverride: profileOverride,
+          persistToFirebase: persistCompanyProfile,
+        ),
+        HomeSection.platformAdmin => const PlatformAdminPage(),
+      };
 }
 
 class _Destination {
@@ -177,7 +180,9 @@ class _Destination {
 }
 
 class _MenuManagementPage extends StatelessWidget {
-  const _MenuManagementPage();
+  const _MenuManagementPage({required this.currencyCode});
+
+  final String currencyCode;
 
   @override
   Widget build(BuildContext context) {
@@ -220,7 +225,9 @@ class _MenuManagementPage extends StatelessWidget {
                   subtitle: Text(
                     '${product.sectionIds.join(' · ')}  •  ${product.trackStock ? 'stock tracked' : 'not tracked'}',
                   ),
-                  trailing: Text(formatMoney(product.priceMinor)),
+                  trailing: Text(
+                    formatMoney(product.priceMinor, currencyCode: currencyCode),
+                  ),
                 ),
             ],
           ),

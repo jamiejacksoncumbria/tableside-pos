@@ -39,11 +39,15 @@ service cloud.firestore {
           .data.get('status', 'active') == 'active';
     }
 
+    function tenantCurrencyCode(tenantId) {
+      return get(/databases/$(database)/documents/tenants/$(tenantId))
+        .data.get('currencyCode', 'GBP');
+    }
+
     function changesOnlyTenantProfile() {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
         'displayName',
         'legalName',
-        'currencyCode',
         'logoUrl',
         'address',
         'phone',
@@ -66,8 +70,11 @@ service cloud.firestore {
       // an owner role.
       allow create: if false;
       allow get: if isPlatformAdmin() || isMember(tenantId);
-      allow update: if isPlatformAdmin()
-        || (managesTenant(tenantId) && changesOnlyTenantProfile());
+      // Currency is selected only when the restaurant is created and remains
+      // permanent. Client profile edits may never bypass that historical-money
+      // safeguard.
+      allow update: if (isPlatformAdmin() || managesTenant(tenantId))
+        && changesOnlyTenantProfile();
       allow delete: if false;
 
       match /members/{userId} {
@@ -124,8 +131,9 @@ service cloud.firestore {
         // payment intent, and is the only actor allowed to change its status.
         allow create: if (isPlatformAdmin() || isMember(tenantId))
           && request.resource.data.keys().hasAll([
-            'venueId', 'billId', 'amountMinor', 'method', 'status', 'idempotencyKey', 'requestedAt'
+            'venueId', 'billId', 'amountMinor', 'currencyCode', 'method', 'status', 'idempotencyKey', 'requestedAt'
           ])
+          && request.resource.data.currencyCode == tenantCurrencyCode(tenantId)
           && isActiveVenue(tenantId, request.resource.data.venueId);
         allow update, delete: if false;
       }
