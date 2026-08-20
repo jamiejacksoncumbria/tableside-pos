@@ -12,6 +12,8 @@ final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
 );
 
 class PlatformAdminRepository {
+  List<String>? _supportedTimeZones;
+
   /// Creates the first administrator, then waits for its custom claim to be
   /// present in the locally held Firebase ID token.
   ///
@@ -49,6 +51,19 @@ class PlatformAdminRepository {
           ),
         )
         .toList(growable: false);
+  }
+
+  Future<List<String>> listSupportedTimeZones() async {
+    final cached = _supportedTimeZones;
+    if (cached != null) return cached;
+
+    final data = await _call('listSupportedTimeZones');
+    final timeZones = List<String>.from(data['timeZones'] as List? ?? const []);
+    if (timeZones.isEmpty) {
+      throw StateError('The platform server returned no supported time zones.');
+    }
+    _supportedTimeZones = List.unmodifiable(timeZones);
+    return _supportedTimeZones!;
   }
 
   Future<List<PlatformVenueSummary>> listTenantVenues(String tenantId) async {
@@ -135,6 +150,13 @@ class PlatformAdminRepository {
       'timeZone': timeZone,
     });
     return PlatformVenueSummary.fromMap(data);
+  }
+
+  Future<void> deleteVenue({
+    required String tenantId,
+    required String venueId,
+  }) {
+    return _call('deleteVenue', {'tenantId': tenantId, 'venueId': venueId});
   }
 
   Future<PlatformAuthUser> createStaffUser({
