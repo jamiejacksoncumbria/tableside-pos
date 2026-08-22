@@ -130,6 +130,7 @@ class FirestorePosRepository {
                   stockUnit: data['stockUnit'] as String? ?? 'each',
                   stockPerSale: (data['stockPerSale'] as num?)?.toDouble() ?? 1,
                   isAvailable: data['isAvailable'] as bool? ?? true,
+                  showOnOrderFlow: data['showOnOrderFlow'] as bool? ?? true,
                 );
               })
               .toList(growable: false),
@@ -296,6 +297,7 @@ class FirestorePosRepository {
     required bool trackStock,
     required double? stockOnHand,
     required double stockPerSale,
+    required bool showOnOrderFlow,
   }) async {
     final cleanedName = name.trim();
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
@@ -319,6 +321,7 @@ class FirestorePosRepository {
       'stockUnit': 'each',
       'stockPerSale': stockPerSale,
       'isAvailable': true,
+      'showOnOrderFlow': showOnOrderFlow,
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
@@ -347,6 +350,7 @@ class FirestorePosRepository {
     required bool trackStock,
     required double? stockOnHand,
     required double stockPerSale,
+    required bool showOnOrderFlow,
   }) async {
     final cleanedName = name.trim();
     if (cleanedName.isEmpty || priceMinor < 0 || sectionIds.isEmpty) {
@@ -365,6 +369,7 @@ class FirestorePosRepository {
           'trackStock': trackStock,
           'stockOnHand': trackStock ? (stockOnHand ?? 0) : null,
           'stockPerSale': stockPerSale,
+          'showOnOrderFlow': showOnOrderFlow,
           'updatedAt': FieldValue.serverTimestamp(),
         });
   }
@@ -394,6 +399,7 @@ class FirestorePosRepository {
     VenueScope scope,
   ) {
     final data = document.data();
+    if (data['showOnOrderFlow'] == false) return null;
     final venueId = data['venueId'] as String?;
     if (venueId == null) return null;
     final releasedAt = data['ticketReleasedAt'];
@@ -402,7 +408,10 @@ class FirestorePosRepository {
         : releasedAt is DateTime
         ? releasedAt
         : DateTime.now();
-    final rawItems = data['productionItems'] ?? data['itemSummary'];
+    final rawItems =
+        data['orderFlowItems'] ??
+        data['productionItems'] ??
+        data['itemSummary'];
     final itemSummary = rawItems is List
         ? rawItems
               .map((item) {

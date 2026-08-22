@@ -973,6 +973,7 @@ async function sendOrderToProductionFor(caller, rawData) {
         productionArea,
         trackStock: product.trackStock === true,
         stockPerSale,
+        showOnOrderFlow: product.showOnOrderFlow !== false,
       };
     });
     const groups = new Map();
@@ -1042,6 +1043,13 @@ async function sendOrderToProductionFor(caller, rawData) {
           name: line.productName,
           quantity: line.quantity,
         })),
+        orderFlowItems: ticket.lines
+          .filter((line) => line.showOnOrderFlow)
+          .map((line) => ({
+            name: line.productName,
+            quantity: line.quantity,
+          })),
+        showOnOrderFlow: ticket.lines.some((line) => line.showOnOrderFlow),
         hasAllergyAlert: false,
         isDelayed: false,
         createdByActor: actor,

@@ -215,6 +215,7 @@ class MenuProduct {
     this.stockUnit = 'each',
     this.stockPerSale = 1,
     this.isAvailable = true,
+    this.showOnOrderFlow = true,
   });
 
   final String id;
@@ -227,6 +228,10 @@ class MenuProduct {
   final String stockUnit;
   final double stockPerSale;
   final bool isAvailable;
+
+  /// Drinks can still print to the bar while being omitted from the live
+  /// kitchen/manager flow board.
+  final bool showOnOrderFlow;
 }
 
 class DiningTable {

@@ -520,6 +520,7 @@ Future<void> _showProductDialog({
   final selectedSections = <String>{...?existing?.sectionIds};
   var productionArea = existing?.productionArea ?? ProductionArea.kitchen;
   var trackStock = existing?.trackStock ?? false;
+  var showOnOrderFlow = existing?.showOnOrderFlow ?? true;
 
   try {
     await showDialog<void>(
@@ -599,6 +600,16 @@ Future<void> _showProductDialog({
                       ],
                     ),
                     const SizedBox(height: 10),
+                    SwitchListTile.adaptive(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Show on Order Flow board'),
+                      subtitle: const Text(
+                        'Turn this off for items such as drinks that should print but do not need preparing/ready tracking.',
+                      ),
+                      value: showOnOrderFlow,
+                      onChanged: (value) =>
+                          setDialogState(() => showOnOrderFlow = value),
+                    ),
                     SwitchListTile.adaptive(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('Track finished-product stock'),
@@ -684,6 +695,7 @@ Future<void> _showProductDialog({
                       trackStock: trackStock,
                       stockOnHand: currentStock,
                       stockPerSale: unitStock,
+                      showOnOrderFlow: showOnOrderFlow,
                     );
                   } else {
                     await repository.updateProduct(
@@ -696,6 +708,7 @@ Future<void> _showProductDialog({
                       trackStock: trackStock,
                       stockOnHand: currentStock,
                       stockPerSale: unitStock,
+                      showOnOrderFlow: showOnOrderFlow,
                     );
                   }
                   if (dialogContext.mounted) Navigator.pop(dialogContext);

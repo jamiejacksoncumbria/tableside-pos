@@ -465,6 +465,18 @@ class _OrderPanel extends ConsumerWidget {
     final order = ref.watch(activeOrderProvider);
     final hasUnsentLines = order.lines.any((line) => !line.isSentToProduction);
     final tableId = ref.watch(selectedTableProvider);
+    final tableLabel = ref
+        .watch(diningTablesProvider)
+        .when(
+          data: (tables) {
+            for (final table in tables) {
+              if (table.id == tableId) return table.label;
+            }
+            return tableId;
+          },
+          loading: () => tableId,
+          error: (_, _) => tableId,
+        );
     final scheme = Theme.of(context).colorScheme;
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -475,10 +487,7 @@ class _OrderPanel extends ConsumerWidget {
           children: [
             Row(
               children: [
-                Text(
-                  'Table $tableId',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
+                Text(tableLabel, style: Theme.of(context).textTheme.titleLarge),
                 const Spacer(),
                 _StatusChip(status: order.status),
               ],
