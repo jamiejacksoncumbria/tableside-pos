@@ -20,12 +20,16 @@ class MenuManagementPage extends ConsumerWidget {
     final scope = ref.watch(activeVenueScopeProvider);
     final sectionsValue = ref.watch(menuSectionsProvider);
     final productsValue = ref.watch(menuProductsProvider);
-    final sections =
-        sectionsValue.valueOrNull ??
-        (scope == null ? demoSections : const <MenuSection>[]);
-    final products =
-        productsValue.valueOrNull ??
-        (scope == null ? demoProducts : const <MenuProduct>[]);
+    final sections = sectionsValue.when(
+      data: (items) => items,
+      loading: () => scope == null ? demoSections : const <MenuSection>[],
+      error: (_, _) => scope == null ? demoSections : const <MenuSection>[],
+    );
+    final products = productsValue.when(
+      data: (items) => items,
+      loading: () => scope == null ? demoProducts : const <MenuProduct>[],
+      error: (_, _) => scope == null ? demoProducts : const <MenuProduct>[],
+    );
 
     return ListView(
       padding: const EdgeInsets.all(20),

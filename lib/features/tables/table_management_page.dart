@@ -17,9 +17,11 @@ class TableManagementPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final scope = ref.watch(activeVenueScopeProvider);
     final tableValue = ref.watch(diningTablesProvider);
-    final tables =
-        tableValue.valueOrNull ??
-        (scope == null ? demoTables : const <DiningTable>[]);
+    final tables = tableValue.when(
+      data: (items) => items,
+      loading: () => scope == null ? demoTables : const <DiningTable>[],
+      error: (_, _) => scope == null ? demoTables : const <DiningTable>[],
+    );
     return Scaffold(
       appBar: AppBar(title: const Text('Venue tables')),
       floatingActionButton: FloatingActionButton.extended(

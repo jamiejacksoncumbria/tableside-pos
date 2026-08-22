@@ -3,9 +3,9 @@ import 'dart:convert';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:tableside_pos/core/tenant_scope.dart';
 
 import '../core/app_logger.dart';
-import '../core/tenant_scope.dart';
 import '../firebase_options.dart';
 import '../features/pos/domain.dart';
 
