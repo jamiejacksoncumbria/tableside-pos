@@ -1,0 +1,580 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../core/app_logger.dart';
+import '../../core/tenant_scope.dart';
+import '../../data/firestore_pos_repository.dart';
+import '../../data/production_command_repository.dart';
+import '../pos/domain.dart';
+
+final orderFlowProvider = StreamProvider<List<OrderFlowOrder>>((ref) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  if (scope == null) return Stream.value(demoOrderFlow);
+  return ref.watch(firestorePosRepositoryProvider).watchOrderFlow(scope);
+});
+
+/// Live, production-safe board used by kitchen/bar and managers. This screen
+/// intentionally does not display money or customer contact information.
+class OrderFlowPage extends ConsumerStatefulWidget {
+  const OrderFlowPage({super.key});
+
+  @override
+  ConsumerState<OrderFlowPage> createState() => _OrderFlowPageState();
+}
+
+class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
+  Timer? _clock;
+  ProductionArea? _area;
+  _FlowFilter _filter = _FlowFilter.all;
+  final Map<String, OrderFlowOrder> _demoOverrides = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _clock = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _clock?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = ref.watch(activeVenueScopeProvider);
+    final flowValue = ref.watch(orderFlowProvider);
+    final rawOrders = flowValue.when(
+      data: (items) => items,
+      loading: () => scope == null ? demoOrderFlow : const <OrderFlowOrder>[],
+      error: (error, stackTrace) {
+        AppLogger.error('Order Flow Board stream', error, stackTrace);
+        return scope == null ? demoOrderFlow : const <OrderFlowOrder>[];
+      },
+    );
+    final orders = rawOrders
+        .map(
+          (order) => scope == null ? _demoOverrides[order.id] ?? order : order,
+        )
+        .where(_matchesFilters)
+        .toList(growable: false);
+    final allOrders = rawOrders
+        .map(
+          (order) => scope == null ? _demoOverrides[order.id] ?? order : order,
+        )
+        .toList(growable: false);
+    final scheme = Theme.of(context).colorScheme;
+
+    return SafeArea(
+      child: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            runSpacing: 12,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Order Flow',
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Live kitchen, bar and manager view. Timers start when tickets are released.',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+              _BoardHealth(allOrders: allOrders),
+            ],
+          ),
+          const SizedBox(height: 20),
+          _FilterBar(
+            area: _area,
+            filter: _filter,
+            onAreaChanged: (area) => setState(() => _area = area),
+            onFilterChanged: (filter) => setState(() => _filter = filter),
+          ),
+          const SizedBox(height: 18),
+          if (flowValue.isLoading && scope != null && rawOrders.isEmpty)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(48),
+                child: CircularProgressIndicator(),
+              ),
+            )
+          else if (orders.isEmpty)
+            _EmptyBoard(filter: _filter, area: _area)
+          else
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final columns = constraints.maxWidth >= 1250
+                    ? 4
+                    : constraints.maxWidth >= 880
+                    ? 3
+                    : constraints.maxWidth >= 560
+                    ? 2
+                    : 1;
+                return GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: orders.length,
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: columns,
+                    mainAxisExtent: 268,
+                    mainAxisSpacing: 12,
+                    crossAxisSpacing: 12,
+                  ),
+                  itemBuilder: (context, index) => _OrderFlowCard(
+                    order: orders[index],
+                    now: DateTime.now(),
+                    onAction: (action) => _applyAction(orders[index], action),
+                  ),
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
+  bool _matchesFilters(OrderFlowOrder order) {
+    if (_area != null && order.productionArea != _area) return false;
+    return switch (_filter) {
+      _FlowFilter.all => true,
+      _FlowFilter.late =>
+        _lateState(order, DateTime.now()) != _LateState.normal,
+      _FlowFilter.allergy => order.hasAllergyAlert,
+      _FlowFilter.ready => order.status == OrderFlowStatus.ready,
+    };
+  }
+
+  Future<void> _applyAction(
+    OrderFlowOrder order,
+    _OrderFlowAction action,
+  ) async {
+    final updated = switch (action) {
+      _OrderFlowAction.startPreparing => order.copyWith(
+        status: OrderFlowStatus.preparing,
+      ),
+      _OrderFlowAction.markReady => order.copyWith(
+        status: OrderFlowStatus.ready,
+      ),
+      _OrderFlowAction.markCollected => order.copyWith(
+        status: OrderFlowStatus.collected,
+      ),
+      _OrderFlowAction.markServed => order.copyWith(
+        status: OrderFlowStatus.served,
+      ),
+      _OrderFlowAction.toggleDelayed => order.copyWith(
+        isDelayed: !order.isDelayed,
+      ),
+    };
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) {
+      setState(() => _demoOverrides[order.id] = updated);
+      return;
+    }
+    try {
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .updateProductionTicket(
+            scope: scope,
+            ticketId: order.id,
+            flowStatus: updated.status.name,
+            isDelayed: updated.isDelayed,
+          );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Update order flow status', error, stackTrace);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('The order status could not be updated. Please retry.'),
+        ),
+      );
+    }
+  }
+}
+
+enum _FlowFilter { all, late, allergy, ready }
+
+enum _OrderFlowAction {
+  startPreparing,
+  markReady,
+  markCollected,
+  markServed,
+  toggleDelayed,
+}
+
+enum _LateState { normal, amber, red }
+
+_LateState _lateState(OrderFlowOrder order, DateTime now) {
+  if (order.isDelayed) return _LateState.red;
+  if (order.status.isTerminal) return _LateState.normal;
+  final elapsed = now.difference(order.ticketReleasedAt);
+  if (elapsed >= const Duration(minutes: 25)) return _LateState.red;
+  if (elapsed >= const Duration(minutes: 15)) return _LateState.amber;
+  return _LateState.normal;
+}
+
+class _BoardHealth extends StatelessWidget {
+  const _BoardHealth({required this.allOrders});
+
+  final List<OrderFlowOrder> allOrders;
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final late = allOrders
+        .where((order) => _lateState(order, now) == _LateState.red)
+        .length;
+    final ready = allOrders
+        .where((order) => order.status == OrderFlowStatus.ready)
+        .length;
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        _MetricChip(
+          label: '${allOrders.length} active',
+          icon: Icons.receipt_long,
+        ),
+        _MetricChip(
+          label: '$ready ready',
+          icon: Icons.room_service_outlined,
+          color: Theme.of(context).colorScheme.primaryContainer,
+        ),
+        _MetricChip(
+          label: '$late late',
+          icon: Icons.priority_high_rounded,
+          color: late == 0
+              ? null
+              : Theme.of(context).colorScheme.errorContainer,
+        ),
+      ],
+    );
+  }
+}
+
+class _MetricChip extends StatelessWidget {
+  const _MetricChip({required this.label, required this.icon, this.color});
+
+  final String label;
+  final IconData icon;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) => Chip(
+    avatar: Icon(icon, size: 18),
+    backgroundColor: color,
+    label: Text(label),
+  );
+}
+
+class _FilterBar extends StatelessWidget {
+  const _FilterBar({
+    required this.area,
+    required this.filter,
+    required this.onAreaChanged,
+    required this.onFilterChanged,
+  });
+
+  final ProductionArea? area;
+  final _FlowFilter filter;
+  final ValueChanged<ProductionArea?> onAreaChanged;
+  final ValueChanged<_FlowFilter> onFilterChanged;
+
+  @override
+  Widget build(BuildContext context) => Wrap(
+    spacing: 8,
+    runSpacing: 8,
+    children: [
+      ChoiceChip(
+        label: const Text('All areas'),
+        selected: area == null,
+        onSelected: (_) => onAreaChanged(null),
+      ),
+      for (final value in ProductionArea.values)
+        ChoiceChip(
+          label: Text(value.label),
+          selected: area == value,
+          onSelected: (_) => onAreaChanged(value),
+        ),
+      const SizedBox(width: 8),
+      for (final value in _FlowFilter.values)
+        FilterChip(
+          label: Text(switch (value) {
+            _FlowFilter.all => 'All orders',
+            _FlowFilter.late => 'Late',
+            _FlowFilter.allergy => 'Allergy alerts',
+            _FlowFilter.ready => 'Ready to run',
+          }),
+          selected: filter == value,
+          onSelected: (_) => onFilterChanged(value),
+        ),
+    ],
+  );
+}
+
+class _EmptyBoard extends StatelessWidget {
+  const _EmptyBoard({required this.filter, required this.area});
+
+  final _FlowFilter filter;
+  final ProductionArea? area;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(32),
+      child: Column(
+        children: [
+          const Icon(Icons.check_circle_outline_rounded, size: 38),
+          const SizedBox(height: 12),
+          Text(
+            'No matching live orders',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            area == null && filter == _FlowFilter.all
+                ? 'All production areas are clear.'
+                : 'Try clearing a filter to see other active orders.',
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _OrderFlowCard extends StatelessWidget {
+  const _OrderFlowCard({
+    required this.order,
+    required this.now,
+    required this.onAction,
+  });
+
+  final OrderFlowOrder order;
+  final DateTime now;
+  final ValueChanged<_OrderFlowAction> onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final late = _lateState(order, now);
+    final scheme = Theme.of(context).colorScheme;
+    final accent = switch (late) {
+      _LateState.red => scheme.error,
+      _LateState.amber => Colors.orange.shade800,
+      _LateState.normal => scheme.outlineVariant,
+    };
+    final elapsed = now.difference(order.ticketReleasedAt);
+    final location = order.tableLabel ?? order.tabName ?? 'Unassigned';
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: accent,
+          width: late == _LateState.normal ? 1 : 2,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _AreaIcon(area: order.productionArea),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '${order.productionArea.label} · #${order.reference}',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                _OrderActions(order: order, onAction: onAction),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Icon(
+                  Icons.table_restaurant_outlined,
+                  size: 18,
+                  color: scheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 5),
+                Expanded(child: Text(location)),
+                _StatusPill(status: order.status),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: ListView(
+                physics: const NeverScrollableScrollPhysics(),
+                children: [
+                  for (final item in order.itemSummary)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(item),
+                    ),
+                ],
+              ),
+            ),
+            if (order.hasAllergyAlert) ...[
+              const SizedBox(height: 8),
+              _AlertRow(
+                icon: Icons.warning_amber_rounded,
+                text: order.note.isEmpty ? 'Allergy alert' : order.note,
+                color: scheme.error,
+              ),
+            ],
+            const SizedBox(height: 8),
+            _AlertRow(
+              icon: late == _LateState.normal
+                  ? Icons.timer_outlined
+                  : Icons.priority_high_rounded,
+              text: '${_formatElapsed(elapsed)} since ticket release',
+              color: accent,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AreaIcon extends StatelessWidget {
+  const _AreaIcon({required this.area});
+
+  final ProductionArea area;
+
+  @override
+  Widget build(BuildContext context) => CircleAvatar(
+    radius: 16,
+    child: Icon(switch (area) {
+      ProductionArea.bar => Icons.local_bar_rounded,
+      ProductionArea.kitchen => Icons.restaurant_rounded,
+      ProductionArea.dessert => Icons.cake_outlined,
+    }, size: 18),
+  );
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({required this.status});
+
+  final OrderFlowStatus status;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      borderRadius: BorderRadius.circular(20),
+      color: Theme.of(context).colorScheme.secondaryContainer,
+    ),
+    child: Text(status.label, style: Theme.of(context).textTheme.labelSmall),
+  );
+}
+
+class _AlertRow extends StatelessWidget {
+  const _AlertRow({
+    required this.icon,
+    required this.text,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String text;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Icon(icon, color: color, size: 18),
+      const SizedBox(width: 5),
+      Expanded(
+        child: Text(
+          text,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(
+            context,
+          ).textTheme.labelMedium?.copyWith(color: color),
+        ),
+      ),
+    ],
+  );
+}
+
+class _OrderActions extends StatelessWidget {
+  const _OrderActions({required this.order, required this.onAction});
+
+  final OrderFlowOrder order;
+  final ValueChanged<_OrderFlowAction> onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final actions = <(_OrderFlowAction, String, IconData)>[
+      if (order.status == OrderFlowStatus.newOrder)
+        (
+          _OrderFlowAction.startPreparing,
+          'Start preparing',
+          Icons.play_arrow_rounded,
+        ),
+      if (order.status == OrderFlowStatus.preparing)
+        (_OrderFlowAction.markReady, 'Mark ready', Icons.check_rounded),
+      if (order.status == OrderFlowStatus.ready)
+        (
+          _OrderFlowAction.markCollected,
+          'Mark collected',
+          Icons.shopping_bag_outlined,
+        ),
+      if (order.status == OrderFlowStatus.collected)
+        (
+          _OrderFlowAction.markServed,
+          'Mark served',
+          Icons.room_service_outlined,
+        ),
+      (
+        _OrderFlowAction.toggleDelayed,
+        order.isDelayed ? 'Clear delayed flag' : 'Mark delayed',
+        Icons.priority_high_rounded,
+      ),
+    ];
+    return PopupMenuButton<_OrderFlowAction>(
+      tooltip: 'Update order',
+      icon: const Icon(Icons.more_vert_rounded),
+      onSelected: onAction,
+      itemBuilder: (context) => [
+        for (final action in actions)
+          PopupMenuItem(
+            value: action.$1,
+            child: Row(
+              children: [
+                Icon(action.$3, size: 19),
+                const SizedBox(width: 10),
+                Text(action.$2),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+String _formatElapsed(Duration value) {
+  final minutes = value.inMinutes;
+  if (minutes < 60) return '${minutes}m';
+  return '${minutes ~/ 60}h ${minutes % 60}m';
+}

@@ -10,6 +10,7 @@ import '../../core/app_logger.dart';
 import '../../data/tenant_profile_repository.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
+import '../tables/table_management_page.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({
@@ -251,18 +252,25 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         ),
         const SizedBox(height: 16),
-        const _SettingsCard(
+        _SettingsCard(
           title: 'Venues and devices',
           child: Column(
             children: [
               ListTile(
                 leading: Icon(Icons.store_outlined),
-                title: Text('Market Street'),
-                subtitle: Text('Europe/London · 8 tables · 2 print devices'),
-                trailing: Icon(Icons.chevron_right_rounded),
+                title: const Text('Venue tables'),
+                subtitle: const Text(
+                  'Create and safely manage table numbers and names.',
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const TableManagementPage(),
+                  ),
+                ),
               ),
-              Divider(),
-              ListTile(
+              const Divider(),
+              const ListTile(
                 leading: Icon(Icons.print_outlined),
                 title: Text('Printer device registration'),
                 subtitle: Text(

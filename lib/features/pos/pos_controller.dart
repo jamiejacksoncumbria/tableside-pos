@@ -2,22 +2,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/tenant_scope.dart';
 import '../../data/firestore_pos_repository.dart';
+import '../../data/production_command_repository.dart';
 import 'domain.dart';
 
 final menuSectionsProvider = StreamProvider<List<MenuSection>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoSections);
-  return ref
-      .watch(firestorePosRepositoryProvider)
-      .watchMenuSections(scope.tenantId);
+  return ref.watch(firestorePosRepositoryProvider).watchMenuSections(scope);
 });
 
 final menuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoProducts);
-  return ref
-      .watch(firestorePosRepositoryProvider)
-      .watchProducts(scope.tenantId);
+  return ref.watch(firestorePosRepositoryProvider).watchProducts(scope);
 });
 
 final diningTablesProvider = StreamProvider<List<DiningTable>>((ref) {
@@ -67,8 +64,10 @@ final activeOrderProvider = NotifierProvider<ActiveOrderController, PosOrder>(
 class ActiveOrderController extends Notifier<PosOrder> {
   @override
   PosOrder build() {
-    final scope = ref.watch(activeVenueScopeProvider);
-    final tableId = ref.watch(selectedTableProvider);
+    // An active order must not be recreated whenever an operator merely taps
+    // another table or the venue scope refreshes.
+    final scope = ref.read(activeVenueScopeProvider);
+    final tableId = ref.read(selectedTableProvider);
     final now = DateTime.now();
     return PosOrder(
       id: 'order-1024',
@@ -100,16 +99,24 @@ class ActiveOrderController extends Notifier<PosOrder> {
           unitPriceMinor: product.priceMinor,
           productionArea: product.productionArea,
           trackStock: product.trackStock,
+          stockPerSale: product.stockPerSale,
         ),
       );
     }
-    state = state.copyWith(lines: updatedLines, status: OrderStatus.open);
+    state = state.copyWith(
+      lines: updatedLines,
+      status: state.status == OrderStatus.sent
+          ? OrderStatus.sent
+          : OrderStatus.open,
+    );
   }
 
   void reduceLine(String lineId) {
     final updatedLines = <OrderLine>[];
     for (final line in state.lines) {
       if (line.id != lineId) {
+        updatedLines.add(line);
+      } else if (line.isSentToProduction) {
         updatedLines.add(line);
       } else if (line.quantity > 1) {
         updatedLines.add(line.copyWith(quantity: line.quantity - 1));
@@ -119,6 +126,54 @@ class ActiveOrderController extends Notifier<PosOrder> {
   }
 
   void markSent() => state = state.copyWith(status: OrderStatus.sent);
+
+  /// Opens the selected table's current order if there is one; otherwise
+  /// starts a clean order. We never silently discard unsent lines while a
+  /// waiter is switching tables.
+  Future<void> openTable(String tableId) async {
+    if (state.tableId == tableId) return;
+    if (state.lines.any((line) => !line.isSentToProduction)) {
+      throw StateError(
+        'Send or remove the unsent items before switching to another table.',
+      );
+    }
+    final scope = ref.read(activeVenueScopeProvider);
+    final existing = scope == null
+        ? null
+        : await ref
+              .read(firestorePosRepositoryProvider)
+              .fetchOpenOrder(scope: scope, tableId: tableId);
+    if (existing != null) {
+      state = existing;
+      return;
+    }
+    final now = DateTime.now();
+    state = PosOrder(
+      id: 'order-${now.microsecondsSinceEpoch}',
+      tenantId: scope?.tenantId ?? demoTenant.id,
+      venueId: scope?.venueId ?? demoVenue.id,
+      tableId: tableId,
+      businessDate: DateTime(now.year, now.month, now.day),
+      openedAt: now,
+      status: OrderStatus.open,
+      lines: const [],
+    );
+  }
+
+  Future<void> sendToProduction() async {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope != null) {
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .sendNewLinesToProduction(scope: scope, order: state);
+    }
+    state = state.copyWith(
+      status: OrderStatus.sent,
+      lines: state.lines
+          .map((line) => line.copyWith(isSentToProduction: true))
+          .toList(growable: false),
+    );
+  }
 
   void markPendingCustomerApproval() => state = state.copyWith(
     status: OrderStatus.pendingApproval,

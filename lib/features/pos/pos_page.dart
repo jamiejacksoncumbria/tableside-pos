@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/app_logger.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import 'domain.dart';
@@ -112,6 +113,21 @@ class _TablesPanel extends ConsumerWidget {
           loading: () => scope == null ? demoTables : const [],
           error: (_, _) => scope == null ? demoTables : const [],
         );
+    // A new live venue will not have the demo's `table-2` ID. As soon as its
+    // table stream arrives, open the first available table rather than leaving
+    // a hidden invalid selection that would fail only when Send is pressed.
+    if (tables.isNotEmpty &&
+        !tables.any((table) => table.id == selectedTableId)) {
+      final firstTable = tables.first;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        try {
+          await ref.read(activeOrderProvider.notifier).openTable(firstTable.id);
+          ref.read(selectedTableProvider.notifier).select(firstTable.id);
+        } on Object catch (error, stackTrace) {
+          AppLogger.error('Open initial venue table', error, stackTrace);
+        }
+      });
+    }
     final scheme = Theme.of(context).colorScheme;
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -146,9 +162,26 @@ class _TablesPanel extends ConsumerWidget {
                         table: table,
                         selected: table.id == selectedTableId,
                         compact: compact,
-                        onTap: () => ref
-                            .read(selectedTableProvider.notifier)
-                            .select(table.id),
+                        onTap: () async {
+                          try {
+                            await ref
+                                .read(activeOrderProvider.notifier)
+                                .openTable(table.id);
+                            ref
+                                .read(selectedTableProvider.notifier)
+                                .select(table.id);
+                          } on Object catch (error, stackTrace) {
+                            AppLogger.error(
+                              'Switch selected table',
+                              error,
+                              stackTrace,
+                            );
+                            if (!context.mounted) return;
+                            ScaffoldMessenger.of(
+                              context,
+                            ).showSnackBar(SnackBar(content: Text('$error')));
+                          }
+                        },
                       ),
                   ],
                 ),
@@ -400,7 +433,7 @@ class _ProductTile extends StatelessWidget {
                     const Spacer(),
                     if (product.trackStock)
                       Text(
-                        '${product.stockOnHand ?? 0} left',
+                        '${_formatStock(product.stockOnHand ?? 0)} ${product.stockUnit} left',
                         style: Theme.of(context).textTheme.labelSmall,
                       ),
                   ],
@@ -414,6 +447,14 @@ class _ProductTile extends StatelessWidget {
   }
 }
 
+String _formatStock(double quantity) {
+  if (quantity == quantity.roundToDouble()) return quantity.toStringAsFixed(0);
+  return quantity
+      .toStringAsFixed(2)
+      .replaceFirst(RegExp(r'0+$'), '')
+      .replaceFirst(RegExp(r'\.$'), '');
+}
+
 class _OrderPanel extends ConsumerWidget {
   const _OrderPanel({required this.currencyCode});
 
@@ -422,6 +463,7 @@ class _OrderPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final order = ref.watch(activeOrderProvider);
+    final hasUnsentLines = order.lines.any((line) => !line.isSentToProduction);
     final tableId = ref.watch(selectedTableProvider);
     final scheme = Theme.of(context).colorScheme;
     return Card(
@@ -461,9 +503,11 @@ class _OrderPanel extends ConsumerWidget {
                           children: [
                             IconButton.filledTonal(
                               tooltip: 'Remove one ${line.productName}',
-                              onPressed: () => ref
-                                  .read(activeOrderProvider.notifier)
-                                  .reduceLine(line.id),
+                              onPressed: line.isSentToProduction
+                                  ? null
+                                  : () => ref
+                                        .read(activeOrderProvider.notifier)
+                                        .reduceLine(line.id),
                               icon: const Icon(Icons.remove_rounded, size: 18),
                             ),
                             const SizedBox(width: 8),
@@ -482,6 +526,13 @@ class _OrderPanel extends ConsumerWidget {
                                       context,
                                     ).textTheme.bodySmall,
                                   ),
+                                  if (line.isSentToProduction)
+                                    Text(
+                                      'Sent to production',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.labelSmall,
+                                    ),
                                 ],
                               ),
                             ),
@@ -522,20 +573,43 @@ class _OrderPanel extends ConsumerWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: order.lines.isEmpty
+                    onPressed: !hasUnsentLines
                         ? null
-                        : () {
-                            ref.read(activeOrderProvider.notifier).markSent();
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Ticket intent saved. Assigned native devices will print it.',
+                        : () async {
+                            try {
+                              await ref
+                                  .read(activeOrderProvider.notifier)
+                                  .sendToProduction();
+                              if (!context.mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'New items sent to the Order Flow Board. Configure print routes before live service.',
+                                  ),
                                 ),
-                              ),
-                            );
+                              );
+                            } on Object catch (error, stackTrace) {
+                              AppLogger.error(
+                                'Send order to production',
+                                error,
+                                stackTrace,
+                              );
+                              if (!context.mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'The order could not be sent. It is still open for retry.',
+                                  ),
+                                ),
+                              );
+                            }
                           },
                     icon: const Icon(Icons.print_rounded),
-                    label: const Text('Send'),
+                    label: Text(
+                      order.status == OrderStatus.sent
+                          ? 'Send additions'
+                          : 'Send',
+                    ),
                   ),
                 ),
               ],

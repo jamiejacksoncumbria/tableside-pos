@@ -1,6 +1,97 @@
 enum OrderStatus { open, pendingApproval, sent, closed, rolledOver }
 
-enum ProductionArea { bar, kitchen }
+enum ProductionArea { bar, kitchen, dessert }
+
+enum OrderFlowStatus {
+  newOrder,
+  preparing,
+  ready,
+  collected,
+  served,
+  cancelled,
+  voided,
+}
+
+extension OrderFlowStatusLabel on OrderFlowStatus {
+  String get label => switch (this) {
+    OrderFlowStatus.newOrder => 'New',
+    OrderFlowStatus.preparing => 'Preparing',
+    OrderFlowStatus.ready => 'Ready',
+    OrderFlowStatus.collected => 'Collected',
+    OrderFlowStatus.served => 'Served',
+    OrderFlowStatus.cancelled => 'Cancelled',
+    OrderFlowStatus.voided => 'Voided',
+  };
+
+  bool get isTerminal => switch (this) {
+    OrderFlowStatus.served ||
+    OrderFlowStatus.cancelled ||
+    OrderFlowStatus.voided => true,
+    _ => false,
+  };
+}
+
+extension ProductionAreaLabel on ProductionArea {
+  String get label => switch (this) {
+    ProductionArea.bar => 'Bar',
+    ProductionArea.kitchen => 'Kitchen',
+    ProductionArea.dessert => 'Dessert',
+  };
+}
+
+/// A production-safe summary of a live order. It intentionally omits money
+/// and contact data so it can be shown on a kitchen/bar display.
+class OrderFlowOrder {
+  const OrderFlowOrder({
+    required this.id,
+    required this.tenantId,
+    required this.venueId,
+    required this.reference,
+    required this.productionArea,
+    required this.status,
+    required this.ticketReleasedAt,
+    required this.itemSummary,
+    this.tableLabel,
+    this.tabName,
+    this.createdByName = '',
+    this.hasAllergyAlert = false,
+    this.isDelayed = false,
+    this.note = '',
+  });
+
+  final String id;
+  final String tenantId;
+  final String venueId;
+  final String reference;
+  final ProductionArea productionArea;
+  final OrderFlowStatus status;
+  final DateTime ticketReleasedAt;
+  final List<String> itemSummary;
+  final String? tableLabel;
+  final String? tabName;
+  final String createdByName;
+  final bool hasAllergyAlert;
+  final bool isDelayed;
+  final String note;
+
+  OrderFlowOrder copyWith({OrderFlowStatus? status, bool? isDelayed}) =>
+      OrderFlowOrder(
+        id: id,
+        tenantId: tenantId,
+        venueId: venueId,
+        reference: reference,
+        productionArea: productionArea,
+        status: status ?? this.status,
+        ticketReleasedAt: ticketReleasedAt,
+        itemSummary: itemSummary,
+        tableLabel: tableLabel,
+        tabName: tabName,
+        createdByName: createdByName,
+        hasAllergyAlert: hasAllergyAlert,
+        isDelayed: isDelayed ?? this.isDelayed,
+        note: note,
+      );
+}
 
 enum PrintJobStatus { queued, claimed, printed, failed }
 
@@ -105,6 +196,8 @@ class MenuProduct {
     required this.productionArea,
     this.trackStock = false,
     this.stockOnHand,
+    this.stockUnit = 'each',
+    this.stockPerSale = 1,
     this.isAvailable = true,
   });
 
@@ -114,7 +207,9 @@ class MenuProduct {
   final List<String> sectionIds;
   final ProductionArea productionArea;
   final bool trackStock;
-  final int? stockOnHand;
+  final double? stockOnHand;
+  final String stockUnit;
+  final double stockPerSale;
   final bool isAvailable;
 }
 
@@ -141,6 +236,8 @@ class OrderLine {
     required this.unitPriceMinor,
     required this.productionArea,
     required this.trackStock,
+    this.stockPerSale = 1,
+    this.isSentToProduction = false,
   });
 
   final String id;
@@ -150,10 +247,12 @@ class OrderLine {
   final int unitPriceMinor;
   final ProductionArea productionArea;
   final bool trackStock;
+  final double stockPerSale;
+  final bool isSentToProduction;
 
   int get totalMinor => quantity * unitPriceMinor;
 
-  OrderLine copyWith({int? quantity}) => OrderLine(
+  OrderLine copyWith({int? quantity, bool? isSentToProduction}) => OrderLine(
     id: id,
     productId: productId,
     productName: productName,
@@ -161,6 +260,8 @@ class OrderLine {
     unitPriceMinor: unitPriceMinor,
     productionArea: productionArea,
     trackStock: trackStock,
+    stockPerSale: stockPerSale,
+    isSentToProduction: isSentToProduction ?? this.isSentToProduction,
   );
 }
 
@@ -190,15 +291,17 @@ class PosOrder {
   int get totalMinor => lines.fold(0, (total, line) => total + line.totalMinor);
 
   PosOrder copyWith({
+    String? id,
+    String? tableId,
     OrderStatus? status,
     List<OrderLine>? lines,
     bool? isCustomerOriginated,
   }) {
     return PosOrder(
-      id: id,
+      id: id ?? this.id,
       tenantId: tenantId,
       venueId: venueId,
-      tableId: tableId,
+      tableId: tableId ?? this.tableId,
       businessDate: businessDate,
       openedAt: openedAt,
       status: status ?? this.status,
@@ -355,4 +458,58 @@ const demoTables = [
   DiningTable(id: 'table-6', label: 'T6', seats: 2),
   DiningTable(id: 'bar-1', label: 'B1', seats: 2, hasOpenOrder: true),
   DiningTable(id: 'terrace-1', label: 'A1', seats: 4),
+];
+
+final demoOrderFlow = [
+  OrderFlowOrder(
+    id: 'flow-1024-kitchen',
+    tenantId: demoTenant.id,
+    venueId: demoVenue.id,
+    reference: '1024',
+    tableLabel: 'T2',
+    productionArea: ProductionArea.kitchen,
+    status: OrderFlowStatus.preparing,
+    ticketReleasedAt: DateTime.now().subtract(const Duration(minutes: 11)),
+    itemSummary: const ['2 × Sea bass', '1 × Burrata'],
+    createdByName: 'Jamie',
+    hasAllergyAlert: true,
+    note: 'Allergy alert: no dairy on burrata.',
+  ),
+  OrderFlowOrder(
+    id: 'flow-1024-bar',
+    tenantId: demoTenant.id,
+    venueId: demoVenue.id,
+    reference: '1024',
+    tableLabel: 'T2',
+    productionArea: ProductionArea.bar,
+    status: OrderFlowStatus.ready,
+    ticketReleasedAt: DateTime.now().subtract(const Duration(minutes: 4)),
+    itemSummary: const ['2 × House red, glass'],
+    createdByName: 'Jamie',
+  ),
+  OrderFlowOrder(
+    id: 'flow-1022-kitchen',
+    tenantId: demoTenant.id,
+    venueId: demoVenue.id,
+    reference: '1022',
+    tableLabel: 'T4',
+    productionArea: ProductionArea.kitchen,
+    status: OrderFlowStatus.newOrder,
+    ticketReleasedAt: DateTime.now().subtract(const Duration(minutes: 27)),
+    itemSummary: const ['2 × Basque cheesecake'],
+    createdByName: 'Sam',
+    isDelayed: true,
+  ),
+  OrderFlowOrder(
+    id: 'flow-1021-bar',
+    tenantId: demoTenant.id,
+    venueId: demoVenue.id,
+    reference: '1021',
+    tabName: 'John N',
+    productionArea: ProductionArea.bar,
+    status: OrderFlowStatus.collected,
+    ticketReleasedAt: DateTime.now().subtract(const Duration(minutes: 18)),
+    itemSummary: const ['1 × Sparkling water'],
+    createdByName: 'Alex',
+  ),
 ];

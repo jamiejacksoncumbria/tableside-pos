@@ -47,6 +47,24 @@ async function requirePlatformAdmin(caller) {
   return caller;
 }
 
+async function requireTenantOperationalMember(caller, tenantId) {
+  const membership = await db.doc(`tenants/${tenantId}/members/${caller.uid}`).get();
+  if (!membership.exists || membership.data().active === false) {
+    throw new HttpsError(
+      "permission-denied",
+      "You do not have active access to this restaurant.",
+    );
+  }
+  const roles = Array.isArray(membership.data().roles) ? membership.data().roles : [];
+  if (!roles.some((role) => ["owner", "manager", "waiter", "cashier"].includes(role))) {
+    throw new HttpsError(
+      "permission-denied",
+      "Your role cannot send orders to production.",
+    );
+  }
+  return {membership: membership.data(), roles};
+}
+
 function requireObject(value) {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
     throw new HttpsError("invalid-argument", "A data object is required.");
@@ -73,6 +91,32 @@ function optionalText(data, name, maxLength = 500) {
     throw new HttpsError("invalid-argument", `${name} is invalid.`);
   }
   return value.trim();
+}
+
+function requiredPositiveInteger(value, name, maximum = 1000) {
+  if (!Number.isInteger(value) || value <= 0 || value > maximum) {
+    throw new HttpsError("invalid-argument", `${name} must be a positive whole number.`);
+  }
+  return value;
+}
+
+function validProductionLine(value, index) {
+  const data = requireObject(value);
+  return {
+    id: requiredText(data, "id", 180),
+    productId: requiredText(data, "productId", 180),
+    quantity: requiredPositiveInteger(data.quantity, `lines[${index}].quantity`, 100),
+  };
+}
+
+function requiredNonNegativeInteger(value, label, maximum = 100000000) {
+  if (!Number.isInteger(value) || value < 0 || value > maximum) {
+    throw new HttpsError(
+      "invalid-argument",
+      `${label} must be a whole number from 0 to ${maximum}.`,
+    );
+  }
+  return value;
 }
 
 function validRoles(value) {
@@ -458,6 +502,8 @@ async function updateVenueFor(caller, rawData) {
 const venueDependencyCollections = Object.freeze([
   "tables",
   "orders",
+  "productionTickets",
+  "stockMovements",
   "bills",
   "paymentRequests",
   "devices",
@@ -671,6 +717,445 @@ async function setPlatformAdminFor(caller, rawData) {
   return {updated: true};
 }
 
+async function requireTenantManager(caller, tenantId) {
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only an owner or manager can change tables.");
+  }
+  return roles;
+}
+
+function tableLabelKey(label) {
+  return venueNameKey(label);
+}
+
+function tableLabelRegistryRef(tenantId, venueId, labelKey) {
+  const encoded = Buffer.from(`${venueId}\u0000${labelKey}`).toString("base64url");
+  return db.doc(`tenants/${tenantId}/tableLabels/${encoded}`);
+}
+
+async function createTableFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const label = requiredText(data, "label", 80).trim();
+  const seats = requiredNonNegativeInteger(data.seats ?? 0, "seats", 1000);
+  await requireTenantManager(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const tableRef = tenantRef.collection("tables").doc();
+  const labelRef = tableLabelRegistryRef(tenantId, venueId, tableLabelKey(label));
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  await db.runTransaction(async (transaction) => {
+    const [venue, registeredLabel] = await Promise.all([
+      transaction.get(venueRef),
+      transaction.get(labelRef),
+    ]);
+    if (!venue.exists || venue.data().status !== "active") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (registeredLabel.exists) {
+      throw new HttpsError("already-exists", "A table with this name already exists at the venue.");
+    }
+    transaction.create(tableRef, {
+      venueId,
+      label,
+      normalizedLabel: tableLabelKey(label),
+      seats,
+      createdAt: FieldValue.serverTimestamp(),
+      createdByActor: actor,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    transaction.create(labelRef, {
+      venueId,
+      tableId: tableRef.id,
+      label,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "createTable",
+      venueId,
+      tableId: tableRef.id,
+      label,
+      seats,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  });
+  return {id: tableRef.id, label, seats};
+}
+
+async function updateTableFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const tableId = requiredText(data, "tableId", 128);
+  const label = requiredText(data, "label", 80).trim();
+  const seats = requiredNonNegativeInteger(data.seats ?? 0, "seats", 1000);
+  await requireTenantManager(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const tableRef = tenantRef.collection("tables").doc(tableId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  await db.runTransaction(async (transaction) => {
+    const table = await transaction.get(tableRef);
+    if (!table.exists || table.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "The table was not found at this venue.");
+    }
+    const oldKey = typeof table.data().normalizedLabel === "string"
+      ? table.data().normalizedLabel
+      : tableLabelKey(table.data().label ?? tableId);
+    const newKey = tableLabelKey(label);
+    const newLabelRef = tableLabelRegistryRef(tenantId, venueId, newKey);
+    if (newKey !== oldKey) {
+      const registered = await transaction.get(newLabelRef);
+      if (registered.exists && registered.data().tableId !== tableId) {
+        throw new HttpsError("already-exists", "A table with this name already exists at the venue.");
+      }
+      transaction.set(newLabelRef, {
+        venueId,
+        tableId,
+        label,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      transaction.delete(tableLabelRegistryRef(tenantId, venueId, oldKey));
+    }
+    transaction.update(tableRef, {
+      label,
+      normalizedLabel: newKey,
+      seats,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "updateTable",
+      venueId,
+      tableId,
+      label,
+      seats,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  });
+  return {updated: true};
+}
+
+async function deleteTableFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const tableId = requiredText(data, "tableId", 128);
+  await requireTenantManager(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const tableRef = tenantRef.collection("tables").doc(tableId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  await db.runTransaction(async (transaction) => {
+    const table = await transaction.get(tableRef);
+    if (!table.exists || table.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "The table was not found at this venue.");
+    }
+    if (typeof table.data().currentOrderId === "string") {
+      throw new HttpsError("failed-precondition", "Close or move the active order before deleting this table.");
+    }
+    const key = typeof table.data().normalizedLabel === "string"
+      ? table.data().normalizedLabel
+      : tableLabelKey(table.data().label ?? tableId);
+    transaction.delete(tableRef);
+    transaction.delete(tableLabelRegistryRef(tenantId, venueId, key));
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "deleteTable",
+      venueId,
+      tableId,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  });
+  return {deleted: true};
+}
+
+async function sendOrderToProductionFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const orderId = requiredText(data, "orderId", 180);
+  const tableId = requiredText(data, "tableId", 180);
+  const rawLines = data.lines;
+  if (!Array.isArray(rawLines) || rawLines.length === 0 || rawLines.length > 100) {
+    throw new HttpsError("invalid-argument", "One to one hundred new order lines are required.");
+  }
+  const lines = rawLines.map(validProductionLine);
+  if (new Set(lines.map((line) => line.id)).size !== lines.length) {
+    throw new HttpsError("invalid-argument", "Each new order line needs a unique ID.");
+  }
+  const stockOverride = data.stockOverride === true;
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (stockOverride && !roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager can override unavailable stock.");
+  }
+
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const tableRef = tenantRef.collection("tables").doc(tableId);
+  const orderRef = tenantRef.collection("orders").doc(orderId);
+  const productRefs = new Map(
+    [...new Set(lines.map((line) => line.productId))].map((productId) => [
+      productId,
+      tenantRef.collection("products").doc(productId),
+    ]),
+  );
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+
+  const result = await db.runTransaction(async (transaction) => {
+    const [venue, table, existingOrder, ...products] = await Promise.all([
+      transaction.get(venueRef),
+      transaction.get(tableRef),
+      transaction.get(orderRef),
+      ...[...productRefs.values()].map((ref) => transaction.get(ref)),
+    ]);
+    if (!venue.exists || venue.data().status !== "active") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (!table.exists || table.data().venueId !== venueId) {
+      throw new HttpsError("failed-precondition", "The selected table is not available at this venue.");
+    }
+    const currentOrderId = table.data().currentOrderId;
+    if (typeof currentOrderId === "string" && currentOrderId !== orderId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This table already has a different open order. Reopen that bill instead.",
+      );
+    }
+    const productById = new Map();
+    for (const snapshot of products) {
+      if (!snapshot.exists) {
+        throw new HttpsError("not-found", "A selected menu product no longer exists.");
+      }
+      if (snapshot.data().venueId !== venueId) {
+        throw new HttpsError(
+          "failed-precondition",
+          "A selected menu product does not belong to this venue.",
+        );
+      }
+      productById.set(snapshot.id, snapshot.data());
+    }
+
+    const canonicalLines = lines.map((line) => {
+      const product = productById.get(line.productId);
+      if (product.isAvailable === false) {
+        throw new HttpsError("failed-precondition", "A selected product is unavailable.");
+      }
+      const unitPriceMinor = Number(product.priceMinor);
+      if (!Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0) {
+        throw new HttpsError(
+          "failed-precondition",
+          "A selected product has an invalid stored price and cannot be sold.",
+        );
+      }
+      const stockPerSale = Number(product.stockPerSale ?? 1);
+      if (!Number.isFinite(stockPerSale) || stockPerSale <= 0) {
+        throw new HttpsError(
+          "failed-precondition",
+          "A selected product has an invalid stock quantity per sale.",
+        );
+      }
+      const productionArea = product.productionArea === "bar"
+        ? "bar"
+        : product.productionArea === "dessert"
+          ? "dessert"
+          : "kitchen";
+      return {
+        ...line,
+        productName: typeof product.name === "string" ? product.name : "Menu item",
+        unitPriceMinor,
+        productionArea,
+        trackStock: product.trackStock === true,
+        stockPerSale,
+      };
+    });
+    const groups = new Map();
+    for (const line of canonicalLines) {
+      const group = groups.get(line.productionArea) ?? [];
+      group.push(line);
+      groups.set(line.productionArea, group);
+    }
+    const ticketEntries = [...groups.entries()].map(([area, areaLines]) => {
+      const ticketId = `${orderId}_${area}_${areaLines.map((line) => line.id).join("_")}`;
+      return {area, lines: areaLines, ticketId, ref: tenantRef.collection("productionTickets").doc(ticketId)};
+    });
+    const existingTickets = await Promise.all(
+      ticketEntries.map((ticket) => transaction.get(ticket.ref)),
+    );
+    const existingTicketIds = new Set(
+      existingTickets.filter((ticket) => ticket.exists).map((ticket) => ticket.id),
+    );
+
+    const tableLabel = typeof table.data().label === "string" ? table.data().label : tableId;
+    const priorLines = Array.isArray(existingOrder.data()?.lines) ? existingOrder.data().lines : [];
+    const priorLineIds = new Set(
+      priorLines.map((line) => (typeof line?.id === "string" ? line.id : "")),
+    );
+    const newOrderLines = canonicalLines
+      .filter((line) => !priorLineIds.has(line.id))
+      .map((line) => ({
+        id: line.id,
+        productId: line.productId,
+        productName: line.productName,
+        quantity: line.quantity,
+        unitPriceMinor: line.unitPriceMinor,
+        productionArea: line.productionArea,
+        trackStock: line.trackStock,
+        stockPerSale: line.stockPerSale,
+        isSentToProduction: true,
+      }));
+    transaction.set(orderRef, {
+      venueId,
+      tableId,
+      tableLabel,
+      status: "sent",
+      openedAt: existingOrder.data()?.openedAt ?? FieldValue.serverTimestamp(),
+      lastTicketReleasedAt: FieldValue.serverTimestamp(),
+      createdByActor: existingOrder.data()?.createdByActor ?? actor,
+      lines: [...priorLines, ...newOrderLines],
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    }, {merge: true});
+    transaction.update(tableRef, {
+      currentOrderId: orderId,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    const stockTotals = new Map();
+    for (const ticket of ticketEntries) {
+      if (existingTicketIds.has(ticket.ticketId)) continue;
+      transaction.create(ticket.ref, {
+        venueId,
+        orderId,
+        reference: orderId.split("-").at(-1) ?? orderId,
+        tableLabel,
+        productionArea: ticket.area,
+        flowStatus: "newOrder",
+        ticketReleasedAt: FieldValue.serverTimestamp(),
+        productionItems: ticket.lines.map((line) => ({
+          name: line.productName,
+          quantity: line.quantity,
+        })),
+        hasAllergyAlert: false,
+        isDelayed: false,
+        createdByActor: actor,
+        idempotencyKey: ticket.ticketId,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+      for (const line of ticket.lines.filter((item) => item.trackStock)) {
+        const quantity = line.quantity * line.stockPerSale;
+        stockTotals.set(line.productId, (stockTotals.get(line.productId) ?? 0) + quantity);
+        const movementRef = tenantRef.collection("stockMovements")
+          .doc(`${ticket.ticketId}_${line.productId}`);
+        transaction.create(movementRef, {
+          venueId,
+          orderId,
+          ticketId: ticket.ticketId,
+          productId: line.productId,
+          quantity: -quantity,
+          reason: "productionTicketReleased",
+          createdByActor: actor,
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      }
+    }
+    for (const [productId, quantity] of stockTotals.entries()) {
+      const product = productById.get(productId);
+      const onHand = Number(product.stockOnHand ?? 0);
+      if (onHand < quantity && !stockOverride) {
+        throw new HttpsError(
+          "failed-precondition",
+          "One or more tracked products are sold out. A manager may record an audited stock override.",
+        );
+      }
+      transaction.update(productRefs.get(productId), {
+        stockOnHand: FieldValue.increment(-quantity),
+        lastStockMovementAt: FieldValue.serverTimestamp(),
+      });
+    }
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "sendOrderToProduction",
+      venueId,
+      orderId,
+      ticketIds: ticketEntries.map((ticket) => ticket.ticketId),
+      stockOverride,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {ticketIds: ticketEntries.map((ticket) => ticket.ticketId), stockOverride};
+  });
+  return result;
+}
+
+const permittedOrderFlowTransitions = Object.freeze({
+  newOrder: ["newOrder", "preparing"],
+  preparing: ["preparing", "ready"],
+  ready: ["ready", "collected"],
+  collected: ["collected", "served"],
+  served: ["served"],
+  cancelled: ["cancelled"],
+  voided: ["voided"],
+});
+
+async function updateProductionTicketFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const ticketId = requiredText(data, "ticketId", 300);
+  const flowStatus = requiredText(data, "flowStatus", 32);
+  if (!Object.hasOwn(permittedOrderFlowTransitions, flowStatus)) {
+    throw new HttpsError("invalid-argument", "The production status is not recognised.");
+  }
+  if (typeof data.isDelayed !== "boolean") {
+    throw new HttpsError("invalid-argument", "isDelayed must be true or false.");
+  }
+  const membership = await db.doc(`tenants/${tenantId}/members/${caller.uid}`).get();
+  const roles = membership.exists && Array.isArray(membership.data().roles)
+    ? membership.data().roles
+    : [];
+  if (!membership.exists || membership.data().active === false
+      || !roles.some((role) => ["owner", "manager", "waiter", "cashier", "kitchen"].includes(role))) {
+    throw new HttpsError("permission-denied", "Your role cannot update production tickets.");
+  }
+  const ticketRef = db.doc(`tenants/${tenantId}/productionTickets/${ticketId}`);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  return db.runTransaction(async (transaction) => {
+    const ticket = await transaction.get(ticketRef);
+    if (!ticket.exists || ticket.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "The production ticket was not found at this venue.");
+    }
+    const currentStatus = typeof ticket.data().flowStatus === "string"
+      ? ticket.data().flowStatus
+      : "newOrder";
+    const permitted = permittedOrderFlowTransitions[currentStatus] ?? [];
+    if (!permitted.includes(flowStatus)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This ticket must move through the normal production sequence.",
+      );
+    }
+    transaction.update(ticketRef, {
+      flowStatus,
+      isDelayed: data.isDelayed,
+      flowUpdatedAt: FieldValue.serverTimestamp(),
+      flowUpdatedByActor: actor,
+    });
+    transaction.create(db.doc(`tenants/${tenantId}/auditEvents/${ticketId}_${Date.now()}`), {
+      action: "updateProductionTicket",
+      venueId,
+      ticketId,
+      fromStatus: currentStatus,
+      toStatus: flowStatus,
+      isDelayed: data.isDelayed,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {updated: true};
+  });
+}
+
 async function invokePlatformAction(action, caller, data) {
   switch (action) {
     case "bootstrapPlatformAdmin":
@@ -707,6 +1192,23 @@ async function invokePlatformAction(action, caller, data) {
       return setPlatformAdminFor(caller, data);
     default:
       throw new HttpsError("not-found", "That platform action does not exist.");
+  }
+}
+
+async function invokePosAction(action, caller, data) {
+  switch (action) {
+    case "createTable":
+      return createTableFor(caller, data);
+    case "updateTable":
+      return updateTableFor(caller, data);
+    case "deleteTable":
+      return deleteTableFor(caller, data);
+    case "sendOrderToProduction":
+      return sendOrderToProductionFor(caller, data);
+    case "updateProductionTicket":
+      return updateProductionTicketFor(caller, data);
+    default:
+      throw new HttpsError("not-found", "That POS action does not exist.");
   }
 }
 
@@ -764,6 +1266,36 @@ export const platformAdminApi = onRequest({cors: true}, async (request, response
   }
 });
 
+// Privileged POS mutations use this small authenticated HTTP surface for the
+// same Windows-compatible reason as platformAdminApi.  It treats all client
+// prices, stock and printer-facing data as untrusted and derives the canonical
+// values from Firestore inside the command handler.
+export const posApi = onRequest({cors: true}, async (request, response) => {
+  try {
+    if (request.method !== "POST") {
+      response.status(405).json({error: {code: "method-not-allowed", message: "Use POST."}});
+      return;
+    }
+    const body = requireObject(request.body);
+    const action = requiredText(body, "action", 80);
+    const data = requireObject(body.data ?? {});
+    const caller = await callerFromHttpRequest(request);
+    const result = await invokePosAction(action, caller, data);
+    response.status(200).json({data: result});
+  } catch (error) {
+    if (error instanceof HttpsError) {
+      response.status(httpStatusFor(error)).json({
+        error: {code: error.code, message: error.message},
+      });
+      return;
+    }
+    console.error("Unexpected POS command error", error);
+    response.status(500).json({
+      error: {code: "internal", message: "The POS action could not be completed."},
+    });
+  }
+});
+
 // Callable variants remain available for non-Windows clients and tests.
 export const bootstrapPlatformAdmin = onCall((request) =>
   bootstrapPlatformAdminFor(callerFromCall(request)));
@@ -797,3 +1329,13 @@ export const retireStaffUser = onCall((request) =>
   retireStaffUserFor(callerFromCall(request), request.data));
 export const setPlatformAdmin = onCall((request) =>
   setPlatformAdminFor(callerFromCall(request), request.data));
+export const sendOrderToProduction = onCall((request) =>
+  sendOrderToProductionFor(callerFromCall(request), request.data));
+export const updateProductionTicket = onCall((request) =>
+  updateProductionTicketFor(callerFromCall(request), request.data));
+export const createTable = onCall((request) =>
+  createTableFor(callerFromCall(request), request.data));
+export const updateTable = onCall((request) =>
+  updateTableFor(callerFromCall(request), request.data));
+export const deleteTable = onCall((request) =>
+  deleteTableFor(callerFromCall(request), request.data));

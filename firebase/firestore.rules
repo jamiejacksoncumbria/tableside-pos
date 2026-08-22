@@ -106,16 +106,34 @@ service cloud.firestore {
         allow write: if isPlatformAdmin() || managesTenant(tenantId);
       }
 
+      // Stock movements are immutable and server-created alongside a verified
+      // release-to-production command. A client must never decrement stock by
+      // writing a movement or product value directly.
+      match /stockMovements/{movementId} {
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if false;
+      }
+
       match /tables/{tableId} {
-        allow read, delete: if isPlatformAdmin() || isMember(tenantId);
-        allow create, update: if (isPlatformAdmin() || isMember(tenantId))
-          && isActiveVenue(tenantId, request.resource.data.venueId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if false;
+      }
+
+      // Server-only table-label registry makes table names unique per venue.
+      match /tableLabels/{labelId} {
+        allow read, write: if false;
       }
 
       match /orders/{orderId} {
-        allow read, delete: if isPlatformAdmin() || isMember(tenantId);
-        allow create, update: if (isPlatformAdmin() || isMember(tenantId))
-          && isActiveVenue(tenantId, request.resource.data.venueId);
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if false;
+      }
+
+      // Production tickets contain kitchen/bar-safe order summaries only. New
+      // tickets and state changes come from trusted, auditable commands.
+      match /productionTickets/{ticketId} {
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if false;
       }
 
       match /bills/{billId} {

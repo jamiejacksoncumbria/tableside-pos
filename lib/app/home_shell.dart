@@ -2,13 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/money.dart';
+import '../features/order_flow/order_flow_page.dart';
+import '../features/menu/menu_management_page.dart';
 import '../features/pos/domain.dart';
 import '../features/pos/pos_controller.dart';
 import '../features/pos/pos_page.dart';
 import '../features/platform_admin/platform_admin_page.dart';
 import '../features/settings/settings_page.dart';
 
-enum HomeSection { pos, menu, reports, settings, platformAdmin }
+enum HomeSection { pos, orderFlow, menu, reports, settings, platformAdmin }
 
 final homeSectionProvider =
     NotifierProvider<HomeSectionController, HomeSection>(
@@ -47,6 +49,11 @@ class HomeShell extends ConsumerWidget {
     final destinations = [
       const _Destination(HomeSection.pos, Icons.point_of_sale_rounded, 'POS'),
       const _Destination(
+        HomeSection.orderFlow,
+        Icons.monitor_heart_outlined,
+        'Order flow',
+      ),
+      const _Destination(
         HomeSection.menu,
         Icons.restaurant_menu_rounded,
         'Menu',
@@ -69,6 +76,15 @@ class HomeShell extends ConsumerWidget {
         ),
     ];
     final index = destinations.indexWhere(
+      (destination) => destination.section == section,
+    );
+    // Material NavigationBar intentionally supports at most five destinations.
+    // Platform tools stay available on compact devices from the app bar rather
+    // than making the entire mobile shell fail for a platform administrator.
+    final compactDestinations = destinations
+        .where((item) => item.section != HomeSection.platformAdmin)
+        .toList(growable: false);
+    final compactIndex = compactDestinations.indexWhere(
       (destination) => destination.section == section,
     );
 
@@ -103,6 +119,14 @@ class HomeShell extends ConsumerWidget {
           ],
         ),
         actions: [
+          if (isPlatformAdmin && !wide)
+            IconButton(
+              tooltip: 'Platform administration',
+              onPressed: () => ref
+                  .read(homeSectionProvider.notifier)
+                  .select(HomeSection.platformAdmin),
+              icon: const Icon(Icons.admin_panel_settings_outlined),
+            ),
           IconButton(
             tooltip: 'Notifications',
             onPressed: () {},
@@ -141,12 +165,12 @@ class HomeShell extends ConsumerWidget {
       bottomNavigationBar: wide
           ? null
           : NavigationBar(
-              selectedIndex: index,
+              selectedIndex: compactIndex < 0 ? 0 : compactIndex,
               onDestinationSelected: (selected) => ref
                   .read(homeSectionProvider.notifier)
-                  .select(destinations[selected].section),
+                  .select(compactDestinations[selected].section),
               destinations: [
-                for (final item in destinations)
+                for (final item in compactDestinations)
                   NavigationDestination(
                     icon: Icon(item.icon),
                     label: item.label,
@@ -159,7 +183,8 @@ class HomeShell extends ConsumerWidget {
   Widget _buildBody(HomeSection section, TenantProfile profile) =>
       switch (section) {
         HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
-        HomeSection.menu => _MenuManagementPage(
+        HomeSection.orderFlow => const OrderFlowPage(),
+        HomeSection.menu => MenuManagementPage(
           currencyCode: profile.currencyCode,
         ),
         HomeSection.reports => const _ReportsPage(),
@@ -177,64 +202,6 @@ class _Destination {
   final HomeSection section;
   final IconData icon;
   final String label;
-}
-
-class _MenuManagementPage extends StatelessWidget {
-  const _MenuManagementPage({required this.currencyCode});
-
-  final String currencyCode;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                'Menu management',
-                style: Theme.of(context).textTheme.headlineSmall,
-              ),
-            ),
-            FilledButton.icon(
-              onPressed: () {},
-              icon: const Icon(Icons.add_rounded),
-              label: const Text('Add product'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        const Text(
-          'Products can belong to more than one section and route to a production area.',
-        ),
-        const SizedBox(height: 20),
-        Card(
-          child: Column(
-            children: [
-              for (final product in demoProducts)
-                ListTile(
-                  leading: CircleAvatar(
-                    child: Icon(
-                      product.productionArea == ProductionArea.bar
-                          ? Icons.local_bar_rounded
-                          : Icons.restaurant_rounded,
-                    ),
-                  ),
-                  title: Text(product.name),
-                  subtitle: Text(
-                    '${product.sectionIds.join(' · ')}  •  ${product.trackStock ? 'stock tracked' : 'not tracked'}',
-                  ),
-                  trailing: Text(
-                    formatMoney(product.priceMinor, currencyCode: currencyCode),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
 }
 
 class _ReportsPage extends StatelessWidget {
