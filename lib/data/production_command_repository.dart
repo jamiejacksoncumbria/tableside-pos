@@ -21,7 +21,7 @@ final productionCommandRepositoryProvider =
 /// product, creates production tickets, and records stock movement atomically.
 class ProductionCommandRepository {
   Future<void> createTable({
-    required TenantScope scope,
+    required VenueScope scope,
     required String label,
     required int seats,
   }) {
@@ -34,7 +34,7 @@ class ProductionCommandRepository {
   }
 
   Future<void> updateTable({
-    required TenantScope scope,
+    required VenueScope scope,
     required String tableId,
     required String label,
     required int seats,
@@ -49,7 +49,7 @@ class ProductionCommandRepository {
   }
 
   Future<void> deleteTable({
-    required TenantScope scope,
+    required VenueScope scope,
     required String tableId,
   }) {
     return _call('deleteTable', {
@@ -60,7 +60,7 @@ class ProductionCommandRepository {
   }
 
   Future<void> sendNewLinesToProduction({
-    required TenantScope scope,
+    required VenueScope scope,
     required PosOrder order,
     bool stockOverride = false,
   }) async {
@@ -88,7 +88,7 @@ class ProductionCommandRepository {
   }
 
   Future<void> updateProductionTicket({
-    required TenantScope scope,
+    required VenueScope scope,
     required String ticketId,
     required String flowStatus,
     required bool isDelayed,
