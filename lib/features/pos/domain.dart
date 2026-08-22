@@ -104,6 +104,7 @@ class TenantProfile {
     this.logoUrl,
     this.address = '',
     this.phone = '',
+    this.phoneNumbers = const [],
     this.receiptFooter = '',
   });
 
@@ -113,8 +114,14 @@ class TenantProfile {
   final String currencyCode;
   final String? logoUrl;
   final String address;
+
+  /// Legacy primary telephone field retained for older tenant records.
   final String phone;
+  final List<String> phoneNumbers;
   final String receiptFooter;
+
+  String get primaryPhone =>
+      phoneNumbers.isNotEmpty ? phoneNumbers.first : phone;
 
   TenantProfile copyWith({
     String? displayName,
@@ -123,6 +130,7 @@ class TenantProfile {
     String? logoUrl,
     String? address,
     String? phone,
+    List<String>? phoneNumbers,
     String? receiptFooter,
   }) {
     return TenantProfile(
@@ -133,6 +141,7 @@ class TenantProfile {
       logoUrl: logoUrl ?? this.logoUrl,
       address: address ?? this.address,
       phone: phone ?? this.phone,
+      phoneNumbers: phoneNumbers ?? this.phoneNumbers,
       receiptFooter: receiptFooter ?? this.receiptFooter,
     );
   }
@@ -143,7 +152,8 @@ class TenantProfile {
     'currencyCode': currencyCode,
     'logoUrl': logoUrl,
     'address': address,
-    'phone': phone,
+    'phone': primaryPhone,
+    'phoneNumbers': phoneNumbers.take(3).toList(growable: false),
     'receiptFooter': receiptFooter,
   };
 }
@@ -180,11 +190,17 @@ class TenantMembership {
 }
 
 class MenuSection {
-  const MenuSection({required this.id, required this.name, required this.icon});
+  const MenuSection({
+    required this.id,
+    required this.name,
+    required this.icon,
+    this.parentSectionId,
+  });
 
   final String id;
   final String name;
   final String icon;
+  final String? parentSectionId;
 }
 
 class MenuProduct {

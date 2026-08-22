@@ -36,6 +36,12 @@ class FirestorePosRepository {
   Stream<TenantProfile> watchTenant(String tenantId) {
     return _firestore.doc('tenants/$tenantId').snapshots().map((document) {
       final data = document.data() ?? const <String, dynamic>{};
+      final phoneNumbers =
+          List<String>.from(data['phoneNumbers'] as List? ?? const [])
+              .where((number) => number.trim().isNotEmpty)
+              .take(3)
+              .toList(growable: false);
+      final legacyPhone = data['phone'] as String? ?? '';
       return TenantProfile(
         id: document.id,
         displayName: data['displayName'] as String? ?? 'Unnamed restaurant',
@@ -43,7 +49,10 @@ class FirestorePosRepository {
         currencyCode: data['currencyCode'] as String? ?? 'GBP',
         logoUrl: data['logoUrl'] as String?,
         address: data['address'] as String? ?? '',
-        phone: data['phone'] as String? ?? '',
+        phone: phoneNumbers.isEmpty ? legacyPhone : phoneNumbers.first,
+        phoneNumbers: phoneNumbers.isEmpty && legacyPhone.trim().isNotEmpty
+            ? [legacyPhone]
+            : phoneNumbers,
         receiptFooter: data['receiptFooter'] as String? ?? '',
       );
     });
@@ -86,6 +95,7 @@ class FirestorePosRepository {
                   id: document.id,
                   name: data['name'] as String? ?? 'Unnamed section',
                   icon: data['icon'] as String? ?? '🍽️',
+                  parentSectionId: data['parentSectionId'] as String?,
                 );
               })
               .toList(growable: false),
@@ -206,6 +216,7 @@ class FirestorePosRepository {
     required String name,
     required String icon,
     required int sortOrder,
+    String? parentSectionId,
   }) async {
     final cleanedName = name.trim();
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
@@ -214,9 +225,66 @@ class FirestorePosRepository {
       'name': cleanedName,
       'icon': icon.trim().isEmpty ? '🍽️' : icon.trim(),
       'sortOrder': sortOrder,
+      'parentSectionId': parentSectionId,
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
+  }
+
+  Future<void> updateMenuSection({
+    required VenueScope scope,
+    required String sectionId,
+    required String name,
+    required String icon,
+    String? parentSectionId,
+  }) async {
+    final cleanedName = name.trim();
+    if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
+    if (parentSectionId == sectionId) {
+      throw ArgumentError('A section cannot be its own parent.');
+    }
+    await _firestore
+        .doc('tenants/${scope.tenantId}/menuSections/$sectionId')
+        .update({
+          'name': cleanedName,
+          'icon': icon.trim().isEmpty ? '🍽️' : icon.trim(),
+          'parentSectionId': parentSectionId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+  }
+
+  Future<void> deleteMenuSection({
+    required VenueScope scope,
+    required String sectionId,
+  }) async {
+    final sections = await _firestore
+        .collection('tenants/${scope.tenantId}/menuSections')
+        .get();
+    final products = await _firestore
+        .collection('tenants/${scope.tenantId}/products')
+        .get();
+    final hasChild = sections.docs.any(
+      (document) =>
+          document.data()['venueId'] == scope.venueId &&
+          document.data()['parentSectionId'] == sectionId,
+    );
+    final isInUse = products.docs.any(
+      (document) =>
+          document.data()['venueId'] == scope.venueId &&
+          List<Object?>.from(
+            document.data()['sectionIds'] as List? ?? const [],
+          ).contains(sectionId),
+    );
+    if (hasChild || isInUse) {
+      throw StateError(
+        hasChild
+            ? 'Move or delete its subcategories before deleting this section.'
+            : 'Remove this section from its products before deleting it.',
+      );
+    }
+    await _firestore
+        .doc('tenants/${scope.tenantId}/menuSections/$sectionId')
+        .delete();
   }
 
   Future<void> createProduct({

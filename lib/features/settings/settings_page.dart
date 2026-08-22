@@ -30,7 +30,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final TextEditingController _displayName;
   late final TextEditingController _legalName;
   late final TextEditingController _address;
-  late final TextEditingController _phone;
+  late final List<TextEditingController> _phoneNumbers;
   late final TextEditingController _footer;
   Uint8List? _logoBytes;
   String? _logoName;
@@ -44,7 +44,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _displayName = TextEditingController(text: profile.displayName);
     _legalName = TextEditingController(text: profile.legalName);
     _address = TextEditingController(text: profile.address);
-    _phone = TextEditingController(text: profile.phone);
+    final phones = profile.phoneNumbers.isEmpty
+        ? (profile.phone.trim().isEmpty ? const <String>[] : [profile.phone])
+        : profile.phoneNumbers;
+    _phoneNumbers = List<TextEditingController>.generate(
+      3,
+      (index) => TextEditingController(
+        text: index < phones.length ? phones[index] : '',
+      ),
+    );
     _footer = TextEditingController(text: profile.receiptFooter);
   }
 
@@ -53,7 +61,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _displayName.dispose();
     _legalName.dispose();
     _address.dispose();
-    _phone.dispose();
+    for (final controller in _phoneNumbers) {
+      controller.dispose();
+    }
     _footer.dispose();
     super.dispose();
   }
@@ -82,7 +92,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         displayName: _displayName.text.trim(),
         legalName: _legalName.text.trim(),
         address: _address.text.trim(),
-        phone: _phone.text.trim(),
+        phoneNumbers: _phoneNumbers
+            .map((controller) => controller.text.trim())
+            .where((number) => number.isNotEmpty)
+            .take(3)
+            .toList(growable: false),
         receiptFooter: _footer.text.trim(),
       );
       if (widget.persistToFirebase) {
@@ -199,10 +213,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   controller: _address,
                   decoration: const InputDecoration(labelText: 'Address'),
                 ),
-                TextField(
-                  controller: _phone,
-                  decoration: const InputDecoration(labelText: 'Phone number'),
-                ),
+                for (var index = 0; index < _phoneNumbers.length; index++)
+                  TextField(
+                    controller: _phoneNumbers[index],
+                    keyboardType: TextInputType.phone,
+                    decoration: InputDecoration(
+                      labelText: index == 0
+                          ? 'Phone number'
+                          : 'Additional phone number ${index + 1}',
+                    ),
+                  ),
               ];
               if (!twoColumns) {
                 return Column(
@@ -236,6 +256,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       Expanded(child: fields[2]),
                       const SizedBox(width: 12),
                       Expanded(child: fields[3]),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(child: fields[4]),
+                      const SizedBox(width: 12),
+                      Expanded(child: fields[5]),
                     ],
                   ),
                   const SizedBox(height: 12),

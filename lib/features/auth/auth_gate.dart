@@ -248,6 +248,16 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
   Widget build(BuildContext context) {
     final tenantId = _tenantId ?? widget.memberships.first.tenantId;
     final venues = ref.watch(venuesProvider(tenantId));
+    final companyNames = <String, String>{
+      for (final membership in widget.memberships)
+        membership.tenantId: ref
+            .watch(liveTenantProfileProvider(membership.tenantId))
+            .when(
+              data: (profile) => profile.displayName,
+              loading: () => 'Loading restaurant…',
+              error: (_, _) => 'Restaurant company',
+            ),
+    };
     return Scaffold(
       body: Center(
         child: ConstrainedBox(
@@ -278,7 +288,10 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
                       for (final membership in widget.memberships)
                         DropdownMenuItem(
                           value: membership.tenantId,
-                          child: Text(membership.tenantId),
+                          child: Text(
+                            companyNames[membership.tenantId] ??
+                                'Restaurant company',
+                          ),
                         ),
                     ],
                     onChanged: (value) => setState(() => _tenantId = value),

@@ -63,6 +63,7 @@ class MenuManagementPage extends ConsumerWidget {
                           context: context,
                           ref: ref,
                           scope: scope,
+                          sections: sections,
                           nextSortOrder: sections.length,
                         ),
                   icon: const Icon(Icons.segment_outlined),
@@ -110,13 +111,35 @@ class MenuManagementPage extends ConsumerWidget {
         if (sections.isEmpty)
           const Text('No menu sections have been configured yet.')
         else
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final section in sections)
-                Chip(label: Text('${section.icon}  ${section.name}')),
-            ],
+          Card(
+            child: Column(
+              children: [
+                for (final section in sections)
+                  _SectionTile(
+                    section: section,
+                    allSections: sections,
+                    canEdit: scope != null,
+                    onEdit: scope == null
+                        ? null
+                        : () => _showSectionDialog(
+                            context: context,
+                            ref: ref,
+                            scope: scope,
+                            sections: sections,
+                            nextSortOrder: sections.length,
+                            existing: section,
+                          ),
+                    onDelete: scope == null
+                        ? null
+                        : () => _deleteSection(
+                            context: context,
+                            ref: ref,
+                            scope: scope,
+                            section: section,
+                          ),
+                  ),
+              ],
+            ),
           ),
         const SizedBox(height: 24),
         Text('Products', style: Theme.of(context).textTheme.titleLarge),
@@ -184,6 +207,93 @@ class MenuManagementPage extends ConsumerWidget {
   }
 }
 
+class _SectionTile extends StatelessWidget {
+  const _SectionTile({
+    required this.section,
+    required this.allSections,
+    required this.canEdit,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  final MenuSection section;
+  final List<MenuSection> allSections;
+  final bool canEdit;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    MenuSection? parent;
+    for (final item in allSections) {
+      if (item.id == section.parentSectionId) {
+        parent = item;
+        break;
+      }
+    }
+    return ListTile(
+      leading: CircleAvatar(child: Text(section.icon)),
+      title: Text(section.name),
+      subtitle: Text(
+        parent == null ? 'Top-level category' : 'Subcategory of ${parent.name}',
+      ),
+      trailing: Wrap(
+        children: [
+          IconButton(
+            tooltip: 'Edit category',
+            onPressed: canEdit ? onEdit : null,
+            icon: const Icon(Icons.edit_outlined),
+          ),
+          IconButton(
+            tooltip: 'Delete category',
+            onPressed: canEdit ? onDelete : null,
+            icon: const Icon(Icons.delete_outline_rounded),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Future<void> _deleteSection({
+  required BuildContext context,
+  required WidgetRef ref,
+  required VenueScope scope,
+  required MenuSection section,
+}) async {
+  final approved = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Delete menu section?'),
+      content: Text(
+        '“${section.name}” will be deleted only if no products or subcategories use it.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton.tonal(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text('Delete'),
+        ),
+      ],
+    ),
+  );
+  if (approved != true) return;
+  try {
+    await ref
+        .read(firestorePosRepositoryProvider)
+        .deleteMenuSection(scope: scope, sectionId: section.id);
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('Delete menu section', error, stackTrace);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('The section could not be deleted: $error')),
+    );
+  }
+}
+
 class _ProductTile extends StatelessWidget {
   const _ProductTile({
     required this.product,
@@ -228,7 +338,19 @@ class _ProductTile extends StatelessWidget {
         spacing: 4,
         children: [
           Text(formatMoney(product.priceMinor, currencyCode: currencyCode)),
-          Switch(value: product.isAvailable, onChanged: onAvailabilityChanged),
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                product.isAvailable ? 'For sale' : 'Unavailable',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+              Switch(
+                value: product.isAvailable,
+                onChanged: onAvailabilityChanged,
+              ),
+            ],
+          ),
           IconButton(
             tooltip: 'Edit product',
             onPressed: canEdit ? onEdit : null,
@@ -266,69 +388,108 @@ Future<void> _showSectionDialog({
   required BuildContext context,
   required WidgetRef ref,
   required VenueScope scope,
+  required List<MenuSection> sections,
   required int nextSortOrder,
+  MenuSection? existing,
 }) async {
-  final name = TextEditingController();
-  final icon = TextEditingController(text: '🍽️');
+  final name = TextEditingController(text: existing?.name ?? '');
+  final icon = TextEditingController(text: existing?.icon ?? '🍽️');
   final formKey = GlobalKey<FormState>();
+  String? parentId = existing?.parentSectionId;
+  final parentOptions = sections.where((item) => item.id != existing?.id);
   try {
     await showDialog<void>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Add menu section'),
-        content: Form(
-          key: formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: name,
-                autofocus: true,
-                decoration: const InputDecoration(labelText: 'Section name'),
-                validator: _requiredText,
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: icon,
-                decoration: const InputDecoration(
-                  labelText: 'Icon (optional)',
-                  helperText: 'For example: 🍷 or 🍛',
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(
+            existing == null ? 'Add menu section' : 'Edit menu section',
+          ),
+          content: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: name,
+                  autofocus: true,
+                  decoration: const InputDecoration(labelText: 'Section name'),
+                  validator: _requiredText,
                 ),
-              ),
-            ],
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: icon,
+                  decoration: const InputDecoration(
+                    labelText: 'Icon (optional)',
+                    helperText: 'For example: 🍷 or 🍛',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String?>(
+                  value: parentId,
+                  decoration: const InputDecoration(
+                    labelText: 'Parent category (optional)',
+                    helperText:
+                        'Choose Alcohol for a Beer, Wine or Spirits subcategory.',
+                  ),
+                  items: [
+                    const DropdownMenuItem<String?>(
+                      value: null,
+                      child: Text('Top-level category'),
+                    ),
+                    for (final item in parentOptions)
+                      DropdownMenuItem<String?>(
+                        value: item.id,
+                        child: Text('${item.icon} ${item.name}'),
+                      ),
+                  ],
+                  onChanged: (value) => setDialogState(() => parentId = value),
+                ),
+              ],
+            ),
           ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              if (!(formKey.currentState?.validate() ?? false)) return;
-              try {
-                await ref
-                    .read(firestorePosRepositoryProvider)
-                    .createMenuSection(
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                if (!(formKey.currentState?.validate() ?? false)) return;
+                try {
+                  final repository = ref.read(firestorePosRepositoryProvider);
+                  if (existing == null) {
+                    await repository.createMenuSection(
                       scope: scope,
                       name: name.text,
                       icon: icon.text,
                       sortOrder: nextSortOrder,
+                      parentSectionId: parentId,
                     );
-                if (dialogContext.mounted) Navigator.pop(dialogContext);
-              } on Object catch (error, stackTrace) {
-                AppLogger.error('Create menu section', error, stackTrace);
-                if (!dialogContext.mounted) return;
-                ScaffoldMessenger.of(dialogContext).showSnackBar(
-                  const SnackBar(
-                    content: Text('The section could not be saved.'),
-                  ),
-                );
-              }
-            },
-            child: const Text('Save section'),
-          ),
-        ],
+                  } else {
+                    await repository.updateMenuSection(
+                      scope: scope,
+                      sectionId: existing.id,
+                      name: name.text,
+                      icon: icon.text,
+                      parentSectionId: parentId,
+                    );
+                  }
+                  if (dialogContext.mounted) Navigator.pop(dialogContext);
+                } on Object catch (error, stackTrace) {
+                  AppLogger.error('Save menu section', error, stackTrace);
+                  if (!dialogContext.mounted) return;
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(
+                    SnackBar(
+                      content: Text('The section could not be saved: $error'),
+                    ),
+                  );
+                }
+              },
+              child: Text(existing == null ? 'Save section' : 'Save changes'),
+            ),
+          ],
+        ),
       ),
     );
   } finally {

@@ -751,7 +751,9 @@ async function createTableFor(caller, rawData) {
       transaction.get(venueRef),
       transaction.get(labelRef),
     ]);
-    if (!venue.exists || venue.data().status !== "active") {
+    // Older venues created before the status field was introduced remain
+    // operational. Only an explicitly deleting venue is unavailable.
+    if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
     }
     if (registeredLabel.exists) {
@@ -911,7 +913,9 @@ async function sendOrderToProductionFor(caller, rawData) {
       transaction.get(orderRef),
       ...[...productRefs.values()].map((ref) => transaction.get(ref)),
     ]);
-    if (!venue.exists || venue.data().status !== "active") {
+    // Older venues created before the status field was introduced remain
+    // operational. Only an explicitly deleting venue is unavailable.
+    if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
     }
     if (!table.exists || table.data().venueId !== venueId) {

@@ -51,6 +51,7 @@ service cloud.firestore {
         'logoUrl',
         'address',
         'phone',
+        'phoneNumbers',
         'receiptFooter'
       ]);
     }
