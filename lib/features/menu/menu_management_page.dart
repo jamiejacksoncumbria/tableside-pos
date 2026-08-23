@@ -389,6 +389,37 @@ class _SetupHint extends StatelessWidget {
   );
 }
 
+class _SectionIconOption {
+  const _SectionIconOption(this.symbol, this.label);
+
+  final String symbol;
+  final String label;
+}
+
+const _sectionIconOptions = <_SectionIconOption>[
+  _SectionIconOption('🍽️', 'Dining'),
+  _SectionIconOption('🥤', 'Soft drinks'),
+  _SectionIconOption('🍷', 'Wine'),
+  _SectionIconOption('🍺', 'Beer'),
+  _SectionIconOption('🥃', 'Spirits'),
+  _SectionIconOption('🍸', 'Cocktails'),
+  _SectionIconOption('☕', 'Hot drinks'),
+  _SectionIconOption('🥗', 'Starters'),
+  _SectionIconOption('🍛', 'Curry'),
+  _SectionIconOption('🍗', 'Chicken'),
+  _SectionIconOption('🥩', 'Meat'),
+  _SectionIconOption('🍔', 'Burgers'),
+  _SectionIconOption('🍕', 'Pizza'),
+  _SectionIconOption('🍝', 'Pasta'),
+  _SectionIconOption('🐟', 'Seafood'),
+  _SectionIconOption('🥦', 'Vegetarian'),
+  _SectionIconOption('🍰', 'Desserts'),
+  _SectionIconOption('🍦', 'Ice cream'),
+  _SectionIconOption('🧒', 'Children'),
+  _SectionIconOption('🥡', 'Takeaway'),
+  _SectionIconOption('⭐', 'Specials'),
+];
+
 Future<void> _showSectionDialog({
   required BuildContext context,
   required WidgetRef ref,
@@ -398,9 +429,14 @@ Future<void> _showSectionDialog({
   MenuSection? existing,
 }) async {
   final name = TextEditingController(text: existing?.name ?? '');
-  final icon = TextEditingController(text: existing?.icon ?? '🍽️');
   final formKey = GlobalKey<FormState>();
   String? parentId = existing?.parentSectionId;
+  var selectedIcon = existing?.icon ?? '🍽️';
+  final iconOptions = [
+    if (!_sectionIconOptions.any((item) => item.symbol == selectedIcon))
+      _SectionIconOption(selectedIcon, 'Current icon'),
+    ..._sectionIconOptions,
+  ];
   final parentOptions = sections.where((item) => item.id != existing?.id);
   try {
     await showDialog<void>(
@@ -410,47 +446,69 @@ Future<void> _showSectionDialog({
           title: Text(
             existing == null ? 'Add menu section' : 'Edit menu section',
           ),
-          content: Form(
-            key: formKey,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextFormField(
-                  controller: name,
-                  autofocus: true,
-                  decoration: const InputDecoration(labelText: 'Section name'),
-                  validator: _requiredText,
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: icon,
-                  decoration: const InputDecoration(
-                    labelText: 'Icon (optional)',
-                    helperText: 'For example: 🍷 or 🍛',
-                  ),
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<String?>(
-                  value: parentId,
-                  decoration: const InputDecoration(
-                    labelText: 'Parent category (optional)',
-                    helperText:
-                        'Choose Alcohol for a Beer, Wine or Spirits subcategory.',
-                  ),
-                  items: [
-                    const DropdownMenuItem<String?>(
-                      value: null,
-                      child: Text('Top-level category'),
-                    ),
-                    for (final item in parentOptions)
-                      DropdownMenuItem<String?>(
-                        value: item.id,
-                        child: Text('${item.icon} ${item.name}'),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextFormField(
+                      controller: name,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Section name',
                       ),
+                      validator: _requiredText,
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      'Category icon',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final option in iconOptions)
+                          ChoiceChip(
+                            avatar: Text(option.symbol),
+                            label: Text(option.label),
+                            selected: selectedIcon == option.symbol,
+                            onSelected: (_) => setDialogState(
+                              () => selectedIcon = option.symbol,
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                    DropdownButtonFormField<String?>(
+                      initialValue: parentId,
+                      decoration: const InputDecoration(
+                        labelText: 'Parent category (optional)',
+                        helperText:
+                            'Choose Alcohol for a Beer, Wine or Spirits subcategory.',
+                      ),
+                      items: [
+                        const DropdownMenuItem<String?>(
+                          value: null,
+                          child: Text('Top-level category'),
+                        ),
+                        for (final item in parentOptions)
+                          DropdownMenuItem<String?>(
+                            value: item.id,
+                            child: Text('${item.icon} ${item.name}'),
+                          ),
+                      ],
+                      onChanged: (value) =>
+                          setDialogState(() => parentId = value),
+                    ),
                   ],
-                  onChanged: (value) => setDialogState(() => parentId = value),
                 ),
-              ],
+              ),
             ),
           ),
           actions: [
@@ -467,7 +525,7 @@ Future<void> _showSectionDialog({
                     await repository.createMenuSection(
                       scope: scope,
                       name: name.text,
-                      icon: icon.text,
+                      icon: selectedIcon,
                       sortOrder: nextSortOrder,
                       parentSectionId: parentId,
                     );
@@ -476,7 +534,7 @@ Future<void> _showSectionDialog({
                       scope: scope,
                       sectionId: existing.id,
                       name: name.text,
-                      icon: icon.text,
+                      icon: selectedIcon,
                       parentSectionId: parentId,
                     );
                   }
@@ -499,7 +557,6 @@ Future<void> _showSectionDialog({
     );
   } finally {
     name.dispose();
-    icon.dispose();
   }
 }
 
