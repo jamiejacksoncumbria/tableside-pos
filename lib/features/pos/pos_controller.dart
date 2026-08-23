@@ -35,15 +35,28 @@ class TenantProfileController extends Notifier<TenantProfile> {
   void update(TenantProfile profile) => state = profile;
 }
 
-final activeSectionProvider = NotifierProvider<ActiveSectionController, String>(
-  ActiveSectionController.new,
-);
+final activeSectionProvider =
+    NotifierProvider<ActiveSectionController, String?>(
+      ActiveSectionController.new,
+    );
 
-class ActiveSectionController extends Notifier<String> {
+class ActiveSectionController extends Notifier<String?> {
   @override
-  String build() => demoSections.first.id;
+  String? build() => null;
 
-  void select(String sectionId) => state = sectionId;
+  void select(String? sectionId) => state = sectionId;
+}
+
+final activeSubsectionProvider =
+    NotifierProvider<ActiveSubsectionController, String?>(
+      ActiveSubsectionController.new,
+    );
+
+class ActiveSubsectionController extends Notifier<String?> {
+  @override
+  String? build() => null;
+
+  void select(String? sectionId) => state = sectionId;
 }
 
 final selectedTableProvider = NotifierProvider<SelectedTableController, String>(

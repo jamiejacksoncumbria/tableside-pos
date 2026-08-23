@@ -112,7 +112,12 @@ class MenuManagementPage extends ConsumerWidget {
           const Text('No menu sections have been configured yet.')
         else
           Card(
-            child: Column(
+            child: ExpansionTile(
+              leading: const Icon(Icons.account_tree_outlined),
+              title: Text('Manage ${sections.length} categories'),
+              subtitle: const Text(
+                'Expand to rename, nest or safely delete categories.',
+              ),
               children: [
                 for (final section in sections)
                   _SectionTile(

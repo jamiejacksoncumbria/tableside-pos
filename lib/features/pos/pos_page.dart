@@ -265,6 +265,7 @@ class _MenuPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final selectedSection = ref.watch(activeSectionProvider);
+    final selectedSubsection = ref.watch(activeSubsectionProvider);
     final scope = ref.watch(activeVenueScopeProvider);
     final sections = ref
         .watch(menuSectionsProvider)
@@ -280,17 +281,40 @@ class _MenuPanel extends ConsumerWidget {
           loading: () => scope == null ? demoProducts : const [],
           error: (_, _) => scope == null ? demoProducts : const [],
         );
-    final effectiveSection = sections.any((item) => item.id == selectedSection)
+    final topLevelSections = sections
+        .where((section) => section.parentSectionId == null)
+        .toList(growable: false);
+    final effectiveSection =
+        topLevelSections.any((section) => section.id == selectedSection)
         ? selectedSection
-        : sections.isEmpty
-        ? null
-        : sections.first.id;
+        : null;
+    final subsections = effectiveSection == null
+        ? const <MenuSection>[]
+        : sections
+              .where((section) => section.parentSectionId == effectiveSection)
+              .toList(growable: false);
+    final effectiveSubsection =
+        subsections.any((section) => section.id == selectedSubsection)
+        ? selectedSubsection
+        : null;
+    final includedSectionIds = effectiveSection == null
+        ? const <String>{}
+        : <String>{
+            effectiveSection,
+            ...subsections.map((section) => section.id),
+          };
     final products = catalog
-        .where((product) => product.sectionIds.contains(effectiveSection))
+        .where((product) {
+          if (effectiveSubsection != null) {
+            return product.sectionIds.contains(effectiveSubsection);
+          }
+          if (effectiveSection == null) return true;
+          return product.sectionIds.any(includedSectionIds.contains);
+        })
         .toList(growable: false);
     final section = effectiveSection == null
         ? null
-        : sections.firstWhere((item) => item.id == effectiveSection);
+        : topLevelSections.firstWhere((item) => item.id == effectiveSection);
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -319,42 +343,91 @@ class _MenuPanel extends ConsumerWidget {
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
-                  for (final item in sections)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ChoiceChip(
+                      label: const Text('All'),
+                      selected: effectiveSection == null,
+                      onSelected: (_) {
+                        ref.read(activeSectionProvider.notifier).select(null);
+                        ref
+                            .read(activeSubsectionProvider.notifier)
+                            .select(null);
+                      },
+                    ),
+                  ),
+                  for (final item in topLevelSections)
                     Padding(
                       padding: const EdgeInsets.only(right: 8),
                       child: ChoiceChip(
                         label: Text('${item.icon} ${item.name}'),
                         selected: item.id == effectiveSection,
-                        onSelected: (_) => ref
-                            .read(activeSectionProvider.notifier)
-                            .select(item.id),
+                        onSelected: (_) {
+                          ref
+                              .read(activeSectionProvider.notifier)
+                              .select(item.id);
+                          ref
+                              .read(activeSubsectionProvider.notifier)
+                              .select(null);
+                        },
                       ),
                     ),
                 ],
               ),
             ),
-            const SizedBox(height: 18),
+            if (subsections.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: FilterChip(
+                        label: Text('All ${section?.name ?? ''}'),
+                        selected: effectiveSubsection == null,
+                        onSelected: (_) => ref
+                            .read(activeSubsectionProvider.notifier)
+                            .select(null),
+                      ),
+                    ),
+                    for (final item in subsections)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: FilterChip(
+                          label: Text('${item.icon} ${item.name}'),
+                          selected: item.id == effectiveSubsection,
+                          onSelected: (_) => ref
+                              .read(activeSubsectionProvider.notifier)
+                              .select(item.id),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 14),
             Text(
-              section?.name ?? 'Menu',
+              effectiveSubsection == null
+                  ? section?.name ?? 'All menu items'
+                  : subsections
+                        .firstWhere((item) => item.id == effectiveSubsection)
+                        .name,
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 10),
             Expanded(
               child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final columns = constraints.maxWidth >= 700
-                      ? 3
-                      : constraints.maxWidth >= 420
-                      ? 2
-                      : 1;
+                builder: (context, _) {
                   return GridView.builder(
                     itemCount: products.length,
-                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: columns,
-                      crossAxisSpacing: 12,
-                      mainAxisSpacing: 12,
-                      childAspectRatio: columns == 1 ? 4.2 : 1.32,
-                    ),
+                    gridDelegate:
+                        const SliverGridDelegateWithMaxCrossAxisExtent(
+                          maxCrossAxisExtent: 180,
+                          crossAxisSpacing: 12,
+                          mainAxisSpacing: 12,
+                          mainAxisExtent: 126,
+                        ),
                     itemBuilder: (context, index) => _ProductTile(
                       product: products[index],
                       currencyCode: currencyCode,
