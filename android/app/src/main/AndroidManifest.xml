@@ -6,6 +6,11 @@
     <uses-permission
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
+    <!-- The Bluetooth library cancels discovery before connecting. This is not
+         location scanning, but Android 12+ still requires this runtime grant. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <application
         android:label="tableside_pos"

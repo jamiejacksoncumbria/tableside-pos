@@ -117,10 +117,17 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       );
     }
     if (Platform.isAndroid) {
-      final permission = await Permission.bluetoothConnect.request();
-      if (!permission.isGranted) {
+      final permissions = await [
+        Permission.bluetoothConnect,
+        Permission.bluetoothScan,
+      ].request();
+      final connectPermission =
+          permissions[Permission.bluetoothConnect] ?? PermissionStatus.denied;
+      final scanPermission =
+          permissions[Permission.bluetoothScan] ?? PermissionStatus.denied;
+      if (!connectPermission.isGranted || !scanPermission.isGranted) {
         throw const BluetoothReceiptPrinterException(
-          'Nearby devices permission is required to use a paired Bluetooth printer. Allow it in Android Settings, then try again.',
+          'Nearby devices permission is required to use a paired Bluetooth printer. Allow Bluetooth connection and scan access in Android Settings, then try again.',
         );
       }
     }
