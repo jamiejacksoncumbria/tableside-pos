@@ -101,30 +101,22 @@ class ActiveOrderController extends Notifier<PosOrder> {
   }
 
   void addProduct(MenuProduct product) {
-    final existingIndex = state.lines.indexWhere(
-      // A sent line is an immutable snapshot of an already released kitchen
-      // or bar ticket. Adding the same product afterwards must form a fresh,
-      // unsent line so it appears on the next additions ticket.
-      (line) => line.productId == product.id && !line.isSentToProduction,
-    );
+    // Keep each tap visible as a separate line in the live order. This makes
+    // late additions unmistakable to staff; a future final bill/receipt can
+    // still consolidate matching lines to save paper.
     final updatedLines = [...state.lines];
-    if (existingIndex >= 0) {
-      final line = updatedLines[existingIndex];
-      updatedLines[existingIndex] = line.copyWith(quantity: line.quantity + 1);
-    } else {
-      updatedLines.add(
-        OrderLine(
-          id: '${product.id}-${DateTime.now().microsecondsSinceEpoch}',
-          productId: product.id,
-          productName: product.name,
-          quantity: 1,
-          unitPriceMinor: product.priceMinor,
-          productionArea: product.productionArea,
-          trackStock: product.trackStock,
-          stockPerSale: product.stockPerSale,
-        ),
-      );
-    }
+    updatedLines.add(
+      OrderLine(
+        id: '${product.id}-${DateTime.now().microsecondsSinceEpoch}',
+        productId: product.id,
+        productName: product.name,
+        quantity: 1,
+        unitPriceMinor: product.priceMinor,
+        productionArea: product.productionArea,
+        trackStock: product.trackStock,
+        stockPerSale: product.stockPerSale,
+      ),
+    );
     state = state.copyWith(
       lines: updatedLines,
       status: state.status == OrderStatus.sent
