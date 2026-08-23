@@ -173,10 +173,27 @@ class FirestorePosRepository {
     final order = await _firestore
         .doc('tenants/${scope.tenantId}/orders/$currentOrderId')
         .get();
+    if (order.data()?['tableId'] != tableId) return null;
+    return _orderFromSnapshot(scope: scope, order: order);
+  }
+
+  Future<PosOrder?> fetchOrder({
+    required VenueScope scope,
+    required String orderId,
+  }) async {
+    final order = await _firestore
+        .doc('tenants/${scope.tenantId}/orders/$orderId')
+        .get();
+    return _orderFromSnapshot(scope: scope, order: order);
+  }
+
+  PosOrder? _orderFromSnapshot({
+    required VenueScope scope,
+    required DocumentSnapshot<Map<String, dynamic>> order,
+  }) {
     final data = order.data();
     if (data == null ||
         data['venueId'] != scope.venueId ||
-        data['tableId'] != tableId ||
         data['status'] == 'closed') {
       return null;
     }
@@ -200,14 +217,21 @@ class FirestorePosRepository {
         .where((line) => line.id.isNotEmpty && line.productId.isNotEmpty)
         .toList(growable: false);
     final date = openedAt is Timestamp ? openedAt.toDate() : DateTime.now();
+    final status = switch (data['status']) {
+      'open' => OrderStatus.open,
+      'pendingApproval' => OrderStatus.pendingApproval,
+      'rolledOver' => OrderStatus.rolledOver,
+      _ => OrderStatus.sent,
+    };
     return PosOrder(
       id: order.id,
       tenantId: scope.tenantId,
       venueId: scope.venueId,
-      tableId: tableId,
+      tableId: data['tableId'] as String?,
+      tabName: data['tabName'] as String?,
       businessDate: DateTime(date.year, date.month, date.day),
       openedAt: date,
-      status: OrderStatus.sent,
+      status: status,
       lines: lines,
     );
   }

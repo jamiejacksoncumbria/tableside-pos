@@ -173,6 +173,44 @@ class ActiveOrderController extends Notifier<PosOrder> {
     );
   }
 
+  /// Opens or creates a venue-local named tab. The server owns the unique name
+  /// reservation, so simultaneous devices can never create two live tabs for
+  /// the same guest name.
+  Future<void> openNamedTab(String tabName) async {
+    final cleanedName = tabName.trim();
+    if (cleanedName.isEmpty) throw StateError('Enter a name for the tab.');
+    if (state.lines.any((line) => !line.isSentToProduction)) {
+      throw StateError(
+        'Send or remove the unsent items before opening another tab.',
+      );
+    }
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) {
+      final now = DateTime.now();
+      state = PosOrder(
+        id: 'order-${now.microsecondsSinceEpoch}',
+        tenantId: demoTenant.id,
+        venueId: demoVenue.id,
+        tabName: cleanedName,
+        businessDate: DateTime(now.year, now.month, now.day),
+        openedAt: now,
+        status: OrderStatus.open,
+        lines: const [],
+      );
+      return;
+    }
+    final orderId = await ref
+        .read(productionCommandRepositoryProvider)
+        .openNamedTab(scope: scope, tabName: cleanedName);
+    final order = await ref
+        .read(firestorePosRepositoryProvider)
+        .fetchOrder(scope: scope, orderId: orderId);
+    if (order == null) {
+      throw StateError('The named tab could not be loaded. Please retry.');
+    }
+    state = order;
+  }
+
   Future<void> sendToProduction() async {
     final scope = ref.read(activeVenueScopeProvider);
     if (scope != null) {

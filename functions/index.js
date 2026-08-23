@@ -734,6 +734,65 @@ function tableLabelRegistryRef(tenantId, venueId, labelKey) {
   return db.doc(`tenants/${tenantId}/tableLabels/${encoded}`);
 }
 
+function openTabRegistryRef(tenantId, venueId, tabName) {
+  const key = venueNameKey(tabName);
+  const encoded = Buffer.from(`${venueId}\u0000${key}`).toString("base64url");
+  return db.doc(`tenants/${tenantId}/openTabNames/${encoded}`);
+}
+
+async function openNamedTabFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const tabName = requiredText(data, "tabName", 80);
+  await requireTenantOperationalMember(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const tabRef = openTabRegistryRef(tenantId, venueId, tabName);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const result = await db.runTransaction(async (transaction) => {
+    const [venue, currentTab] = await Promise.all([
+      transaction.get(venueRef),
+      transaction.get(tabRef),
+    ]);
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (currentTab.exists) {
+      return {orderId: currentTab.data().orderId, reopened: true};
+    }
+    const orderRef = tenantRef.collection("orders").doc();
+    transaction.create(orderRef, {
+      venueId,
+      tabName,
+      tabNameKey: venueNameKey(tabName),
+      status: "open",
+      openedAt: FieldValue.serverTimestamp(),
+      createdByActor: actor,
+      lines: [],
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+    transaction.create(tabRef, {
+      venueId,
+      tabName,
+      tabNameKey: venueNameKey(tabName),
+      orderId: orderRef.id,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "openNamedTab",
+      venueId,
+      tabName,
+      orderId: orderRef.id,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {orderId: orderRef.id, reopened: false};
+  });
+  return result;
+}
+
 async function createTableFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -879,7 +938,14 @@ async function sendOrderToProductionFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const orderId = requiredText(data, "orderId", 180);
-  const tableId = requiredText(data, "tableId", 180);
+  const tableId = optionalText(data, "tableId", 180) || null;
+  const tabName = optionalText(data, "tabName", 80) || null;
+  if ((tableId == null) === (tabName == null)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Choose either a table or a named tab for the order.",
+    );
+  }
   const rawLines = data.lines;
   if (!Array.isArray(rawLines) || rawLines.length === 0 || rawLines.length > 100) {
     throw new HttpsError("invalid-argument", "One to one hundred new order lines are required.");
@@ -896,7 +962,8 @@ async function sendOrderToProductionFor(caller, rawData) {
 
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
-  const tableRef = tenantRef.collection("tables").doc(tableId);
+  const tableRef = tableId == null ? null : tenantRef.collection("tables").doc(tableId);
+  const tabRef = tabName == null ? null : openTabRegistryRef(tenantId, venueId, tabName);
   const orderRef = tenantRef.collection("orders").doc(orderId);
   const productRefs = new Map(
     [...new Set(lines.map((line) => line.productId))].map((productId) => [
@@ -907,9 +974,10 @@ async function sendOrderToProductionFor(caller, rawData) {
   const actor = actorSnapshot(await auth.getUser(caller.uid));
 
   const result = await db.runTransaction(async (transaction) => {
-    const [venue, table, existingOrder, ...products] = await Promise.all([
+    const [venue, table, namedTab, existingOrder, ...products] = await Promise.all([
       transaction.get(venueRef),
-      transaction.get(tableRef),
+      tableRef == null ? Promise.resolve(null) : transaction.get(tableRef),
+      tabRef == null ? Promise.resolve(null) : transaction.get(tabRef),
       transaction.get(orderRef),
       ...[...productRefs.values()].map((ref) => transaction.get(ref)),
     ]);
@@ -918,14 +986,20 @@ async function sendOrderToProductionFor(caller, rawData) {
     if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
     }
-    if (!table.exists || table.data().venueId !== venueId) {
+    if (tableRef != null && (!table.exists || table.data().venueId !== venueId)) {
       throw new HttpsError("failed-precondition", "The selected table is not available at this venue.");
     }
-    const currentOrderId = table.data().currentOrderId;
-    if (typeof currentOrderId === "string" && currentOrderId !== orderId) {
+    const currentOrderId = tableRef == null ? null : table.data().currentOrderId;
+    if (tableRef != null && typeof currentOrderId === "string" && currentOrderId !== orderId) {
       throw new HttpsError(
         "failed-precondition",
         "This table already has a different open order. Reopen that bill instead.",
+      );
+    }
+    if (tabRef != null && (!namedTab.exists || namedTab.data().orderId !== orderId)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "A different open tab already uses this name. Reopen it instead.",
       );
     }
     const productById = new Map();
@@ -993,7 +1067,9 @@ async function sendOrderToProductionFor(caller, rawData) {
       existingTickets.filter((ticket) => ticket.exists).map((ticket) => ticket.id),
     );
 
-    const tableLabel = typeof table.data().label === "string" ? table.data().label : tableId;
+    const tableLabel = tableRef == null
+      ? null
+      : (typeof table.data().label === "string" ? table.data().label : tableId);
     const priorLines = Array.isArray(existingOrder.data()?.lines) ? existingOrder.data().lines : [];
     const priorLineIds = new Set(
       priorLines.map((line) => (typeof line?.id === "string" ? line.id : "")),
@@ -1014,6 +1090,7 @@ async function sendOrderToProductionFor(caller, rawData) {
     transaction.set(orderRef, {
       venueId,
       tableId,
+      tabName,
       tableLabel,
       status: "sent",
       openedAt: existingOrder.data()?.openedAt ?? FieldValue.serverTimestamp(),
@@ -1023,10 +1100,12 @@ async function sendOrderToProductionFor(caller, rawData) {
       updatedAt: FieldValue.serverTimestamp(),
       updatedByActor: actor,
     }, {merge: true});
-    transaction.update(tableRef, {
-      currentOrderId: orderId,
-      updatedAt: FieldValue.serverTimestamp(),
-    });
+    if (tableRef != null) {
+      transaction.update(tableRef, {
+        currentOrderId: orderId,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
 
     const stockTotals = new Map();
     for (const ticket of ticketEntries) {
@@ -1036,6 +1115,7 @@ async function sendOrderToProductionFor(caller, rawData) {
         orderId,
         reference: orderId.split("-").at(-1) ?? orderId,
         tableLabel,
+        tabName,
         productionArea: ticket.area,
         flowStatus: "newOrder",
         ticketReleasedAt: FieldValue.serverTimestamp(),
@@ -1209,6 +1289,8 @@ async function invokePlatformAction(action, caller, data) {
 
 async function invokePosAction(action, caller, data) {
   switch (action) {
+    case "openNamedTab":
+      return openNamedTabFor(caller, data);
     case "createTable":
       return createTableFor(caller, data);
     case "updateTable":
@@ -1345,6 +1427,8 @@ export const sendOrderToProduction = onCall((request) =>
   sendOrderToProductionFor(callerFromCall(request), request.data));
 export const updateProductionTicket = onCall((request) =>
   updateProductionTicketFor(callerFromCall(request), request.data));
+export const openNamedTab = onCall((request) =>
+  openNamedTabFor(callerFromCall(request), request.data));
 export const createTable = onCall((request) =>
   createTableFor(callerFromCall(request), request.data));
 export const updateTable = onCall((request) =>

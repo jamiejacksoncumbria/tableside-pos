@@ -291,18 +291,20 @@ class PosOrder {
     required this.id,
     required this.tenantId,
     required this.venueId,
-    required this.tableId,
     required this.businessDate,
     required this.openedAt,
     required this.status,
     required this.lines,
+    this.tableId,
+    this.tabName,
     this.isCustomerOriginated = false,
   });
 
   final String id;
   final String tenantId;
   final String venueId;
-  final String tableId;
+  final String? tableId;
+  final String? tabName;
   final DateTime businessDate;
   final DateTime openedAt;
   final OrderStatus status;
@@ -314,6 +316,7 @@ class PosOrder {
   PosOrder copyWith({
     String? id,
     String? tableId,
+    String? tabName,
     OrderStatus? status,
     List<OrderLine>? lines,
     bool? isCustomerOriginated,
@@ -323,6 +326,7 @@ class PosOrder {
       tenantId: tenantId,
       venueId: venueId,
       tableId: tableId ?? this.tableId,
+      tabName: tabName ?? this.tabName,
       businessDate: businessDate,
       openedAt: openedAt,
       status: status ?? this.status,

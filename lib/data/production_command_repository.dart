@@ -59,6 +59,22 @@ class ProductionCommandRepository {
     });
   }
 
+  Future<String> openNamedTab({
+    required VenueScope scope,
+    required String tabName,
+  }) async {
+    final result = await _call('openNamedTab', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'tabName': tabName,
+    });
+    final orderId = result['orderId'];
+    if (orderId is! String || orderId.isEmpty) {
+      throw StateError('The server did not return the named tab order.');
+    }
+    return orderId;
+  }
+
   Future<void> sendNewLinesToProduction({
     required VenueScope scope,
     required PosOrder order,
@@ -74,6 +90,7 @@ class ProductionCommandRepository {
       'venueId': scope.venueId,
       'orderId': order.id,
       'tableId': order.tableId,
+      'tabName': order.tabName,
       'stockOverride': stockOverride,
       'lines': unsentLines
           .map(

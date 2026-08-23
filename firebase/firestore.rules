@@ -125,6 +125,11 @@ service cloud.firestore {
         allow read, write: if false;
       }
 
+      // Open named tabs are server-managed, venue-local unique-name records.
+      match /openTabNames/{tabId} {
+        allow read, write: if false;
+      }
+
       match /orders/{orderId} {
         allow read: if isPlatformAdmin() || isMember(tenantId);
         allow write: if false;

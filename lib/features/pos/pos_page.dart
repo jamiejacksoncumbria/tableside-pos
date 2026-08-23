@@ -105,6 +105,7 @@ class _TablesPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final selectedTableId = ref.watch(selectedTableProvider);
+    final activeOrder = ref.watch(activeOrderProvider);
     final scope = ref.watch(activeVenueScopeProvider);
     final tables = ref
         .watch(diningTablesProvider)
@@ -116,7 +117,8 @@ class _TablesPanel extends ConsumerWidget {
     // A new live venue will not have the demo's `table-2` ID. As soon as its
     // table stream arrives, open the first available table rather than leaving
     // a hidden invalid selection that would fail only when Send is pressed.
-    if (tables.isNotEmpty &&
+    if (activeOrder.tabName == null &&
+        tables.isNotEmpty &&
         !tables.any((table) => table.id == selectedTableId)) {
       final firstTable = tables.first;
       WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -138,14 +140,23 @@ class _TablesPanel extends ConsumerWidget {
           children: [
             Row(
               children: [
-                Text('Tables', style: Theme.of(context).textTheme.titleLarge),
+                Text(
+                  'Tables & tabs',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
                 const Spacer(),
-                Icon(Icons.tune_rounded, color: scheme.primary),
+                TextButton.icon(
+                  onPressed: () => _showNamedTabDialog(context, ref),
+                  icon: const Icon(Icons.person_add_alt_1_rounded),
+                  label: Text(compact ? 'Tab' : 'Named tab'),
+                ),
               ],
             ),
             const SizedBox(height: 4),
             Text(
-              'Market Street',
+              activeOrder.tabName == null
+                  ? 'Select a table or open a named tab'
+                  : 'Current tab: ${activeOrder.tabName}',
               style: Theme.of(
                 context,
               ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
@@ -550,6 +561,7 @@ class _OrderPanel extends ConsumerWidget {
           loading: () => tableId,
           error: (_, _) => tableId,
         );
+    final orderLocationLabel = order.tabName ?? tableLabel;
     final scheme = Theme.of(context).colorScheme;
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -560,7 +572,10 @@ class _OrderPanel extends ConsumerWidget {
           children: [
             Row(
               children: [
-                Text(tableLabel, style: Theme.of(context).textTheme.titleLarge),
+                Text(
+                  orderLocationLabel,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
                 const Spacer(),
                 _StatusChip(status: order.status),
               ],
@@ -723,6 +738,60 @@ class _StatusChip extends StatelessWidget {
       visualDensity: VisualDensity.compact,
     );
   }
+}
+
+void _showNamedTabDialog(BuildContext context, WidgetRef ref) {
+  final nameController = TextEditingController();
+  showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      icon: const Icon(Icons.person_outline_rounded),
+      title: const Text('Open named tab'),
+      content: TextField(
+        controller: nameController,
+        autofocus: true,
+        maxLength: 80,
+        textCapitalization: TextCapitalization.words,
+        decoration: const InputDecoration(
+          labelText: 'Customer or tab name',
+          hintText: 'For example, John N',
+          helperText:
+              'Entering an existing open name returns to that tab instead.',
+        ),
+        onSubmitted: (_) {},
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton.icon(
+          onPressed: () async {
+            try {
+              await ref
+                  .read(activeOrderProvider.notifier)
+                  .openNamedTab(nameController.text);
+              ref.read(selectedTableProvider.notifier).select('');
+              if (!dialogContext.mounted) return;
+              Navigator.of(dialogContext).pop();
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Named tab is ready.')),
+              );
+            } on Object catch (error, stackTrace) {
+              AppLogger.error('Open named tab', error, stackTrace);
+              if (!dialogContext.mounted) return;
+              ScaffoldMessenger.of(
+                dialogContext,
+              ).showSnackBar(SnackBar(content: Text('$error')));
+            }
+          },
+          icon: const Icon(Icons.open_in_new_rounded),
+          label: const Text('Open tab'),
+        ),
+      ],
+    ),
+  ).whenComplete(nameController.dispose);
 }
 
 void _showSplitBillSheet(BuildContext context) {
