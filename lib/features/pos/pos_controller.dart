@@ -102,7 +102,10 @@ class ActiveOrderController extends Notifier<PosOrder> {
 
   void addProduct(MenuProduct product) {
     final existingIndex = state.lines.indexWhere(
-      (line) => line.productId == product.id,
+      // A sent line is an immutable snapshot of an already released kitchen
+      // or bar ticket. Adding the same product afterwards must form a fresh,
+      // unsent line so it appears on the next additions ticket.
+      (line) => line.productId == product.id && !line.isSentToProduction,
     );
     final updatedLines = [...state.lines];
     if (existingIndex >= 0) {
