@@ -23,6 +23,12 @@ final diningTablesProvider = StreamProvider<List<DiningTable>>((ref) {
   return ref.watch(firestorePosRepositoryProvider).watchTables(scope);
 });
 
+final openNamedTabsProvider = StreamProvider<List<OpenNamedTab>>((ref) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  if (scope == null) return Stream.value(const []);
+  return ref.watch(firestorePosRepositoryProvider).watchOpenNamedTabs(scope);
+});
+
 final tenantProfileProvider =
     NotifierProvider<TenantProfileController, TenantProfile>(
       TenantProfileController.new,

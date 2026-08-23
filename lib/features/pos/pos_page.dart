@@ -114,6 +114,16 @@ class _TablesPanel extends ConsumerWidget {
           loading: () => scope == null ? demoTables : const [],
           error: (_, _) => scope == null ? demoTables : const [],
         );
+    final namedTabs = ref
+        .watch(openNamedTabsProvider)
+        .when(
+          data: (items) => items,
+          loading: () => const <OpenNamedTab>[],
+          error: (error, stackTrace) {
+            AppLogger.error('Load open named tabs', error, stackTrace);
+            return const <OpenNamedTab>[];
+          },
+        );
     // A new live venue will not have the demo's `table-2` ID. As soon as its
     // table stream arrives, open the first available table rather than leaving
     // a hidden invalid selection that would fail only when Send is pressed.
@@ -138,17 +148,20 @@ class _TablesPanel extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 0,
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 Text(
                   'Tables & tabs',
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
-                const Spacer(),
                 TextButton.icon(
                   onPressed: () => _showNamedTabDialog(context, ref),
                   icon: const Icon(Icons.person_add_alt_1_rounded),
-                  label: Text(compact ? 'Tab' : 'Named tab'),
+                  label: const Text('Named tab'),
                 ),
               ],
             ),
@@ -164,36 +177,79 @@ class _TablesPanel extends ConsumerWidget {
             const SizedBox(height: 14),
             Expanded(
               child: SingleChildScrollView(
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    for (final table in tables)
-                      _TableButton(
-                        table: table,
-                        selected: table.id == selectedTableId,
-                        compact: compact,
-                        onTap: () async {
-                          try {
-                            await ref
-                                .read(activeOrderProvider.notifier)
-                                .openTable(table.id);
-                            ref
-                                .read(selectedTableProvider.notifier)
-                                .select(table.id);
-                          } on Object catch (error, stackTrace) {
-                            AppLogger.error(
-                              'Switch selected table',
-                              error,
-                              stackTrace,
-                            );
-                            if (!context.mounted) return;
-                            ScaffoldMessenger.of(
-                              context,
-                            ).showSnackBar(SnackBar(content: Text('$error')));
-                          }
-                        },
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final table in tables)
+                          _TableButton(
+                            table: table,
+                            selected:
+                                activeOrder.tabName == null &&
+                                table.id == selectedTableId,
+                            compact: compact,
+                            onTap: () async {
+                              try {
+                                await ref
+                                    .read(activeOrderProvider.notifier)
+                                    .openTable(table.id);
+                                ref
+                                    .read(selectedTableProvider.notifier)
+                                    .select(table.id);
+                              } on Object catch (error, stackTrace) {
+                                AppLogger.error(
+                                  'Switch selected table',
+                                  error,
+                                  stackTrace,
+                                );
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('$error')),
+                                );
+                              }
+                            },
+                          ),
+                      ],
+                    ),
+                    if (namedTabs.isNotEmpty) ...[
+                      const SizedBox(height: 16),
+                      Text(
+                        'Open named tabs',
+                        style: Theme.of(context).textTheme.labelLarge,
                       ),
+                      const SizedBox(height: 6),
+                      for (final tab in namedTabs)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 6),
+                          child: _NamedTabButton(
+                            tab: tab,
+                            selected: tab.orderId == activeOrder.id,
+                            onTap: () async {
+                              try {
+                                await ref
+                                    .read(activeOrderProvider.notifier)
+                                    .openNamedTab(tab.name);
+                                ref
+                                    .read(selectedTableProvider.notifier)
+                                    .select('');
+                              } on Object catch (error, stackTrace) {
+                                AppLogger.error(
+                                  'Open listed named tab',
+                                  error,
+                                  stackTrace,
+                                );
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('$error')),
+                                );
+                              }
+                            },
+                          ),
+                        ),
+                    ],
                   ],
                 ),
               ),
@@ -260,6 +316,62 @@ class _TableButton extends StatelessWidget {
                   color: foreground.withValues(alpha: .8),
                 ),
               ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NamedTabButton extends StatelessWidget {
+  const _NamedTabButton({
+    required this.tab,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final OpenNamedTab tab;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final background = selected
+        ? scheme.primaryContainer
+        : scheme.surfaceContainerHighest;
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: 'Open tab for ${tab.name}',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Ink(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: background,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.person_outline_rounded,
+                size: 18,
+                color: selected ? scheme.primary : scheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  tab.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+              if (selected)
+                Icon(Icons.check_circle_rounded, color: scheme.primary),
             ],
           ),
         ),

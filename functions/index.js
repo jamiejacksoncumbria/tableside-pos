@@ -759,7 +759,19 @@ async function openNamedTabFor(caller, rawData) {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
     }
     if (currentTab.exists) {
-      return {orderId: currentTab.data().orderId, reopened: true};
+      const currentOrderId = currentTab.data().orderId;
+      const currentOrder = typeof currentOrderId === "string"
+        ? await transaction.get(tenantRef.collection("orders").doc(currentOrderId))
+        : null;
+      if (currentOrder?.exists
+          && currentOrder.data().venueId === venueId
+          && currentOrder.data().status !== "closed") {
+        return {orderId: currentOrderId, reopened: true};
+      }
+      // A later bill-close command normally removes this reservation. Clean up
+      // a stale one defensively so a missing/closed historic order cannot
+      // permanently block a customer name.
+      transaction.delete(tabRef);
     }
     const orderRef = tenantRef.collection("orders").doc();
     transaction.create(orderRef, {

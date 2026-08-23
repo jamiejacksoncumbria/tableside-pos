@@ -248,6 +248,20 @@ class DiningTable {
   final bool hasOpenOrder;
 }
 
+/// A venue-local customer-name tab. Its server-created registry is what makes
+/// a name unique while that tab remains open.
+class OpenNamedTab {
+  const OpenNamedTab({
+    required this.id,
+    required this.orderId,
+    required this.name,
+  });
+
+  final String id;
+  final String orderId;
+  final String name;
+}
+
 class OrderLine {
   const OrderLine({
     required this.id,

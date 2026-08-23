@@ -161,6 +161,37 @@ class FirestorePosRepository {
         );
   }
 
+  /// Watches the server-owned name reservations for live, no-table tabs.
+  /// There is one document per open name, so this stays small even when a
+  /// venue has a long order history.
+  Stream<List<OpenNamedTab>> watchOpenNamedTabs(VenueScope scope) {
+    return _firestore
+        .collection('tenants/${scope.tenantId}/openTabNames')
+        .where('venueId', isEqualTo: scope.venueId)
+        .snapshots()
+        .map((snapshot) {
+          final tabs = snapshot.docs
+              .map((document) {
+                final data = document.data();
+                final orderId = data['orderId'] as String? ?? '';
+                final name = data['tabName'] as String? ?? '';
+                if (orderId.isEmpty || name.trim().isEmpty) return null;
+                return OpenNamedTab(
+                  id: document.id,
+                  orderId: orderId,
+                  name: name,
+                );
+              })
+              .whereType<OpenNamedTab>()
+              .toList(growable: false);
+          tabs.sort(
+            (first, second) =>
+                first.name.toLowerCase().compareTo(second.name.toLowerCase()),
+          );
+          return tabs;
+        });
+  }
+
   Future<PosOrder?> fetchOpenOrder({
     required VenueScope scope,
     required String tableId,
