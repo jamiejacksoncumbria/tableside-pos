@@ -146,7 +146,7 @@ App Check is activated during Firebase startup before the app uses Authenticatio
 - Android release builds use Play Integrity. For an APK distributed outside Google Play, configure the Play Integrity App Check registration as an outside-Google-Play app and do not require the `PLAY_RECOGNIZED` or `LICENSED` verdicts.
 - iOS debug builds use the debug provider; release builds use App Attest with DeviceCheck fallback. Register the iOS bundle in App Check before testing a signed iPhone build.
 - Windows has only Firebase's debug provider. It is supported for development/monitoring, but is not suitable as a production attestation secret because a shipped desktop app can be inspected. Windows remains protected by sign-in, membership checks, Firestore/Storage rules, and server-side validation; do **not** enable Firebase service enforcement until a production desktop approach is agreed.
-- Web debug builds use the debug provider. Production web builds use reCAPTCHA v3 when supplied a registered site key through `TABLESIDE_WEB_APP_CHECK_RECAPTCHA_SITE_KEY`.
+- Web debug builds use the debug provider. Supply a registered `TABLESIDE_WEB_APP_CHECK_DEBUG_TOKEN` to keep one development browser token stable; otherwise Firebase generates one per browser origin. Production web builds use reCAPTCHA v3 when supplied a registered site key through `TABLESIDE_WEB_APP_CHECK_RECAPTCHA_SITE_KEY`.
 
 Set up Android App Check in this order:
 
@@ -162,6 +162,12 @@ For Windows development monitoring, create a registered debug token and run:
 
 ```powershell
 flutter run -d windows --dart-define=TABLESIDE_USE_FIREBASE=true --dart-define=TABLESIDE_WINDOWS_APP_CHECK_DEBUG_TOKEN=YOUR_REGISTERED_TOKEN
+```
+
+For a stable Chrome development token, register a different debug token and run:
+
+```powershell
+flutter run -d chrome --web-port=5000 --dart-define=TABLESIDE_USE_FIREBASE=true --dart-define=TABLESIDE_WEB_APP_CHECK_DEBUG_TOKEN=YOUR_REGISTERED_TOKEN
 ```
 
 ## Run locally

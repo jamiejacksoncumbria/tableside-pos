@@ -27,6 +27,9 @@ Future<void> _activateAppCheck() async {
       const webSiteKey = String.fromEnvironment(
         'TABLESIDE_WEB_APP_CHECK_RECAPTCHA_SITE_KEY',
       );
+      const webDebugToken = String.fromEnvironment(
+        'TABLESIDE_WEB_APP_CHECK_DEBUG_TOKEN',
+      );
       final useDebugProvider = kDebugMode;
       if (!useDebugProvider && webSiteKey.isEmpty) {
         AppLogger.info(
@@ -36,12 +39,14 @@ Future<void> _activateAppCheck() async {
       }
       await FirebaseAppCheck.instance.activate(
         providerWeb: useDebugProvider
-            ? WebDebugProvider()
+            ? WebDebugProvider(
+                debugToken: webDebugToken.isEmpty ? null : webDebugToken,
+              )
             : ReCaptchaV3Provider(webSiteKey),
       );
       _appCheckActivated = true;
       AppLogger.info(
-        'Firebase App Check activated for web (${useDebugProvider ? 'debug' : 'reCAPTCHA v3'} provider).',
+        'Firebase App Check activated for web (${useDebugProvider ? (webDebugToken.isEmpty ? 'generated debug' : 'fixed debug') : 'reCAPTCHA v3'} provider).',
       );
       return;
     }
