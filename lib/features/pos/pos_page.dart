@@ -124,6 +124,7 @@ class _TablesPanel extends ConsumerWidget {
             return const <OpenNamedTab>[];
           },
         );
+    final namedTabGroups = _groupOpenNamedTabs(namedTabs);
     // A new live venue will not have the demo's `table-2` ID. As soon as its
     // table stream arrives, open the first available table rather than leaving
     // a hidden invalid selection that would fail only when Send is pressed.
@@ -176,81 +177,92 @@ class _TablesPanel extends ConsumerWidget {
             ),
             const SizedBox(height: 14),
             Expanded(
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        for (final table in tables)
-                          _TableButton(
-                            table: table,
-                            selected:
-                                activeOrder.tabName == null &&
-                                table.id == selectedTableId,
-                            compact: compact,
-                            onTap: () async {
-                              try {
-                                await ref
-                                    .read(activeOrderProvider.notifier)
-                                    .openTable(table.id);
-                                ref
-                                    .read(selectedTableProvider.notifier)
-                                    .select(table.id);
-                              } on Object catch (error, stackTrace) {
-                                AppLogger.error(
-                                  'Switch selected table',
-                                  error,
-                                  stackTrace,
-                                );
-                                if (!context.mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content: Text('$error')),
-                                );
-                              }
-                            },
-                          ),
-                      ],
-                    ),
-                    if (namedTabs.isNotEmpty) ...[
-                      const SizedBox(height: 16),
-                      Text(
-                        'Open named tabs',
-                        style: Theme.of(context).textTheme.labelLarge,
+              child: Scrollbar(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final table in tables)
+                            _TableButton(
+                              table: table,
+                              selected:
+                                  activeOrder.tabName == null &&
+                                  table.id == selectedTableId,
+                              compact: compact,
+                              onTap: () async {
+                                try {
+                                  await ref
+                                      .read(activeOrderProvider.notifier)
+                                      .openTable(table.id);
+                                  ref
+                                      .read(selectedTableProvider.notifier)
+                                      .select(table.id);
+                                } on Object catch (error, stackTrace) {
+                                  AppLogger.error(
+                                    'Switch selected table',
+                                    error,
+                                    stackTrace,
+                                  );
+                                  if (!context.mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text('$error')),
+                                  );
+                                }
+                              },
+                            ),
+                        ],
                       ),
-                      const SizedBox(height: 6),
-                      for (final tab in namedTabs)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 6),
-                          child: _NamedTabButton(
-                            tab: tab,
-                            selected: tab.orderId == activeOrder.id,
-                            onTap: () async {
-                              try {
-                                await ref
-                                    .read(activeOrderProvider.notifier)
-                                    .openNamedTab(tab.name);
-                                ref
-                                    .read(selectedTableProvider.notifier)
-                                    .select('');
-                              } on Object catch (error, stackTrace) {
-                                AppLogger.error(
-                                  'Open listed named tab',
-                                  error,
-                                  stackTrace,
-                                );
-                                if (!context.mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content: Text('$error')),
-                                );
-                              }
-                            },
-                          ),
+                      if (namedTabGroups.isNotEmpty) ...[
+                        const SizedBox(height: 16),
+                        Text(
+                          'Open named tabs',
+                          style: Theme.of(context).textTheme.labelLarge,
                         ),
+                        const SizedBox(height: 6),
+                        for (final group in namedTabGroups) ...[
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6, bottom: 6),
+                            child: Text(
+                              _namedTabDateLabel(context, group.openedDate),
+                              style: Theme.of(context).textTheme.labelMedium,
+                            ),
+                          ),
+                          for (final tab in group.tabs)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: _NamedTabButton(
+                                tab: tab,
+                                selected: tab.orderId == activeOrder.id,
+                                onTap: () async {
+                                  try {
+                                    await ref
+                                        .read(activeOrderProvider.notifier)
+                                        .openNamedTab(tab.name);
+                                    ref
+                                        .read(selectedTableProvider.notifier)
+                                        .select('');
+                                  } on Object catch (error, stackTrace) {
+                                    AppLogger.error(
+                                      'Open listed named tab',
+                                      error,
+                                      stackTrace,
+                                    );
+                                    if (!context.mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text('$error')),
+                                    );
+                                  }
+                                },
+                              ),
+                            ),
+                        ],
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -378,6 +390,43 @@ class _NamedTabButton extends StatelessWidget {
       ),
     );
   }
+}
+
+class _NamedTabDateGroup {
+  const _NamedTabDateGroup({required this.openedDate, required this.tabs});
+
+  final DateTime? openedDate;
+  final List<OpenNamedTab> tabs;
+}
+
+List<_NamedTabDateGroup> _groupOpenNamedTabs(List<OpenNamedTab> tabs) {
+  final datedTabs = <DateTime, List<OpenNamedTab>>{};
+  final undatedTabs = <OpenNamedTab>[];
+  for (final tab in tabs) {
+    final openedAt = tab.openedAt;
+    if (openedAt == null) {
+      undatedTabs.add(tab);
+      continue;
+    }
+    final date = DateTime(openedAt.year, openedAt.month, openedAt.day);
+    (datedTabs[date] ??= <OpenNamedTab>[]).add(tab);
+  }
+  final dates = datedTabs.keys.toList()..sort((a, b) => b.compareTo(a));
+  return [
+    for (final date in dates)
+      _NamedTabDateGroup(openedDate: date, tabs: datedTabs[date]!),
+    if (undatedTabs.isNotEmpty)
+      _NamedTabDateGroup(openedDate: null, tabs: undatedTabs),
+  ];
+}
+
+String _namedTabDateLabel(BuildContext context, DateTime? date) {
+  if (date == null) return 'Earlier tabs';
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  if (date == today) return 'Today';
+  if (date == today.subtract(const Duration(days: 1))) return 'Yesterday';
+  return MaterialLocalizations.of(context).formatMediumDate(date);
 }
 
 class _MenuPanel extends ConsumerWidget {

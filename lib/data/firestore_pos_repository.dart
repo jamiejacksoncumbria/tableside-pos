@@ -175,18 +175,21 @@ class FirestorePosRepository {
                 final data = document.data();
                 final orderId = data['orderId'] as String? ?? '';
                 final name = data['tabName'] as String? ?? '';
+                final createdAt = data['createdAt'];
                 if (orderId.isEmpty || name.trim().isEmpty) return null;
                 return OpenNamedTab(
                   id: document.id,
                   orderId: orderId,
                   name: name,
+                  openedAt: createdAt is Timestamp ? createdAt.toDate() : null,
                 );
               })
               .whereType<OpenNamedTab>()
               .toList(growable: false);
           tabs.sort(
-            (first, second) =>
-                first.name.toLowerCase().compareTo(second.name.toLowerCase()),
+            (first, second) => (second.openedAt ?? DateTime(0)).compareTo(
+              first.openedAt ?? DateTime(0),
+            ),
           );
           return tabs;
         });

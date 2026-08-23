@@ -255,11 +255,13 @@ class OpenNamedTab {
     required this.id,
     required this.orderId,
     required this.name,
+    this.openedAt,
   });
 
   final String id;
   final String orderId;
   final String name;
+  final DateTime? openedAt;
 }
 
 class OrderLine {
