@@ -1,8 +1,11 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
+import '../printing/bluetooth_production_print_service.dart';
 import 'domain.dart';
 
 final menuSectionsProvider = StreamProvider<List<MenuSection>>((ref) {
@@ -212,18 +215,54 @@ class ActiveOrderController extends Notifier<PosOrder> {
     state = order;
   }
 
-  Future<void> sendToProduction() async {
+  Future<BluetoothProductionPrintResult> sendToProduction() async {
     final scope = ref.read(activeVenueScopeProvider);
+    final unsentLines = state.lines
+        .where((line) => !line.isSentToProduction)
+        .toList(growable: false);
+    var printResult = const BluetoothProductionPrintResult();
     if (scope != null) {
       await ref
           .read(productionCommandRepositoryProvider)
           .sendNewLinesToProduction(scope: scope, order: state);
+      final tableLabel = _tableLabelFor(state);
+      final user = FirebaseAuth.instance.currentUser;
+      AppLogger.info(
+        'Bluetooth production printing: evaluating ${unsentLines.length} newly sent line(s).',
+      );
+      printResult = await BluetoothProductionPrintService().printNewLines(
+        scope: scope,
+        order: state,
+        lines: unsentLines,
+        restaurantName: ref.read(tenantProfileProvider).displayName,
+        tableLabel: tableLabel,
+        createdByName: user?.displayName?.trim().isNotEmpty == true
+            ? user!.displayName!.trim()
+            : user?.email ?? '',
+      );
+      AppLogger.info(
+        'Bluetooth production printing: ${printResult.ticketsPrinted} ticket(s) sent to the local printer.',
+      );
     }
     state = state.copyWith(
       status: OrderStatus.sent,
       lines: state.lines
           .map((line) => line.copyWith(isSentToProduction: true))
           .toList(growable: false),
+    );
+    return printResult;
+  }
+
+  String _tableLabelFor(PosOrder order) {
+    final tableId = order.tableId;
+    if (tableId == null) return '';
+    return ref.read(diningTablesProvider).when(
+      data: (tables) => tables
+          .where((table) => table.id == tableId)
+          .map((table) => table.label)
+          .firstOrNull ?? tableId,
+      loading: () => tableId,
+      error: (_, _) => tableId,
     );
   }
 

@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/tenant_scope.dart';
 import '../../data/tenant_profile_repository.dart';
 import '../printing/bluetooth_printer_setup_page.dart';
 import '../pos/domain.dart';
@@ -153,6 +154,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   Widget build(BuildContext context) {
     final TenantProfile profile =
         widget.profileOverride ?? ref.watch(tenantProfileProvider);
+    final venueScope = ref.watch(activeVenueScopeProvider);
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -310,6 +312,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   MaterialPageRoute<void>(
                     builder: (_) => BluetoothPrinterSetupPage(
                       restaurantName: profile.displayName,
+                      venueRoutingKey: venueScope == null
+                          ? 'demo'
+                          : '${venueScope.tenantId}_${venueScope.venueId}',
                     ),
                   ),
                 ),

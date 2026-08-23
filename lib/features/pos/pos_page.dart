@@ -837,14 +837,16 @@ class _OrderPanel extends ConsumerWidget {
                         ? null
                         : () async {
                             try {
-                              await ref
+                              final printResult = await ref
                                   .read(activeOrderProvider.notifier)
                                   .sendToProduction();
                               if (!context.mounted) return;
                               ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
+                                SnackBar(
                                   content: Text(
-                                    'New items sent to the Order Flow Board. Configure print routes before live service.',
+                                    printResult.ticketsPrinted > 0
+                                        ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
+                                        : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.',
                                   ),
                                 ),
                               );
@@ -858,7 +860,7 @@ class _OrderPanel extends ConsumerWidget {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
                                   content: Text(
-                                    'The order could not be sent. It is still open for retry.',
+                                    'The order or its local ticket could not be completed. It remains open for a safe retry.',
                                   ),
                                 ),
                               );

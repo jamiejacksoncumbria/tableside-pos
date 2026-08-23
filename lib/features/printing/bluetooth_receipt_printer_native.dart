@@ -13,6 +13,8 @@ BluetoothReceiptPrinter createBluetoothReceiptPrinter() =>
 class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   static const _namePreferenceKey = 'tableside.bluetoothPrinter.name';
   static const _addressPreferenceKey = 'tableside.bluetoothPrinter.address';
+  static const _routingPreferencePrefix =
+      'tableside.bluetoothPrinter.productionRouting.';
 
   final SharedPreferencesAsync _preferences = SharedPreferencesAsync();
 
@@ -56,6 +58,36 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   Future<void> clearSelectedDevice() async {
     await _preferences.remove(_namePreferenceKey);
     await _preferences.remove(_addressPreferenceKey);
+  }
+
+  @override
+  Future<BluetoothProductionRouting> productionRouting({
+    required String venueRoutingKey,
+  }) async {
+    final raw = await _preferences.getString(
+      _routingPreferenceKey(venueRoutingKey),
+    );
+    if (raw == null || raw.isEmpty) return const BluetoothProductionRouting();
+    final parts = raw.split('|');
+    return BluetoothProductionRouting(
+      enabled: parts.first == 'enabled',
+      productionAreas: parts
+          .skip(1)
+          .where((area) => area.isNotEmpty)
+          .toSet(),
+    );
+  }
+
+  @override
+  Future<void> saveProductionRouting({
+    required String venueRoutingKey,
+    required BluetoothProductionRouting routing,
+  }) {
+    final value = [
+      routing.enabled ? 'enabled' : 'disabled',
+      ...routing.productionAreas.toList()..sort(),
+    ].join('|');
+    return _preferences.setString(_routingPreferenceKey(venueRoutingKey), value);
   }
 
   @override
@@ -109,6 +141,82 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       );
     }
   }
+
+  @override
+  Future<void> printProductionTicket({
+    required BluetoothReceiptPrinterDevice device,
+    required BluetoothProductionTicket ticket,
+  }) async {
+    await _ensureReady();
+    final connected = await PrintBluetoothThermal.connect(
+      macPrinterAddress: device.address,
+    );
+    if (!connected) {
+      throw const BluetoothReceiptPrinterException(
+        'Could not connect to the paired printer. Check it is powered on, nearby, and not connected to another device.',
+      );
+    }
+
+    final profile = await CapabilityProfile.load();
+    final generator = Generator(PaperSize.mm58, profile);
+    final location = ticket.tabName?.trim().isNotEmpty == true
+        ? 'Tab: ${ticket.tabName!.trim()}'
+        : ticket.tableLabel?.trim().isNotEmpty == true
+        ? 'Table: ${ticket.tableLabel!.trim()}'
+        : 'Order location unavailable';
+    final areaLabel = switch (ticket.productionArea) {
+      'bar' => 'BAR',
+      'dessert' => 'DESSERT',
+      _ => 'KITCHEN',
+    };
+    final now = DateTime.now();
+    final printedAt =
+        '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} '
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final bytes = <int>[
+      ...generator.reset(),
+      ...generator.text(
+        ticket.restaurantName.isEmpty ? 'TABLESIDE POS' : ticket.restaurantName,
+        styles: const PosStyles(
+          align: PosAlign.center,
+          bold: true,
+          height: PosTextSize.size2,
+          width: PosTextSize.size2,
+        ),
+      ),
+      ...generator.text(
+        ticket.isAddition ? '$areaLabel ADDITION' : areaLabel,
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      ),
+      ...generator.hr(),
+      ...generator.text(location, styles: const PosStyles(bold: true)),
+      ...generator.text('Order #${ticket.reference}'),
+      ...generator.text('Printed: $printedAt'),
+      if (ticket.createdByName?.trim().isNotEmpty == true)
+        ...generator.text('By: ${ticket.createdByName!.trim()}'),
+      ...generator.hr(),
+      for (final line in ticket.lines)
+        ...generator.text(
+          '${line.quantity} x ${line.name}',
+          styles: const PosStyles(bold: true),
+        ),
+      ...generator.hr(),
+      ...generator.text(
+        ticket.isAddition ? 'ADDITION TO EXISTING ORDER' : 'NEW ORDER',
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      ),
+      ...generator.feed(4),
+    ];
+    final written = await PrintBluetoothThermal.writeBytes(bytes);
+    if (!written) {
+      throw const BluetoothReceiptPrinterException(
+        'The printer connection was lost before the production ticket was accepted.',
+      );
+    }
+  }
+
+  String _routingPreferenceKey(String venueRoutingKey) =>
+      '$_routingPreferencePrefix$venueRoutingKey';
 
   Future<void> _ensureReady() async {
     if (!isSupported) {

@@ -9,6 +9,57 @@ class BluetoothReceiptPrinterDevice {
   final String address;
 }
 
+/// Local routing for the printer paired with this physical device. The route
+/// is deliberately keyed by venue so staff carrying a device between venues
+/// cannot accidentally print a venue's orders at another venue.
+class BluetoothProductionRouting {
+  const BluetoothProductionRouting({
+    this.enabled = false,
+    this.productionAreas = const <String>{},
+  });
+
+  final bool enabled;
+  final Set<String> productionAreas;
+
+  bool routes(String productionArea) =>
+      enabled && productionAreas.contains(productionArea);
+}
+
+/// A price-free payload for a kitchen, bar, or dessert ticket.
+class BluetoothProductionTicket {
+  const BluetoothProductionTicket({
+    required this.ticketId,
+    required this.restaurantName,
+    required this.productionArea,
+    required this.reference,
+    required this.lines,
+    this.tableLabel,
+    this.tabName,
+    this.createdByName,
+    this.isAddition = false,
+  });
+
+  final String ticketId;
+  final String restaurantName;
+  final String productionArea;
+  final String reference;
+  final List<BluetoothProductionTicketLine> lines;
+  final String? tableLabel;
+  final String? tabName;
+  final String? createdByName;
+  final bool isAddition;
+}
+
+class BluetoothProductionTicketLine {
+  const BluetoothProductionTicketLine({
+    required this.name,
+    required this.quantity,
+  });
+
+  final String name;
+  final int quantity;
+}
+
 class BluetoothReceiptPrinterException implements Exception {
   const BluetoothReceiptPrinterException(this.message);
 
@@ -32,6 +83,15 @@ abstract interface class BluetoothReceiptPrinter {
 
   Future<void> clearSelectedDevice();
 
+  Future<BluetoothProductionRouting> productionRouting({
+    required String venueRoutingKey,
+  });
+
+  Future<void> saveProductionRouting({
+    required String venueRoutingKey,
+    required BluetoothProductionRouting routing,
+  });
+
   /// Connects to [device] and writes a real 58 mm ESC/POS test ticket.
   ///
   /// Completion means the bytes were accepted by the Bluetooth transport. A
@@ -41,5 +101,10 @@ abstract interface class BluetoothReceiptPrinter {
   Future<void> printTestTicket({
     required BluetoothReceiptPrinterDevice device,
     required String restaurantName,
+  });
+
+  Future<void> printProductionTicket({
+    required BluetoothReceiptPrinterDevice device,
+    required BluetoothProductionTicket ticket,
   });
 }

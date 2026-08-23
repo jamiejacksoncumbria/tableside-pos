@@ -5,9 +5,14 @@ import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
 
 class BluetoothPrinterSetupPage extends StatefulWidget {
-  const BluetoothPrinterSetupPage({super.key, required this.restaurantName});
+  const BluetoothPrinterSetupPage({
+    super.key,
+    required this.restaurantName,
+    required this.venueRoutingKey,
+  });
 
   final String restaurantName;
+  final String venueRoutingKey;
 
   @override
   State<BluetoothPrinterSetupPage> createState() =>
@@ -19,8 +24,10 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
 
   List<BluetoothReceiptPrinterDevice> _devices = const [];
   BluetoothReceiptPrinterDevice? _selected;
+  BluetoothProductionRouting _routing = const BluetoothProductionRouting();
   bool _loading = true;
   bool _printing = false;
+  bool _savingRouting = false;
   String? _error;
 
   @override
@@ -44,6 +51,9 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
     });
     try {
       final selected = await _printer.selectedDevice();
+      final routing = await _printer.productionRouting(
+        venueRoutingKey: widget.venueRoutingKey,
+      );
       final devices = await _printer.pairedDevices();
       if (!mounted) return;
       setState(() {
@@ -52,6 +62,7 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
           (device) => device?.address == selected?.address,
           orElse: () => selected,
         );
+        _routing = routing;
       });
     } on Object catch (error, stackTrace) {
       AppLogger.error('Load paired Bluetooth printers', error, stackTrace);
@@ -119,6 +130,36 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
       ).showSnackBar(SnackBar(content: Text(_friendlyError(error))));
     } finally {
       if (mounted) setState(() => _printing = false);
+    }
+  }
+
+  Future<void> _saveRouting(BluetoothProductionRouting routing) async {
+    if (_savingRouting) return;
+    setState(() => _savingRouting = true);
+    try {
+      await _printer.saveProductionRouting(
+        venueRoutingKey: widget.venueRoutingKey,
+        routing: routing,
+      );
+      if (!mounted) return;
+      setState(() => _routing = routing);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            routing.enabled && routing.productionAreas.isNotEmpty
+                ? 'Live production routing saved for this venue.'
+                : 'Live production routing is off for this venue.',
+          ),
+        ),
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Save Bluetooth production routing', error, stackTrace);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(_friendlyError(error))));
+    } finally {
+      if (mounted) setState(() => _savingRouting = false);
     }
   }
 
@@ -218,6 +259,74 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                 ),
               ),
             ),
+          const SizedBox(height: 16),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Live production tickets on this device',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'When this device sends an order, the selected printer receives tickets only for the production areas enabled below. This setting is stored separately for the active venue.',
+                  ),
+                  const SizedBox(height: 8),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Enable live production printing'),
+                    value: _routing.enabled,
+                    onChanged: _selected == null || _savingRouting
+                        ? null
+                        : (enabled) => _saveRouting(
+                            BluetoothProductionRouting(
+                              enabled: enabled,
+                              productionAreas: _routing.productionAreas,
+                            ),
+                          ),
+                  ),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final area in const [
+                        ('bar', 'Bar'),
+                        ('kitchen', 'Kitchen'),
+                        ('dessert', 'Dessert'),
+                      ])
+                        FilterChip(
+                          label: Text(area.$2),
+                          selected: _routing.productionAreas.contains(area.$1),
+                          onSelected: _selected == null || _savingRouting
+                              ? null
+                              : (selected) {
+                                  final areas = {..._routing.productionAreas};
+                                  if (selected) {
+                                    areas.add(area.$1);
+                                  } else {
+                                    areas.remove(area.$1);
+                                  }
+                                  _saveRouting(
+                                    BluetoothProductionRouting(
+                                      enabled: _routing.enabled,
+                                      productionAreas: areas,
+                                    ),
+                                  );
+                                },
+                        ),
+                    ],
+                  ),
+                  if (_selected == null) ...[
+                    const SizedBox(height: 8),
+                    const Text('Select a paired printer before enabling routing.'),
+                  ],
+                ],
+              ),
+            ),
+          ),
           const SizedBox(height: 16),
           FilledButton.icon(
             onPressed: _selected == null || _printing ? null : _testPrint,
