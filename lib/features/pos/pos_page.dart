@@ -650,40 +650,42 @@ class _ProductTile extends StatelessWidget {
           ),
           child: Padding(
             padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(
-                  product.productionArea == ProductionArea.bar
-                      ? Icons.local_bar_rounded
-                      : Icons.restaurant_rounded,
-                  color: unavailable ? scheme.outline : scheme.primary,
-                ),
-                const Spacer(),
-                Text(
-                  product.name,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
-                ),
-                const SizedBox(height: 4),
-                Row(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                // Phone grids intentionally use a short tile. Keep its most
+                // useful information visible without causing a layout overflow.
+                final compact = constraints.maxHeight < 120;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      formatMoney(
-                        product.priceMinor,
-                        currencyCode: currencyCode,
-                      ),
+                    Icon(
+                      product.productionArea == ProductionArea.bar
+                          ? Icons.local_bar_rounded
+                          : Icons.restaurant_rounded,
+                      size: compact ? 20 : null,
+                      color: unavailable ? scheme.outline : scheme.primary,
                     ),
-                    const Spacer(),
-                    if (product.trackStock)
+                    if (compact) const SizedBox(height: 4) else const Spacer(),
+                    Text(
+                      product.name,
+                      maxLines: compact ? 1 : 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    SizedBox(height: compact ? 2 : 4),
+                    Text(
+                      formatMoney(product.priceMinor, currencyCode: currencyCode),
+                    ),
+                    if (!compact && product.trackStock)
                       Text(
                         '${_formatStock(product.stockOnHand ?? 0)} ${product.stockUnit} left',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.labelSmall,
                       ),
                   ],
-                ),
-              ],
+                );
+              },
             ),
           ),
         ),

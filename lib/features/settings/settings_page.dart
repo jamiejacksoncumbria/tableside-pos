@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
 import '../../data/tenant_profile_repository.dart';
+import '../printing/bluetooth_printer_setup_page.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 import '../tables/table_management_page.dart';
@@ -298,13 +299,20 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ),
               ),
               const Divider(),
-              const ListTile(
-                leading: Icon(Icons.print_outlined),
-                title: Text('Printer device registration'),
-                subtitle: Text(
-                  'Android and Windows devices listen for their own queue jobs.',
+              ListTile(
+                leading: const Icon(Icons.print_outlined),
+                title: const Text('Bluetooth printer setup'),
+                subtitle: const Text(
+                  'Pair a 58 mm ESC/POS printer and send a test ticket.',
                 ),
-                trailing: Icon(Icons.chevron_right_rounded),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => BluetoothPrinterSetupPage(
+                      restaurantName: profile.displayName,
+                    ),
+                  ),
+                ),
               ),
             ],
           ),

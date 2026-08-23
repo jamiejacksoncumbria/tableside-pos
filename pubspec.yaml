@@ -20,6 +20,10 @@ dependencies:
   firebase_storage: ^13.4.6
   file_picker: ^12.0.0-beta.7
   flutter_riverpod: ^3.4.2
+  esc_pos_utils_plus: ^2.0.4
+  permission_handler: ^13.0.1
+  print_bluetooth_thermal: ^1.2.2
+  shared_preferences: ^2.5.5
 
 dev_dependencies:
   flutter_test:
