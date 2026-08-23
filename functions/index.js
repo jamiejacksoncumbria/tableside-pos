@@ -1,9 +1,10 @@
 import {randomBytes} from "node:crypto";
 import {getApps, initializeApp} from "firebase-admin/app";
+import {getAppCheck} from "firebase-admin/app-check";
 import {getAuth} from "firebase-admin/auth";
 import {FieldValue, getFirestore} from "firebase-admin/firestore";
 import {HttpsError, onCall, onRequest} from "firebase-functions/v2/https";
-import {defineString} from "firebase-functions/params";
+import {defineBoolean, defineString} from "firebase-functions/params";
 import {setGlobalOptions} from "firebase-functions/v2";
 
 if (getApps().length === 0) {
@@ -11,9 +12,13 @@ if (getApps().length === 0) {
 }
 
 const auth = getAuth();
+const appCheck = getAppCheck();
 const db = getFirestore();
 const region = "europe-west2";
 const initialPlatformAdminEmail = defineString("INITIAL_PLATFORM_ADMIN_EMAIL");
+// Monitor first: old Windows/web clients must not be locked out while their
+// attestation provider is being registered and verified.
+const requireAppCheck = defineBoolean("REQUIRE_APP_CHECK", {default: false});
 const supportedTimeZones = Object.freeze(Intl.supportedValuesOf("timeZone"));
 const supportedTimeZoneSet = new Set(supportedTimeZones);
 const supportedCurrencyCodes = Object.freeze(Intl.supportedValuesOf("currency"));
@@ -1331,6 +1336,31 @@ async function callerFromHttpRequest(request) {
   }
 }
 
+// Verifies App Check for TableSide's custom HTTP APIs. Firestore and Storage
+// have their own App Check enforcement in the Firebase console. Monitor mode
+// provides server-side evidence before enforcement rejects older clients.
+async function verifyAppCheckFromHttpRequest(request, endpointName) {
+  const token = request.get("X-Firebase-AppCheck") ?? "";
+  if (token.trim().length === 0) {
+    console.warn(`App Check missing for ${endpointName}.`);
+    if (requireAppCheck.value()) {
+      throw new HttpsError("unauthenticated", "A valid Firebase App Check token is required.");
+    }
+    return null;
+  }
+  try {
+    const claims = await appCheck.verifyToken(token);
+    console.info(`App Check verified for ${endpointName}.`);
+    return claims;
+  } catch (error) {
+    console.warn(`App Check verification failed for ${endpointName}.`, error);
+    if (requireAppCheck.value()) {
+      throw new HttpsError("unauthenticated", "The Firebase App Check token is invalid.");
+    }
+    return null;
+  }
+}
+
 function httpStatusFor(error) {
   switch (error.code) {
     case "invalid-argument": return 400;
@@ -1352,6 +1382,7 @@ export const platformAdminApi = onRequest({cors: true}, async (request, response
       response.status(405).json({error: {code: "method-not-allowed", message: "Use POST."}});
       return;
     }
+    await verifyAppCheckFromHttpRequest(request, "platformAdminApi");
     const body = requireObject(request.body);
     const action = requiredText(body, "action", 80);
     const data = requireObject(body.data ?? {});
@@ -1382,6 +1413,7 @@ export const posApi = onRequest({cors: true}, async (request, response) => {
       response.status(405).json({error: {code: "method-not-allowed", message: "Use POST."}});
       return;
     }
+    await verifyAppCheckFromHttpRequest(request, "posApi");
     const body = requireObject(request.body);
     const action = requiredText(body, "action", 80);
     const data = requireObject(body.data ?? {});

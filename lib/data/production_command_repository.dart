@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:tableside_pos/core/tenant_scope.dart';
 
 import '../core/app_logger.dart';
+import '../core/firebase_bootstrap.dart';
 import '../firebase_options.dart';
 import '../features/pos/domain.dart';
 
@@ -131,6 +132,7 @@ class ProductionCommandRepository {
     if (token == null || token.isEmpty) {
       throw StateError('Could not obtain a Firebase sign-in token.');
     }
+    final appCheckToken = await currentFirebaseAppCheckToken();
     final projectId = DefaultFirebaseOptions.currentPlatform.projectId;
     final endpoint = Uri.https(
       'europe-west2-$projectId.cloudfunctions.net',
@@ -142,6 +144,7 @@ class ProductionCommandRepository {
       headers: {
         'Authorization': 'Bearer $token',
         'Content-Type': 'application/json',
+        'X-Firebase-AppCheck': ?appCheckToken,
       },
       body: jsonEncode({'action': action, 'data': data}),
     );
