@@ -165,7 +165,12 @@ class HomeShell extends ConsumerWidget {
               ],
             ),
           Expanded(
+            // The print worker is intentionally invisible. A default loose
+            // Stack sizes itself from non-positioned children, so this stack
+            // could collapse to the worker's zero height inside the outer Row
+            // and hide every venue screen. Expand to the workspace bounds.
             child: Stack(
+              fit: StackFit.expand,
               children: [
                 Positioned.fill(child: _buildBody(section, profile)),
                 const _QueuedPrintWorkerHost(),
