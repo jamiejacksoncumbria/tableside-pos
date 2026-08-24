@@ -1325,16 +1325,28 @@ async function sendOrderToProductionFor(caller, rawData) {
       } else {
         unroutedProductionAreas.add(ticket.area);
       }
+      // The till deliberately keeps every tap as its own order line so staff
+      // can see the latest addition. Several lines can therefore represent
+      // the same tracked product on one ticket. Aggregate before creating
+      // stock movements: Firestore correctly rejects two `create` writes to
+      // the same ticket/product movement document in one transaction.
+      const ticketStockTotals = new Map();
       for (const line of ticket.lines.filter((item) => item.trackStock)) {
         const quantity = line.quantity * line.stockPerSale;
-        stockTotals.set(line.productId, (stockTotals.get(line.productId) ?? 0) + quantity);
+        ticketStockTotals.set(
+          line.productId,
+          (ticketStockTotals.get(line.productId) ?? 0) + quantity,
+        );
+      }
+      for (const [productId, quantity] of ticketStockTotals.entries()) {
+        stockTotals.set(productId, (stockTotals.get(productId) ?? 0) + quantity);
         const movementRef = tenantRef.collection("stockMovements")
-          .doc(`${ticket.ticketId}_${line.productId}`);
+          .doc(`${ticket.ticketId}_${productId}`);
         transaction.create(movementRef, {
           venueId,
           orderId,
           ticketId: ticket.ticketId,
-          productId: line.productId,
+          productId,
           quantity: -quantity,
           reason: "productionTicketReleased",
           createdByActor: actor,
