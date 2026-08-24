@@ -16,6 +16,11 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   static const _routingPreferencePrefix =
       'tableside.bluetoothPrinter.productionRouting.';
 
+  // The package keeps a process-wide Android output stream. Calling its
+  // connect API again while that stream is healthy returns false, so retain the
+  // address and reuse the live connection for subsequent tickets.
+  static String? _connectedAddress;
+
   final SharedPreferencesAsync _preferences = SharedPreferencesAsync();
 
   @override
@@ -71,10 +76,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     final parts = raw.split('|');
     return BluetoothProductionRouting(
       enabled: parts.first == 'enabled',
-      productionAreas: parts
-          .skip(1)
-          .where((area) => area.isNotEmpty)
-          .toSet(),
+      productionAreas: parts.skip(1).where((area) => area.isNotEmpty).toSet(),
     );
   }
 
@@ -87,7 +89,10 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       routing.enabled ? 'enabled' : 'disabled',
       ...routing.productionAreas.toList()..sort(),
     ].join('|');
-    return _preferences.setString(_routingPreferenceKey(venueRoutingKey), value);
+    return _preferences.setString(
+      _routingPreferenceKey(venueRoutingKey),
+      value,
+    );
   }
 
   @override
@@ -95,16 +100,6 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     required BluetoothReceiptPrinterDevice device,
     required String restaurantName,
   }) async {
-    await _ensureReady();
-    final connected = await PrintBluetoothThermal.connect(
-      macPrinterAddress: device.address,
-    );
-    if (!connected) {
-      throw const BluetoothReceiptPrinterException(
-        'Could not connect to the paired printer. Check it is powered on, nearby, and not connected to another device.',
-      );
-    }
-
     final profile = await CapabilityProfile.load();
     final generator = Generator(PaperSize.mm58, profile);
     final bytes = <int>[
@@ -134,12 +129,12 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       ),
       ...generator.feed(4),
     ];
-    final written = await PrintBluetoothThermal.writeBytes(bytes);
-    if (!written) {
-      throw const BluetoothReceiptPrinterException(
-        'The printer connection was lost before the test ticket was accepted.',
-      );
-    }
+    await _write(
+      device,
+      bytes,
+      failureMessage:
+          'The printer connection was lost before the test ticket was accepted.',
+    );
   }
 
   @override
@@ -147,16 +142,6 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     required BluetoothReceiptPrinterDevice device,
     required BluetoothProductionTicket ticket,
   }) async {
-    await _ensureReady();
-    final connected = await PrintBluetoothThermal.connect(
-      macPrinterAddress: device.address,
-    );
-    if (!connected) {
-      throw const BluetoothReceiptPrinterException(
-        'Could not connect to the paired printer. Check it is powered on, nearby, and not connected to another device.',
-      );
-    }
-
     final profile = await CapabilityProfile.load();
     final generator = Generator(PaperSize.mm58, profile);
     final location = ticket.tabName?.trim().isNotEmpty == true
@@ -207,16 +192,50 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       ),
       ...generator.feed(4),
     ];
-    final written = await PrintBluetoothThermal.writeBytes(bytes);
-    if (!written) {
-      throw const BluetoothReceiptPrinterException(
-        'The printer connection was lost before the production ticket was accepted.',
-      );
-    }
+    await _write(
+      device,
+      bytes,
+      failureMessage:
+          'The printer connection was lost before the production ticket was accepted.',
+    );
   }
 
   String _routingPreferenceKey(String venueRoutingKey) =>
       '$_routingPreferencePrefix$venueRoutingKey';
+
+  Future<void> _write(
+    BluetoothReceiptPrinterDevice device,
+    List<int> bytes, {
+    required String failureMessage,
+  }) async {
+    await _ensureConnected(device);
+    final written = await PrintBluetoothThermal.writeBytes(bytes);
+    if (written) return;
+
+    _connectedAddress = null;
+    await PrintBluetoothThermal.disconnect;
+    throw BluetoothReceiptPrinterException(failureMessage);
+  }
+
+  Future<void> _ensureConnected(BluetoothReceiptPrinterDevice device) async {
+    await _ensureReady();
+    final alreadyConnected = await PrintBluetoothThermal.connectionStatus;
+    if (alreadyConnected && _connectedAddress == device.address) return;
+
+    if (alreadyConnected) {
+      await PrintBluetoothThermal.disconnect;
+      _connectedAddress = null;
+    }
+    final connected = await PrintBluetoothThermal.connect(
+      macPrinterAddress: device.address,
+    );
+    if (!connected) {
+      throw const BluetoothReceiptPrinterException(
+        'Could not connect to the paired printer. Check it is powered on, nearby, and not connected to another device.',
+      );
+    }
+    _connectedAddress = device.address;
+  }
 
   Future<void> _ensureReady() async {
     if (!isSupported) {
