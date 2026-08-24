@@ -175,7 +175,13 @@ service cloud.firestore {
       }
 
       match /devices/{deviceId} {
-        allow read: if isPlatformAdmin()
+        // A normal till must be able to check whether its locally generated
+        // device ID is registered. A missing document has no resource data,
+        // so treating this as a member-only `get` avoids false permission
+        // errors on every unregistered phone or desktop. Device lists remain
+        // restricted to managers, platform support, or their assigned user.
+        allow get: if isPlatformAdmin() || managesTenant(tenantId) || isMember(tenantId);
+        allow list: if isPlatformAdmin()
           || managesTenant(tenantId)
           || (signedIn() && resource.data.assignedUserId == request.auth.uid);
         allow create: if (isPlatformAdmin() || managesTenant(tenantId))

@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../features/pos/domain.dart';
 
@@ -78,63 +79,87 @@ class FirestorePosRepository {
         );
   }
 
-  Stream<List<MenuSection>> watchMenuSections(VenueScope scope) {
-    return _firestore
-        .collection('tenants/${scope.tenantId}/menuSections')
-        .orderBy('sortOrder')
-        .snapshots()
-        .map(
-          (snapshot) => snapshot.docs
-              .where(
-                (document) =>
-                    (document.data()['venueId'] as String?) == scope.venueId,
-              )
-              .map((document) {
-                final data = document.data();
-                return MenuSection(
-                  id: document.id,
-                  name: data['name'] as String? ?? 'Unnamed section',
-                  icon: data['icon'] as String? ?? '🍽️',
-                  parentSectionId: data['parentSectionId'] as String?,
-                );
-              })
-              .toList(growable: false),
+  Stream<List<MenuSection>> watchMenuSections(VenueScope scope) async* {
+    AppLogger.info(
+      'Load menu sections: tenant=${scope.tenantId}, venue=${scope.venueId}.',
+    );
+    try {
+      await for (final snapshot
+          in _firestore
+              .collection('tenants/${scope.tenantId}/menuSections')
+              .orderBy('sortOrder')
+              .snapshots()) {
+        final items = snapshot.docs
+            .where(
+              (document) =>
+                  (document.data()['venueId'] as String?) == scope.venueId,
+            )
+            .map((document) {
+              final data = document.data();
+              return MenuSection(
+                id: document.id,
+                name: data['name'] as String? ?? 'Unnamed section',
+                icon: data['icon'] as String? ?? '🍽️',
+                parentSectionId: data['parentSectionId'] as String?,
+              );
+            })
+            .toList(growable: false);
+        AppLogger.info(
+          'Menu sections loaded: ${snapshot.size} document(s) received, ${items.length} for the active venue.',
         );
+        yield items;
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Load menu sections', error, stackTrace);
+      rethrow;
+    }
   }
 
-  Stream<List<MenuProduct>> watchProducts(VenueScope scope) {
-    return _firestore
-        .collection('tenants/${scope.tenantId}/products')
-        .orderBy('name')
-        .snapshots()
-        .map(
-          (snapshot) => snapshot.docs
-              .where(
-                (document) =>
-                    (document.data()['venueId'] as String?) == scope.venueId,
-              )
-              .map((document) {
-                final data = document.data();
-                return MenuProduct(
-                  id: document.id,
-                  name: data['name'] as String? ?? 'Unnamed product',
-                  priceMinor: data['priceMinor'] as int? ?? 0,
-                  sectionIds: List<String>.from(
-                    data['sectionIds'] as List? ?? const [],
-                  ),
-                  productionArea: _productionArea(
-                    data['productionArea'] as String?,
-                  ),
-                  trackStock: data['trackStock'] as bool? ?? false,
-                  stockOnHand: (data['stockOnHand'] as num?)?.toDouble(),
-                  stockUnit: data['stockUnit'] as String? ?? 'each',
-                  stockPerSale: (data['stockPerSale'] as num?)?.toDouble() ?? 1,
-                  isAvailable: data['isAvailable'] as bool? ?? true,
-                  showOnOrderFlow: data['showOnOrderFlow'] as bool? ?? true,
-                );
-              })
-              .toList(growable: false),
+  Stream<List<MenuProduct>> watchProducts(VenueScope scope) async* {
+    AppLogger.info(
+      'Load menu products: tenant=${scope.tenantId}, venue=${scope.venueId}.',
+    );
+    try {
+      await for (final snapshot
+          in _firestore
+              .collection('tenants/${scope.tenantId}/products')
+              .orderBy('name')
+              .snapshots()) {
+        final items = snapshot.docs
+            .where(
+              (document) =>
+                  (document.data()['venueId'] as String?) == scope.venueId,
+            )
+            .map((document) {
+              final data = document.data();
+              return MenuProduct(
+                id: document.id,
+                name: data['name'] as String? ?? 'Unnamed product',
+                priceMinor: data['priceMinor'] as int? ?? 0,
+                sectionIds: List<String>.from(
+                  data['sectionIds'] as List? ?? const [],
+                ),
+                productionArea: _productionArea(
+                  data['productionArea'] as String?,
+                ),
+                trackStock: data['trackStock'] as bool? ?? false,
+                stockOnHand: (data['stockOnHand'] as num?)?.toDouble(),
+                stockUnit: data['stockUnit'] as String? ?? 'each',
+                stockPerSale: (data['stockPerSale'] as num?)?.toDouble() ?? 1,
+                isAvailable: data['isAvailable'] as bool? ?? true,
+                showOnOrderFlow: data['showOnOrderFlow'] as bool? ?? true,
+              );
+            })
+            .toList(growable: false);
+        AppLogger.info(
+          'Menu products loaded: ${snapshot.size} document(s) received, ${items.length} for the active venue.',
         );
+        yield items;
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Load menu products', error, stackTrace);
+      rethrow;
+    }
   }
 
   Stream<List<DiningTable>> watchTables(VenueScope scope) {
