@@ -198,6 +198,7 @@ class AuthenticatedWorkspace extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    AppLogger.info('Authenticated workspace: checking restaurant memberships.');
     final platformAdmin = ref.watch(platformAdminProvider);
     if (platformAdmin.isLoading) {
       return const _LoadingScreen(label: 'Checking your access…');
@@ -216,6 +217,9 @@ class AuthenticatedWorkspace extends ConsumerWidget {
       error: (error, _) =>
           _ErrorScreen(message: 'Could not load restaurant access: $error'),
       data: (items) {
+        AppLogger.info(
+          'Restaurant access loaded: ${items.length} membership(s).',
+        );
         if (items.isEmpty) {
           return isPlatformAdmin
               ? _PlatformAdminScaffold(
@@ -324,14 +328,19 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
                                 trailing: const Icon(
                                   Icons.chevron_right_rounded,
                                 ),
-                                onTap: () => ref
-                                    .read(activeVenueScopeProvider.notifier)
-                                    .select(
-                                      VenueScope(
-                                        tenantId: tenantId,
-                                        venueId: venue.id,
-                                      ),
-                                    ),
+                                onTap: () {
+                                  AppLogger.info(
+                                    'Venue selected: tenant=$tenantId, venue=${venue.id}.',
+                                  );
+                                  ref
+                                      .read(activeVenueScopeProvider.notifier)
+                                      .select(
+                                        VenueScope(
+                                          tenantId: tenantId,
+                                          venueId: venue.id,
+                                        ),
+                                      );
+                                },
                               ),
                             ),
                       ],

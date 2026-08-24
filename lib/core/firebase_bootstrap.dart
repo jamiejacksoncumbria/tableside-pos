@@ -18,8 +18,10 @@ Future<void> initializeFirebase() async {
 
 /// Activates only providers that are safe for the current TableSide rollout.
 /// Android uses Play Integrity and iOS uses App Attest with a DeviceCheck
-/// fallback in release builds. Windows currently has only Firebase's debug
-/// provider, so it is opt-in until a production desktop provider is available.
+/// fallback in release builds. The Windows plugin currently emits platform
+/// channel callbacks from a non-platform thread on some Flutter/Windows
+/// combinations, so desktop App Check remains deliberately disabled while the
+/// project is in its monitor phase.
 Future<void> _activateAppCheck() async {
   if (_appCheckActivated) return;
   try {
@@ -75,22 +77,10 @@ Future<void> _activateAppCheck() async {
           'Firebase App Check activated for iOS (${useDebugProvider ? 'debug' : 'App Attest'} provider).',
         );
       case TargetPlatform.windows:
-        const windowsDebugToken = String.fromEnvironment(
-          'TABLESIDE_WINDOWS_APP_CHECK_DEBUG_TOKEN',
+        AppLogger.info(
+          'Firebase App Check is disabled on Windows during the monitor phase; Android and web attestation remain active.',
         );
-        if (windowsDebugToken.isEmpty) {
-          AppLogger.info(
-            'Firebase App Check is not active on Windows: configure a registered debug token before enforcing desktop requests.',
-          );
-          return;
-        }
-        await FirebaseAppCheck.instance.activate(
-          providerWindows: const WindowsDebugProvider(
-            debugToken: windowsDebugToken,
-          ),
-        );
-        _appCheckActivated = true;
-        AppLogger.info('Firebase App Check activated for Windows debug.');
+        return;
       default:
         AppLogger.info(
           'Firebase App Check is not configured for this platform yet.',
