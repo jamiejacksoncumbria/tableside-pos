@@ -16,7 +16,11 @@ class PosPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        if (constraints.maxWidth >= 1100) {
+        // Three simultaneously visible panels need both a genuinely wide and
+        // tall workspace. On a phone or a compact Windows window, stacking
+        // tables, menu and order made the menu grid receive almost no height
+        // at all, despite its Firestore data having loaded successfully.
+        if (constraints.maxWidth >= 1100 && constraints.maxHeight >= 700) {
           return Padding(
             padding: const EdgeInsets.all(20),
             child: Row(
@@ -35,61 +39,41 @@ class PosPage extends ConsumerWidget {
           );
         }
 
-        // Landscape tablets and compact desktop windows need a different
-        // interaction model: stacking all three panels would make the order
-        // panel inaccessible. Let the operator switch panels instead.
-        if (constraints.maxHeight < 620) {
-          return Padding(
-            padding: const EdgeInsets.all(12),
-            child: DefaultTabController(
-              length: 3,
-              child: Column(
-                children: [
-                  const TabBar(
-                    tabs: [
-                      Tab(
-                        icon: Icon(Icons.table_restaurant_rounded),
-                        text: 'Tables',
-                      ),
-                      Tab(
-                        icon: Icon(Icons.restaurant_menu_rounded),
-                        text: 'Menu',
-                      ),
-                      Tab(
-                        icon: Icon(Icons.receipt_long_rounded),
-                        text: 'Order',
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Expanded(
-                    child: TabBarView(
-                      children: [
-                        const _TablesPanel(compact: true),
-                        _MenuPanel(currencyCode: currencyCode),
-                        _OrderPanel(currencyCode: currencyCode),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        }
-
+        // Phones, tablets, and compact desktop windows use one full-height
+        // workspace at a time. Menu is the default tab because it is the
+        // primary waiter action; tables and the live order stay one tap away.
         return Padding(
           padding: const EdgeInsets.all(12),
-          child: Column(
-            children: [
-              const SizedBox(height: 170, child: _TablesPanel(compact: true)),
-              const SizedBox(height: 12),
-              Expanded(child: _MenuPanel(currencyCode: currencyCode)),
-              const SizedBox(height: 12),
-              SizedBox(
-                height: 280,
-                child: _OrderPanel(currencyCode: currencyCode),
-              ),
-            ],
+          child: DefaultTabController(
+            length: 3,
+            initialIndex: 1,
+            child: Column(
+              children: [
+                const TabBar(
+                  tabs: [
+                    Tab(
+                      icon: Icon(Icons.table_restaurant_rounded),
+                      text: 'Tables',
+                    ),
+                    Tab(
+                      icon: Icon(Icons.restaurant_menu_rounded),
+                      text: 'Menu',
+                    ),
+                    Tab(icon: Icon(Icons.receipt_long_rounded), text: 'Order'),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: TabBarView(
+                    children: [
+                      const _TablesPanel(compact: true),
+                      _MenuPanel(currencyCode: currencyCode),
+                      _OrderPanel(currencyCode: currencyCode),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         );
       },
@@ -674,7 +658,10 @@ class _ProductTile extends StatelessWidget {
                     ),
                     SizedBox(height: compact ? 2 : 4),
                     Text(
-                      formatMoney(product.priceMinor, currencyCode: currencyCode),
+                      formatMoney(
+                        product.priceMinor,
+                        currencyCode: currencyCode,
+                      ),
                     ),
                     if (!compact && product.trackStock)
                       Text(
