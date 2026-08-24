@@ -423,20 +423,34 @@ class _MenuPanel extends ConsumerWidget {
     final selectedSection = ref.watch(activeSectionProvider);
     final selectedSubsection = ref.watch(activeSubsectionProvider);
     final scope = ref.watch(activeVenueScopeProvider);
-    final sections = ref
-        .watch(menuSectionsProvider)
-        .when(
-          data: (items) => items,
-          loading: () => scope == null ? demoSections : const [],
-          error: (_, _) => scope == null ? demoSections : const [],
-        );
-    final catalog = ref
-        .watch(menuProductsProvider)
-        .when(
-          data: (items) => items,
-          loading: () => scope == null ? demoProducts : const [],
-          error: (_, _) => scope == null ? demoProducts : const [],
-        );
+    final sectionsState = ref.watch(menuSectionsProvider);
+    final catalogState = ref.watch(menuProductsProvider);
+    final sections = sectionsState.when(
+      data: (items) => items,
+      loading: () => scope == null ? demoSections : const [],
+      error: (error, stackTrace) {
+        AppLogger.error('Display menu sections', error, stackTrace);
+        return scope == null ? demoSections : const [];
+      },
+    );
+    final catalog = catalogState.when(
+      data: (items) => items,
+      loading: () => scope == null ? demoProducts : const [],
+      error: (error, stackTrace) {
+        AppLogger.error('Display menu products', error, stackTrace);
+        return scope == null ? demoProducts : const [];
+      },
+    );
+    final loading = sectionsState.isLoading || catalogState.isLoading;
+    final menuError = sectionsState.when<Object?>(
+      data: (_) => catalogState.when<Object?>(
+        data: (_) => null,
+        loading: () => null,
+        error: (error, _) => error,
+      ),
+      loading: () => null,
+      error: (error, _) => error,
+    );
     final topLevelSections = sections
         .where((section) => section.parentSectionId == null)
         .toList(growable: false);
@@ -573,27 +587,84 @@ class _MenuPanel extends ConsumerWidget {
             ),
             const SizedBox(height: 10),
             Expanded(
-              child: LayoutBuilder(
-                builder: (context, _) {
-                  return GridView.builder(
-                    itemCount: products.length,
-                    gridDelegate:
-                        const SliverGridDelegateWithMaxCrossAxisExtent(
-                          maxCrossAxisExtent: 180,
-                          crossAxisSpacing: 12,
-                          mainAxisSpacing: 12,
-                          mainAxisExtent: 126,
-                        ),
-                    itemBuilder: (context, index) => _ProductTile(
-                      product: products[index],
-                      currencyCode: currencyCode,
-                      onTap: () => ref
-                          .read(activeOrderProvider.notifier)
-                          .addProduct(products[index]),
+              child: loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : menuError != null
+                  ? _MenuStateMessage(
+                      icon: Icons.cloud_off_rounded,
+                      title: 'Could not load this venue’s menu',
+                      detail: '$menuError',
+                    )
+                  : products.isEmpty
+                  ? const _MenuStateMessage(
+                      icon: Icons.menu_book_outlined,
+                      title: 'No menu items are available',
+                      detail:
+                          'Add a product in Menu management, or choose a different category.',
+                    )
+                  : LayoutBuilder(
+                      builder: (context, _) {
+                        return GridView.builder(
+                          itemCount: products.length,
+                          gridDelegate:
+                              const SliverGridDelegateWithMaxCrossAxisExtent(
+                                maxCrossAxisExtent: 180,
+                                crossAxisSpacing: 12,
+                                mainAxisSpacing: 12,
+                                mainAxisExtent: 126,
+                              ),
+                          itemBuilder: (context, index) => _ProductTile(
+                            product: products[index],
+                            currencyCode: currencyCode,
+                            onTap: () => ref
+                                .read(activeOrderProvider.notifier)
+                                .addProduct(products[index]),
+                          ),
+                        );
+                      },
                     ),
-                  );
-                },
-              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MenuStateMessage extends StatelessWidget {
+  const _MenuStateMessage({
+    required this.icon,
+    required this.title,
+    required this.detail,
+  });
+
+  final IconData icon;
+  final String title;
+  final String detail;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 40, color: scheme.primary),
+            const SizedBox(height: 12),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 6),
+            Text(
+              detail,
+              textAlign: TextAlign.center,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
             ),
           ],
         ),

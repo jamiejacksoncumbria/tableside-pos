@@ -364,6 +364,9 @@ class _TenantWorkspace extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    AppLogger.info(
+      'Opening venue workspace: tenant=${scope.tenantId}, venue=${scope.venueId}.',
+    );
     final profile = ref.watch(liveTenantProfileProvider(scope.tenantId));
     final venues = ref.watch(venuesProvider(scope.tenantId));
     if (profile.isLoading || venues.isLoading) {
@@ -377,10 +380,18 @@ class _TenantWorkspace extends ConsumerWidget {
     );
     final venue = matchingVenues.isEmpty ? null : matchingVenues.first;
     if (venue == null) {
+      AppLogger.error(
+        'Open venue workspace',
+        StateError(
+          'The selected venue is not in the current venue list for this membership.',
+        ),
+        StackTrace.current,
+      );
       return const _ErrorScreen(
         message: 'That venue is no longer available to you.',
       );
     }
+    AppLogger.info('Venue workspace ready: ${venue.name}.');
     return HomeShell(
       profileOverride: profile.requireValue,
       venueOverride: venue,
