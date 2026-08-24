@@ -222,9 +222,16 @@ class ActiveOrderController extends Notifier<PosOrder> {
         .toList(growable: false);
     var printResult = const BluetoothProductionPrintResult();
     if (scope != null) {
-      await ref
+      final dispatch = await ref
           .read(productionCommandRepositoryProvider)
           .sendNewLinesToProduction(scope: scope, order: state);
+      final locallyRoutedLines = unsentLines
+          .where(
+            (line) => !dispatch.queuedProductionAreas.contains(
+              line.productionArea.name,
+            ),
+          )
+          .toList(growable: false);
       final tableLabel = _tableLabelFor(state);
       final user = FirebaseAuth.instance.currentUser;
       AppLogger.info(
@@ -233,7 +240,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
       printResult = await BluetoothProductionPrintService().printNewLines(
         scope: scope,
         order: state,
-        lines: unsentLines,
+        lines: locallyRoutedLines,
         restaurantName: ref.read(tenantProfileProvider).displayName,
         tableLabel: tableLabel,
         createdByName: user?.displayName?.trim().isNotEmpty == true
@@ -256,14 +263,18 @@ class ActiveOrderController extends Notifier<PosOrder> {
   String _tableLabelFor(PosOrder order) {
     final tableId = order.tableId;
     if (tableId == null) return '';
-    return ref.read(diningTablesProvider).when(
-      data: (tables) => tables
-          .where((table) => table.id == tableId)
-          .map((table) => table.label)
-          .firstOrNull ?? tableId,
-      loading: () => tableId,
-      error: (_, _) => tableId,
-    );
+    return ref
+        .read(diningTablesProvider)
+        .when(
+          data: (tables) =>
+              tables
+                  .where((table) => table.id == tableId)
+                  .map((table) => table.label)
+                  .firstOrNull ??
+              tableId,
+          loading: () => tableId,
+          error: (_, _) => tableId,
+        );
   }
 
   void markPendingCustomerApproval() => state = state.copyWith(

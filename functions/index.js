@@ -3,6 +3,7 @@ import {getApps, initializeApp} from "firebase-admin/app";
 import {getAppCheck} from "firebase-admin/app-check";
 import {getAuth} from "firebase-admin/auth";
 import {FieldValue, getFirestore} from "firebase-admin/firestore";
+import {onDocumentUpdated} from "firebase-functions/v2/firestore";
 import {HttpsError, onCall, onRequest} from "firebase-functions/v2/https";
 import {defineBoolean, defineString} from "firebase-functions/params";
 import {setGlobalOptions} from "firebase-functions/v2";
@@ -950,6 +951,99 @@ async function deleteTableFor(caller, rawData) {
   return {deleted: true};
 }
 
+function activeRouteDevice(device, venueId, productionArea) {
+  if (!device?.exists) return false;
+  const data = device.data();
+  return data.venueId === venueId
+    && data.active === true
+    && Array.isArray(data.productionAreas)
+    && data.productionAreas.includes(productionArea);
+}
+
+// A ticket is deliberately queued to one device at a time.  The original
+// device gets three attempts (managed by the client worker); only then does
+// this server-side trigger create a separate, idempotent fallback job.  That
+// prevents the same ticket printing at both locations while a printer is just
+// temporarily slow to connect.
+export const enqueueFallbackPrintJob = onDocumentUpdated(
+  "tenants/{tenantId}/printJobs/{jobId}",
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (before == null || after == null || before.status === "failed" || after.status !== "failed") {
+      return;
+    }
+
+    const tenantId = event.params.tenantId;
+    const jobId = event.params.jobId;
+    const venueId = typeof after.venueId === "string" ? after.venueId : "";
+    const productionArea = typeof after.productionArea === "string" ? after.productionArea : "";
+    const primaryDeviceId = typeof after.targetDeviceId === "string" ? after.targetDeviceId : "";
+    const fallbackDeviceId = typeof after.fallbackDeviceId === "string" ? after.fallbackDeviceId : "";
+    if (!venueId || !productionArea || !fallbackDeviceId || fallbackDeviceId === primaryDeviceId) {
+      return;
+    }
+
+    const tenantRef = db.doc(`tenants/${tenantId}`);
+    const fallbackDevice = await tenantRef.collection("devices").doc(fallbackDeviceId).get();
+    if (!activeRouteDevice(fallbackDevice, venueId, productionArea)) {
+      console.warn("Skipping invalid fallback print device", {
+        tenantId,
+        jobId,
+        venueId,
+        productionArea,
+        fallbackDeviceId,
+      });
+      return;
+    }
+
+    const fallbackJobId = `${jobId}_fallback`;
+    const fallbackRef = tenantRef.collection("printJobs").doc(fallbackJobId);
+    const auditRef = tenantRef.collection("auditEvents").doc(`printFallback_${jobId}`);
+    const batch = db.batch();
+    batch.create(fallbackRef, {
+      venueId,
+      targetDeviceId: fallbackDeviceId,
+      fallbackDeviceId: null,
+      orderId: after.orderId,
+      ticketId: after.ticketId,
+      productionArea,
+      status: "queued",
+      attempts: 0,
+      idempotencyKey: fallbackJobId,
+      payload: after.payload ?? {},
+      fallbackFromJobId: jobId,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    batch.create(auditRef, {
+      action: "queueFallbackPrintJob",
+      venueId,
+      orderId: after.orderId ?? null,
+      ticketId: after.ticketId ?? null,
+      productionArea,
+      failedJobId: jobId,
+      fallbackJobId,
+      primaryDeviceId,
+      fallbackDeviceId,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    try {
+      await batch.commit();
+      console.info("Queued fallback print job", {
+        tenantId,
+        jobId,
+        fallbackJobId,
+        fallbackDeviceId,
+      });
+    } catch (error) {
+      // Firestore triggers are at-least-once. The deterministic document IDs
+      // mean an already-created fallback is a successful previous delivery.
+      if (error?.code === 6 || error?.code === "already-exists") return;
+      throw error;
+    }
+  },
+);
+
 async function sendOrderToProductionFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -989,6 +1083,10 @@ async function sendOrderToProductionFor(caller, rawData) {
     ]),
   );
   const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const tenant = await tenantRef.get();
+  const restaurantName = tenant.exists && typeof tenant.data().displayName === "string"
+    ? tenant.data().displayName
+    : "TABLESIDE POS";
 
   const result = await db.runTransaction(async (transaction) => {
     const [venue, table, namedTab, existingOrder, ...products] = await Promise.all([
@@ -1083,6 +1181,35 @@ async function sendOrderToProductionFor(caller, rawData) {
     const existingTicketIds = new Set(
       existingTickets.filter((ticket) => ticket.exists).map((ticket) => ticket.id),
     );
+    // Route records are read before any transaction writes. A route is only
+    // accepted when its target is an active printer device at this same venue.
+    const routeEntries = ticketEntries.map((ticket) => ({
+      area: ticket.area,
+      ref: tenantRef.collection("printerRoutes").doc(`${venueId}_${ticket.area}`),
+    }));
+    const routeSnapshots = await Promise.all(
+      routeEntries.map((route) => transaction.get(route.ref)),
+    );
+    const routeByArea = new Map(
+      routeSnapshots
+        .map((snapshot, index) => [routeEntries[index].area, snapshot])
+        .filter(([, snapshot]) => snapshot.exists),
+    );
+    const targetDeviceIds = [...new Set(
+      [...routeByArea.values()]
+        .map((route) => route.data().primaryDeviceId)
+        .filter((deviceId) => typeof deviceId === "string" && deviceId.length > 0),
+    )];
+    const targetDeviceRefs = new Map(targetDeviceIds.map((deviceId) => [
+      deviceId,
+      tenantRef.collection("devices").doc(deviceId),
+    ]));
+    const targetDevices = await Promise.all(
+      [...targetDeviceRefs.values()].map((ref) => transaction.get(ref)),
+    );
+    const deviceById = new Map(
+      targetDevices.map((device) => [device.id, device]),
+    );
 
     const tableLabel = tableRef == null
       ? null
@@ -1125,6 +1252,9 @@ async function sendOrderToProductionFor(caller, rawData) {
     }
 
     const stockTotals = new Map();
+    const printJobIds = [];
+    const queuedProductionAreas = new Set();
+    const unroutedProductionAreas = new Set();
     for (const ticket of ticketEntries) {
       if (existingTicketIds.has(ticket.ticketId)) continue;
       transaction.create(ticket.ref, {
@@ -1153,6 +1283,48 @@ async function sendOrderToProductionFor(caller, rawData) {
         idempotencyKey: ticket.ticketId,
         createdAt: FieldValue.serverTimestamp(),
       });
+      const route = routeByArea.get(ticket.area);
+      const targetDeviceId = route?.data().primaryDeviceId;
+      const targetDevice = typeof targetDeviceId === "string"
+        ? deviceById.get(targetDeviceId)
+        : null;
+      if (typeof targetDeviceId === "string"
+          && activeRouteDevice(targetDevice, venueId, ticket.area)) {
+        const jobId = `${ticket.ticketId}_${targetDeviceId}`;
+        transaction.create(tenantRef.collection("printJobs").doc(jobId), {
+          venueId,
+          targetDeviceId,
+          fallbackDeviceId: typeof route.data().fallbackDeviceId === "string"
+            ? route.data().fallbackDeviceId
+            : null,
+          orderId,
+          ticketId: ticket.ticketId,
+          productionArea: ticket.area,
+          status: "queued",
+          attempts: 0,
+          idempotencyKey: jobId,
+          payload: {
+            type: "production",
+            ticketId: ticket.ticketId,
+            restaurantName,
+            reference: orderId.split("-").at(-1) ?? orderId,
+            productionArea: ticket.area,
+            tableLabel,
+            tabName,
+            isAddition: priorLines.length > 0,
+            createdByName: actor.displayName ?? actor.email ?? "",
+            lines: ticket.lines.map((line) => ({
+              name: line.productName,
+              quantity: line.quantity,
+            })),
+          },
+          createdAt: FieldValue.serverTimestamp(),
+        });
+        printJobIds.push(jobId);
+        queuedProductionAreas.add(ticket.area);
+      } else {
+        unroutedProductionAreas.add(ticket.area);
+      }
       for (const line of ticket.lines.filter((item) => item.trackStock)) {
         const quantity = line.quantity * line.stockPerSale;
         stockTotals.set(line.productId, (stockTotals.get(line.productId) ?? 0) + quantity);
@@ -1189,11 +1361,20 @@ async function sendOrderToProductionFor(caller, rawData) {
       venueId,
       orderId,
       ticketIds: ticketEntries.map((ticket) => ticket.ticketId),
+      printJobIds,
+      queuedProductionAreas: [...queuedProductionAreas],
+      unroutedProductionAreas: [...unroutedProductionAreas],
       stockOverride,
       actor,
       createdAt: FieldValue.serverTimestamp(),
     });
-    return {ticketIds: ticketEntries.map((ticket) => ticket.ticketId), stockOverride};
+    return {
+      ticketIds: ticketEntries.map((ticket) => ticket.ticketId),
+      printJobIds,
+      queuedProductionAreas: [...queuedProductionAreas],
+      unroutedProductionAreas: [...unroutedProductionAreas],
+      stockOverride,
+    };
   });
   return result;
 }

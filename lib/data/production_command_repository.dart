@@ -10,6 +10,18 @@ import '../core/firebase_bootstrap.dart';
 import '../firebase_options.dart';
 import '../features/pos/domain.dart';
 
+class ProductionDispatchResult {
+  const ProductionDispatchResult({
+    this.queuedPrintJobIds = const <String>[],
+    this.queuedProductionAreas = const <String>[],
+    this.unroutedProductionAreas = const <String>[],
+  });
+
+  final List<String> queuedPrintJobIds;
+  final List<String> queuedProductionAreas;
+  final List<String> unroutedProductionAreas;
+}
+
 final productionCommandRepositoryProvider =
     Provider<ProductionCommandRepository>(
       (ref) => ProductionCommandRepository(),
@@ -76,7 +88,7 @@ class ProductionCommandRepository {
     return orderId;
   }
 
-  Future<void> sendNewLinesToProduction({
+  Future<ProductionDispatchResult> sendNewLinesToProduction({
     required VenueScope scope,
     required PosOrder order,
     bool stockOverride = false,
@@ -84,9 +96,9 @@ class ProductionCommandRepository {
     final unsentLines = order.lines
         .where((line) => !line.isSentToProduction)
         .toList(growable: false);
-    if (unsentLines.isEmpty) return;
+    if (unsentLines.isEmpty) return const ProductionDispatchResult();
 
-    await _call('sendOrderToProduction', {
+    final response = await _call('sendOrderToProduction', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'orderId': order.id,
@@ -103,6 +115,11 @@ class ProductionCommandRepository {
           )
           .toList(growable: false),
     });
+    return ProductionDispatchResult(
+      queuedPrintJobIds: _stringList(response['printJobIds']),
+      queuedProductionAreas: _stringList(response['queuedProductionAreas']),
+      unroutedProductionAreas: _stringList(response['unroutedProductionAreas']),
+    );
   }
 
   Future<void> updateProductionTicket({
@@ -172,4 +189,8 @@ class ProductionCommandRepository {
         ? Map<String, Object?>.from(result)
         : const {};
   }
+
+  List<String> _stringList(Object? value) => value is List
+      ? value.whereType<String>().toList(growable: false)
+      : const <String>[];
 }

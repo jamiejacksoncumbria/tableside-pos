@@ -2,9 +2,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../features/pos/domain.dart';
 
-/// Native Android and Windows workers use this repository after they are
-/// provisioned with a device-specific custom claim. Web clients never need
-/// Bluetooth or USB permission; they only create approved order events.
+/// Native Android and Windows workers use this repository only after a
+/// manager has explicitly registered the physical device to the venue.
+/// Web clients never need Bluetooth or USB permission; they only create
+/// approved order events.
 class PrintJobRepository {
   PrintJobRepository(this._firestore);
 
@@ -25,11 +26,17 @@ class PrintJobRepository {
         .where('targetDeviceId', isEqualTo: deviceId)
         .where('status', isEqualTo: 'queued')
         .orderBy('createdAt')
-        .limit(1)
+        .limit(25)
         .get();
-    if (candidates.docs.isEmpty) return null;
+    final now = DateTime.now();
+    final candidate = candidates.docs.where((document) {
+      final nextAttemptAt = document.data()['nextAttemptAt'];
+      return nextAttemptAt is! Timestamp ||
+          !nextAttemptAt.toDate().isAfter(now);
+    }).firstOrNull;
+    if (candidate == null) return null;
 
-    final reference = candidates.docs.first.reference;
+    final reference = candidate.reference;
     return _firestore.runTransaction((transaction) async {
       final snapshot = await transaction.get(reference);
       final data = snapshot.data();
@@ -63,10 +70,32 @@ class PrintJobRepository {
     required bool printed,
     String? failureReason,
   }) {
+    if (printed) {
+      return _jobs(job.tenantId).doc(job.id).update({
+        'status': 'printed',
+        'completedAt': FieldValue.serverTimestamp(),
+        'failureReason': FieldValue.delete(),
+        'nextAttemptAt': FieldValue.delete(),
+      });
+    }
+    if (job.attempts < 3) {
+      return _jobs(job.tenantId).doc(job.id).update({
+        'status': 'queued',
+        'failureReason':
+            failureReason ?? 'The printer did not accept the ticket.',
+        'nextAttemptAt': Timestamp.fromDate(
+          DateTime.now().add(const Duration(seconds: 10)),
+        ),
+        'claimedByDeviceId': FieldValue.delete(),
+        'claimedAt': FieldValue.delete(),
+      });
+    }
     return _jobs(job.tenantId).doc(job.id).update({
-      'status': printed ? 'printed' : 'failed',
+      'status': 'failed',
       'completedAt': FieldValue.serverTimestamp(),
-      'failureReason': failureReason,
+      'failureReason':
+          failureReason ?? 'The printer failed after three attempts.',
+      'nextAttemptAt': FieldValue.delete(),
     });
   }
 }

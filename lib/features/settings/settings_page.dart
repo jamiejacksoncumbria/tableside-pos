@@ -10,6 +10,7 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/tenant_profile_repository.dart';
 import '../printing/bluetooth_printer_setup_page.dart';
+import '../printing/venue_printer_routing_page.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 import '../tables/table_management_page.dart';
@@ -316,6 +317,20 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           ? 'demo'
                           : '${venueScope.tenantId}_${venueScope.venueId}',
                     ),
+                  ),
+                ),
+              ),
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.account_tree_outlined),
+                title: const Text('Shared printer routes'),
+                subtitle: const Text(
+                  'Register this device and route bar, kitchen, and dessert tickets.',
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const VenuePrinterRoutingPage(),
                   ),
                 ),
               ),

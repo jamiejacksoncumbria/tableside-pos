@@ -8,6 +8,9 @@ class PrinterDevice {
     required this.platform,
     required this.productionAreas,
     required this.transports,
+    required this.assignedUserId,
+    required this.active,
+    this.lastHeartbeatAt,
   });
 
   final String id;
@@ -16,11 +19,14 @@ class PrinterDevice {
   final String platform;
   final List<String> productionAreas;
   final List<String> transports;
+  final String assignedUserId;
+  final bool active;
+  final DateTime? lastHeartbeatAt;
 }
 
-/// Devices are registered by a manager and then issued a device-specific
-/// custom claim by a trusted server. The native worker only sends heartbeats
-/// and claims jobs targeting its device ID.
+/// Devices are registered to a venue and explicitly assigned to the account
+/// currently configuring them. This prevents an arbitrary signed-in device
+/// from claiming a printer's queued jobs.
 class PrinterDeviceRepository {
   PrinterDeviceRepository(this._firestore);
 
@@ -33,16 +39,27 @@ class PrinterDeviceRepository {
       'platform': device.platform,
       'productionAreas': device.productionAreas,
       'transports': device.transports,
-      'active': true,
+      'assignedUserId': device.assignedUserId,
+      'active': device.active,
       'registeredAt': FieldValue.serverTimestamp(),
       'lastHeartbeatAt': FieldValue.serverTimestamp(),
-    });
+    }, SetOptions(merge: true));
   }
 
   Future<void> heartbeat({required String tenantId, required String deviceId}) {
     return _firestore.doc('tenants/$tenantId/devices/$deviceId').update({
       'lastHeartbeatAt': FieldValue.serverTimestamp(),
     });
+  }
+
+  Future<PrinterDevice?> getDevice({
+    required String tenantId,
+    required String deviceId,
+  }) async {
+    final document = await _firestore
+        .doc('tenants/$tenantId/devices/$deviceId')
+        .get();
+    return document.exists ? _fromDocument(document) : null;
   }
 
   Stream<List<PrinterDevice>> watchVenueDevices({
@@ -54,23 +71,25 @@ class PrinterDeviceRepository {
         .where('venueId', isEqualTo: venueId)
         .snapshots()
         .map(
-          (snapshot) => snapshot.docs
-              .map((document) {
-                final data = document.data();
-                return PrinterDevice(
-                  id: document.id,
-                  venueId: data['venueId'] as String,
-                  name: data['name'] as String? ?? 'Unnamed device',
-                  platform: data['platform'] as String? ?? 'unknown',
-                  productionAreas: List<String>.from(
-                    data['productionAreas'] as List? ?? const [],
-                  ),
-                  transports: List<String>.from(
-                    data['transports'] as List? ?? const [],
-                  ),
-                );
-              })
-              .toList(growable: false),
+          (snapshot) =>
+              snapshot.docs.map(_fromDocument).toList(growable: false),
         );
+  }
+
+  PrinterDevice _fromDocument(DocumentSnapshot<Map<String, dynamic>> document) {
+    final data = document.data() ?? const <String, dynamic>{};
+    return PrinterDevice(
+      id: document.id,
+      venueId: data['venueId'] as String? ?? '',
+      name: data['name'] as String? ?? 'Unnamed device',
+      platform: data['platform'] as String? ?? 'unknown',
+      productionAreas: List<String>.from(
+        data['productionAreas'] as List? ?? const [],
+      ),
+      transports: List<String>.from(data['transports'] as List? ?? const []),
+      assignedUserId: data['assignedUserId'] as String? ?? '',
+      active: data['active'] as bool? ?? true,
+      lastHeartbeatAt: (data['lastHeartbeatAt'] as Timestamp?)?.toDate(),
+    );
   }
 }

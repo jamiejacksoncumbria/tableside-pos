@@ -1,13 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../core/money.dart';
+import '../core/app_logger.dart';
+import '../core/tenant_scope.dart';
 import '../features/order_flow/order_flow_page.dart';
 import '../features/menu/menu_management_page.dart';
 import '../features/pos/domain.dart';
 import '../features/pos/pos_controller.dart';
 import '../features/pos/pos_page.dart';
 import '../features/platform_admin/platform_admin_page.dart';
+import '../features/printing/native_print_worker.dart';
+import '../features/printing/queued_bluetooth_print_worker.dart';
 import '../features/settings/settings_page.dart';
 
 enum HomeSection { pos, orderFlow, menu, reports, settings, platformAdmin }
@@ -159,7 +164,14 @@ class HomeShell extends ConsumerWidget {
                   ),
               ],
             ),
-          Expanded(child: _buildBody(section, profile)),
+          Expanded(
+            child: Stack(
+              children: [
+                Positioned.fill(child: _buildBody(section, profile)),
+                const _QueuedPrintWorkerHost(),
+              ],
+            ),
+          ),
         ],
       ),
       bottomNavigationBar: wide
@@ -194,6 +206,70 @@ class HomeShell extends ConsumerWidget {
         ),
         HomeSection.platformAdmin => const PlatformAdminPage(),
       };
+}
+
+class _QueuedPrintWorkerHost extends ConsumerStatefulWidget {
+  const _QueuedPrintWorkerHost();
+
+  @override
+  ConsumerState<_QueuedPrintWorkerHost> createState() =>
+      _QueuedPrintWorkerHostState();
+}
+
+class _QueuedPrintWorkerHostState
+    extends ConsumerState<_QueuedPrintWorkerHost> {
+  final QueuedBluetoothPrintWorker _worker = QueuedBluetoothPrintWorker();
+  Timer? _timer;
+  VenueScope? _scope;
+  bool _processing = false;
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = ref.watch(activeVenueScopeProvider);
+    if (scope != _scope) {
+      scheduleMicrotask(() => _configure(scope));
+    }
+    return const SizedBox.shrink();
+  }
+
+  void _configure(VenueScope? scope) {
+    if (!mounted || scope == _scope) return;
+    _timer?.cancel();
+    _scope = scope;
+    if (scope == null) return;
+    unawaited(_process(scope));
+    _timer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => unawaited(_process(scope)),
+    );
+  }
+
+  Future<void> _process(VenueScope scope) async {
+    if (_processing || !mounted || _scope != scope) return;
+    _processing = true;
+    try {
+      final result = await _worker.processNext(scope);
+      if (result == PrintWorkerResult.printed) {
+        AppLogger.info('Queued Bluetooth printer: ticket printed.');
+      } else if (result == PrintWorkerResult.failed) {
+        AppLogger.error(
+          'Queued Bluetooth printer',
+          StateError('A queued ticket failed and will be retried or flagged.'),
+          StackTrace.current,
+        );
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Queued Bluetooth print worker', error, stackTrace);
+    } finally {
+      _processing = false;
+    }
+  }
 }
 
 class _Destination {
