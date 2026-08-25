@@ -1234,7 +1234,62 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
   return {notificationRetentionSeconds};
 }
 
-function validClosePayment(value, index, currencyCode) {
+function currencyDecimalDigits(currencyCode) {
+  switch (currencyCode) {
+    case "BIF": case "CLP": case "DJF": case "GNF": case "JPY":
+    case "KMF": case "KRW": case "PYG": case "RWF": case "UGX":
+    case "VND": case "VUV": case "XAF": case "XOF": case "XPF":
+      return 0;
+    case "BHD": case "IQD": case "JOD": case "KWD": case "LYD":
+    case "OMR": case "TND":
+      return 3;
+    case "CLF": case "UYW":
+      return 4;
+    default:
+      return 2;
+  }
+}
+
+function tenToBigInt(power) {
+  return 10n ** BigInt(power);
+}
+
+/// The rate is recorded as: one major unit of tender currency equals this
+/// many major units of the tenant's permanent reporting currency. Keeping the
+/// original decimal text plus fixed-scale integer arithmetic avoids floating
+/// point errors in historic sales data.
+function validExchangeRate(value) {
+  if (typeof value !== "string" ||
+      !/^(?:0|[1-9]\d{0,8})(?:\.\d{1,6})?$/.test(value.trim())) {
+    throw new HttpsError(
+      "invalid-argument",
+      "exchangeRateToBase must be a positive decimal with up to six decimal places.",
+    );
+  }
+  const text = value.trim();
+  const [whole, fraction = ""] = text.split(".");
+  const scaled = (BigInt(whole) * 1000000n) + BigInt(fraction.padEnd(6, "0"));
+  if (scaled <= 0n) {
+    throw new HttpsError("invalid-argument", "exchangeRateToBase must be greater than zero.");
+  }
+  return {text, scaled};
+}
+
+function convertedBaseMinor({amountMinor, tenderCurrencyCode, baseCurrencyCode, exchangeRate}) {
+  if (tenderCurrencyCode === baseCurrencyCode) return amountMinor;
+  const numerator = BigInt(amountMinor) * exchangeRate.scaled *
+    tenToBigInt(currencyDecimalDigits(baseCurrencyCode));
+  const denominator = tenToBigInt(currencyDecimalDigits(tenderCurrencyCode)) * 1000000n;
+  // Rounds once, half-up, at the reporting currency's minor unit. The rate
+  // and converted result are both snapshotted on the bill for auditability.
+  const result = (numerator + (denominator / 2n)) / denominator;
+  if (result <= 0n || result > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new HttpsError("failed-precondition", "The converted payment amount is outside the supported range.");
+  }
+  return Number(result);
+}
+
+function validClosePayment(value, index, baseCurrencyCode) {
   const payment = requireObject(value);
   const method = requiredText(payment, "method", 40);
   if (!["cash", "cardTerminal"].includes(method)) {
@@ -1243,29 +1298,46 @@ function validClosePayment(value, index, currencyCode) {
       `payments[${index}].method must be cash or cardTerminal.`,
     );
   }
-  const amountMinor = requiredPositiveInteger(
+  const tenderedAmountMinor = requiredPositiveInteger(
     payment.amountMinor,
     `payments[${index}].amountMinor`,
     100000000,
   );
-  const paymentCurrency = requiredText(payment, "currencyCode", 3).toUpperCase();
-  if (paymentCurrency !== currencyCode) {
+  const tenderedCurrencyCode = requiredText(payment, "currencyCode", 3).toUpperCase();
+  if (!supportedCurrencyCodeSet.has(tenderedCurrencyCode)) {
     throw new HttpsError(
-      "failed-precondition",
-      "Payments must use the venue's configured currency until foreign-currency tender is enabled.",
+      "invalid-argument",
+      `payments[${index}].currencyCode must be a supported ISO currency code.`,
     );
   }
   const terminalLabel = optionalText(payment, "terminalLabel", 120) || null;
+  if (method === "cardTerminal" && tenderedCurrencyCode !== baseCurrencyCode) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Card terminal payments must use the tenant reporting currency. Foreign tender is recorded as cash.",
+    );
+  }
   if (method === "cardTerminal" && payment.cardPaymentApproved !== true) {
     throw new HttpsError(
       "failed-precondition",
       "Confirm the card terminal approved this payment before recording it.",
     );
   }
+  const exchangeRate = tenderedCurrencyCode === baseCurrencyCode
+    ? {text: "1", scaled: 1000000n}
+    : validExchangeRate(payment.exchangeRateToBase);
+  const baseAmountMinor = convertedBaseMinor({
+    amountMinor: tenderedAmountMinor,
+    tenderCurrencyCode,
+    baseCurrencyCode,
+    exchangeRate,
+  });
   return {
     method,
-    amountMinor,
-    currencyCode: paymentCurrency,
+    tenderedAmountMinor,
+    tenderedCurrencyCode,
+    exchangeRateToBase: exchangeRate.text,
+    baseAmountMinor,
     terminalLabel,
     cardPaymentApproved: method === "cardTerminal",
   };
@@ -1297,23 +1369,23 @@ function billBusinessDate(timeZone, cutoffMinutes, now = new Date()) {
   return localDate.toISOString().slice(0, 10);
 }
 
-/// Closes an entire open order against verified payment information. Splits
-/// will create child bills later; this foundation deliberately keeps the first
-/// closing path atomic so an accidental double tap cannot create two sales or
-/// free a table before its financial record exists.
+/// Closes an entire open order against verified payment allocations. Splits
+/// will create child bills later; this foundation keeps every tender allocation
+/// and its conversion inside one transaction so an accidental double tap
+/// cannot create two sales or free a table before its record exists.
 async function closeOrderFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const orderId = requiredText(data, "orderId", 180);
   const rawPayments = data.payments;
-  if (!Array.isArray(rawPayments) || rawPayments.length !== 1) {
+  if (!Array.isArray(rawPayments) || rawPayments.length === 0 || rawPayments.length > 8) {
     throw new HttpsError(
       "invalid-argument",
-      "Exactly one full payment is required while bill splitting is being configured.",
+      "One to eight payment allocations are required.",
     );
   }
-  await requireTenantOperationalMember(caller, tenantId);
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
   const orderRef = tenantRef.collection("orders").doc(orderId);
@@ -1384,7 +1456,14 @@ async function closeOrderFor(caller, rawData) {
     const currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
     const payments = rawPayments.map((payment, index) =>
       validClosePayment(payment, index, currencyCode));
-    const paidMinor = payments.reduce((total, payment) => total + payment.amountMinor, 0);
+    if (payments.some((payment) => payment.tenderedCurrencyCode !== currencyCode) &&
+        !roles.some((role) => role === "owner" || role === "manager")) {
+      throw new HttpsError(
+        "permission-denied",
+        "A manager must enter or approve a foreign-currency exchange rate.",
+      );
+    }
+    const paidMinor = payments.reduce((total, payment) => total + payment.baseAmountMinor, 0);
     if (paidMinor !== totalMinor) {
       throw new HttpsError(
         "failed-precondition",

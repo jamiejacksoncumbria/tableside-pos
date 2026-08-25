@@ -444,14 +444,11 @@ class ActiveOrderController extends Notifier<PosOrder> {
     return printResult;
   }
 
-  /// Records one verified full payment and releases the table/tab only after
-  /// the server has atomically created its immutable bill. Split and mixed
-  /// tender will extend this command with child allocations; they must never
-  /// bypass the close-bill transaction below.
+  /// Records verified payment allocations and releases the table/tab only
+  /// after the server has atomically created its immutable bill. Split bills
+  /// will later create child allocations; they must never bypass this command.
   Future<BillCloseResult> closeBill({
-    required PaymentMethod method,
-    required bool cardPaymentApproved,
-    String? terminalLabel,
+    required List<BillPaymentInput> payments,
   }) async {
     if (_isSavingDraft) {
       throw StateError('The basket is still saving. Please wait a moment.');
@@ -470,18 +467,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
       );
     }
     final order = state;
-    final profile = ref.read(tenantProfileProvider);
     final result = await ref
         .read(productionCommandRepositoryProvider)
-        .closeOrder(
-          scope: scope,
-          order: order,
-          method: method,
-          amountMinor: order.totalMinor,
-          currencyCode: profile.currencyCode,
-          cardPaymentApproved: cardPaymentApproved,
-          terminalLabel: terminalLabel,
-        );
+        .closeOrder(scope: scope, order: order, payments: payments);
     _pendingDraftQuantities.clear();
     _selectPersistedOrder(null);
     ref.read(selectedTableProvider.notifier).select('');

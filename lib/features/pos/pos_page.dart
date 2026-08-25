@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/app_logger.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
+import '../../data/production_command_repository.dart';
 import '../notifications/notification_centre.dart';
 import 'domain.dart';
 import 'pos_controller.dart';
@@ -1067,198 +1068,493 @@ Future<void> _showCheckoutSheet(
   required String currencyCode,
 }) async {
   final terminalController = TextEditingController();
+  final tenderedAmountController = TextEditingController(
+    text: _moneyInputFromMinor(order.totalMinor, currencyCode),
+  );
+  final exchangeRateController = TextEditingController(text: '1');
+  final currencyChoices = <String>{
+    currencyCode.toUpperCase(),
+    'TRY',
+    'EUR',
+    'GBP',
+    'USD',
+  }.toList(growable: false);
   await showModalBottomSheet<void>(
     context: pageContext,
     showDragHandle: true,
     isScrollControlled: true,
     builder: (sheetContext) {
       var method = PaymentMethod.cash;
+      var tenderedCurrencyCode = currencyCode.toUpperCase();
       var cardApproved = false;
       var saving = false;
+      final paymentEntries = <_CheckoutPaymentDraft>[];
       return StatefulBuilder(
-        builder: (context, setSheetState) => SafeArea(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(
-              24,
-              0,
-              24,
-              24 + MediaQuery.viewInsetsOf(context).bottom,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  'Take payment',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  order.tabName?.trim().isNotEmpty == true
-                      ? 'Named tab: ${order.tabName}'
-                      : 'Table bill',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-                const SizedBox(height: 16),
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.receipt_long_outlined),
-                        const SizedBox(width: 12),
-                        const Expanded(child: Text('Amount due')),
-                        Text(
-                          formatMoney(
-                            order.totalMinor,
-                            currencyCode: currencyCode,
+        builder: (context, setSheetState) {
+          final tenderedMinor = _minorFromMoneyInput(
+            tenderedAmountController.text,
+            tenderedCurrencyCode,
+          );
+          final convertedBaseMinor = tenderedMinor == null
+              ? null
+              : _convertedBaseMinor(
+                  tenderedMinor: tenderedMinor,
+                  tenderedCurrencyCode: tenderedCurrencyCode,
+                  baseCurrencyCode: currencyCode,
+                  exchangeRateText: exchangeRateController.text,
+                );
+          final recordedBaseMinor = paymentEntries.fold<int>(
+            0,
+            (total, payment) => total + payment.baseAmountMinor,
+          );
+          final remainingBaseMinor = order.totalMinor - recordedBaseMinor;
+          final amountFits =
+              convertedBaseMinor != null &&
+              convertedBaseMinor > 0 &&
+              convertedBaseMinor <= remainingBaseMinor;
+          final paymentsComplete =
+              paymentEntries.isNotEmpty && remainingBaseMinor == 0;
+          final isForeignCash = tenderedCurrencyCode != currencyCode;
+          return SafeArea(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                24,
+                0,
+                24,
+                24 + MediaQuery.viewInsetsOf(context).bottom,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'Take payment',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    order.tabName?.trim().isNotEmpty == true
+                        ? 'Named tab: ${order.tabName}'
+                        : 'Table bill',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 16),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.receipt_long_outlined),
+                          const SizedBox(width: 12),
+                          const Expanded(child: Text('Amount remaining')),
+                          Text(
+                            formatMoney(
+                              remainingBaseMinor,
+                              currencyCode: currencyCode,
+                            ),
+                            style: Theme.of(context).textTheme.headlineSmall
+                                ?.copyWith(fontWeight: FontWeight.w800),
                           ),
-                          style: Theme.of(context).textTheme.headlineSmall
-                              ?.copyWith(fontWeight: FontWeight.w800),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                SegmentedButton<PaymentMethod>(
-                  segments: const [
-                    ButtonSegment(
-                      value: PaymentMethod.cash,
-                      icon: Icon(Icons.payments_outlined),
-                      label: Text('Cash'),
+                  const SizedBox(height: 12),
+                  SegmentedButton<PaymentMethod>(
+                    segments: const [
+                      ButtonSegment(
+                        value: PaymentMethod.cash,
+                        icon: Icon(Icons.payments_outlined),
+                        label: Text('Cash'),
+                      ),
+                      ButtonSegment(
+                        value: PaymentMethod.cardTerminal,
+                        icon: Icon(Icons.credit_card_rounded),
+                        label: Text('Card'),
+                      ),
+                    ],
+                    selected: {method},
+                    onSelectionChanged: saving
+                        ? null
+                        : (selection) => setSheetState(() {
+                            method = selection.first;
+                            cardApproved = false;
+                            if (method == PaymentMethod.cardTerminal) {
+                              tenderedCurrencyCode = currencyCode;
+                              exchangeRateController.text = '1';
+                              tenderedAmountController.text =
+                                  _moneyInputFromMinor(
+                                    order.totalMinor,
+                                    currencyCode,
+                                  );
+                            }
+                          }),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    key: ValueKey(tenderedCurrencyCode),
+                    initialValue: tenderedCurrencyCode,
+                    decoration: const InputDecoration(
+                      labelText: 'Tender currency',
                     ),
-                    ButtonSegment(
-                      value: PaymentMethod.cardTerminal,
-                      icon: Icon(Icons.credit_card_rounded),
-                      label: Text('Card'),
-                    ),
-                  ],
-                  selected: {method},
-                  onSelectionChanged: saving
-                      ? null
-                      : (selection) => setSheetState(() {
-                          method = selection.first;
-                          cardApproved = false;
-                        }),
-                ),
-                if (method == PaymentMethod.cardTerminal) ...[
+                    items: [
+                      for (final code in currencyChoices)
+                        DropdownMenuItem(value: code, child: Text(code)),
+                    ],
+                    onChanged: saving || method == PaymentMethod.cardTerminal
+                        ? null
+                        : (value) => setSheetState(() {
+                            tenderedCurrencyCode = value ?? currencyCode;
+                            exchangeRateController.text =
+                                tenderedCurrencyCode == currencyCode ? '1' : '';
+                            tenderedAmountController.clear();
+                          }),
+                  ),
                   const SizedBox(height: 12),
                   TextField(
-                    controller: terminalController,
+                    controller: tenderedAmountController,
                     enabled: !saving,
-                    maxLength: 120,
-                    textCapitalization: TextCapitalization.words,
-                    decoration: const InputDecoration(
-                      labelText: 'Card terminal used (optional)',
-                      hintText: 'For example, Bar terminal',
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
                     ),
+                    decoration: InputDecoration(
+                      labelText: 'Amount received ($tenderedCurrencyCode)',
+                      helperText: isForeignCash
+                          ? 'Enter the physical cash received in $tenderedCurrencyCode.'
+                          : 'Enter the amount received.',
+                    ),
+                    onChanged: (_) => setSheetState(() {}),
                   ),
-                  CheckboxListTile(
-                    value: cardApproved,
-                    contentPadding: EdgeInsets.zero,
-                    onChanged: saving
-                        ? null
-                        : (value) => setSheetState(
-                            () => cardApproved = value ?? false,
-                          ),
-                    title: const Text('Card terminal approved the payment'),
-                    subtitle: const Text(
-                      'Only record this after Card Plus confirms approval.',
+                  if (isForeignCash) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: exchangeRateController,
+                      enabled: !saving,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        labelText:
+                            '1 $tenderedCurrencyCode = how many $currencyCode?',
+                        helperText:
+                            'Manager-approved manual rate. The exact rate is retained on the bill.',
+                      ),
+                      onChanged: (_) => setSheetState(() {}),
+                    ),
+                  ],
+                  if (convertedBaseMinor != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      'Recorded value: ${formatMoney(convertedBaseMinor, currencyCode: currencyCode)}',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: amountFits
+                            ? Colors.green.shade700
+                            : Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ],
+                  if (!amountFits)
+                    Text(
+                      'This tender must not exceed the remaining amount.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  if (paymentEntries.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'Payment allocations',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 4),
+                    for (var index = 0; index < paymentEntries.length; index++)
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(
+                          paymentEntries[index].method == PaymentMethod.cash
+                              ? Icons.payments_outlined
+                              : Icons.credit_card_rounded,
+                        ),
+                        title: Text(
+                          '${paymentEntries[index].method == PaymentMethod.cash ? 'Cash' : 'Card'} · ${formatMoney(paymentEntries[index].tenderedAmountMinor, currencyCode: paymentEntries[index].tenderedCurrencyCode)}',
+                        ),
+                        subtitle:
+                            paymentEntries[index].tenderedCurrencyCode ==
+                                currencyCode
+                            ? null
+                            : Text(
+                                'Rate ${paymentEntries[index].exchangeRateToBase} → ${formatMoney(paymentEntries[index].baseAmountMinor, currencyCode: currencyCode)}',
+                              ),
+                        trailing: IconButton(
+                          tooltip: 'Remove payment allocation',
+                          onPressed: saving
+                              ? null
+                              : () => setSheetState(
+                                  () => paymentEntries.removeAt(index),
+                                ),
+                          icon: const Icon(Icons.close_rounded),
+                        ),
+                      ),
+                  ],
+                  if (method == PaymentMethod.cardTerminal) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: terminalController,
+                      enabled: !saving,
+                      maxLength: 120,
+                      textCapitalization: TextCapitalization.words,
+                      decoration: const InputDecoration(
+                        labelText: 'Card terminal used (optional)',
+                        hintText: 'For example, Bar terminal',
+                      ),
+                    ),
+                    CheckboxListTile(
+                      value: cardApproved,
+                      contentPadding: EdgeInsets.zero,
+                      onChanged: saving
+                          ? null
+                          : (value) => setSheetState(
+                              () => cardApproved = value ?? false,
+                            ),
+                      title: const Text('Card terminal approved the payment'),
+                      subtitle: const Text(
+                        'Only record this after Card Plus confirms approval.',
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  Text(
+                    isForeignCash
+                        ? 'Foreign cash is converted into the company reporting currency and retains its tender amount and rate for audit/reporting.'
+                        : 'Add one or more payment allocations. The total must equal the remaining bill value.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: saving
+                              ? null
+                              : () => Navigator.of(sheetContext).pop(),
+                          child: const Text('Cancel'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed:
+                              saving ||
+                                  paymentEntries.length >= 8 ||
+                                  !amountFits ||
+                                  tenderedMinor == null ||
+                                  (method == PaymentMethod.cardTerminal &&
+                                      !cardApproved)
+                              ? null
+                              : () => setSheetState(() {
+                                  paymentEntries.add(
+                                    _CheckoutPaymentDraft(
+                                      method: method,
+                                      tenderedAmountMinor: tenderedMinor,
+                                      tenderedCurrencyCode:
+                                          tenderedCurrencyCode,
+                                      exchangeRateToBase: exchangeRateController
+                                          .text
+                                          .trim(),
+                                      baseAmountMinor: convertedBaseMinor,
+                                      cardPaymentApproved: cardApproved,
+                                      terminalLabel: terminalController.text
+                                          .trim(),
+                                    ),
+                                  );
+                                  final nextRemaining =
+                                      order.totalMinor -
+                                      paymentEntries.fold<int>(
+                                        0,
+                                        (total, payment) =>
+                                            total + payment.baseAmountMinor,
+                                      );
+                                  method = PaymentMethod.cash;
+                                  tenderedCurrencyCode = currencyCode;
+                                  cardApproved = false;
+                                  exchangeRateController.text = '1';
+                                  terminalController.clear();
+                                  tenderedAmountController.text =
+                                      nextRemaining <= 0
+                                      ? ''
+                                      : _moneyInputFromMinor(
+                                          nextRemaining,
+                                          currencyCode,
+                                        );
+                                }),
+                          icon: const Icon(Icons.add_card_rounded),
+                          label: const Text('Add payment'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: saving || !paymentsComplete
+                          ? null
+                          : () async {
+                              setSheetState(() => saving = true);
+                              try {
+                                final result = await ref
+                                    .read(activeOrderProvider.notifier)
+                                    .closeBill(
+                                      payments: paymentEntries
+                                          .map(
+                                            (entry) => entry.toPaymentInput(),
+                                          )
+                                          .toList(growable: false),
+                                    );
+                                if (!sheetContext.mounted) return;
+                                Navigator.of(sheetContext).pop();
+                                if (!pageContext.mounted) return;
+                                showAppNotification(
+                                  pageContext,
+                                  ref: ref,
+                                  title: result.alreadyClosed
+                                      ? 'Bill was already closed'
+                                      : 'Payment recorded',
+                                  message:
+                                      'Receipt ${result.receiptNumber} closed at ${formatMoney(result.totalMinor, currencyCode: result.currencyCode)}.',
+                                  level: AppNotificationLevel.success,
+                                );
+                              } on Object catch (error, stackTrace) {
+                                AppLogger.error(
+                                  'Close bill',
+                                  error,
+                                  stackTrace,
+                                );
+                                if (!sheetContext.mounted) return;
+                                setSheetState(() => saving = false);
+                                showAppNotification(
+                                  sheetContext,
+                                  ref: ref,
+                                  title: 'Payment was not recorded',
+                                  message: '$error',
+                                  level: AppNotificationLevel.error,
+                                );
+                              }
+                            },
+                      icon: saving
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.check_circle_outline_rounded),
+                      label: Text(
+                        saving
+                            ? 'Recording…'
+                            : paymentsComplete
+                            ? 'Close bill'
+                            : 'Add payment allocation',
+                      ),
                     ),
                   ),
                 ],
-                const SizedBox(height: 12),
-                Text(
-                  'This closes the whole bill. Split bills, mixed tender and foreign cash are the next checkout step.',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: saving
-                            ? null
-                            : () => Navigator.of(sheetContext).pop(),
-                        child: const Text('Cancel'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: FilledButton.icon(
-                        onPressed:
-                            saving ||
-                                (method == PaymentMethod.cardTerminal &&
-                                    !cardApproved)
-                            ? null
-                            : () async {
-                                setSheetState(() => saving = true);
-                                try {
-                                  final result = await ref
-                                      .read(activeOrderProvider.notifier)
-                                      .closeBill(
-                                        method: method,
-                                        cardPaymentApproved: cardApproved,
-                                        terminalLabel: terminalController.text
-                                            .trim(),
-                                      );
-                                  if (!sheetContext.mounted) return;
-                                  Navigator.of(sheetContext).pop();
-                                  if (!pageContext.mounted) return;
-                                  showAppNotification(
-                                    pageContext,
-                                    ref: ref,
-                                    title: result.alreadyClosed
-                                        ? 'Bill was already closed'
-                                        : 'Payment recorded',
-                                    message:
-                                        'Receipt ${result.receiptNumber} closed at ${formatMoney(result.totalMinor, currencyCode: result.currencyCode)}.',
-                                    level: AppNotificationLevel.success,
-                                  );
-                                } on Object catch (error, stackTrace) {
-                                  AppLogger.error(
-                                    'Close bill',
-                                    error,
-                                    stackTrace,
-                                  );
-                                  if (!sheetContext.mounted) return;
-                                  setSheetState(() => saving = false);
-                                  showAppNotification(
-                                    sheetContext,
-                                    ref: ref,
-                                    title: 'Payment was not recorded',
-                                    message: '$error',
-                                    level: AppNotificationLevel.error,
-                                  );
-                                }
-                              },
-                        icon: saving
-                            ? const SizedBox.square(
-                                dimension: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.check_circle_outline_rounded),
-                        label: Text(
-                          saving
-                              ? 'Recording…'
-                              : method == PaymentMethod.cash
-                              ? 'Record cash'
-                              : 'Record card',
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+              ),
             ),
-          ),
-        ),
+          );
+        },
       );
     },
-  ).whenComplete(terminalController.dispose);
+  ).whenComplete(() {
+    terminalController.dispose();
+    tenderedAmountController.dispose();
+    exchangeRateController.dispose();
+  });
+}
+
+class _CheckoutPaymentDraft {
+  const _CheckoutPaymentDraft({
+    required this.method,
+    required this.tenderedAmountMinor,
+    required this.tenderedCurrencyCode,
+    required this.exchangeRateToBase,
+    required this.baseAmountMinor,
+    required this.cardPaymentApproved,
+    this.terminalLabel,
+  });
+
+  final PaymentMethod method;
+  final int tenderedAmountMinor;
+  final String tenderedCurrencyCode;
+  final String exchangeRateToBase;
+  final int baseAmountMinor;
+  final bool cardPaymentApproved;
+  final String? terminalLabel;
+
+  BillPaymentInput toPaymentInput() => BillPaymentInput(
+    method: method,
+    tenderedAmountMinor: tenderedAmountMinor,
+    tenderedCurrencyCode: tenderedCurrencyCode,
+    exchangeRateToBase: exchangeRateToBase,
+    cardPaymentApproved: cardPaymentApproved,
+    terminalLabel: terminalLabel,
+  );
+}
+
+String _moneyInputFromMinor(int minorUnits, String currencyCode) {
+  final digits = currencyDecimalDigits(currencyCode);
+  final scale = _minorScale(digits);
+  final major = minorUnits ~/ scale;
+  if (digits == 0) return '$major';
+  final fraction = (minorUnits.abs() % scale).toString().padLeft(digits, '0');
+  return '$major.$fraction';
+}
+
+int? _minorFromMoneyInput(String raw, String currencyCode) {
+  final value = raw.trim().replaceAll(',', '.');
+  final digits = currencyDecimalDigits(currencyCode);
+  final expression = digits == 0
+      ? RegExp(r'^\d+$')
+      : RegExp('^\\d+(?:\\.\\d{0,$digits})?\$');
+  if (!expression.hasMatch(value)) return null;
+  final pieces = value.split('.');
+  final major = int.tryParse(pieces.first);
+  if (major == null) return null;
+  final scale = _minorScale(digits);
+  final fraction = digits == 0 || pieces.length == 1
+      ? 0
+      : int.tryParse(pieces.last.padRight(digits, '0'));
+  if (fraction == null) return null;
+  final amount = (major * scale) + fraction;
+  return amount > 0 && amount <= 100000000 ? amount : null;
+}
+
+int? _convertedBaseMinor({
+  required int tenderedMinor,
+  required String tenderedCurrencyCode,
+  required String baseCurrencyCode,
+  required String exchangeRateText,
+}) {
+  if (tenderedCurrencyCode == baseCurrencyCode) return tenderedMinor;
+  final normalizedRate = exchangeRateText.trim();
+  if (!RegExp(r'^(?:0|[1-9]\d{0,8})(?:\.\d{1,6})?$').hasMatch(normalizedRate)) {
+    return null;
+  }
+  final rate = double.tryParse(normalizedRate);
+  if (rate == null || !rate.isFinite || rate <= 0) return null;
+  final tenderedScale = _minorScale(
+    currencyDecimalDigits(tenderedCurrencyCode),
+  );
+  final baseScale = _minorScale(currencyDecimalDigits(baseCurrencyCode));
+  final result = ((tenderedMinor / tenderedScale) * rate * baseScale).round();
+  return result > 0 && result <= 100000000 ? result : null;
+}
+
+int _minorScale(int decimalDigits) {
+  var result = 1;
+  for (var index = 0; index < decimalDigits; index++) {
+    result *= 10;
+  }
+  return result;
 }
 
 /// Always asks at the point an order leaves the basket. Bar staff often need

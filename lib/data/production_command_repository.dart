@@ -41,6 +41,36 @@ class BillCloseResult {
   final bool alreadyClosed;
 }
 
+/// A tender allocation as entered at checkout. The server derives the
+/// reporting-currency value from the amount, currency and rate; it does not
+/// trust a client-provided converted total.
+class BillPaymentInput {
+  const BillPaymentInput({
+    required this.method,
+    required this.tenderedAmountMinor,
+    required this.tenderedCurrencyCode,
+    required this.exchangeRateToBase,
+    required this.cardPaymentApproved,
+    this.terminalLabel,
+  });
+
+  final PaymentMethod method;
+  final int tenderedAmountMinor;
+  final String tenderedCurrencyCode;
+  final String exchangeRateToBase;
+  final bool cardPaymentApproved;
+  final String? terminalLabel;
+
+  Map<String, Object?> toRequestData() => {
+    'method': method.name,
+    'amountMinor': tenderedAmountMinor,
+    'currencyCode': tenderedCurrencyCode,
+    'exchangeRateToBase': exchangeRateToBase,
+    'cardPaymentApproved': cardPaymentApproved,
+    'terminalLabel': terminalLabel,
+  };
+}
+
 final productionCommandRepositoryProvider =
     Provider<ProductionCommandRepository>(
       (ref) => ProductionCommandRepository(),
@@ -202,25 +232,13 @@ class ProductionCommandRepository {
   Future<BillCloseResult> closeOrder({
     required VenueScope scope,
     required PosOrder order,
-    required PaymentMethod method,
-    required int amountMinor,
-    required String currencyCode,
-    required bool cardPaymentApproved,
-    String? terminalLabel,
+    required List<BillPaymentInput> payments,
   }) async {
     final response = await _call('closeOrder', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'orderId': order.id,
-      'payments': [
-        {
-          'method': method.name,
-          'amountMinor': amountMinor,
-          'currencyCode': currencyCode,
-          'cardPaymentApproved': cardPaymentApproved,
-          'terminalLabel': terminalLabel,
-        },
-      ],
+      'payments': payments.map((payment) => payment.toRequestData()).toList(),
     });
     final billId = response['billId'];
     final totalMinor = response['totalMinor'];
