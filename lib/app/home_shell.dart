@@ -188,9 +188,15 @@ class HomeShell extends ConsumerWidget {
           ),
         ],
       ),
-      bottomNavigationBar: wide
-          ? null
-          : NavigationBar(
+      // Notifications live in the scaffold's bottom area rather than as a
+      // floating SnackBar. This reserves layout space, so a message can never
+      // cover a POS control or require staff to dismiss it before continuing.
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const _BottomNotificationTray(),
+          if (!wide)
+            NavigationBar(
               selectedIndex: compactIndex < 0 ? 0 : compactIndex,
               onDestinationSelected: (selected) => ref
                   .read(homeSectionProvider.notifier)
@@ -203,6 +209,8 @@ class HomeShell extends ConsumerWidget {
                   ),
               ],
             ),
+        ],
+      ),
     );
   }
 
@@ -221,6 +229,83 @@ class HomeShell extends ConsumerWidget {
         ),
         HomeSection.platformAdmin => const PlatformAdminPage(),
       };
+}
+
+/// A layout-reserving tray for the latest notification. It intentionally sits
+/// inside the bottom navigation area, never over the order controls.
+class _BottomNotificationTray extends ConsumerWidget {
+  const _BottomNotificationTray();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final notifications = ref.watch(appNotificationsProvider);
+    if (notifications.isEmpty) return const SizedBox.shrink();
+    final notification = notifications.first;
+    final controller = ref.read(appNotificationsProvider.notifier);
+    final scheme = Theme.of(context).colorScheme;
+    final (icon, colour) = switch (notification.level) {
+      AppNotificationLevel.success => (
+        Icons.check_circle_outline_rounded,
+        Colors.green.shade700,
+      ),
+      AppNotificationLevel.information => (
+        Icons.info_outline_rounded,
+        scheme.primary,
+      ),
+      AppNotificationLevel.warning => (
+        Icons.warning_amber_rounded,
+        Colors.orange.shade800,
+      ),
+      AppNotificationLevel.error => (Icons.error_outline_rounded, scheme.error),
+    };
+    return SafeArea(
+      top: false,
+      bottom: false,
+      child: Material(
+        color: scheme.surfaceContainerHigh,
+        child: InkWell(
+          onTap: () {
+            controller.markRead(notification.id);
+            openNotificationCentre(context);
+          },
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+            child: Row(
+              children: [
+                Icon(icon, color: colour),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        notification.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      Text(
+                        notification.message,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Dismiss notification',
+                  onPressed: () => controller.dismiss(notification.id),
+                  icon: const Icon(Icons.close_rounded),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _QueuedPrintWorkerHost extends ConsumerStatefulWidget {

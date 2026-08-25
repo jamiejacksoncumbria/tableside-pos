@@ -127,8 +127,8 @@ class AppNotificationsController extends Notifier<List<AppNotification>> {
 int unreadNotificationCount(List<AppNotification> notifications) =>
     notifications.where((notification) => !notification.isRead).length;
 
-/// Records every important message before showing the familiar short toast.
-/// Both disappear after the venue's configured retention time.
+/// Records every important message for the non-blocking bottom notification
+/// tray. Messages disappear after the venue's configured retention time.
 void showAppNotification(
   BuildContext context, {
   WidgetRef? ref,
@@ -163,22 +163,6 @@ void showAppNotification(
     level: level,
     retentionSeconds: retention,
   );
-  final colour = _colourFor(level, Theme.of(context).colorScheme);
-  ScaffoldMessenger.of(context)
-    ..hideCurrentSnackBar()
-    ..showSnackBar(
-      SnackBar(
-        behavior: SnackBarBehavior.floating,
-        duration: Duration(seconds: retention),
-        backgroundColor: colour,
-        content: Text(message),
-        action: SnackBarAction(
-          label: 'VIEW',
-          textColor: Theme.of(context).colorScheme.onPrimary,
-          onPressed: () => openNotificationCentre(context),
-        ),
-      ),
-    );
 }
 
 void openNotificationCentre(BuildContext context) {
