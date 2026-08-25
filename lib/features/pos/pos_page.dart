@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/app_logger.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
+import '../notifications/notification_centre.dart';
 import 'domain.dart';
 import 'pos_controller.dart';
 
@@ -192,8 +193,12 @@ class _TablesPanel extends ConsumerWidget {
                                     stackTrace,
                                   );
                                   if (!context.mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(content: Text('$error')),
+                                  showAppNotification(
+                                    context,
+                                    ref: ref,
+                                    title: 'Could not switch table',
+                                    message: '$error',
+                                    level: AppNotificationLevel.error,
                                   );
                                 }
                               },
@@ -236,8 +241,12 @@ class _TablesPanel extends ConsumerWidget {
                                       stackTrace,
                                     );
                                     if (!context.mounted) return;
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(content: Text('$error')),
+                                    showAppNotification(
+                                      context,
+                                      ref: ref,
+                                      title: 'Could not open named tab',
+                                      message: '$error',
+                                      level: AppNotificationLevel.error,
                                     );
                                   }
                                 },
@@ -745,8 +754,9 @@ class _ProductTile extends StatelessWidget {
                         unavailableLabel,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.labelSmall
-                            ?.copyWith(color: scheme.error),
+                        style: Theme.of(
+                          context,
+                        ).textTheme.labelSmall?.copyWith(color: scheme.error),
                       ),
                     if (!compact && product.trackStock)
                       Text(
@@ -913,14 +923,15 @@ class _OrderPanel extends ConsumerWidget {
                                   .read(activeOrderProvider.notifier)
                                   .sendToProduction();
                               if (!context.mounted) return;
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    printResult.ticketsPrinted > 0
-                                        ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
-                                        : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.',
-                                  ),
-                                ),
+                              final message = printResult.ticketsPrinted > 0
+                                  ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
+                                  : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.';
+                              showAppNotification(
+                                context,
+                                ref: ref,
+                                title: 'Order sent',
+                                message: message,
+                                level: AppNotificationLevel.success,
                               );
                             } on Object catch (error, stackTrace) {
                               AppLogger.error(
@@ -929,12 +940,13 @@ class _OrderPanel extends ConsumerWidget {
                                 stackTrace,
                               );
                               if (!context.mounted) return;
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text(
+                              showAppNotification(
+                                context,
+                                ref: ref,
+                                title: 'Order needs attention',
+                                message:
                                     'The order or its local ticket could not be completed. It remains open for a safe retry.',
-                                  ),
-                                ),
+                                level: AppNotificationLevel.error,
                               );
                             }
                           },
@@ -1012,15 +1024,23 @@ void _showNamedTabDialog(BuildContext context, WidgetRef ref) {
               if (!dialogContext.mounted) return;
               Navigator.of(dialogContext).pop();
               if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Named tab is ready.')),
+              showAppNotification(
+                context,
+                ref: ref,
+                title: 'Named tab ready',
+                message: 'Named tab is ready.',
+                level: AppNotificationLevel.success,
               );
             } on Object catch (error, stackTrace) {
               AppLogger.error('Open named tab', error, stackTrace);
               if (!dialogContext.mounted) return;
-              ScaffoldMessenger.of(
+              showAppNotification(
                 dialogContext,
-              ).showSnackBar(SnackBar(content: Text('$error')));
+                ref: ref,
+                title: 'Could not open named tab',
+                message: '$error',
+                level: AppNotificationLevel.error,
+              );
             }
           },
           icon: const Icon(Icons.open_in_new_rounded),

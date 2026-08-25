@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/app_logger.dart';
+import '../notifications/notification_centre.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
 
@@ -78,17 +79,21 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
       await _printer.selectDevice(device);
       if (!mounted) return;
       setState(() => _selected = device);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('${device.name} is selected for test printing.'),
-        ),
+      showAppNotification(
+        context,
+        title: 'Printer selected',
+        message: '${device.name} is selected for test printing.',
+        level: AppNotificationLevel.success,
       );
     } on Object catch (error, stackTrace) {
       AppLogger.error('Select Bluetooth printer', error, stackTrace);
       if (!mounted) return;
-      ScaffoldMessenger.of(
+      showAppNotification(
         context,
-      ).showSnackBar(SnackBar(content: Text(_friendlyError(error))));
+        title: 'Could not select printer',
+        message: _friendlyError(error),
+        level: AppNotificationLevel.error,
+      );
     }
   }
 
@@ -99,9 +104,12 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
     } on Object catch (error, stackTrace) {
       AppLogger.error('Clear Bluetooth printer selection', error, stackTrace);
       if (!mounted) return;
-      ScaffoldMessenger.of(
+      showAppNotification(
         context,
-      ).showSnackBar(SnackBar(content: Text(_friendlyError(error))));
+        title: 'Could not clear printer',
+        message: _friendlyError(error),
+        level: AppNotificationLevel.error,
+      );
     }
   }
 
@@ -115,19 +123,22 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
         restaurantName: widget.restaurantName,
       );
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
+      showAppNotification(
+        context,
+        title: 'Test print sent',
+        message:
             'Test bytes were sent. Confirm that the complete ticket printed before enabling live routes.',
-          ),
-        ),
+        level: AppNotificationLevel.success,
       );
     } on Object catch (error, stackTrace) {
       AppLogger.error('Bluetooth test print', error, stackTrace);
       if (!mounted) return;
-      ScaffoldMessenger.of(
+      showAppNotification(
         context,
-      ).showSnackBar(SnackBar(content: Text(_friendlyError(error))));
+        title: 'Test print failed',
+        message: _friendlyError(error),
+        level: AppNotificationLevel.error,
+      );
     } finally {
       if (mounted) setState(() => _printing = false);
     }
@@ -143,21 +154,23 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
       );
       if (!mounted) return;
       setState(() => _routing = routing);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            routing.enabled && routing.productionAreas.isNotEmpty
-                ? 'Live production routing saved for this venue.'
-                : 'Live production routing is off for this venue.',
-          ),
-        ),
+      showAppNotification(
+        context,
+        title: 'Printer routing saved',
+        message: routing.enabled && routing.productionAreas.isNotEmpty
+            ? 'Live production routing saved for this venue.'
+            : 'Live production routing is off for this venue.',
+        level: AppNotificationLevel.success,
       );
     } on Object catch (error, stackTrace) {
       AppLogger.error('Save Bluetooth production routing', error, stackTrace);
       if (!mounted) return;
-      ScaffoldMessenger.of(
+      showAppNotification(
         context,
-      ).showSnackBar(SnackBar(content: Text(_friendlyError(error))));
+        title: 'Could not save printer routing',
+        message: _friendlyError(error),
+        level: AppNotificationLevel.error,
+      );
     } finally {
       if (mounted) setState(() => _savingRouting = false);
     }
@@ -321,7 +334,9 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                   ),
                   if (_selected == null) ...[
                     const SizedBox(height: 8),
-                    const Text('Select a paired printer before enabling routing.'),
+                    const Text(
+                      'Select a paired printer before enabling routing.',
+                    ),
                   ],
                 ],
               ),

@@ -7,6 +7,7 @@ import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../features/order_flow/order_flow_page.dart';
 import '../features/menu/menu_management_page.dart';
+import '../features/notifications/notification_centre.dart';
 import '../features/pos/domain.dart';
 import '../features/pos/pos_controller.dart';
 import '../features/pos/pos_page.dart';
@@ -48,6 +49,9 @@ class HomeShell extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final section = ref.watch(homeSectionProvider);
+    final unreadNotifications = ref.watch(
+      appNotificationsProvider.select(unreadNotificationCount),
+    );
     final TenantProfile profile =
         profileOverride ?? ref.watch(tenantProfileProvider);
     final wide = MediaQuery.sizeOf(context).width >= 840;
@@ -134,8 +138,13 @@ class HomeShell extends ConsumerWidget {
             ),
           IconButton(
             tooltip: 'Notifications',
-            onPressed: () {},
-            icon: const Badge(child: Icon(Icons.notifications_none_rounded)),
+            onPressed: () => openNotificationCentre(context),
+            icon: unreadNotifications == 0
+                ? const Icon(Icons.notifications_none_rounded)
+                : Badge.count(
+                    count: unreadNotifications,
+                    child: const Icon(Icons.notifications_none_rounded),
+                  ),
           ),
           if (onSignOut != null)
             IconButton(
@@ -253,29 +262,35 @@ class _QueuedPrintWorkerHostState
     _scope = scope;
     _queuedJobCount = 0;
     if (scope == null) return;
-    _queuedJobsSubscription = _worker.watchQueuedJobCount(scope).listen(
-      (queuedCount) {
-        _queuedJobCount = queuedCount;
-        AppLogger.info(
-          'Queued printer stream: $queuedCount queued job(s) for this venue.',
+    _queuedJobsSubscription = _worker
+        .watchQueuedJobCount(scope)
+        .listen(
+          (queuedCount) {
+            _queuedJobCount = queuedCount;
+            AppLogger.info(
+              'Queued printer stream: $queuedCount queued job(s) for this venue.',
+            );
+            if (queuedCount > 0) unawaited(_processAvailable(scope));
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            AppLogger.error('Queued printer stream', error, stackTrace);
+            if (!mounted) return;
+            showAppNotification(
+              context,
+              ref: ref,
+              title: 'Printer queue connection failed',
+              message:
+                  'Could not watch the printer queue. Check the connection.',
+              level: AppNotificationLevel.error,
+            );
+          },
         );
-        if (queuedCount > 0) unawaited(_processAvailable(scope));
-      },
-      onError: (Object error, StackTrace stackTrace) => AppLogger.error(
-        'Queued printer stream',
-        error,
-        stackTrace,
-      ),
-    );
     // Failed tickets deliberately wait ten seconds before their next allowed
     // attempt. This is not normal polling: it is only the retry wake-up for
     // work that was already observed by the stream.
-    _retryTimer = Timer.periodic(
-      const Duration(seconds: 10),
-      (_) {
-        if (_queuedJobCount > 0) unawaited(_processAvailable(scope));
-      },
-    );
+    _retryTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (_queuedJobCount > 0) unawaited(_processAvailable(scope));
+    });
     unawaited(_processAvailable(scope));
   }
 
@@ -285,6 +300,7 @@ class _QueuedPrintWorkerHostState
     try {
       while (mounted && _scope == scope) {
         final result = await _worker.processNext(scope);
+        if (!mounted || _scope != scope) return;
         if (result == PrintWorkerResult.noWork) return;
         if (result == PrintWorkerResult.printed) {
           AppLogger.info('Queued Bluetooth printer: ticket printed.');
@@ -296,12 +312,29 @@ class _QueuedPrintWorkerHostState
             ),
             StackTrace.current,
           );
+          showAppNotification(
+            context,
+            ref: ref,
+            title: 'Production ticket needs attention',
+            message:
+                'A production ticket could not print. It will retry automatically.',
+            level: AppNotificationLevel.error,
+          );
           // A failed job is requeued for a delayed retry, so do not spin on it.
           return;
         }
       }
     } on Object catch (error, stackTrace) {
       AppLogger.error('Queued Bluetooth print worker', error, stackTrace);
+      if (mounted) {
+        showAppNotification(
+          context,
+          ref: ref,
+          title: 'Printer worker failed',
+          message: 'The printer worker encountered an error and will retry.',
+          level: AppNotificationLevel.error,
+        );
+      }
     } finally {
       _processing = false;
     }

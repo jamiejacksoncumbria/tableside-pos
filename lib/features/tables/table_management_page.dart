@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
+import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 
@@ -232,10 +233,12 @@ Future<void> _showTableDialog({
               } on Object catch (error, stackTrace) {
                 AppLogger.error('Save venue table', error, stackTrace);
                 if (!dialogContext.mounted) return;
-                ScaffoldMessenger.of(dialogContext).showSnackBar(
-                  SnackBar(
-                    content: Text('The table could not be saved: $error'),
-                  ),
+                showAppNotification(
+                  dialogContext,
+                  ref: ref,
+                  title: 'Could not save table',
+                  message: 'The table could not be saved: $error',
+                  level: AppNotificationLevel.error,
                 );
               }
             },
@@ -281,8 +284,12 @@ Future<void> _confirmDelete({
   } on Object catch (error, stackTrace) {
     AppLogger.error('Delete venue table', error, stackTrace);
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('The table could not be deleted: $error')),
+    showAppNotification(
+      context,
+      ref: ref,
+      title: 'Could not delete table',
+      message: 'The table could not be deleted: $error',
+      level: AppNotificationLevel.error,
     );
   }
 }

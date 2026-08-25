@@ -5,6 +5,7 @@ import '../../core/app_logger.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/firestore_pos_repository.dart';
+import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 
@@ -194,12 +195,13 @@ class MenuManagementPage extends ConsumerWidget {
                                 stackTrace,
                               );
                               if (!context.mounted) return;
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text(
+                              showAppNotification(
+                                context,
+                                ref: ref,
+                                title: 'Availability update failed',
+                                message:
                                     'The availability could not be updated.',
-                                  ),
-                                ),
+                                level: AppNotificationLevel.error,
                               );
                             }
                           },
@@ -293,8 +295,12 @@ Future<void> _deleteSection({
   } on Object catch (error, stackTrace) {
     AppLogger.error('Delete menu section', error, stackTrace);
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('The section could not be deleted: $error')),
+    showAppNotification(
+      context,
+      ref: ref,
+      title: 'Could not delete section',
+      message: 'The section could not be deleted: $error',
+      level: AppNotificationLevel.error,
     );
   }
 }
@@ -542,10 +548,12 @@ Future<void> _showSectionDialog({
                 } on Object catch (error, stackTrace) {
                   AppLogger.error('Save menu section', error, stackTrace);
                   if (!dialogContext.mounted) return;
-                  ScaffoldMessenger.of(dialogContext).showSnackBar(
-                    SnackBar(
-                      content: Text('The section could not be saved: $error'),
-                    ),
+                  showAppNotification(
+                    dialogContext,
+                    ref: ref,
+                    title: 'Could not save section',
+                    message: 'The section could not be saved: $error',
+                    level: AppNotificationLevel.error,
                   );
                 }
               },
@@ -733,10 +741,12 @@ Future<void> _showProductDialog({
               onPressed: () async {
                 if (!(formKey.currentState?.validate() ?? false)) return;
                 if (selectedSections.isEmpty) {
-                  ScaffoldMessenger.of(dialogContext).showSnackBar(
-                    const SnackBar(
-                      content: Text('Select at least one menu section.'),
-                    ),
+                  showAppNotification(
+                    dialogContext,
+                    ref: ref,
+                    title: 'Select a menu section',
+                    message: 'Select at least one menu section.',
+                    level: AppNotificationLevel.warning,
                   );
                   return;
                 }
@@ -777,10 +787,12 @@ Future<void> _showProductDialog({
                 } on Object catch (error, stackTrace) {
                   AppLogger.error('Save menu product', error, stackTrace);
                   if (!dialogContext.mounted) return;
-                  ScaffoldMessenger.of(dialogContext).showSnackBar(
-                    const SnackBar(
-                      content: Text('The product could not be saved.'),
-                    ),
+                  showAppNotification(
+                    dialogContext,
+                    ref: ref,
+                    title: 'Could not save product',
+                    message: 'The product could not be saved.',
+                    level: AppNotificationLevel.error,
                   );
                 }
               },

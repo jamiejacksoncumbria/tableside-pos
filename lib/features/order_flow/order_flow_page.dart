@@ -7,6 +7,7 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
+import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 
 final orderFlowProvider = StreamProvider<List<OrderFlowOrder>>((ref) {
@@ -196,10 +197,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     } on Object catch (error, stackTrace) {
       AppLogger.error('Update order flow status', error, stackTrace);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('The order status could not be updated. Please retry.'),
-        ),
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Order flow update failed',
+        message: 'The order status could not be updated. Please retry.',
+        level: AppNotificationLevel.error,
       );
     }
   }

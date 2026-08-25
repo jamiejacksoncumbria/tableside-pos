@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/tenant_profile_repository.dart';
+import '../notifications/notification_centre.dart';
 import '../printing/bluetooth_printer_setup_page.dart';
 import '../printing/venue_printer_routing_page.dart';
 import '../pos/domain.dart';
@@ -121,21 +122,25 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         ref.read(tenantProfileProvider.notifier).update(updated);
       }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              widget.persistToFirebase
-                  ? 'Company profile saved to Firebase.'
-                  : 'Company profile saved locally in this starter.',
-            ),
-          ),
+        showAppNotification(
+          context,
+          ref: ref,
+          title: 'Company profile saved',
+          message: widget.persistToFirebase
+              ? 'Company profile saved to Firebase.'
+              : 'Company profile saved locally in this starter.',
+          level: AppNotificationLevel.success,
         );
       }
     } on Object catch (error, stackTrace) {
       AppLogger.error('Save company profile', error, stackTrace);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not save company profile: $error')),
+        showAppNotification(
+          context,
+          ref: ref,
+          title: 'Could not save company profile',
+          message: 'Could not save company profile: $error',
+          level: AppNotificationLevel.error,
         );
       }
     } finally {
