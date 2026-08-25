@@ -978,72 +978,287 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                   child: OutlinedButton.icon(
                     onPressed: () => _showSplitBillSheet(context),
                     icon: const Icon(Icons.call_split_rounded),
-                    label: const Text('Split bill'),
+                    label: const Text('Split'),
                   ),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: !hasUnsentLines
+                    onPressed: order.lines.isEmpty || hasUnsentLines
                         ? null
-                        : () async {
-                            final printRequired = await _confirmProductionPrint(
-                              context,
-                            );
-                            if (printRequired == null || !context.mounted) {
-                              return;
-                            }
-                            try {
-                              final printResult = await ref
-                                  .read(activeOrderProvider.notifier)
-                                  .sendToProduction(
-                                    printRequired: printRequired,
-                                  );
-                              if (!context.mounted) return;
-                              final message = !printRequired
-                                  ? 'New items sent to the Order Flow Board without printing.'
-                                  : printResult.ticketsPrinted > 0
-                                  ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
-                                  : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.';
-                              showAppNotification(
-                                context,
-                                ref: ref,
-                                title: 'Order sent',
-                                message: message,
-                                level: AppNotificationLevel.success,
-                              );
-                            } on Object catch (error, stackTrace) {
-                              AppLogger.error(
-                                'Send order to production',
-                                error,
-                                stackTrace,
-                              );
-                              if (!context.mounted) return;
-                              showAppNotification(
-                                context,
-                                ref: ref,
-                                title: 'Order needs attention',
-                                message:
-                                    'The order or its local ticket could not be completed. It remains open for a safe retry.',
-                                level: AppNotificationLevel.error,
-                              );
-                            }
-                          },
-                    icon: const Icon(Icons.print_rounded),
-                    label: Text(
-                      order.status == OrderStatus.sent
-                          ? 'Send additions'
-                          : 'Send',
-                    ),
+                        : () => _showCheckoutSheet(
+                            context,
+                            ref: ref,
+                            order: order,
+                            currencyCode: widget.currencyCode,
+                          ),
+                    icon: const Icon(Icons.payments_outlined),
+                    label: const Text('Pay'),
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: !hasUnsentLines
+                    ? null
+                    : () async {
+                        final printRequired = await _confirmProductionPrint(
+                          context,
+                        );
+                        if (printRequired == null || !context.mounted) {
+                          return;
+                        }
+                        try {
+                          final printResult = await ref
+                              .read(activeOrderProvider.notifier)
+                              .sendToProduction(printRequired: printRequired);
+                          if (!context.mounted) return;
+                          final message = !printRequired
+                              ? 'New items sent to the Order Flow Board without printing.'
+                              : printResult.ticketsPrinted > 0
+                              ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
+                              : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.';
+                          showAppNotification(
+                            context,
+                            ref: ref,
+                            title: 'Order sent',
+                            message: message,
+                            level: AppNotificationLevel.success,
+                          );
+                        } on Object catch (error, stackTrace) {
+                          AppLogger.error(
+                            'Send order to production',
+                            error,
+                            stackTrace,
+                          );
+                          if (!context.mounted) return;
+                          showAppNotification(
+                            context,
+                            ref: ref,
+                            title: 'Order needs attention',
+                            message:
+                                'The order or its local ticket could not be completed. It remains open for a safe retry.',
+                            level: AppNotificationLevel.error,
+                          );
+                        }
+                      },
+                icon: const Icon(Icons.print_rounded),
+                label: Text(
+                  order.status == OrderStatus.sent
+                      ? 'Send additions'
+                      : 'Send order',
+                ),
+              ),
             ),
           ],
         ),
       ),
     );
   }
+}
+
+Future<void> _showCheckoutSheet(
+  BuildContext pageContext, {
+  required WidgetRef ref,
+  required PosOrder order,
+  required String currencyCode,
+}) async {
+  final terminalController = TextEditingController();
+  await showModalBottomSheet<void>(
+    context: pageContext,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (sheetContext) {
+      var method = PaymentMethod.cash;
+      var cardApproved = false;
+      var saving = false;
+      return StatefulBuilder(
+        builder: (context, setSheetState) => SafeArea(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              24,
+              0,
+              24,
+              24 + MediaQuery.viewInsetsOf(context).bottom,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Take payment',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  order.tabName?.trim().isNotEmpty == true
+                      ? 'Named tab: ${order.tabName}'
+                      : 'Table bill',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 16),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.receipt_long_outlined),
+                        const SizedBox(width: 12),
+                        const Expanded(child: Text('Amount due')),
+                        Text(
+                          formatMoney(
+                            order.totalMinor,
+                            currencyCode: currencyCode,
+                          ),
+                          style: Theme.of(context).textTheme.headlineSmall
+                              ?.copyWith(fontWeight: FontWeight.w800),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SegmentedButton<PaymentMethod>(
+                  segments: const [
+                    ButtonSegment(
+                      value: PaymentMethod.cash,
+                      icon: Icon(Icons.payments_outlined),
+                      label: Text('Cash'),
+                    ),
+                    ButtonSegment(
+                      value: PaymentMethod.cardTerminal,
+                      icon: Icon(Icons.credit_card_rounded),
+                      label: Text('Card'),
+                    ),
+                  ],
+                  selected: {method},
+                  onSelectionChanged: saving
+                      ? null
+                      : (selection) => setSheetState(() {
+                          method = selection.first;
+                          cardApproved = false;
+                        }),
+                ),
+                if (method == PaymentMethod.cardTerminal) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: terminalController,
+                    enabled: !saving,
+                    maxLength: 120,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: const InputDecoration(
+                      labelText: 'Card terminal used (optional)',
+                      hintText: 'For example, Bar terminal',
+                    ),
+                  ),
+                  CheckboxListTile(
+                    value: cardApproved,
+                    contentPadding: EdgeInsets.zero,
+                    onChanged: saving
+                        ? null
+                        : (value) => setSheetState(
+                            () => cardApproved = value ?? false,
+                          ),
+                    title: const Text('Card terminal approved the payment'),
+                    subtitle: const Text(
+                      'Only record this after Card Plus confirms approval.',
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                Text(
+                  'This closes the whole bill. Split bills, mixed tender and foreign cash are the next checkout step.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: saving
+                            ? null
+                            : () => Navigator.of(sheetContext).pop(),
+                        child: const Text('Cancel'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed:
+                            saving ||
+                                (method == PaymentMethod.cardTerminal &&
+                                    !cardApproved)
+                            ? null
+                            : () async {
+                                setSheetState(() => saving = true);
+                                try {
+                                  final result = await ref
+                                      .read(activeOrderProvider.notifier)
+                                      .closeBill(
+                                        method: method,
+                                        cardPaymentApproved: cardApproved,
+                                        terminalLabel: terminalController.text
+                                            .trim(),
+                                      );
+                                  if (!sheetContext.mounted) return;
+                                  Navigator.of(sheetContext).pop();
+                                  if (!pageContext.mounted) return;
+                                  showAppNotification(
+                                    pageContext,
+                                    ref: ref,
+                                    title: result.alreadyClosed
+                                        ? 'Bill was already closed'
+                                        : 'Payment recorded',
+                                    message:
+                                        'Receipt ${result.receiptNumber} closed at ${formatMoney(result.totalMinor, currencyCode: result.currencyCode)}.',
+                                    level: AppNotificationLevel.success,
+                                  );
+                                } on Object catch (error, stackTrace) {
+                                  AppLogger.error(
+                                    'Close bill',
+                                    error,
+                                    stackTrace,
+                                  );
+                                  if (!sheetContext.mounted) return;
+                                  setSheetState(() => saving = false);
+                                  showAppNotification(
+                                    sheetContext,
+                                    ref: ref,
+                                    title: 'Payment was not recorded',
+                                    message: '$error',
+                                    level: AppNotificationLevel.error,
+                                  );
+                                }
+                              },
+                        icon: saving
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.check_circle_outline_rounded),
+                        label: Text(
+                          saving
+                              ? 'Recording…'
+                              : method == PaymentMethod.cash
+                              ? 'Record cash'
+                              : 'Record card',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    },
+  ).whenComplete(terminalController.dispose);
 }
 
 /// Always asks at the point an order leaves the basket. Bar staff often need

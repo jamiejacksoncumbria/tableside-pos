@@ -444,6 +444,63 @@ class ActiveOrderController extends Notifier<PosOrder> {
     return printResult;
   }
 
+  /// Records one verified full payment and releases the table/tab only after
+  /// the server has atomically created its immutable bill. Split and mixed
+  /// tender will extend this command with child allocations; they must never
+  /// bypass the close-bill transaction below.
+  Future<BillCloseResult> closeBill({
+    required PaymentMethod method,
+    required bool cardPaymentApproved,
+    String? terminalLabel,
+  }) async {
+    if (_isSavingDraft) {
+      throw StateError('The basket is still saving. Please wait a moment.');
+    }
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) {
+      throw StateError('Sign in to close a live restaurant bill.');
+    }
+    _requireValidLiveOrderLocation();
+    if (state.lines.isEmpty) {
+      throw StateError('Add at least one item before taking payment.');
+    }
+    if (state.lines.any((line) => !line.isSentToProduction)) {
+      throw StateError(
+        'Send or remove every draft item before taking payment.',
+      );
+    }
+    final order = state;
+    final profile = ref.read(tenantProfileProvider);
+    final result = await ref
+        .read(productionCommandRepositoryProvider)
+        .closeOrder(
+          scope: scope,
+          order: order,
+          method: method,
+          amountMinor: order.totalMinor,
+          currencyCode: profile.currencyCode,
+          cardPaymentApproved: cardPaymentApproved,
+          terminalLabel: terminalLabel,
+        );
+    _pendingDraftQuantities.clear();
+    _selectPersistedOrder(null);
+    ref.read(selectedTableProvider.notifier).select('');
+    final now = DateTime.now();
+    state = PosOrder(
+      id: 'order-${now.microsecondsSinceEpoch}',
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      businessDate: DateTime(now.year, now.month, now.day),
+      openedAt: now,
+      status: OrderStatus.open,
+      lines: const [],
+    );
+    AppLogger.info(
+      'Bill ${result.billId} closed for order ${order.id}, receipt ${result.receiptNumber}.',
+    );
+    return result;
+  }
+
   void _requireValidLiveOrderLocation() {
     if (state.tabName?.trim().isNotEmpty == true) return;
     final tableId = state.tableId;

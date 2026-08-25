@@ -1234,6 +1234,237 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
   return {notificationRetentionSeconds};
 }
 
+function validClosePayment(value, index, currencyCode) {
+  const payment = requireObject(value);
+  const method = requiredText(payment, "method", 40);
+  if (!["cash", "cardTerminal"].includes(method)) {
+    throw new HttpsError(
+      "invalid-argument",
+      `payments[${index}].method must be cash or cardTerminal.`,
+    );
+  }
+  const amountMinor = requiredPositiveInteger(
+    payment.amountMinor,
+    `payments[${index}].amountMinor`,
+    100000000,
+  );
+  const paymentCurrency = requiredText(payment, "currencyCode", 3).toUpperCase();
+  if (paymentCurrency !== currencyCode) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Payments must use the venue's configured currency until foreign-currency tender is enabled.",
+    );
+  }
+  const terminalLabel = optionalText(payment, "terminalLabel", 120) || null;
+  if (method === "cardTerminal" && payment.cardPaymentApproved !== true) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Confirm the card terminal approved this payment before recording it.",
+    );
+  }
+  return {
+    method,
+    amountMinor,
+    currencyCode: paymentCurrency,
+    terminalLabel,
+    cardPaymentApproved: method === "cardTerminal",
+  };
+}
+
+function billBusinessDate(timeZone, cutoffMinutes, now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const value = (type) => parts.find((part) => part.type === type)?.value;
+  const year = Number(value("year"));
+  const month = Number(value("month"));
+  const day = Number(value("day"));
+  const hour = Number(value("hour"));
+  const minute = Number(value("minute"));
+  if (![year, month, day, hour, minute].every(Number.isFinite)) {
+    throw new HttpsError("failed-precondition", "The venue business date could not be calculated.");
+  }
+  const localDate = new Date(Date.UTC(year, month - 1, day));
+  if ((hour * 60) + minute < cutoffMinutes) {
+    localDate.setUTCDate(localDate.getUTCDate() - 1);
+  }
+  return localDate.toISOString().slice(0, 10);
+}
+
+/// Closes an entire open order against verified payment information. Splits
+/// will create child bills later; this foundation deliberately keeps the first
+/// closing path atomic so an accidental double tap cannot create two sales or
+/// free a table before its financial record exists.
+async function closeOrderFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const orderId = requiredText(data, "orderId", 180);
+  const rawPayments = data.payments;
+  if (!Array.isArray(rawPayments) || rawPayments.length !== 1) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Exactly one full payment is required while bill splitting is being configured.",
+    );
+  }
+  await requireTenantOperationalMember(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const orderRef = tenantRef.collection("orders").doc(orderId);
+  // A deterministic bill ID makes a lost HTTP response safe to retry.
+  const billRef = tenantRef.collection("bills").doc(orderId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+
+  return db.runTransaction(async (transaction) => {
+    const [tenant, venue, order, existingBill] = await Promise.all([
+      transaction.get(tenantRef),
+      transaction.get(venueRef),
+      transaction.get(orderRef),
+      transaction.get(billRef),
+    ]);
+    if (!tenant.exists) {
+      throw new HttpsError("not-found", "The restaurant was not found.");
+    }
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (existingBill.exists) {
+      const existing = existingBill.data();
+      if (existing.venueId !== venueId || existing.orderId !== orderId) {
+        throw new HttpsError("failed-precondition", "This bill ID belongs to different sale data.");
+      }
+      return {
+        billId: existingBill.id,
+        totalMinor: existing.totalMinor,
+        currencyCode: existing.currencyCode,
+        alreadyClosed: true,
+      };
+    }
+    if (!order.exists || order.data().venueId !== venueId || order.data().status === "closed") {
+      throw new HttpsError("failed-precondition", "This order is no longer open at this venue.");
+    }
+    const orderData = order.data();
+    const rawLines = Array.isArray(orderData.lines) ? orderData.lines : [];
+    if (rawLines.length === 0) {
+      throw new HttpsError("failed-precondition", "An empty order cannot be closed.");
+    }
+    if (rawLines.some((line) => line?.isSentToProduction !== true)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Send or remove every draft item before closing the bill.",
+      );
+    }
+    const lines = rawLines.map((line, index) => {
+      const quantity = Number(line?.quantity);
+      const unitPriceMinor = Number(line?.unitPriceMinor);
+      if (!Number.isInteger(quantity) || quantity <= 0 ||
+          !Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0) {
+        throw new HttpsError("failed-precondition", `Order line ${index + 1} has invalid saved sale data.`);
+      }
+      return {
+        id: typeof line.id === "string" ? line.id : "",
+        productId: typeof line.productId === "string" ? line.productId : "",
+        productName: typeof line.productName === "string" ? line.productName : "Menu item",
+        quantity,
+        unitPriceMinor,
+        lineTotalMinor: quantity * unitPriceMinor,
+        productionArea: typeof line.productionArea === "string" ? line.productionArea : "kitchen",
+      };
+    });
+    const totalMinor = lines.reduce((total, line) => total + line.lineTotalMinor, 0);
+    if (!Number.isSafeInteger(totalMinor) || totalMinor <= 0) {
+      throw new HttpsError("failed-precondition", "This order has no payable total.");
+    }
+    const currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
+    const payments = rawPayments.map((payment, index) =>
+      validClosePayment(payment, index, currencyCode));
+    const paidMinor = payments.reduce((total, payment) => total + payment.amountMinor, 0);
+    if (paidMinor !== totalMinor) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The payment amount must exactly equal the current bill total.",
+      );
+    }
+
+    const tableId = typeof orderData.tableId === "string" ? orderData.tableId : null;
+    const tabName = typeof orderData.tabName === "string" ? orderData.tabName : null;
+    const tableRef = tableId == null ? null : tenantRef.collection("tables").doc(tableId);
+    const tabRef = tabName == null ? null : openTabRegistryRef(tenantId, venueId, tabName);
+    const [table, namedTab] = await Promise.all([
+      tableRef == null ? Promise.resolve(null) : transaction.get(tableRef),
+      tabRef == null ? Promise.resolve(null) : transaction.get(tabRef),
+    ]);
+    const timeZone = typeof venue.data().timeZone === "string"
+      ? venue.data().timeZone
+      : "Europe/London";
+    const configuredCutoff = Number(venue.data().businessDayCutoffMinutes ?? 240);
+    const cutoffMinutes = Number.isInteger(configuredCutoff) && configuredCutoff >= 0 && configuredCutoff < 1440
+      ? configuredCutoff
+      : 240;
+    const businessDate = billBusinessDate(timeZone, cutoffMinutes);
+    const receiptNumber = `${businessDate.replaceAll("-", "")}-${orderId.slice(-6).toUpperCase()}`;
+    const receiptLines = lines.map((line) => ({...line}));
+
+    transaction.create(billRef, {
+      venueId,
+      orderId,
+      status: "closed",
+      receiptNumber,
+      tableId,
+      tableLabel: typeof orderData.tableLabel === "string" ? orderData.tableLabel : null,
+      tabName,
+      currencyCode,
+      businessDate,
+      businessDayCutoffMinutes: cutoffMinutes,
+      venueTimeZone: timeZone,
+      totalMinor,
+      payments,
+      lines: receiptLines,
+      openedAt: orderData.openedAt ?? null,
+      closedAt: FieldValue.serverTimestamp(),
+      closedByActor: actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    transaction.update(orderRef, {
+      status: "closed",
+      closedAt: FieldValue.serverTimestamp(),
+      closedByActor: actor,
+      billId: billRef.id,
+      businessDate,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+    if (tableRef != null && table?.exists && table.data().currentOrderId === orderId) {
+      transaction.update(tableRef, {
+        currentOrderId: FieldValue.delete(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+    if (tabRef != null && namedTab?.exists && namedTab.data().orderId === orderId) {
+      transaction.delete(tabRef);
+    }
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "closeBill",
+      venueId,
+      orderId,
+      billId: billRef.id,
+      receiptNumber,
+      totalMinor,
+      currencyCode,
+      paymentMethods: payments.map((payment) => payment.method),
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {billId: billRef.id, totalMinor, currencyCode, receiptNumber, alreadyClosed: false};
+  });
+}
+
 function activeRouteDevice(device, venueId, productionArea) {
   if (!device?.exists) return false;
   const data = device.data();
@@ -1845,6 +2076,8 @@ async function invokePosAction(action, caller, data) {
       return updateVenueNotificationSettingsFor(caller, data);
     case "sendOrderToProduction":
       return sendOrderToProductionFor(caller, data);
+    case "closeOrder":
+      return closeOrderFor(caller, data);
     case "updateProductionTicket":
       return updateProductionTicketFor(caller, data);
     default:
@@ -1998,6 +2231,8 @@ export const setPlatformAdmin = onCall((request) =>
   setPlatformAdminFor(callerFromCall(request), request.data));
 export const sendOrderToProduction = onCall((request) =>
   sendOrderToProductionFor(callerFromCall(request), request.data));
+export const closeOrder = onCall((request) =>
+  closeOrderFor(callerFromCall(request), request.data));
 export const updateProductionTicket = onCall((request) =>
   updateProductionTicketFor(callerFromCall(request), request.data));
 export const openNamedTab = onCall((request) =>

@@ -22,6 +22,25 @@ class ProductionDispatchResult {
   final List<String> unroutedProductionAreas;
 }
 
+/// The server-calculated receipt result. The client never supplies the order
+/// total: it only records the confirmed tender, which the Cloud Function
+/// compares to its immutable order snapshot before closing the sale.
+class BillCloseResult {
+  const BillCloseResult({
+    required this.billId,
+    required this.totalMinor,
+    required this.currencyCode,
+    required this.receiptNumber,
+    required this.alreadyClosed,
+  });
+
+  final String billId;
+  final int totalMinor;
+  final String currencyCode;
+  final String receiptNumber;
+  final bool alreadyClosed;
+}
+
 final productionCommandRepositoryProvider =
     Provider<ProductionCommandRepository>(
       (ref) => ProductionCommandRepository(),
@@ -178,6 +197,48 @@ class ProductionCommandRepository {
       'flowStatus': flowStatus,
       'isDelayed': isDelayed,
     });
+  }
+
+  Future<BillCloseResult> closeOrder({
+    required VenueScope scope,
+    required PosOrder order,
+    required PaymentMethod method,
+    required int amountMinor,
+    required String currencyCode,
+    required bool cardPaymentApproved,
+    String? terminalLabel,
+  }) async {
+    final response = await _call('closeOrder', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'orderId': order.id,
+      'payments': [
+        {
+          'method': method.name,
+          'amountMinor': amountMinor,
+          'currencyCode': currencyCode,
+          'cardPaymentApproved': cardPaymentApproved,
+          'terminalLabel': terminalLabel,
+        },
+      ],
+    });
+    final billId = response['billId'];
+    final totalMinor = response['totalMinor'];
+    final resultCurrency = response['currencyCode'];
+    final receiptNumber = response['receiptNumber'];
+    if (billId is! String ||
+        totalMinor is! int ||
+        resultCurrency is! String ||
+        receiptNumber is! String) {
+      throw StateError('The server did not return a valid closed bill.');
+    }
+    return BillCloseResult(
+      billId: billId,
+      totalMinor: totalMinor,
+      currencyCode: resultCurrency,
+      receiptNumber: receiptNumber,
+      alreadyClosed: response['alreadyClosed'] == true,
+    );
   }
 
   /// Owner-only, venue-specific notification timing. This remains a trusted
