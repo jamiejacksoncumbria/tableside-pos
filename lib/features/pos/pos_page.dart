@@ -611,9 +611,27 @@ class _MenuPanel extends ConsumerWidget {
                             product: products[index],
                             currencyCode: currencyCode,
                             canAdd: activeOrder.canAddProduct(products[index]),
-                            onTap: () => ref
-                                .read(activeOrderProvider.notifier)
-                                .addProduct(products[index]),
+                            onTap: () async {
+                              try {
+                                await ref
+                                    .read(activeOrderProvider.notifier)
+                                    .addProduct(products[index]);
+                              } on Object catch (error, stackTrace) {
+                                AppLogger.error(
+                                  'Add item to shared draft order',
+                                  error,
+                                  stackTrace,
+                                );
+                                if (!context.mounted) return;
+                                showAppNotification(
+                                  context,
+                                  ref: ref,
+                                  title: 'Item was not added',
+                                  message: '$error',
+                                  level: AppNotificationLevel.error,
+                                );
+                              }
+                            },
                           ),
                         );
                       },
@@ -831,9 +849,27 @@ class _OrderPanel extends ConsumerWidget {
                               tooltip: 'Remove one ${line.productName}',
                               onPressed: line.isSentToProduction
                                   ? null
-                                  : () => ref
-                                        .read(activeOrderProvider.notifier)
-                                        .reduceLine(line.id),
+                                  : () async {
+                                      try {
+                                        await ref
+                                            .read(activeOrderProvider.notifier)
+                                            .reduceLine(line.id);
+                                      } on Object catch (error, stackTrace) {
+                                        AppLogger.error(
+                                          'Remove item from shared draft order',
+                                          error,
+                                          stackTrace,
+                                        );
+                                        if (!context.mounted) return;
+                                        showAppNotification(
+                                          context,
+                                          ref: ref,
+                                          title: 'Item was not removed',
+                                          message: '$error',
+                                          level: AppNotificationLevel.error,
+                                        );
+                                      }
+                                    },
                               icon: const Icon(Icons.remove_rounded, size: 18),
                             ),
                             const SizedBox(width: 8),

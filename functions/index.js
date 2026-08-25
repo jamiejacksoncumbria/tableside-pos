@@ -811,6 +811,242 @@ async function openNamedTabFor(caller, rawData) {
   return result;
 }
 
+// Draft lines are deliberately written by this trusted API rather than by the
+// client directly.  They are visible to every till straight away, but remain
+// harmless until sendOrderToProductionFor creates the ticket and stock move.
+async function addOrderDraftLineFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const orderId = requiredText(data, "orderId", 180);
+  const tableId = optionalText(data, "tableId", 180) || null;
+  const tabName = optionalText(data, "tabName", 80) || null;
+  if ((tableId == null) === (tabName == null)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Choose either a table or a named tab for the order.",
+    );
+  }
+  const line = validProductionLine(data.line, 0);
+  await requireTenantOperationalMember(caller, tenantId);
+
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const tableRef = tableId == null ? null : tenantRef.collection("tables").doc(tableId);
+  const tabRef = tabName == null ? null : openTabRegistryRef(tenantId, venueId, tabName);
+  const orderRef = tenantRef.collection("orders").doc(orderId);
+  const productRef = tenantRef.collection("products").doc(line.productId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+
+  return db.runTransaction(async (transaction) => {
+    const [venue, table, namedTab, existingOrder, product] = await Promise.all([
+      transaction.get(venueRef),
+      tableRef == null ? Promise.resolve(null) : transaction.get(tableRef),
+      tabRef == null ? Promise.resolve(null) : transaction.get(tabRef),
+      transaction.get(orderRef),
+      transaction.get(productRef),
+    ]);
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (tableRef != null && (!table.exists || table.data().venueId !== venueId)) {
+      throw new HttpsError("failed-precondition", "The selected table is not available at this venue.");
+    }
+    if (tableRef != null) {
+      const currentOrderId = table.data().currentOrderId;
+      if (typeof currentOrderId === "string" && currentOrderId !== orderId) {
+        throw new HttpsError(
+          "failed-precondition",
+          "This table already has a different open order. Reopen that bill instead.",
+        );
+      }
+    }
+    if (tabRef != null && (!namedTab.exists || namedTab.data().orderId !== orderId)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "A different open tab already uses this name. Reopen it instead.",
+      );
+    }
+    if (existingOrder.exists) {
+      const current = existingOrder.data();
+      if (current.venueId !== venueId || current.status === "closed") {
+        throw new HttpsError("failed-precondition", "This order is no longer open at this venue.");
+      }
+      if ((current.tableId ?? null) !== tableId || (current.tabName ?? null) !== tabName) {
+        throw new HttpsError("failed-precondition", "This order belongs to a different table or named tab.");
+      }
+      const priorLines = Array.isArray(current.lines) ? current.lines : [];
+      // A lost HTTP response must never result in the same tap being added
+      // twice. Line IDs are generated once by the client and are idempotent.
+      if (priorLines.some((item) => item?.id === line.id)) {
+        return {orderId, saved: true, alreadyPresent: true};
+      }
+    }
+    if (!product.exists || product.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "A selected menu product no longer exists at this venue.");
+    }
+    const productData = product.data();
+    if (productData.isAvailable === false) {
+      throw new HttpsError("failed-precondition", "This product is currently unavailable.");
+    }
+    const unitPriceMinor = Number(productData.priceMinor);
+    const stockPerSale = Number(productData.stockPerSale ?? 1);
+    if (!Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0
+        || !Number.isFinite(stockPerSale) || stockPerSale <= 0) {
+      throw new HttpsError("failed-precondition", "This product has invalid saved sale details.");
+    }
+    if (productData.trackStock === true) {
+      const onHand = Number(productData.stockOnHand ?? 0);
+      if (!Number.isFinite(onHand) || onHand < line.quantity * stockPerSale) {
+        throw new HttpsError(
+          "failed-precondition",
+          "This tracked product is sold out. A manager can only override stock when sending the order.",
+        );
+      }
+    }
+    const productionArea = productData.productionArea === "bar"
+      ? "bar"
+      : productData.productionArea === "dessert"
+        ? "dessert"
+        : "kitchen";
+    const canonicalLine = {
+      id: line.id,
+      productId: line.productId,
+      productName: typeof productData.name === "string" ? productData.name : "Menu item",
+      quantity: line.quantity,
+      unitPriceMinor,
+      productionArea,
+      trackStock: productData.trackStock === true,
+      stockPerSale,
+      isSentToProduction: false,
+    };
+    const current = existingOrder.exists ? existingOrder.data() : null;
+    const priorLines = Array.isArray(current?.lines) ? current.lines : [];
+    const tableLabel = tableRef == null
+      ? null
+      : (typeof table.data().label === "string" ? table.data().label : tableId);
+    transaction.set(orderRef, {
+      venueId,
+      tableId,
+      tabName,
+      tableLabel,
+      status: current?.status === "sent" ? "sent" : "open",
+      openedAt: current?.openedAt ?? FieldValue.serverTimestamp(),
+      createdByActor: current?.createdByActor ?? actor,
+      lines: [...priorLines, canonicalLine],
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    }, {merge: true});
+    if (tableRef != null) {
+      transaction.update(tableRef, {
+        currentOrderId: orderId,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "addOrderDraftLine",
+      venueId,
+      orderId,
+      tableId,
+      tabName,
+      lineId: line.id,
+      productId: line.productId,
+      quantity: line.quantity,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {orderId, saved: true, alreadyPresent: false};
+  });
+}
+
+async function updateOrderDraftLineFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const orderId = requiredText(data, "orderId", 180);
+  const tableId = optionalText(data, "tableId", 180) || null;
+  const tabName = optionalText(data, "tabName", 80) || null;
+  if ((tableId == null) === (tabName == null)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Choose either a table or a named tab for the order.",
+    );
+  }
+  const lineId = requiredText(data, "lineId", 180);
+  const quantity = requiredNonNegativeInteger(data.quantity, "quantity", 100);
+  await requireTenantOperationalMember(caller, tenantId);
+
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const tableRef = tableId == null ? null : tenantRef.collection("tables").doc(tableId);
+  const tabRef = tabName == null ? null : openTabRegistryRef(tenantId, venueId, tabName);
+  const orderRef = tenantRef.collection("orders").doc(orderId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+
+  return db.runTransaction(async (transaction) => {
+    const [venue, table, namedTab, order] = await Promise.all([
+      transaction.get(venueRef),
+      tableRef == null ? Promise.resolve(null) : transaction.get(tableRef),
+      tabRef == null ? Promise.resolve(null) : transaction.get(tabRef),
+      transaction.get(orderRef),
+    ]);
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (!order.exists || order.data().venueId !== venueId || order.data().status === "closed") {
+      throw new HttpsError("failed-precondition", "This order is no longer open at this venue.");
+    }
+    if ((order.data().tableId ?? null) !== tableId || (order.data().tabName ?? null) !== tabName) {
+      throw new HttpsError("failed-precondition", "This order belongs to a different table or named tab.");
+    }
+    if (tableRef != null && (!table.exists || table.data().venueId !== venueId
+        || table.data().currentOrderId !== orderId)) {
+      throw new HttpsError("failed-precondition", "The selected table no longer has this open order.");
+    }
+    if (tabRef != null && (!namedTab.exists || namedTab.data().orderId !== orderId)) {
+      throw new HttpsError("failed-precondition", "This named tab is no longer open.");
+    }
+    const priorLines = Array.isArray(order.data().lines) ? order.data().lines : [];
+    const target = priorLines.find((item) => item?.id === lineId);
+    if (target == null) {
+      throw new HttpsError("not-found", "The draft item is no longer on this order.");
+    }
+    if (target.isSentToProduction === true) {
+      throw new HttpsError("failed-precondition", "Printed items cannot be changed. Use a cancellation or refund.");
+    }
+    const nextLines = quantity === 0
+      ? priorLines.filter((item) => item?.id !== lineId)
+      : priorLines.map((item) => item?.id === lineId ? {...item, quantity} : item);
+    const hasSentLines = nextLines.some((item) => item?.isSentToProduction === true);
+    if (nextLines.length === 0 && tableRef != null) {
+      transaction.delete(orderRef);
+      transaction.update(tableRef, {
+        currentOrderId: FieldValue.delete(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    } else {
+      transaction.update(orderRef, {
+        status: hasSentLines ? "sent" : "open",
+        lines: nextLines,
+        updatedAt: FieldValue.serverTimestamp(),
+        updatedByActor: actor,
+      });
+    }
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: quantity === 0 ? "removeOrderDraftLine" : "updateOrderDraftLine",
+      venueId,
+      orderId,
+      tableId,
+      tabName,
+      lineId,
+      quantity,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {orderId, saved: true, removedOrder: nextLines.length === 0 && tableRef != null};
+  });
+}
+
 async function createTableFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -1218,19 +1454,31 @@ async function sendOrderToProductionFor(caller, rawData) {
     const priorLineIds = new Set(
       priorLines.map((line) => (typeof line?.id === "string" ? line.id : "")),
     );
-    const newOrderLines = canonicalLines
-      .filter((line) => !priorLineIds.has(line.id))
-      .map((line) => ({
-        id: line.id,
-        productId: line.productId,
-        productName: line.productName,
-        quantity: line.quantity,
-        unitPriceMinor: line.unitPriceMinor,
-        productionArea: line.productionArea,
-        trackStock: line.trackStock,
-        stockPerSale: line.stockPerSale,
-        isSentToProduction: true,
-      }));
+    const canonicalById = new Map(canonicalLines.map((line) => [line.id, line]));
+    const sentOrderLine = (line) => ({
+      id: line.id,
+      productId: line.productId,
+      productName: line.productName,
+      quantity: line.quantity,
+      unitPriceMinor: line.unitPriceMinor,
+      productionArea: line.productionArea,
+      trackStock: line.trackStock,
+      stockPerSale: line.stockPerSale,
+      isSentToProduction: true,
+    });
+    // Draft lines already exist on the order so every device can see them.
+    // Sending must promote those same lines to sent rather than treating them
+    // as duplicates and silently creating no ticket.
+    const mergedOrderLines = [
+      ...priorLines.map((line) => {
+        const canonical = canonicalById.get(line?.id);
+        return canonical == null ? line : sentOrderLine(canonical);
+      }),
+      ...canonicalLines
+        .filter((line) => !priorLineIds.has(line.id))
+        .map(sentOrderLine),
+    ];
+    const hasPriorSentLines = priorLines.some((line) => line?.isSentToProduction === true);
     transaction.set(orderRef, {
       venueId,
       tableId,
@@ -1240,7 +1488,7 @@ async function sendOrderToProductionFor(caller, rawData) {
       openedAt: existingOrder.data()?.openedAt ?? FieldValue.serverTimestamp(),
       lastTicketReleasedAt: FieldValue.serverTimestamp(),
       createdByActor: existingOrder.data()?.createdByActor ?? actor,
-      lines: [...priorLines, ...newOrderLines],
+      lines: mergedOrderLines,
       updatedAt: FieldValue.serverTimestamp(),
       updatedByActor: actor,
     }, {merge: true});
@@ -1311,7 +1559,7 @@ async function sendOrderToProductionFor(caller, rawData) {
             productionArea: ticket.area,
             tableLabel,
             tabName,
-            isAddition: priorLines.length > 0,
+            isAddition: hasPriorSentLines,
             createdByName: actor.displayName ?? actor.email ?? "",
             lines: ticket.lines.map((line) => ({
               name: line.productName,
@@ -1501,6 +1749,10 @@ async function invokePosAction(action, caller, data) {
   switch (action) {
     case "openNamedTab":
       return openNamedTabFor(caller, data);
+    case "addOrderDraftLine":
+      return addOrderDraftLineFor(caller, data);
+    case "updateOrderDraftLine":
+      return updateOrderDraftLineFor(caller, data);
     case "createTable":
       return createTableFor(caller, data);
     case "updateTable":
@@ -1666,6 +1918,10 @@ export const updateProductionTicket = onCall((request) =>
   updateProductionTicketFor(callerFromCall(request), request.data));
 export const openNamedTab = onCall((request) =>
   openNamedTabFor(callerFromCall(request), request.data));
+export const addOrderDraftLine = onCall((request) =>
+  addOrderDraftLineFor(callerFromCall(request), request.data));
+export const updateOrderDraftLine = onCall((request) =>
+  updateOrderDraftLineFor(callerFromCall(request), request.data));
 export const createTable = onCall((request) =>
   createTableFor(callerFromCall(request), request.data));
 export const updateTable = onCall((request) =>

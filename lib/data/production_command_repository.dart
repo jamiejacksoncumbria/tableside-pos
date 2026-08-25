@@ -88,6 +88,47 @@ class ProductionCommandRepository {
     return orderId;
   }
 
+  /// Persists one not-yet-sent order line.  Draft lines are intentionally
+  /// server-owned so another till can open the same table and see changes in
+  /// real time, while printing and stock movements remain deferred until Send.
+  Future<void> addDraftLine({
+    required VenueScope scope,
+    required PosOrder order,
+    required OrderLine line,
+  }) {
+    return _call('addOrderDraftLine', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'orderId': order.id,
+      'tableId': order.tableId,
+      'tabName': order.tabName,
+      'line': {
+        'id': line.id,
+        'productId': line.productId,
+        'quantity': line.quantity,
+      },
+    });
+  }
+
+  /// Changes an unsent draft line. A quantity of zero removes it. The server
+  /// refuses any attempt to alter a line which has already been printed.
+  Future<void> updateDraftLineQuantity({
+    required VenueScope scope,
+    required PosOrder order,
+    required String lineId,
+    required int quantity,
+  }) {
+    return _call('updateOrderDraftLine', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'orderId': order.id,
+      'tableId': order.tableId,
+      'tabName': order.tabName,
+      'lineId': lineId,
+      'quantity': quantity,
+    });
+  }
+
   Future<ProductionDispatchResult> sendNewLinesToProduction({
     required VenueScope scope,
     required PosOrder order,
