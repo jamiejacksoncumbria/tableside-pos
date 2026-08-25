@@ -17,6 +17,8 @@ class AppNotification {
     required this.level,
     required this.createdAt,
     this.isRead = false,
+    this.deduplicationKey,
+    this.requiresAttention = false,
   });
 
   final String id;
@@ -26,13 +28,31 @@ class AppNotification {
   final DateTime createdAt;
   final bool isRead;
 
-  AppNotification copyWith({bool? isRead}) => AppNotification(
+  /// A stable key turns an on-going operational condition (such as a failed
+  /// printer job) into one notification rather than one message per stream
+  /// event or retry timer tick.
+  final String? deduplicationKey;
+
+  /// Critical operational alerts deliberately stay visible until the user
+  /// dismisses them or the underlying condition is resolved.
+  final bool requiresAttention;
+
+  AppNotification copyWith({
+    String? title,
+    String? message,
+    AppNotificationLevel? level,
+    DateTime? createdAt,
+    bool? isRead,
+    bool? requiresAttention,
+  }) => AppNotification(
     id: id,
-    title: title,
-    message: message,
-    level: level,
-    createdAt: createdAt,
+    title: title ?? this.title,
+    message: message ?? this.message,
+    level: level ?? this.level,
+    createdAt: createdAt ?? this.createdAt,
     isRead: isRead ?? this.isRead,
+    deduplicationKey: deduplicationKey,
+    requiresAttention: requiresAttention ?? this.requiresAttention,
   );
 }
 
@@ -58,6 +78,7 @@ final venueNotificationRetentionSecondsProvider = StreamProvider<int>((ref) {
 
 class AppNotificationsController extends Notifier<List<AppNotification>> {
   final _autoDismissTimers = <String, Timer>{};
+  final _dismissedAttentionKeys = <String>{};
 
   @override
   List<AppNotification> build() {
@@ -74,17 +95,83 @@ class AppNotificationsController extends Notifier<List<AppNotification>> {
     required String message,
     AppNotificationLevel level = AppNotificationLevel.information,
     int retentionSeconds = 5,
+    String? deduplicationKey,
+    bool requiresAttention = false,
   }) {
+    final existingIndex = deduplicationKey == null
+        ? -1
+        : state.indexWhere(
+            (notification) => notification.deduplicationKey == deduplicationKey,
+          );
+    if (existingIndex >= 0) {
+      final existing = state[existingIndex];
+      // A timer may reconcile the same unresolved print job every few
+      // seconds. Leave an identical message completely untouched so its
+      // unread state and ordering remain meaningful.
+      if (existing.title == title &&
+          existing.message == message &&
+          existing.level == level &&
+          existing.requiresAttention == requiresAttention) {
+        return;
+      }
+      _autoDismissTimers.remove(existing.id)?.cancel();
+      final updated = existing.copyWith(
+        title: title,
+        message: message,
+        level: level,
+        createdAt: DateTime.now(),
+        isRead: false,
+        requiresAttention: requiresAttention,
+      );
+      state = [
+        updated,
+        ...state.where((notification) => notification.id != existing.id),
+      ];
+      _scheduleDismiss(updated, retentionSeconds);
+      AppLogger.info('Notification updated: ${updated.title}.');
+      return;
+    }
+    if (requiresAttention &&
+        deduplicationKey != null &&
+        _dismissedAttentionKeys.contains(deduplicationKey)) {
+      return;
+    }
     final notification = AppNotification(
       id: 'notification-${DateTime.now().microsecondsSinceEpoch}',
       title: title,
       message: message,
       level: level,
       createdAt: DateTime.now(),
+      deduplicationKey: deduplicationKey,
+      requiresAttention: requiresAttention,
     );
     // Keep a useful, bounded session history while allowing a busy shared
     // till to clear routine messages automatically.
     state = [notification, ...state].take(100).toList(growable: false);
+    _scheduleDismiss(notification, retentionSeconds);
+    AppLogger.info('Notification recorded: ${notification.title}.');
+  }
+
+  void resolve(String deduplicationKey) {
+    _dismissedAttentionKeys.remove(deduplicationKey);
+    final matchingIds = state
+        .where(
+          (notification) => notification.deduplicationKey == deduplicationKey,
+        )
+        .map((notification) => notification.id)
+        .toList(growable: false);
+    for (final id in matchingIds) {
+      _autoDismissTimers.remove(id)?.cancel();
+    }
+    state = state
+        .where(
+          (notification) => notification.deduplicationKey != deduplicationKey,
+        )
+        .toList(growable: false);
+  }
+
+  void _scheduleDismiss(AppNotification notification, int retentionSeconds) {
+    if (notification.requiresAttention) return;
     final safeRetention = retentionSeconds.clamp(1, 60).toInt();
     _autoDismissTimers[notification.id] = Timer(
       Duration(seconds: safeRetention),
@@ -93,7 +180,6 @@ class AppNotificationsController extends Notifier<List<AppNotification>> {
         dismiss(notification.id);
       },
     );
-    AppLogger.info('Notification recorded: ${notification.title}.');
   }
 
   void markAllRead() => state = state
@@ -110,6 +196,11 @@ class AppNotificationsController extends Notifier<List<AppNotification>> {
 
   void dismiss(String id) {
     _autoDismissTimers.remove(id)?.cancel();
+    final notification = state.where((item) => item.id == id).firstOrNull;
+    if (notification?.requiresAttention == true &&
+        notification?.deduplicationKey != null) {
+      _dismissedAttentionKeys.add(notification!.deduplicationKey!);
+    }
     state = state
         .where((notification) => notification.id != id)
         .toList(growable: false);
@@ -135,6 +226,8 @@ void showAppNotification(
   required String title,
   required String message,
   AppNotificationLevel level = AppNotificationLevel.information,
+  String? deduplicationKey,
+  bool requiresAttention = false,
 }) {
   final AppNotificationsController controller;
   if (ref != null) {
@@ -162,6 +255,8 @@ void showAppNotification(
     message: message,
     level: level,
     retentionSeconds: retention,
+    deduplicationKey: deduplicationKey,
+    requiresAttention: requiresAttention,
   );
 }
 
@@ -231,7 +326,7 @@ class NotificationCentrePage extends ConsumerWidget {
                     ),
                     title: Text(notification.title),
                     subtitle: Text(
-                      '${notification.message}\n${_dateTimeLabel(context, notification.createdAt)}',
+                      '${notification.message}\n${_dateTimeLabel(context, notification.createdAt)}${notification.requiresAttention ? ' · Requires attention' : ''}',
                     ),
                     isThreeLine: true,
                     onTap: () => controller.markRead(notification.id),

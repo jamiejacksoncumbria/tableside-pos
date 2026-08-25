@@ -175,15 +175,11 @@ service cloud.firestore {
       }
 
       match /devices/{deviceId} {
-        // A normal till must be able to check whether its locally generated
-        // device ID is registered. A missing document has no resource data,
-        // so treating this as a member-only `get` avoids false permission
-        // errors on every unregistered phone or desktop. Device lists remain
-        // restricted to managers, platform support, or their assigned user.
+        // Every active venue member may see printer device health. This lets a
+        // waiter who sent an order be alerted when its kitchen/bar printer is
+        // offline, while only managers may register, route, or alter a device.
         allow get: if isPlatformAdmin() || managesTenant(tenantId) || isMember(tenantId);
-        allow list: if isPlatformAdmin()
-          || managesTenant(tenantId)
-          || (signedIn() && resource.data.assignedUserId == request.auth.uid);
+        allow list: if isPlatformAdmin() || isMember(tenantId);
         allow create: if (isPlatformAdmin() || managesTenant(tenantId))
           && isActiveVenue(tenantId, request.resource.data.venueId);
         allow delete: if isPlatformAdmin() || managesTenant(tenantId);
@@ -205,9 +201,10 @@ service cloud.firestore {
       }
 
       match /printJobs/{jobId} {
-        allow read: if isPlatformAdmin()
-          || managesTenant(tenantId)
-          || isAssignedPrintDevice(tenantId);
+        // The content is kitchen/bar-safe and all venue staff need real-time
+        // delivery warnings. Claiming remains restricted to the assigned
+        // physical printer device below.
+        allow read: if isPlatformAdmin() || isMember(tenantId);
         allow create, delete: if false;
         allow update: if isAssignedPrintDevice(tenantId)
           && validPrintJobStateTransition()

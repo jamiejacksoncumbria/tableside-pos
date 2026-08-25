@@ -14,6 +14,7 @@ import '../features/pos/pos_page.dart';
 import '../features/platform_admin/platform_admin_page.dart';
 import '../features/printing/native_print_worker.dart';
 import '../features/printing/queued_bluetooth_print_worker.dart';
+import '../features/printing/print_delivery_monitor.dart';
 import '../features/settings/settings_page.dart';
 
 enum HomeSection { pos, orderFlow, menu, reports, settings, platformAdmin }
@@ -187,6 +188,7 @@ class HomeShell extends ConsumerWidget {
               children: [
                 Positioned.fill(child: _buildBody(section, profile)),
                 const _QueuedPrintWorkerHost(),
+                const PrintDeliveryMonitorHost(),
               ],
             ),
           ),
@@ -440,8 +442,13 @@ class _QueuedPrintWorkerHostState
     // attempt. This is not normal polling: it is only the retry wake-up for
     // work that was already observed by the stream.
     _retryTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      // A registered printer reports its health even while idle. Other tills
+      // use the heartbeat to distinguish a short queue hand-off from an
+      // actually offline kitchen/bar printer.
+      unawaited(_worker.maintainHeartbeat(scope));
       if (_queuedJobCount > 0) unawaited(_processAvailable(scope));
     });
+    unawaited(_worker.maintainHeartbeat(scope));
     unawaited(_processAvailable(scope));
   }
 

@@ -394,7 +394,15 @@ class PrintJob {
     required this.status,
     required this.idempotencyKey,
     required this.createdAt,
+    this.ticketId,
+    this.productionArea,
     this.claimedByDeviceId,
+    this.fallbackDeviceId,
+    this.fallbackFromJobId,
+    this.fallbackDeliveryStatus,
+    this.failureReason,
+    this.claimedAt,
+    this.completedAt,
     this.attempts = 0,
     this.payload = const {},
   });
@@ -407,7 +415,15 @@ class PrintJob {
   final PrintJobStatus status;
   final String idempotencyKey;
   final DateTime createdAt;
+  final String? ticketId;
+  final String? productionArea;
   final String? claimedByDeviceId;
+  final String? fallbackDeviceId;
+  final String? fallbackFromJobId;
+  final String? fallbackDeliveryStatus;
+  final String? failureReason;
+  final DateTime? claimedAt;
+  final DateTime? completedAt;
   final int attempts;
   final Map<String, Object?> payload;
 }

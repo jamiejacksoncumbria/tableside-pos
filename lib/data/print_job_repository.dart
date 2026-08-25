@@ -24,10 +24,29 @@ class PrintJobRepository {
   }) {
     return _jobs(tenantId)
         .where('venueId', isEqualTo: venueId)
+        .where('status', whereIn: const ['queued', 'claimed', 'failed'])
         .where('status', isEqualTo: 'queued')
         .snapshots()
         .map((snapshot) => snapshot.size)
         .distinct();
+  }
+
+  /// A venue-wide live view used by every signed-in till to surface jobs that
+  /// are waiting for an offline printer.  This is intentionally broader than
+  /// the device worker's queued-count stream: service staff need to know that
+  /// a ticket is at risk even though they cannot claim it themselves.
+  Stream<List<PrintJob>> watchVenueJobs({
+    required String tenantId,
+    required String venueId,
+  }) {
+    return _jobs(tenantId)
+        .where('venueId', isEqualTo: venueId)
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map((document) => _fromDocument(tenantId, document))
+              .toList(growable: false),
+        );
   }
 
   /// Atomically claims one queued job. A worker must print an idempotent ticket
@@ -74,7 +93,15 @@ class PrintJobRepository {
         idempotencyKey: data['idempotencyKey'] as String,
         createdAt:
             (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+        ticketId: data['ticketId'] as String?,
+        productionArea: data['productionArea'] as String?,
         claimedByDeviceId: deviceId,
+        fallbackDeviceId: data['fallbackDeviceId'] as String?,
+        fallbackFromJobId: data['fallbackFromJobId'] as String?,
+        fallbackDeliveryStatus: data['fallbackDeliveryStatus'] as String?,
+        failureReason: data['failureReason'] as String?,
+        claimedAt: (data['claimedAt'] as Timestamp?)?.toDate(),
+        completedAt: (data['completedAt'] as Timestamp?)?.toDate(),
         attempts: (data['attempts'] as int? ?? 0) + 1,
         payload: Map<String, Object?>.from(data['payload'] as Map? ?? const {}),
       );
@@ -113,5 +140,37 @@ class PrintJobRepository {
           failureReason ?? 'The printer failed after three attempts.',
       'nextAttemptAt': FieldValue.delete(),
     });
+  }
+
+  PrintJob _fromDocument(
+    String tenantId,
+    QueryDocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final data = document.data();
+    final statusName = data['status'] as String? ?? 'queued';
+    final status = PrintJobStatus.values
+        .where((value) => value.name == statusName)
+        .firstOrNull;
+    return PrintJob(
+      id: document.id,
+      tenantId: tenantId,
+      venueId: data['venueId'] as String? ?? '',
+      targetDeviceId: data['targetDeviceId'] as String? ?? '',
+      orderId: data['orderId'] as String? ?? '',
+      status: status ?? PrintJobStatus.queued,
+      idempotencyKey: data['idempotencyKey'] as String? ?? document.id,
+      createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      ticketId: data['ticketId'] as String?,
+      productionArea: data['productionArea'] as String?,
+      claimedByDeviceId: data['claimedByDeviceId'] as String?,
+      fallbackDeviceId: data['fallbackDeviceId'] as String?,
+      fallbackFromJobId: data['fallbackFromJobId'] as String?,
+      fallbackDeliveryStatus: data['fallbackDeliveryStatus'] as String?,
+      failureReason: data['failureReason'] as String?,
+      claimedAt: (data['claimedAt'] as Timestamp?)?.toDate(),
+      completedAt: (data['completedAt'] as Timestamp?)?.toDate(),
+      attempts: data['attempts'] is int ? data['attempts'] as int : 0,
+      payload: Map<String, Object?>.from(data['payload'] as Map? ?? const {}),
+    );
   }
 }

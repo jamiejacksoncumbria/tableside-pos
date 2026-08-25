@@ -1253,12 +1253,37 @@ export const enqueueFallbackPrintJob = onDocumentUpdated(
   async (event) => {
     const before = event.data?.before.data();
     const after = event.data?.after.data();
-    if (before == null || after == null || before.status === "failed" || after.status !== "failed") {
+    if (before == null || after == null) {
       return;
     }
 
     const tenantId = event.params.tenantId;
     const jobId = event.params.jobId;
+    // A fallback completing proves the original ticket was delivered. Store
+    // that fact on the failed primary so all tills can stream unresolved jobs
+    // only and immediately clear the alarm rather than retaining a false
+    // failed-print notification forever.
+    if (before.status !== "printed" && after.status === "printed" &&
+        typeof after.fallbackFromJobId === "string" && after.fallbackFromJobId.length > 0) {
+      const primaryRef = db.doc(`tenants/${tenantId}/printJobs/${after.fallbackFromJobId}`);
+      const primary = await primaryRef.get();
+      if (primary.exists) {
+        await primaryRef.update({
+          fallbackDeliveryStatus: "printed",
+          fallbackPrintedAt: FieldValue.serverTimestamp(),
+        });
+      }
+      console.info("Fallback print job completed", {
+        tenantId,
+        jobId,
+        failedJobId: after.fallbackFromJobId,
+      });
+      return;
+    }
+    if (before.status === "failed" || after.status !== "failed") {
+      return;
+    }
+
     const venueId = typeof after.venueId === "string" ? after.venueId : "";
     const productionArea = typeof after.productionArea === "string" ? after.productionArea : "";
     const primaryDeviceId = typeof after.targetDeviceId === "string" ? after.targetDeviceId : "";

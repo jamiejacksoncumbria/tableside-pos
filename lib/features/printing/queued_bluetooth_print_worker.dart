@@ -29,11 +29,39 @@ class QueuedBluetoothPrintWorker {
 
   /// Signals that a venue has queued work. The host listens to this stream and
   /// claims jobs immediately; it does not wait for a periodic scan.
-  Stream<int> watchQueuedJobCount(VenueScope scope) =>
-      _queue.watchQueuedJobCount(
+  Stream<int> watchQueuedJobCount(VenueScope scope) => _queue
+      .watchQueuedJobCount(tenantId: scope.tenantId, venueId: scope.venueId);
+
+  /// Keeps a registered foreground printer visible to the venue-wide delivery
+  /// monitor even while it has no jobs. An unregistered till performs no
+  /// heartbeat write, so this is safe to call on the shared app shell timer.
+  Future<void> maintainHeartbeat(VenueScope scope) async {
+    final now = DateTime.now();
+    if (_lastHeartbeatAt != null &&
+        now.difference(_lastHeartbeatAt!) < const Duration(seconds: 30)) {
+      return;
+    }
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+      final deviceId = await _identity.getOrCreate();
+      final device = await _devices.getDevice(
         tenantId: scope.tenantId,
-        venueId: scope.venueId,
+        deviceId: deviceId,
       );
+      if (device == null ||
+          !device.active ||
+          device.venueId != scope.venueId ||
+          device.assignedUserId != user.uid ||
+          !device.transports.contains('bluetooth')) {
+        return;
+      }
+      await _devices.heartbeat(tenantId: scope.tenantId, deviceId: deviceId);
+      _lastHeartbeatAt = now;
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Maintain printer device heartbeat', error, stackTrace);
+    }
+  }
 
   Future<PrintWorkerResult> processNext(VenueScope scope) async {
     final user = FirebaseAuth.instance.currentUser;
