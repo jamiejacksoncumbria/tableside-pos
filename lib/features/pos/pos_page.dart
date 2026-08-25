@@ -786,29 +786,65 @@ String _formatStock(double quantity) {
       .replaceFirst(RegExp(r'\.$'), '');
 }
 
-class _OrderPanel extends ConsumerWidget {
+class _OrderPanel extends ConsumerStatefulWidget {
   const _OrderPanel({required this.currencyCode});
 
   final String currencyCode;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_OrderPanel> createState() => _OrderPanelState();
+}
+
+class _OrderPanelState extends ConsumerState<_OrderPanel> {
+  final _lineScrollController = ScrollController();
+  String? _lastOrderLinesKey;
+
+  @override
+  void dispose() {
+    _lineScrollController.dispose();
+    super.dispose();
+  }
+
+  void _showLatestLines(PosOrder order) {
+    final latestLineId = order.lines.isEmpty ? '' : order.lines.last.id;
+    final key = '${order.id}:${order.lines.length}:$latestLineId';
+    if (_lastOrderLinesKey == key) return;
+    _lastOrderLinesKey = key;
+    if (order.lines.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_lineScrollController.hasClients) return;
+      // The order list is chronological, so the most recently added line is
+      // at the bottom. Jump there for both a newly opened order and a live
+      // addition from another device.
+      _lineScrollController.jumpTo(
+        _lineScrollController.position.maxScrollExtent,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final order = ref.watch(activeOrderProvider);
+    _showLatestLines(order);
     final hasUnsentLines = order.lines.any((line) => !line.isSentToProduction);
-    final tableId = ref.watch(selectedTableProvider);
-    final tableLabel = ref
-        .watch(diningTablesProvider)
-        .when(
-          data: (tables) {
-            for (final table in tables) {
-              if (table.id == tableId) return table.label;
-            }
-            return tableId;
-          },
-          loading: () => tableId,
-          error: (_, _) => tableId,
-        );
-    final orderLocationLabel = order.tabName ?? tableLabel;
+    final tableId = order.tableId ?? ref.watch(selectedTableProvider) ?? '';
+    final tableLabel = tableId.isEmpty
+        ? ''
+        : ref
+              .watch(diningTablesProvider)
+              .when(
+                data: (tables) {
+                  for (final table in tables) {
+                    if (table.id == tableId) return table.label;
+                  }
+                  return tableId;
+                },
+                loading: () => tableId,
+                error: (_, _) => tableId,
+              );
+    final orderLocationLabel =
+        order.tabName ??
+        (tableLabel.isEmpty ? 'No table selected' : tableLabel);
     final scheme = Theme.of(context).colorScheme;
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -838,75 +874,85 @@ class _OrderPanel extends ConsumerWidget {
             Expanded(
               child: order.lines.isEmpty
                   ? const Center(child: Text('Choose menu items to begin.'))
-                  : ListView.separated(
-                      itemCount: order.lines.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: 8),
-                      itemBuilder: (context, index) {
-                        final line = order.lines[index];
-                        return Row(
-                          children: [
-                            IconButton.filledTonal(
-                              tooltip: 'Remove one ${line.productName}',
-                              onPressed: line.isSentToProduction
-                                  ? null
-                                  : () async {
-                                      try {
-                                        await ref
-                                            .read(activeOrderProvider.notifier)
-                                            .reduceLine(line.id);
-                                      } on Object catch (error, stackTrace) {
-                                        AppLogger.error(
-                                          'Remove item from shared draft order',
-                                          error,
-                                          stackTrace,
-                                        );
-                                        if (!context.mounted) return;
-                                        showAppNotification(
-                                          context,
-                                          ref: ref,
-                                          title: 'Item was not removed',
-                                          message: '$error',
-                                          level: AppNotificationLevel.error,
-                                        );
-                                      }
-                                    },
-                              icon: const Icon(Icons.remove_rounded, size: 18),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    line.productName,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  Text(
-                                    '${line.quantity} × ${formatMoney(line.unitPriceMinor, currencyCode: currencyCode)}',
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodySmall,
-                                  ),
-                                  if (line.isSentToProduction)
+                  : Scrollbar(
+                      controller: _lineScrollController,
+                      thumbVisibility: true,
+                      child: ListView.separated(
+                        controller: _lineScrollController,
+                        itemCount: order.lines.length,
+                        separatorBuilder: (_, _) => const SizedBox(height: 8),
+                        itemBuilder: (context, index) {
+                          final line = order.lines[index];
+                          return Row(
+                            children: [
+                              IconButton.filledTonal(
+                                tooltip: 'Remove one ${line.productName}',
+                                onPressed: line.isSentToProduction
+                                    ? null
+                                    : () async {
+                                        try {
+                                          await ref
+                                              .read(
+                                                activeOrderProvider.notifier,
+                                              )
+                                              .reduceLine(line.id);
+                                        } on Object catch (error, stackTrace) {
+                                          AppLogger.error(
+                                            'Remove item from shared draft order',
+                                            error,
+                                            stackTrace,
+                                          );
+                                          if (!context.mounted) return;
+                                          showAppNotification(
+                                            context,
+                                            ref: ref,
+                                            title: 'Item was not removed',
+                                            message: '$error',
+                                            level: AppNotificationLevel.error,
+                                          );
+                                        }
+                                      },
+                                icon: const Icon(
+                                  Icons.remove_rounded,
+                                  size: 18,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
                                     Text(
-                                      'Sent to production',
+                                      line.productName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    Text(
+                                      '${line.quantity} × ${formatMoney(line.unitPriceMinor, currencyCode: widget.currencyCode)}',
                                       style: Theme.of(
                                         context,
-                                      ).textTheme.labelSmall,
+                                      ).textTheme.bodySmall,
                                     ),
-                                ],
+                                    if (line.isSentToProduction)
+                                      Text(
+                                        'Sent to production',
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.labelSmall,
+                                      ),
+                                  ],
+                                ),
                               ),
-                            ),
-                            Text(
-                              formatMoney(
-                                line.totalMinor,
-                                currencyCode: currencyCode,
+                              Text(
+                                formatMoney(
+                                  line.totalMinor,
+                                  currencyCode: widget.currencyCode,
+                                ),
                               ),
-                            ),
-                          ],
-                        );
-                      },
+                            ],
+                          );
+                        },
+                      ),
                     ),
             ),
             const Divider(height: 24),
@@ -915,7 +961,10 @@ class _OrderPanel extends ConsumerWidget {
                 Text('Total', style: Theme.of(context).textTheme.titleMedium),
                 const Spacer(),
                 Text(
-                  formatMoney(order.totalMinor, currencyCode: currencyCode),
+                  formatMoney(
+                    order.totalMinor,
+                    currencyCode: widget.currencyCode,
+                  ),
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.w800,
                   ),
