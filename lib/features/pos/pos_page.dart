@@ -1068,12 +1068,13 @@ Future<void> _showCheckoutSheet(
   required String currencyCode,
 }) async {
   final terminalController = TextEditingController();
+  final baseCurrencyCode = currencyCode.trim().toUpperCase();
   final tenderedAmountController = TextEditingController(
     text: _moneyInputFromMinor(order.totalMinor, currencyCode),
   );
   final exchangeRateController = TextEditingController(text: '1');
   final currencyChoices = <String>{
-    currencyCode.toUpperCase(),
+    baseCurrencyCode,
     'TRY',
     'EUR',
     'GBP',
@@ -1085,7 +1086,7 @@ Future<void> _showCheckoutSheet(
     isScrollControlled: true,
     builder: (sheetContext) {
       var method = PaymentMethod.cash;
-      var tenderedCurrencyCode = currencyCode.toUpperCase();
+      var tenderedCurrencyCode = baseCurrencyCode;
       var cardApproved = false;
       var saving = false;
       var printReceipt = false;
@@ -1103,7 +1104,7 @@ Future<void> _showCheckoutSheet(
               : _convertedBaseMinor(
                   tenderedMinor: tenderedMinor,
                   tenderedCurrencyCode: tenderedCurrencyCode,
-                  baseCurrencyCode: currencyCode,
+                  baseCurrencyCode: baseCurrencyCode,
                   exchangeRateText: exchangeRateController.text,
                 );
           final recordedBaseMinor = paymentEntries.fold<int>(
@@ -1111,16 +1112,38 @@ Future<void> _showCheckoutSheet(
             (total, payment) => total + payment.baseAmountMinor,
           );
           final remainingBaseMinor = order.totalMinor - recordedBaseMinor;
+          final cashChangeBaseMinor =
+              method == PaymentMethod.cash &&
+                  convertedBaseMinor != null &&
+                  convertedBaseMinor > remainingBaseMinor
+              ? convertedBaseMinor - remainingBaseMinor
+              : 0;
+          final appliedBaseMinor = convertedBaseMinor == null
+              ? null
+              : convertedBaseMinor - cashChangeBaseMinor;
           final amountFits =
-              convertedBaseMinor != null &&
-              convertedBaseMinor > 0 &&
-              convertedBaseMinor <= remainingBaseMinor;
+              appliedBaseMinor != null &&
+              appliedBaseMinor > 0 &&
+              (method == PaymentMethod.cash ||
+                  appliedBaseMinor <= remainingBaseMinor);
           final paymentsComplete =
               paymentEntries.isNotEmpty && remainingBaseMinor == 0;
-          final isForeignCash = tenderedCurrencyCode != currencyCode;
+          final isForeignCash = tenderedCurrencyCode != baseCurrencyCode;
+          final hasAmountInput = tenderedAmountController.text
+              .trim()
+              .isNotEmpty;
+          final validationMessage = tenderedMinor == null
+              ? 'Enter a valid payment amount.'
+              : isForeignCash && convertedBaseMinor == null
+              ? 'Load the official rate or enter a valid manager rate.'
+              : method != PaymentMethod.cash &&
+                    convertedBaseMinor != null &&
+                    convertedBaseMinor > remainingBaseMinor
+              ? 'This payment allocation is more than the amount remaining.'
+              : 'This payment cannot be added.';
           final loadedOfficialRate = officialRateQuote;
           return SafeArea(
-            child: Padding(
+            child: SingleChildScrollView(
               padding: EdgeInsets.fromLTRB(
                 24,
                 0,
@@ -1184,7 +1207,7 @@ Future<void> _showCheckoutSheet(
                             method = selection.first;
                             cardApproved = false;
                             if (method == PaymentMethod.cardTerminal) {
-                              tenderedCurrencyCode = currencyCode;
+                              tenderedCurrencyCode = baseCurrencyCode;
                               exchangeRateController.text = '1';
                               tenderedAmountController.text =
                                   _moneyInputFromMinor(
@@ -1209,9 +1232,11 @@ Future<void> _showCheckoutSheet(
                     onChanged: saving || method == PaymentMethod.cardTerminal
                         ? null
                         : (value) => setSheetState(() {
-                            tenderedCurrencyCode = value ?? currencyCode;
+                            tenderedCurrencyCode = value ?? baseCurrencyCode;
                             exchangeRateController.text =
-                                tenderedCurrencyCode == currencyCode ? '1' : '';
+                                tenderedCurrencyCode == baseCurrencyCode
+                                ? '1'
+                                : '';
                             tenderedAmountController.clear();
                             officialRateQuote = null;
                           }),
@@ -1326,7 +1351,7 @@ Future<void> _showCheckoutSheet(
                   if (convertedBaseMinor != null) ...[
                     const SizedBox(height: 8),
                     Text(
-                      'Recorded value: ${formatMoney(convertedBaseMinor, currencyCode: currencyCode)}',
+                      'Tender value: ${formatMoney(convertedBaseMinor, currencyCode: currencyCode)}',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: amountFits
                             ? Colors.green.shade700
@@ -1334,9 +1359,18 @@ Future<void> _showCheckoutSheet(
                       ),
                     ),
                   ],
-                  if (!amountFits)
+                  if (cashChangeBaseMinor > 0) ...[
+                    const SizedBox(height: 4),
                     Text(
-                      'This tender must not exceed the remaining amount.',
+                      'Change due: ${formatMoney(cashChangeBaseMinor, currencyCode: currencyCode)}',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                  ],
+                  if (hasAmountInput && !amountFits)
+                    Text(
+                      validationMessage,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: Theme.of(context).colorScheme.error,
                       ),
@@ -1362,10 +1396,11 @@ Future<void> _showCheckoutSheet(
                         ),
                         subtitle:
                             paymentEntries[index].tenderedCurrencyCode ==
-                                currencyCode
+                                    baseCurrencyCode &&
+                                paymentEntries[index].cashChangeBaseMinor == 0
                             ? null
                             : Text(
-                                'Rate ${paymentEntries[index].exchangeRateToBase} → ${formatMoney(paymentEntries[index].baseAmountMinor, currencyCode: currencyCode)}',
+                                '${paymentEntries[index].tenderedCurrencyCode == baseCurrencyCode ? 'Applied' : 'Rate ${paymentEntries[index].exchangeRateToBase} →'} ${formatMoney(paymentEntries[index].baseAmountMinor, currencyCode: currencyCode)}${paymentEntries[index].cashChangeBaseMinor > 0 ? ' after ${formatMoney(paymentEntries[index].cashChangeBaseMinor, currencyCode: currencyCode)} change' : ''}',
                               ),
                         trailing: IconButton(
                           tooltip: 'Remove payment allocation',
@@ -1420,7 +1455,7 @@ Future<void> _showCheckoutSheet(
                   const SizedBox(height: 12),
                   Text(
                     isForeignCash
-                        ? 'Foreign cash is converted into the company reporting currency and retains its tender amount and rate for audit/reporting.'
+                        ? 'Foreign cash retains its tender amount and rate for audit/reporting. Any overpayment is shown as change in the reporting currency.'
                         : 'Add one or more payment allocations. The total must equal the remaining bill value.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
@@ -1456,10 +1491,11 @@ Future<void> _showCheckoutSheet(
                                       exchangeRateToBase: exchangeRateController
                                           .text
                                           .trim(),
-                                      baseAmountMinor: convertedBaseMinor,
+                                      baseAmountMinor: appliedBaseMinor,
                                       cardPaymentApproved: cardApproved,
                                       terminalLabel: terminalController.text
                                           .trim(),
+                                      cashChangeBaseMinor: cashChangeBaseMinor,
                                       exchangeRateSource:
                                           officialRateQuote?.source,
                                       exchangeRatePublishedDate:
@@ -1476,7 +1512,7 @@ Future<void> _showCheckoutSheet(
                                             total + payment.baseAmountMinor,
                                       );
                                   method = PaymentMethod.cash;
-                                  tenderedCurrencyCode = currencyCode;
+                                  tenderedCurrencyCode = baseCurrencyCode;
                                   cardApproved = false;
                                   exchangeRateController.text = '1';
                                   officialRateQuote = null;
@@ -1582,6 +1618,7 @@ class _CheckoutPaymentDraft {
     required this.baseAmountMinor,
     required this.cardPaymentApproved,
     this.terminalLabel,
+    this.cashChangeBaseMinor = 0,
     this.exchangeRateSource,
     this.exchangeRatePublishedDate,
     this.exchangeRateFetchedAt,
@@ -1594,6 +1631,7 @@ class _CheckoutPaymentDraft {
   final int baseAmountMinor;
   final bool cardPaymentApproved;
   final String? terminalLabel;
+  final int cashChangeBaseMinor;
   final String? exchangeRateSource;
   final String? exchangeRatePublishedDate;
   final String? exchangeRateFetchedAt;
@@ -1605,6 +1643,7 @@ class _CheckoutPaymentDraft {
     exchangeRateToBase: exchangeRateToBase,
     cardPaymentApproved: cardPaymentApproved,
     terminalLabel: terminalLabel,
+    cashChangeBaseMinor: cashChangeBaseMinor,
     exchangeRateSource: exchangeRateSource,
     exchangeRatePublishedDate: exchangeRatePublishedDate,
     exchangeRateFetchedAt: exchangeRateFetchedAt,
@@ -1650,13 +1689,24 @@ int? _convertedBaseMinor({
   if (!RegExp(r'^(?:0|[1-9]\d{0,8})(?:\.\d{1,6})?$').hasMatch(normalizedRate)) {
     return null;
   }
-  final rate = double.tryParse(normalizedRate);
-  if (rate == null || !rate.isFinite || rate <= 0) return null;
+  final pieces = normalizedRate.split('.');
+  final major = int.tryParse(pieces.first);
+  if (major == null) return null;
+  final fractionalText = pieces.length == 1 ? '' : pieces.last;
+  final fraction = int.tryParse(fractionalText.padRight(6, '0'));
+  if (fraction == null) return null;
+  // This mirrors the Cloud Function's fixed-scale integer calculation. The
+  // earlier double calculation could differ by one minor unit, enabling the
+  // Close bill button locally but making the server correctly reject the bill.
+  final rateScaled = (major * 1000000) + fraction;
+  if (rateScaled <= 0) return null;
   final tenderedScale = _minorScale(
     currencyDecimalDigits(tenderedCurrencyCode),
   );
   final baseScale = _minorScale(currencyDecimalDigits(baseCurrencyCode));
-  final result = ((tenderedMinor / tenderedScale) * rate * baseScale).round();
+  final numerator = tenderedMinor * rateScaled * baseScale;
+  final denominator = tenderedScale * 1000000;
+  final result = (numerator + (denominator ~/ 2)) ~/ denominator;
   return result > 0 && result <= 100000000 ? result : null;
 }
 

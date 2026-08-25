@@ -77,6 +77,7 @@ class BillPaymentInput {
     required this.exchangeRateToBase,
     required this.cardPaymentApproved,
     this.terminalLabel,
+    this.cashChangeBaseMinor = 0,
     this.exchangeRateSource,
     this.exchangeRatePublishedDate,
     this.exchangeRateFetchedAt,
@@ -88,6 +89,7 @@ class BillPaymentInput {
   final String exchangeRateToBase;
   final bool cardPaymentApproved;
   final String? terminalLabel;
+  final int cashChangeBaseMinor;
   final String? exchangeRateSource;
   final String? exchangeRatePublishedDate;
   final String? exchangeRateFetchedAt;
@@ -99,6 +101,7 @@ class BillPaymentInput {
     'exchangeRateToBase': exchangeRateToBase,
     'cardPaymentApproved': cardPaymentApproved,
     'terminalLabel': terminalLabel,
+    'cashChangeBaseMinor': cashChangeBaseMinor,
     'exchangeRateSource': exchangeRateSource,
     'exchangeRatePublishedDate': exchangeRatePublishedDate,
     'exchangeRateFetchedAt': exchangeRateFetchedAt,

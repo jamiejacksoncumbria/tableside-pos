@@ -1505,6 +1505,13 @@ function validClosePayment(value, index, baseCurrencyCode) {
     `payments[${index}].amountMinor`,
     100000000,
   );
+  const cashChangeBaseMinor = payment.cashChangeBaseMinor == null
+    ? 0
+    : requiredNonNegativeInteger(
+      payment.cashChangeBaseMinor,
+      `payments[${index}].cashChangeBaseMinor`,
+      100000000,
+    );
   const tenderedCurrencyCode = requiredText(payment, "currencyCode", 3).toUpperCase();
   if (!supportedCurrencyCodeSet.has(tenderedCurrencyCode)) {
     throw new HttpsError(
@@ -1535,17 +1542,32 @@ function validClosePayment(value, index, baseCurrencyCode) {
   const exchangeRate = tenderedCurrencyCode === baseCurrencyCode
     ? {text: "1", scaled: 1000000n}
     : validExchangeRate(payment.exchangeRateToBase);
-  const baseAmountMinor = convertedBaseMinor({
+  const tenderedBaseAmountMinor = convertedBaseMinor({
     amountMinor: tenderedAmountMinor,
     tenderCurrencyCode,
     baseCurrencyCode,
     exchangeRate,
   });
+  if (method !== "cash" && cashChangeBaseMinor !== 0) {
+    throw new HttpsError(
+      "invalid-argument",
+      `payments[${index}].cashChangeBaseMinor is only valid for cash.`,
+    );
+  }
+  if (cashChangeBaseMinor >= tenderedBaseAmountMinor) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Cash change must be less than the converted cash tender.",
+    );
+  }
+  const baseAmountMinor = tenderedBaseAmountMinor - cashChangeBaseMinor;
   return {
     method,
     tenderedAmountMinor,
     tenderedCurrencyCode,
     exchangeRateToBase: exchangeRate.text,
+    tenderedBaseAmountMinor,
+    cashChangeBaseMinor,
     baseAmountMinor,
     terminalLabel,
     exchangeRateSource,
