@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -102,8 +100,7 @@ final selectedTableProvider = NotifierProvider<SelectedTableController, String>(
 
 class SelectedTableController extends Notifier<String> {
   @override
-  String build() =>
-      ref.watch(activeVenueScopeProvider) == null ? 'table-2' : '';
+  String build() => '';
 
   void select(String tableId) => state = tableId;
 }
@@ -113,7 +110,6 @@ final activeOrderProvider = NotifierProvider<ActiveOrderController, PosOrder>(
 );
 
 class ActiveOrderController extends Notifier<PosOrder> {
-  var _isSelectingInitialTable = false;
   var _pendingDraftMutations = 0;
   final _pendingDraftQuantities = <String, int>{};
 
@@ -129,20 +125,8 @@ class ActiveOrderController extends Notifier<PosOrder> {
             AppLogger.error('Live active order', error, stackTrace),
       );
     });
-    // This listener must live in the controller rather than the Tables tab.
-    // On a phone the Menu tab opens first, so a hidden Tables tab cannot be
-    // responsible for replacing the old demo table ID with a real Firestore
-    // table ID.
-    ref.listen<AsyncValue<List<DiningTable>>>(diningTablesProvider, (_, next) {
-      next.when(
-        data: _selectInitialLiveTable,
-        loading: () {},
-        error: (error, stackTrace) =>
-            AppLogger.error('Load initial venue table', error, stackTrace),
-      );
-    });
-    // An active order must not be recreated whenever an operator merely taps
-    // another table or the venue scope refreshes.
+    // A venue deliberately opens with no selected table. Picking the first
+    // table automatically can attach a waiter to the wrong guest's bill.
     final scope = ref.read(activeVenueScopeProvider);
     final tableId = ref.read(selectedTableProvider);
     final now = DateTime.now();
@@ -254,39 +238,6 @@ class ActiveOrderController extends Notifier<PosOrder> {
     AppLogger.info(
       'Live active order applied: ${remoteOrder.id}, ${state.lines.length} line(s).',
     );
-  }
-
-  void _selectInitialLiveTable(List<DiningTable> tables) {
-    if (_isSelectingInitialTable || tables.isEmpty || state.tabName != null) {
-      return;
-    }
-    final currentTableId = state.tableId;
-    if (currentTableId != null &&
-        tables.any((table) => table.id == currentTableId)) {
-      return;
-    }
-    if (state.lines.any((line) => !line.isSentToProduction)) {
-      AppLogger.info(
-        'Initial table selection deferred because this basket has unsent items.',
-      );
-      return;
-    }
-    _isSelectingInitialTable = true;
-    unawaited(_openInitialLiveTable(tables.first));
-  }
-
-  Future<void> _openInitialLiveTable(DiningTable table) async {
-    try {
-      // Select before the async lookup so the visible Order panel never shows
-      // a demo/empty table ID while a live venue is open.
-      ref.read(selectedTableProvider.notifier).select(table.id);
-      await openTable(table.id);
-      AppLogger.info('Initial live table selected: ${table.label}.');
-    } on Object catch (error, stackTrace) {
-      AppLogger.error('Open initial live table', error, stackTrace);
-    } finally {
-      _isSelectingInitialTable = false;
-    }
   }
 
   Future<void> reduceLine(String lineId) async {

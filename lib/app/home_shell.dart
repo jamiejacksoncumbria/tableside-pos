@@ -154,6 +154,10 @@ class HomeShell extends ConsumerWidget {
             ),
           const SizedBox(width: 8),
         ],
+        bottom: const PreferredSize(
+          preferredSize: Size.fromHeight(42),
+          child: _CurrentOrderLocationIndicator(),
+        ),
       ),
       body: Row(
         children: [
@@ -229,6 +233,67 @@ class HomeShell extends ConsumerWidget {
         ),
         HomeSection.platformAdmin => const PlatformAdminPage(),
       };
+}
+
+/// Keeps the currently selected service location unmistakable on every screen.
+/// A venue deliberately starts with no table selected to prevent accidental
+/// orders being attached to the first table in the list.
+class _CurrentOrderLocationIndicator extends ConsumerWidget {
+  const _CurrentOrderLocationIndicator();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final order = ref.watch(activeOrderProvider);
+    final tabName = order.tabName?.trim();
+    final tableId = order.tableId;
+    final scheme = Theme.of(context).colorScheme;
+    final (icon, label) = tabName?.isNotEmpty == true
+        ? (Icons.person_outline_rounded, 'Current tab: $tabName')
+        : tableId == null
+        ? (Icons.table_restaurant_outlined, 'No table or tab selected')
+        : (
+            Icons.table_restaurant_rounded,
+            'Current table: ${_tableLabel(ref, tableId)}',
+          );
+    return Semantics(
+      liveRegion: true,
+      label: label,
+      child: Container(
+        width: double.infinity,
+        color: scheme.surfaceContainerLow,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: scheme.primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(
+                  context,
+                ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _tableLabel(WidgetRef ref, String tableId) => ref
+      .watch(diningTablesProvider)
+      .when(
+        data: (tables) {
+          for (final table in tables) {
+            if (table.id == tableId) return table.label;
+          }
+          return tableId;
+        },
+        loading: () => 'Loading…',
+        error: (_, _) => tableId,
+      );
 }
 
 /// A layout-reserving tray for the latest notification. It intentionally sits
