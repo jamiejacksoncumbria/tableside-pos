@@ -12,7 +12,9 @@ dependencies:
   flutter:
     sdk: flutter
 
-  cloud_firestore: ^6.8.0
+  # 6.9.0 fixes the Android transaction-channel teardown regression in 6.8.0
+  # that reports a spurious MissingPluginException after successful work.
+  cloud_firestore: ^6.9.0
   http: ^1.5.0
   firebase_auth: ^6.5.6
   firebase_app_check: ^0.4.6
