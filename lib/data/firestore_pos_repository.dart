@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -220,31 +222,123 @@ class FirestorePosRepository {
         });
   }
 
+  /// Streams one active order. The POS listens to this after an order has
+  /// been opened or sent, so additions, cancellations and status changes made
+  /// by another device appear without reopening the table.
+  Stream<PosOrder?> watchOrder({
+    required VenueScope scope,
+    required String orderId,
+  }) async* {
+    AppLogger.info(
+      'Watch active order: tenant=${scope.tenantId}, venue=${scope.venueId}, order=$orderId.',
+    );
+    try {
+      await for (final snapshot
+          in _firestore
+              .doc('tenants/${scope.tenantId}/orders/$orderId')
+              .snapshots()) {
+        final order = _orderFromSnapshot(scope: scope, order: snapshot);
+        AppLogger.info(
+          order == null
+              ? 'Active order stream: $orderId is no longer open.'
+              : 'Active order stream: $orderId now has ${order.lines.length} line(s).',
+        );
+        yield order;
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Watch active order $orderId', error, stackTrace);
+      rethrow;
+    }
+  }
+
+  /// Streams the current order attached to [tableId], including a change from
+  /// no order to a newly opened order. This is used for the initial table
+  /// lookup and avoids leaving a table view on a stale point-in-time read.
+  Stream<PosOrder?> watchOpenOrder({
+    required VenueScope scope,
+    required String tableId,
+  }) {
+    late final StreamController<PosOrder?> controller;
+    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? tableSubscription;
+    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? orderSubscription;
+    String? observedOrderId;
+    var hasObservedOrderId = false;
+
+    Future<void> stopSubscriptions() async {
+      await tableSubscription?.cancel();
+      await orderSubscription?.cancel();
+    }
+
+    controller = StreamController<PosOrder?>(
+      onListen: () {
+        AppLogger.info(
+          'Watch table order: tenant=${scope.tenantId}, venue=${scope.venueId}, table=$tableId.',
+        );
+        tableSubscription = _firestore
+            .doc('tenants/${scope.tenantId}/tables/$tableId')
+            .snapshots()
+            .listen(
+              (table) {
+                final data = table.data();
+                final orderId = data?['currentOrderId'] as String?;
+                if (hasObservedOrderId && orderId == observedOrderId) return;
+                hasObservedOrderId = true;
+                observedOrderId = orderId;
+                unawaited(orderSubscription?.cancel());
+                orderSubscription = null;
+                if (orderId == null || orderId.isEmpty) {
+                  controller.add(null);
+                  return;
+                }
+                orderSubscription = _firestore
+                    .doc('tenants/${scope.tenantId}/orders/$orderId')
+                    .snapshots()
+                    .listen(
+                      (order) {
+                        final parsed = _orderFromSnapshot(
+                          scope: scope,
+                          order: order,
+                        );
+                        if (parsed?.tableId != tableId) {
+                          controller.add(null);
+                          return;
+                        }
+                        controller.add(parsed);
+                      },
+                      onError: (Object error, StackTrace stackTrace) {
+                        AppLogger.error(
+                          'Watch table order $tableId',
+                          error,
+                          stackTrace,
+                        );
+                        controller.addError(error, stackTrace);
+                      },
+                    );
+              },
+              onError: (Object error, StackTrace stackTrace) {
+                AppLogger.error(
+                  'Watch table $tableId',
+                  error,
+                  stackTrace,
+                );
+                controller.addError(error, stackTrace);
+              },
+            );
+      },
+      onCancel: stopSubscriptions,
+    );
+    return controller.stream;
+  }
+
   Future<PosOrder?> fetchOpenOrder({
     required VenueScope scope,
     required String tableId,
-  }) async {
-    final table = await _firestore
-        .doc('tenants/${scope.tenantId}/tables/$tableId')
-        .get();
-    final currentOrderId = table.data()?['currentOrderId'] as String?;
-    if (currentOrderId == null || currentOrderId.isEmpty) return null;
-    final order = await _firestore
-        .doc('tenants/${scope.tenantId}/orders/$currentOrderId')
-        .get();
-    if (order.data()?['tableId'] != tableId) return null;
-    return _orderFromSnapshot(scope: scope, order: order);
-  }
+  }) => watchOpenOrder(scope: scope, tableId: tableId).first;
 
   Future<PosOrder?> fetchOrder({
     required VenueScope scope,
     required String orderId,
-  }) async {
-    final order = await _firestore
-        .doc('tenants/${scope.tenantId}/orders/$orderId')
-        .get();
-    return _orderFromSnapshot(scope: scope, order: order);
-  }
+  }) => watchOrder(scope: scope, orderId: orderId).first;
 
   PosOrder? _orderFromSnapshot({
     required VenueScope scope,

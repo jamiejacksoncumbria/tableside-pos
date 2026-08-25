@@ -14,6 +14,22 @@ class PrintJobRepository {
   CollectionReference<Map<String, dynamic>> _jobs(String tenantId) =>
       _firestore.collection('tenants/$tenantId/printJobs');
 
+  /// Emits whenever this venue's queued-print workload changes. Workers use
+  /// this to wake immediately for a new ticket instead of waiting for a poll.
+  /// Claiming remains a transaction below, so simultaneous printer devices
+  /// still cannot print the same job twice.
+  Stream<int> watchQueuedJobCount({
+    required String tenantId,
+    required String venueId,
+  }) {
+    return _jobs(tenantId)
+        .where('venueId', isEqualTo: venueId)
+        .where('status', isEqualTo: 'queued')
+        .snapshots()
+        .map((snapshot) => snapshot.size)
+        .distinct();
+  }
+
   /// Atomically claims one queued job. A worker must print an idempotent ticket
   /// from [idempotencyKey], then call [complete].
   Future<PrintJob?> claimNext({

@@ -422,6 +422,7 @@ class _MenuPanel extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final selectedSection = ref.watch(activeSectionProvider);
     final selectedSubsection = ref.watch(activeSubsectionProvider);
+    final activeOrder = ref.watch(activeOrderProvider);
     final scope = ref.watch(activeVenueScopeProvider);
     final sectionsState = ref.watch(menuSectionsProvider);
     final catalogState = ref.watch(menuProductsProvider);
@@ -616,6 +617,7 @@ class _MenuPanel extends ConsumerWidget {
                           itemBuilder: (context, index) => _ProductTile(
                             product: products[index],
                             currencyCode: currencyCode,
+                            canAdd: activeOrder.canAddProduct(products[index]),
                             onTap: () => ref
                                 .read(activeOrderProvider.notifier)
                                 .addProduct(products[index]),
@@ -677,22 +679,26 @@ class _ProductTile extends StatelessWidget {
   const _ProductTile({
     required this.product,
     required this.currencyCode,
+    required this.canAdd,
     required this.onTap,
   });
 
   final MenuProduct product;
   final String currencyCode;
+  final bool canAdd;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final unavailable =
-        !product.isAvailable ||
-        (product.trackStock && (product.stockOnHand ?? 0) <= 0);
+    final unavailable = !canAdd;
+    final unavailableLabel = product.isAvailable ? 'Sold out' : 'Unavailable';
     return Semantics(
       button: true,
-      label: 'Add ${product.name}',
+      enabled: !unavailable,
+      label: unavailable
+          ? '${product.name}, $unavailableLabel'
+          : 'Add ${product.name}',
       child: InkWell(
         onTap: unavailable ? null : onTap,
         borderRadius: BorderRadius.circular(16),
@@ -734,6 +740,14 @@ class _ProductTile extends StatelessWidget {
                         currencyCode: currencyCode,
                       ),
                     ),
+                    if (unavailable)
+                      Text(
+                        unavailableLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall
+                            ?.copyWith(color: scheme.error),
+                      ),
                     if (!compact && product.trackStock)
                       Text(
                         '${_formatStock(product.stockOnHand ?? 0)} ${product.stockUnit} left',

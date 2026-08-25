@@ -27,6 +27,14 @@ class QueuedBluetoothPrintWorker {
   final LocalPrinterDeviceIdentity _identity;
   DateTime? _lastHeartbeatAt;
 
+  /// Signals that a venue has queued work. The host listens to this stream and
+  /// claims jobs immediately; it does not wait for a periodic scan.
+  Stream<int> watchQueuedJobCount(VenueScope scope) =>
+      _queue.watchQueuedJobCount(
+        tenantId: scope.tenantId,
+        venueId: scope.venueId,
+      );
+
   Future<PrintWorkerResult> processNext(VenueScope scope) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return PrintWorkerResult.noWork;

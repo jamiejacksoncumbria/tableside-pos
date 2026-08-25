@@ -329,6 +329,36 @@ class PosOrder {
 
   int get totalMinor => lines.fold(0, (total, line) => total + line.totalMinor);
 
+  /// Stock is reserved as soon as an item is added to this order, rather than
+  /// waiting until the waiter presses Send.  This is deliberately limited to
+  /// local, unsent lines: once an item is sent, the product's Firestore stock
+  /// stream becomes the source of truth for every device.
+  double unsentStockReservedFor(String productId) => lines
+      .where(
+        (line) =>
+            line.productId == productId &&
+            line.trackStock &&
+            !line.isSentToProduction,
+      )
+      .fold<double>(
+        0,
+        (reserved, line) => reserved + (line.quantity * line.stockPerSale),
+      );
+
+  /// Returns whether one more unit of [product] may be added locally.
+  ///
+  /// The Cloud Function performs the same validation in its transaction. This
+  /// UI guard prevents an obvious over-sale in a single basket; the server
+  /// still protects against another device selling the final unit first.
+  bool canAddProduct(MenuProduct product) {
+    if (!product.isAvailable) return false;
+    if (!product.trackStock) return true;
+    final stockOnHand = product.stockOnHand;
+    if (stockOnHand == null || product.stockPerSale <= 0) return false;
+    return stockOnHand - unsentStockReservedFor(product.id) >=
+        product.stockPerSale;
+  }
+
   PosOrder copyWith({
     String? id,
     String? tableId,

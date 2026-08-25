@@ -32,6 +32,32 @@ final openNamedTabsProvider = StreamProvider<List<OpenNamedTab>>((ref) {
   return ref.watch(firestorePosRepositoryProvider).watchOpenNamedTabs(scope);
 });
 
+/// Identifies the server-owned order currently visible in the POS. A newly
+/// started local basket has no document to listen to until it is first sent.
+final activePersistedOrderIdProvider =
+    NotifierProvider<ActivePersistedOrderIdController, String?>(
+      ActivePersistedOrderIdController.new,
+    );
+
+class ActivePersistedOrderIdController extends Notifier<String?> {
+  @override
+  String? build() => null;
+
+  void select(String? orderId) => state = orderId;
+}
+
+/// The active order must be live, just like the menu, tables and named tabs.
+/// Every device watching the same sent order receives changes through this
+/// stream rather than requiring the user to reopen the table.
+final activeOrderStreamProvider = StreamProvider<PosOrder?>((ref) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  final orderId = ref.watch(activePersistedOrderIdProvider);
+  if (scope == null || orderId == null) return Stream.value(null);
+  return ref
+      .watch(firestorePosRepositoryProvider)
+      .watchOrder(scope: scope, orderId: orderId);
+});
+
 final tenantProfileProvider =
     NotifierProvider<TenantProfileController, TenantProfile>(
       TenantProfileController.new,
@@ -86,6 +112,14 @@ final activeOrderProvider = NotifierProvider<ActiveOrderController, PosOrder>(
 class ActiveOrderController extends Notifier<PosOrder> {
   @override
   PosOrder build() {
+    ref.listen<AsyncValue<PosOrder?>>(activeOrderStreamProvider, (_, next) {
+      next.when(
+        data: _applyLiveOrder,
+        loading: () {},
+        error: (error, stackTrace) =>
+            AppLogger.error('Live active order', error, stackTrace),
+      );
+    });
     // An active order must not be recreated whenever an operator merely taps
     // another table or the venue scope refreshes.
     final scope = ref.read(activeVenueScopeProvider);
@@ -104,6 +138,12 @@ class ActiveOrderController extends Notifier<PosOrder> {
   }
 
   void addProduct(MenuProduct product) {
+    if (!state.canAddProduct(product)) {
+      AppLogger.info(
+        'Stock prevented adding ${product.id} to active order ${state.id}.',
+      );
+      return;
+    }
     // Keep each tap visible as a separate line in the live order. This makes
     // late additions unmistakable to staff; a future final bill/receipt can
     // still consolidate matching lines to save paper.
@@ -125,6 +165,30 @@ class ActiveOrderController extends Notifier<PosOrder> {
       status: state.status == OrderStatus.sent
           ? OrderStatus.sent
           : OrderStatus.open,
+    );
+  }
+
+  void _applyLiveOrder(PosOrder? remoteOrder) {
+    if (remoteOrder == null) {
+      AppLogger.info('Live active order is no longer open.');
+      return;
+    }
+    if (remoteOrder.id != state.id) return;
+
+    // Do not lose a waiter’s locally added, unsent items if a Firestore
+    // snapshot from another device arrives before this device sends them.
+    final remoteLineIds = remoteOrder.lines.map((line) => line.id).toSet();
+    final localOnlyUnsentLines = state.lines
+        .where(
+          (line) =>
+              !line.isSentToProduction && !remoteLineIds.contains(line.id),
+        )
+        .toList(growable: false);
+    state = remoteOrder.copyWith(
+      lines: [...remoteOrder.lines, ...localOnlyUnsentLines],
+    );
+    AppLogger.info(
+      'Live active order applied: ${remoteOrder.id}, ${state.lines.length} line(s).',
     );
   }
 
@@ -162,6 +226,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
               .fetchOpenOrder(scope: scope, tableId: tableId);
     if (existing != null) {
       state = existing;
+      _selectPersistedOrder(existing.id);
       return;
     }
     final now = DateTime.now();
@@ -175,6 +240,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
       status: OrderStatus.open,
       lines: const [],
     );
+    _selectPersistedOrder(null);
   }
 
   /// Opens or creates a venue-local named tab. The server owns the unique name
@@ -201,6 +267,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
         status: OrderStatus.open,
         lines: const [],
       );
+      _selectPersistedOrder(null);
       return;
     }
     final orderId = await ref
@@ -213,6 +280,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
       throw StateError('The named tab could not be loaded. Please retry.');
     }
     state = order;
+    _selectPersistedOrder(order.id);
   }
 
   Future<BluetoothProductionPrintResult> sendToProduction() async {
@@ -225,6 +293,10 @@ class ActiveOrderController extends Notifier<PosOrder> {
       final dispatch = await ref
           .read(productionCommandRepositoryProvider)
           .sendNewLinesToProduction(scope: scope, order: state);
+      // The order document is now server-owned, so subscribe before local
+      // printing. This lets a second device see the order immediately even if
+      // this device's Bluetooth printer is unavailable.
+      _selectPersistedOrder(state.id);
       final locallyRoutedLines = unsentLines
           .where(
             (line) => !dispatch.queuedProductionAreas.contains(
@@ -259,6 +331,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
     );
     return printResult;
   }
+
+  void _selectPersistedOrder(String? orderId) =>
+      ref.read(activePersistedOrderIdProvider.notifier).select(orderId);
 
   String _tableLabelFor(PosOrder order) {
     final tableId = order.tableId;

@@ -224,13 +224,16 @@ class _QueuedPrintWorkerHost extends ConsumerStatefulWidget {
 class _QueuedPrintWorkerHostState
     extends ConsumerState<_QueuedPrintWorkerHost> {
   final QueuedBluetoothPrintWorker _worker = QueuedBluetoothPrintWorker();
-  Timer? _timer;
+  Timer? _retryTimer;
+  StreamSubscription<int>? _queuedJobsSubscription;
   VenueScope? _scope;
   bool _processing = false;
+  int _queuedJobCount = 0;
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _retryTimer?.cancel();
+    _queuedJobsSubscription?.cancel();
     super.dispose();
   }
 
@@ -245,29 +248,57 @@ class _QueuedPrintWorkerHostState
 
   void _configure(VenueScope? scope) {
     if (!mounted || scope == _scope) return;
-    _timer?.cancel();
+    _retryTimer?.cancel();
+    _queuedJobsSubscription?.cancel();
     _scope = scope;
+    _queuedJobCount = 0;
     if (scope == null) return;
-    unawaited(_process(scope));
-    _timer = Timer.periodic(
-      const Duration(seconds: 5),
-      (_) => unawaited(_process(scope)),
+    _queuedJobsSubscription = _worker.watchQueuedJobCount(scope).listen(
+      (queuedCount) {
+        _queuedJobCount = queuedCount;
+        AppLogger.info(
+          'Queued printer stream: $queuedCount queued job(s) for this venue.',
+        );
+        if (queuedCount > 0) unawaited(_processAvailable(scope));
+      },
+      onError: (Object error, StackTrace stackTrace) => AppLogger.error(
+        'Queued printer stream',
+        error,
+        stackTrace,
+      ),
     );
+    // Failed tickets deliberately wait ten seconds before their next allowed
+    // attempt. This is not normal polling: it is only the retry wake-up for
+    // work that was already observed by the stream.
+    _retryTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) {
+        if (_queuedJobCount > 0) unawaited(_processAvailable(scope));
+      },
+    );
+    unawaited(_processAvailable(scope));
   }
 
-  Future<void> _process(VenueScope scope) async {
+  Future<void> _processAvailable(VenueScope scope) async {
     if (_processing || !mounted || _scope != scope) return;
     _processing = true;
     try {
-      final result = await _worker.processNext(scope);
-      if (result == PrintWorkerResult.printed) {
-        AppLogger.info('Queued Bluetooth printer: ticket printed.');
-      } else if (result == PrintWorkerResult.failed) {
-        AppLogger.error(
-          'Queued Bluetooth printer',
-          StateError('A queued ticket failed and will be retried or flagged.'),
-          StackTrace.current,
-        );
+      while (mounted && _scope == scope) {
+        final result = await _worker.processNext(scope);
+        if (result == PrintWorkerResult.noWork) return;
+        if (result == PrintWorkerResult.printed) {
+          AppLogger.info('Queued Bluetooth printer: ticket printed.');
+        } else {
+          AppLogger.error(
+            'Queued Bluetooth printer',
+            StateError(
+              'A queued ticket failed and will be retried or flagged.',
+            ),
+            StackTrace.current,
+          );
+          // A failed job is requeued for a delayed retry, so do not spin on it.
+          return;
+        }
       }
     } on Object catch (error, stackTrace) {
       AppLogger.error('Queued Bluetooth print worker', error, stackTrace);
