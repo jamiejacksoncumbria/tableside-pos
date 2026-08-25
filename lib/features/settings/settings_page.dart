@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,6 +10,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/tenant_profile_repository.dart';
+import '../../data/production_command_repository.dart';
+import '../auth/session_providers.dart';
 import '../notifications/notification_centre.dart';
 import '../printing/bluetooth_printer_setup_page.dart';
 import '../printing/venue_printer_routing_page.dart';
@@ -20,10 +23,12 @@ class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({
     super.key,
     this.profileOverride,
+    this.venueOverride,
     this.persistToFirebase = false,
   });
 
   final TenantProfile? profileOverride;
+  final Venue? venueOverride;
   final bool persistToFirebase;
 
   @override
@@ -36,9 +41,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final TextEditingController _address;
   late final List<TextEditingController> _phoneNumbers;
   late final TextEditingController _footer;
+  late final TextEditingController _notificationRetentionSeconds;
   Uint8List? _logoBytes;
   String? _logoName;
   bool _saving = false;
+  bool _savingNotificationRetention = false;
 
   @override
   void initState() {
@@ -58,6 +65,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       ),
     );
     _footer = TextEditingController(text: profile.receiptFooter);
+    _notificationRetentionSeconds = TextEditingController(
+      text: '${widget.venueOverride?.notificationRetentionSeconds ?? 5}',
+    );
   }
 
   @override
@@ -69,6 +79,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       controller.dispose();
     }
     _footer.dispose();
+    _notificationRetentionSeconds.dispose();
     super.dispose();
   }
 
@@ -148,6 +159,47 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     }
   }
 
+  Future<void> _saveVenueNotificationRetention(VenueScope scope) async {
+    if (_savingNotificationRetention) return;
+    final seconds = int.tryParse(_notificationRetentionSeconds.text.trim());
+    if (seconds == null || seconds < 1 || seconds > 60) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Enter a valid notification time',
+        message: 'Choose a whole number from 1 to 60 seconds.',
+        level: AppNotificationLevel.warning,
+      );
+      return;
+    }
+    setState(() => _savingNotificationRetention = true);
+    try {
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .updateVenueNotificationRetention(scope: scope, seconds: seconds);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Venue notification timing saved',
+        message: 'Notifications will now dismiss after $seconds seconds.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Save venue notification timing', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not save notification timing',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _savingNotificationRetention = false);
+    }
+  }
+
   String _contentTypeFor(String fileName) {
     final name = fileName.toLowerCase();
     if (name.endsWith('.png')) return 'image/png';
@@ -161,6 +213,30 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final TenantProfile profile =
         widget.profileOverride ?? ref.watch(tenantProfileProvider);
     final venueScope = ref.watch(activeVenueScopeProvider);
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final memberships = userId == null
+        ? const <TenantMembership>[]
+        : ref
+              .watch(membershipsProvider(userId))
+              .when(
+                data: (items) => items,
+                loading: () => const <TenantMembership>[],
+                error: (error, stackTrace) {
+                  AppLogger.error(
+                    'Load owner settings access',
+                    error,
+                    stackTrace,
+                  );
+                  return const <TenantMembership>[];
+                },
+              );
+    final isVenueOwner =
+        venueScope != null &&
+        memberships.any(
+          (membership) =>
+              membership.tenantId == venueScope.tenantId &&
+              membership.roles.contains('owner'),
+        );
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -342,6 +418,51 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             ],
           ),
         ),
+        if (venueScope != null && isVenueOwner) ...[
+          const SizedBox(height: 16),
+          _SettingsCard(
+            title: 'Owner venue administration',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Notification retention for ${widget.venueOverride?.name ?? 'this venue'}',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'The bell centre and temporary app messages clear automatically after this time.',
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _notificationRetentionSeconds,
+                  keyboardType: TextInputType.number,
+                  enabled: !_savingNotificationRetention,
+                  decoration: const InputDecoration(
+                    labelText: 'Notification display time (seconds)',
+                    helperText: '1 to 60 seconds; the default is 5 seconds.',
+                    suffixText: 'seconds',
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton.icon(
+                    onPressed: _savingNotificationRetention
+                        ? null
+                        : () => _saveVenueNotificationRetention(venueScope),
+                    icon: const Icon(Icons.timer_outlined),
+                    label: Text(
+                      _savingNotificationRetention
+                          ? 'Saving…'
+                          : 'Save notification timing',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 20),
         Align(
           alignment: Alignment.centerRight,

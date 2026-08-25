@@ -938,12 +938,22 @@ class _OrderPanel extends ConsumerWidget {
                     onPressed: !hasUnsentLines
                         ? null
                         : () async {
+                            final printRequired = await _confirmProductionPrint(
+                              context,
+                            );
+                            if (printRequired == null || !context.mounted) {
+                              return;
+                            }
                             try {
                               final printResult = await ref
                                   .read(activeOrderProvider.notifier)
-                                  .sendToProduction();
+                                  .sendToProduction(
+                                    printRequired: printRequired,
+                                  );
                               if (!context.mounted) return;
-                              final message = printResult.ticketsPrinted > 0
+                              final message = !printRequired
+                                  ? 'New items sent to the Order Flow Board without printing.'
+                                  : printResult.ticketsPrinted > 0
                                   ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
                                   : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.';
                               showAppNotification(
@@ -986,6 +996,34 @@ class _OrderPanel extends ConsumerWidget {
     );
   }
 }
+
+/// Always asks at the point an order leaves the basket. Bar staff often need
+/// the order recorded and visible on the flow board without wasting a ticket.
+Future<bool?> _confirmProductionPrint(BuildContext context) => showDialog<bool>(
+  context: context,
+  builder: (dialogContext) => AlertDialog(
+    icon: const Icon(Icons.print_outlined),
+    title: const Text('Send order'),
+    content: const Text(
+      'Do you need a production ticket printed for these new items?',
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(dialogContext).pop(),
+        child: const Text('Cancel'),
+      ),
+      OutlinedButton(
+        onPressed: () => Navigator.of(dialogContext).pop(false),
+        child: const Text('Send without printing'),
+      ),
+      FilledButton.icon(
+        onPressed: () => Navigator.of(dialogContext).pop(true),
+        icon: const Icon(Icons.print_rounded),
+        label: const Text('Send & print'),
+      ),
+    ],
+  ),
+);
 
 class _StatusChip extends StatelessWidget {
   const _StatusChip({required this.status});

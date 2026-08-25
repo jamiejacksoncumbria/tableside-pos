@@ -383,6 +383,7 @@ async function createTenantFor(caller, rawData) {
       name: venueName,
       nameKey: venueNameKey(venueName),
       timeZone,
+      notificationRetentionSeconds: 5,
       status: "active",
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -460,6 +461,7 @@ async function createVenueFor(caller, rawData) {
       name,
       nameKey,
       timeZone,
+      notificationRetentionSeconds: 5,
       status: "active",
       createdAt: FieldValue.serverTimestamp(),
       createdBy: caller.uid,
@@ -727,6 +729,17 @@ async function requireTenantManager(caller, tenantId) {
   const {roles} = await requireTenantOperationalMember(caller, tenantId);
   if (!roles.some((role) => role === "owner" || role === "manager")) {
     throw new HttpsError("permission-denied", "Only an owner or manager can change tables.");
+  }
+  return roles;
+}
+
+async function requireTenantOwner(caller, tenantId) {
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.includes("owner")) {
+    throw new HttpsError(
+      "permission-denied",
+      "Only a company owner can change this venue setting.",
+    );
   }
   return roles;
 }
@@ -1187,6 +1200,40 @@ async function deleteTableFor(caller, rawData) {
   return {deleted: true};
 }
 
+async function updateVenueNotificationSettingsFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const notificationRetentionSeconds = requiredPositiveInteger(
+    data.notificationRetentionSeconds,
+    "notificationRetentionSeconds",
+    60,
+  );
+  await requireTenantOwner(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  await db.runTransaction(async (transaction) => {
+    const venue = await transaction.get(venueRef);
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    transaction.update(venueRef, {
+      notificationRetentionSeconds,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "updateVenueNotificationSettings",
+      venueId,
+      notificationRetentionSeconds,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  });
+  return {notificationRetentionSeconds};
+}
+
 function activeRouteDevice(device, venueId, productionArea) {
   if (!device?.exists) return false;
   const data = device.data();
@@ -1302,6 +1349,11 @@ async function sendOrderToProductionFor(caller, rawData) {
     throw new HttpsError("invalid-argument", "Each new order line needs a unique ID.");
   }
   const stockOverride = data.stockOverride === true;
+  if (data.printRequired != null && typeof data.printRequired !== "boolean") {
+    throw new HttpsError("invalid-argument", "printRequired must be true or false.");
+  }
+  // Older app builds retain their existing behaviour and print by default.
+  const printRequired = data.printRequired !== false;
   const {roles} = await requireTenantOperationalMember(caller, tenantId);
   if (stockOverride && !roles.some((role) => role === "owner" || role === "manager")) {
     throw new HttpsError("permission-denied", "Only a manager can override unavailable stock.");
@@ -1419,10 +1471,10 @@ async function sendOrderToProductionFor(caller, rawData) {
     );
     // Route records are read before any transaction writes. A route is only
     // accepted when its target is an active printer device at this same venue.
-    const routeEntries = ticketEntries.map((ticket) => ({
+    const routeEntries = printRequired ? ticketEntries.map((ticket) => ({
       area: ticket.area,
       ref: tenantRef.collection("printerRoutes").doc(`${venueId}_${ticket.area}`),
-    }));
+    })) : [];
     const routeSnapshots = await Promise.all(
       routeEntries.map((route) => transaction.get(route.ref)),
     );
@@ -1512,6 +1564,7 @@ async function sendOrderToProductionFor(caller, rawData) {
         tableLabel,
         tabName,
         productionArea: ticket.area,
+        printRequired,
         flowStatus: "newOrder",
         ticketReleasedAt: FieldValue.serverTimestamp(),
         productionItems: ticket.lines.map((line) => ({
@@ -1531,47 +1584,49 @@ async function sendOrderToProductionFor(caller, rawData) {
         idempotencyKey: ticket.ticketId,
         createdAt: FieldValue.serverTimestamp(),
       });
-      const route = routeByArea.get(ticket.area);
-      const targetDeviceId = route?.data().primaryDeviceId;
-      const targetDevice = typeof targetDeviceId === "string"
-        ? deviceById.get(targetDeviceId)
-        : null;
-      if (typeof targetDeviceId === "string"
-          && activeRouteDevice(targetDevice, venueId, ticket.area)) {
-        const jobId = `${ticket.ticketId}_${targetDeviceId}`;
-        transaction.create(tenantRef.collection("printJobs").doc(jobId), {
-          venueId,
-          targetDeviceId,
-          fallbackDeviceId: typeof route.data().fallbackDeviceId === "string"
-            ? route.data().fallbackDeviceId
-            : null,
-          orderId,
-          ticketId: ticket.ticketId,
-          productionArea: ticket.area,
-          status: "queued",
-          attempts: 0,
-          idempotencyKey: jobId,
-          payload: {
-            type: "production",
+      if (printRequired) {
+        const route = routeByArea.get(ticket.area);
+        const targetDeviceId = route?.data().primaryDeviceId;
+        const targetDevice = typeof targetDeviceId === "string"
+          ? deviceById.get(targetDeviceId)
+          : null;
+        if (typeof targetDeviceId === "string"
+            && activeRouteDevice(targetDevice, venueId, ticket.area)) {
+          const jobId = `${ticket.ticketId}_${targetDeviceId}`;
+          transaction.create(tenantRef.collection("printJobs").doc(jobId), {
+            venueId,
+            targetDeviceId,
+            fallbackDeviceId: typeof route.data().fallbackDeviceId === "string"
+              ? route.data().fallbackDeviceId
+              : null,
+            orderId,
             ticketId: ticket.ticketId,
-            restaurantName,
-            reference: orderId.split("-").at(-1) ?? orderId,
             productionArea: ticket.area,
-            tableLabel,
-            tabName,
-            isAddition: hasPriorSentLines,
-            createdByName: actor.displayName ?? actor.email ?? "",
-            lines: ticket.lines.map((line) => ({
-              name: line.productName,
-              quantity: line.quantity,
-            })),
-          },
-          createdAt: FieldValue.serverTimestamp(),
-        });
-        printJobIds.push(jobId);
-        queuedProductionAreas.add(ticket.area);
-      } else {
-        unroutedProductionAreas.add(ticket.area);
+            status: "queued",
+            attempts: 0,
+            idempotencyKey: jobId,
+            payload: {
+              type: "production",
+              ticketId: ticket.ticketId,
+              restaurantName,
+              reference: orderId.split("-").at(-1) ?? orderId,
+              productionArea: ticket.area,
+              tableLabel,
+              tabName,
+              isAddition: hasPriorSentLines,
+              createdByName: actor.displayName ?? actor.email ?? "",
+              lines: ticket.lines.map((line) => ({
+                name: line.productName,
+                quantity: line.quantity,
+              })),
+            },
+            createdAt: FieldValue.serverTimestamp(),
+          });
+          printJobIds.push(jobId);
+          queuedProductionAreas.add(ticket.area);
+        } else {
+          unroutedProductionAreas.add(ticket.area);
+        }
       }
       // The till deliberately keeps every tap as its own order line so staff
       // can see the latest addition. Several lines can therefore represent
@@ -1625,6 +1680,7 @@ async function sendOrderToProductionFor(caller, rawData) {
       queuedProductionAreas: [...queuedProductionAreas],
       unroutedProductionAreas: [...unroutedProductionAreas],
       stockOverride,
+      printRequired,
       actor,
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -1634,6 +1690,7 @@ async function sendOrderToProductionFor(caller, rawData) {
       queuedProductionAreas: [...queuedProductionAreas],
       unroutedProductionAreas: [...unroutedProductionAreas],
       stockOverride,
+      printRequired,
     };
   });
   return result;
@@ -1759,6 +1816,8 @@ async function invokePosAction(action, caller, data) {
       return updateTableFor(caller, data);
     case "deleteTable":
       return deleteTableFor(caller, data);
+    case "updateVenueNotificationSettings":
+      return updateVenueNotificationSettingsFor(caller, data);
     case "sendOrderToProduction":
       return sendOrderToProductionFor(caller, data);
     case "updateProductionTicket":
@@ -1922,6 +1981,8 @@ export const addOrderDraftLine = onCall((request) =>
   addOrderDraftLineFor(callerFromCall(request), request.data));
 export const updateOrderDraftLine = onCall((request) =>
   updateOrderDraftLineFor(callerFromCall(request), request.data));
+export const updateVenueNotificationSettings = onCall((request) =>
+  updateVenueNotificationSettingsFor(callerFromCall(request), request.data));
 export const createTable = onCall((request) =>
   createTableFor(callerFromCall(request), request.data));
 export const updateTable = onCall((request) =>

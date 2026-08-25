@@ -426,7 +426,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
     _selectPersistedOrder(order.id);
   }
 
-  Future<BluetoothProductionPrintResult> sendToProduction() async {
+  Future<BluetoothProductionPrintResult> sendToProduction({
+    required bool printRequired,
+  }) async {
     if (_isSavingDraft) {
       throw StateError(
         'The basket is still saving. Please retry Send in a moment.',
@@ -441,36 +443,46 @@ class ActiveOrderController extends Notifier<PosOrder> {
     if (scope != null) {
       final dispatch = await ref
           .read(productionCommandRepositoryProvider)
-          .sendNewLinesToProduction(scope: scope, order: state);
+          .sendNewLinesToProduction(
+            scope: scope,
+            order: state,
+            printRequired: printRequired,
+          );
       // The order document is now server-owned, so subscribe before local
       // printing. This lets a second device see the order immediately even if
       // this device's Bluetooth printer is unavailable.
       _selectPersistedOrder(state.id);
-      final locallyRoutedLines = unsentLines
-          .where(
-            (line) => !dispatch.queuedProductionAreas.contains(
-              line.productionArea.name,
-            ),
-          )
-          .toList(growable: false);
-      final tableLabel = _tableLabelFor(state);
-      final user = FirebaseAuth.instance.currentUser;
-      AppLogger.info(
-        'Bluetooth production printing: evaluating ${unsentLines.length} newly sent line(s).',
-      );
-      printResult = await BluetoothProductionPrintService().printNewLines(
-        scope: scope,
-        order: state,
-        lines: locallyRoutedLines,
-        restaurantName: ref.read(tenantProfileProvider).displayName,
-        tableLabel: tableLabel,
-        createdByName: user?.displayName?.trim().isNotEmpty == true
-            ? user!.displayName!.trim()
-            : user?.email ?? '',
-      );
-      AppLogger.info(
-        'Bluetooth production printing: ${printResult.ticketsPrinted} ticket(s) sent to the local printer.',
-      );
+      if (printRequired) {
+        final locallyRoutedLines = unsentLines
+            .where(
+              (line) => !dispatch.queuedProductionAreas.contains(
+                line.productionArea.name,
+              ),
+            )
+            .toList(growable: false);
+        final tableLabel = _tableLabelFor(state);
+        final user = FirebaseAuth.instance.currentUser;
+        AppLogger.info(
+          'Bluetooth production printing: evaluating ${unsentLines.length} newly sent line(s).',
+        );
+        printResult = await BluetoothProductionPrintService().printNewLines(
+          scope: scope,
+          order: state,
+          lines: locallyRoutedLines,
+          restaurantName: ref.read(tenantProfileProvider).displayName,
+          tableLabel: tableLabel,
+          createdByName: user?.displayName?.trim().isNotEmpty == true
+              ? user!.displayName!.trim()
+              : user?.email ?? '',
+        );
+        AppLogger.info(
+          'Bluetooth production printing: ${printResult.ticketsPrinted} ticket(s) sent to the local printer.',
+        );
+      } else {
+        AppLogger.info(
+          'Order ${state.id} sent without a production print by staff choice.',
+        );
+      }
     }
     state = state.copyWith(
       status: OrderStatus.sent,

@@ -164,12 +164,14 @@ class Venue {
     required this.tenantId,
     required this.name,
     required this.timeZone,
+    this.notificationRetentionSeconds = 5,
   });
 
   final String id;
   final String tenantId;
   final String name;
   final String timeZone;
+  final int notificationRetentionSeconds;
 }
 
 class TenantMembership {

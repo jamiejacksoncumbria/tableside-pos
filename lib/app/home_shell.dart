@@ -216,6 +216,7 @@ class HomeShell extends ConsumerWidget {
         HomeSection.reports => const _ReportsPage(),
         HomeSection.settings => SettingsPage(
           profileOverride: profileOverride,
+          venueOverride: venueOverride,
           persistToFirebase: persistCompanyProfile,
         ),
         HomeSection.platformAdmin => const PlatformAdminPage(),

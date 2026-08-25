@@ -1,7 +1,11 @@
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/tenant_scope.dart';
 
 enum AppNotificationLevel { success, information, warning, error }
 
@@ -37,14 +41,39 @@ final appNotificationsProvider =
       AppNotificationsController.new,
     );
 
+/// Venue-owned notification retention. Existing venues safely use the five
+/// second default until their owner saves a different value.
+final venueNotificationRetentionSecondsProvider = StreamProvider<int>((ref) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  if (scope == null) return Stream.value(5);
+  return FirebaseFirestore.instance
+      .doc('tenants/${scope.tenantId}/venues/${scope.venueId}')
+      .snapshots()
+      .map((snapshot) {
+        final value = snapshot.data()?['notificationRetentionSeconds'];
+        final seconds = value is int ? value : 5;
+        return seconds.clamp(1, 60).toInt();
+      });
+});
+
 class AppNotificationsController extends Notifier<List<AppNotification>> {
+  final _autoDismissTimers = <String, Timer>{};
+
   @override
-  List<AppNotification> build() => const [];
+  List<AppNotification> build() {
+    ref.onDispose(() {
+      for (final timer in _autoDismissTimers.values) {
+        timer.cancel();
+      }
+    });
+    return const [];
+  }
 
   void add({
     required String title,
     required String message,
     AppNotificationLevel level = AppNotificationLevel.information,
+    int retentionSeconds = 5,
   }) {
     final notification = AppNotification(
       id: 'notification-${DateTime.now().microsecondsSinceEpoch}',
@@ -53,10 +82,17 @@ class AppNotificationsController extends Notifier<List<AppNotification>> {
       level: level,
       createdAt: DateTime.now(),
     );
-    // Keep a useful, bounded session history. Notifications remain visible
-    // until dismissed; the cap merely prevents a shared till from growing
-    // without limit during a very long shift.
+    // Keep a useful, bounded session history while allowing a busy shared
+    // till to clear routine messages automatically.
     state = [notification, ...state].take(100).toList(growable: false);
+    final safeRetention = retentionSeconds.clamp(1, 60).toInt();
+    _autoDismissTimers[notification.id] = Timer(
+      Duration(seconds: safeRetention),
+      () {
+        _autoDismissTimers.remove(notification.id);
+        dismiss(notification.id);
+      },
+    );
     AppLogger.info('Notification recorded: ${notification.title}.');
   }
 
@@ -72,19 +108,27 @@ class AppNotificationsController extends Notifier<List<AppNotification>> {
       )
       .toList(growable: false);
 
-  void dismiss(String id) => state = state
-      .where((notification) => notification.id != id)
-      .toList(growable: false);
+  void dismiss(String id) {
+    _autoDismissTimers.remove(id)?.cancel();
+    state = state
+        .where((notification) => notification.id != id)
+        .toList(growable: false);
+  }
 
-  void clearAll() => state = const [];
+  void clearAll() {
+    for (final timer in _autoDismissTimers.values) {
+      timer.cancel();
+    }
+    _autoDismissTimers.clear();
+    state = const [];
+  }
 }
 
 int unreadNotificationCount(List<AppNotification> notifications) =>
     notifications.where((notification) => !notification.isRead).length;
 
 /// Records every important message before showing the familiar short toast.
-/// The notification centre is therefore the reliable record if a waiter
-/// misses the transient visual confirmation.
+/// Both disappear after the venue's configured retention time.
 void showAppNotification(
   BuildContext context, {
   WidgetRef? ref,
@@ -100,14 +144,32 @@ void showAppNotification(
       context,
     ).read(appNotificationsProvider.notifier);
   }
-  controller.add(title: title, message: message, level: level);
+  final AsyncValue<int> retentionState;
+  if (ref != null) {
+    retentionState = ref.read(venueNotificationRetentionSecondsProvider);
+  } else {
+    retentionState = ProviderScope.containerOf(
+      context,
+    ).read(venueNotificationRetentionSecondsProvider);
+  }
+  final retention = retentionState.when(
+    data: (seconds) => seconds,
+    loading: () => 5,
+    error: (_, _) => 5,
+  );
+  controller.add(
+    title: title,
+    message: message,
+    level: level,
+    retentionSeconds: retention,
+  );
   final colour = _colourFor(level, Theme.of(context).colorScheme);
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
     ..showSnackBar(
       SnackBar(
         behavior: SnackBarBehavior.floating,
-        duration: const Duration(seconds: 8),
+        duration: Duration(seconds: retention),
         backgroundColor: colour,
         content: Text(message),
         action: SnackBarAction(

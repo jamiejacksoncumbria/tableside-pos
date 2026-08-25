@@ -75,10 +75,18 @@ class FirestorePosRepository {
                   tenantId: tenantId,
                   name: data['name'] as String? ?? 'Unnamed venue',
                   timeZone: data['timeZone'] as String? ?? 'UTC',
+                  notificationRetentionSeconds: _notificationRetentionSeconds(
+                    data['notificationRetentionSeconds'],
+                  ),
                 );
               })
               .toList(growable: false),
         );
+  }
+
+  int _notificationRetentionSeconds(Object? value) {
+    final seconds = value is int ? value : 5;
+    return seconds.clamp(1, 60).toInt();
   }
 
   Stream<List<MenuSection>> watchMenuSections(VenueScope scope) async* {
@@ -259,8 +267,10 @@ class FirestorePosRepository {
     required String tableId,
   }) {
     late final StreamController<PosOrder?> controller;
-    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? tableSubscription;
-    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? orderSubscription;
+    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
+    tableSubscription;
+    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
+    orderSubscription;
     String? observedOrderId;
     var hasObservedOrderId = false;
 
@@ -316,11 +326,7 @@ class FirestorePosRepository {
                     );
               },
               onError: (Object error, StackTrace stackTrace) {
-                AppLogger.error(
-                  'Watch table $tableId',
-                  error,
-                  stackTrace,
-                );
+                AppLogger.error('Watch table $tableId', error, stackTrace);
                 controller.addError(error, stackTrace);
               },
             );

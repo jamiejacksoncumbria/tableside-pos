@@ -132,6 +132,7 @@ class ProductionCommandRepository {
   Future<ProductionDispatchResult> sendNewLinesToProduction({
     required VenueScope scope,
     required PosOrder order,
+    required bool printRequired,
     bool stockOverride = false,
   }) async {
     final unsentLines = order.lines
@@ -146,6 +147,7 @@ class ProductionCommandRepository {
       'tableId': order.tableId,
       'tabName': order.tabName,
       'stockOverride': stockOverride,
+      'printRequired': printRequired,
       'lines': unsentLines
           .map(
             (line) => {
@@ -175,6 +177,19 @@ class ProductionCommandRepository {
       'ticketId': ticketId,
       'flowStatus': flowStatus,
       'isDelayed': isDelayed,
+    });
+  }
+
+  /// Owner-only, venue-specific notification timing. This remains a trusted
+  /// server mutation because venue records themselves are server-owned.
+  Future<void> updateVenueNotificationRetention({
+    required VenueScope scope,
+    required int seconds,
+  }) {
+    return _call('updateVenueNotificationSettings', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'notificationRetentionSeconds': seconds,
     });
   }
 
