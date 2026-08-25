@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -100,7 +102,8 @@ final selectedTableProvider = NotifierProvider<SelectedTableController, String>(
 
 class SelectedTableController extends Notifier<String> {
   @override
-  String build() => 'table-2';
+  String build() =>
+      ref.watch(activeVenueScopeProvider) == null ? 'table-2' : '';
 
   void select(String tableId) => state = tableId;
 }
@@ -110,6 +113,8 @@ final activeOrderProvider = NotifierProvider<ActiveOrderController, PosOrder>(
 );
 
 class ActiveOrderController extends Notifier<PosOrder> {
+  var _isSelectingInitialTable = false;
+
   @override
   PosOrder build() {
     ref.listen<AsyncValue<PosOrder?>>(activeOrderStreamProvider, (_, next) {
@@ -118,6 +123,18 @@ class ActiveOrderController extends Notifier<PosOrder> {
         loading: () {},
         error: (error, stackTrace) =>
             AppLogger.error('Live active order', error, stackTrace),
+      );
+    });
+    // This listener must live in the controller rather than the Tables tab.
+    // On a phone the Menu tab opens first, so a hidden Tables tab cannot be
+    // responsible for replacing the old demo table ID with a real Firestore
+    // table ID.
+    ref.listen<AsyncValue<List<DiningTable>>>(diningTablesProvider, (_, next) {
+      next.when(
+        data: _selectInitialLiveTable,
+        loading: () {},
+        error: (error, stackTrace) =>
+            AppLogger.error('Load initial venue table', error, stackTrace),
       );
     });
     // An active order must not be recreated whenever an operator merely taps
@@ -129,7 +146,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
       id: 'order-1024',
       tenantId: scope?.tenantId ?? demoTenant.id,
       venueId: scope?.venueId ?? demoVenue.id,
-      tableId: tableId,
+      tableId: tableId.isEmpty ? null : tableId,
       businessDate: DateTime(now.year, now.month, now.day),
       openedAt: now,
       status: OrderStatus.open,
@@ -190,6 +207,39 @@ class ActiveOrderController extends Notifier<PosOrder> {
     AppLogger.info(
       'Live active order applied: ${remoteOrder.id}, ${state.lines.length} line(s).',
     );
+  }
+
+  void _selectInitialLiveTable(List<DiningTable> tables) {
+    if (_isSelectingInitialTable || tables.isEmpty || state.tabName != null) {
+      return;
+    }
+    final currentTableId = state.tableId;
+    if (currentTableId != null &&
+        tables.any((table) => table.id == currentTableId)) {
+      return;
+    }
+    if (state.lines.any((line) => !line.isSentToProduction)) {
+      AppLogger.info(
+        'Initial table selection deferred because this basket has unsent items.',
+      );
+      return;
+    }
+    _isSelectingInitialTable = true;
+    unawaited(_openInitialLiveTable(tables.first));
+  }
+
+  Future<void> _openInitialLiveTable(DiningTable table) async {
+    try {
+      // Select before the async lookup so the visible Order panel never shows
+      // a demo/empty table ID while a live venue is open.
+      ref.read(selectedTableProvider.notifier).select(table.id);
+      await openTable(table.id);
+      AppLogger.info('Initial live table selected: ${table.label}.');
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Open initial live table', error, stackTrace);
+    } finally {
+      _isSelectingInitialTable = false;
+    }
   }
 
   void reduceLine(String lineId) {
@@ -285,6 +335,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
 
   Future<BluetoothProductionPrintResult> sendToProduction() async {
     final scope = ref.read(activeVenueScopeProvider);
+    if (scope != null) _requireValidLiveOrderLocation();
     final unsentLines = state.lines
         .where((line) => !line.isSentToProduction)
         .toList(growable: false);
@@ -330,6 +381,30 @@ class ActiveOrderController extends Notifier<PosOrder> {
           .toList(growable: false),
     );
     return printResult;
+  }
+
+  void _requireValidLiveOrderLocation() {
+    if (state.tabName?.trim().isNotEmpty == true) return;
+    final tableId = state.tableId;
+    final problem = ref
+        .read(diningTablesProvider)
+        .when(
+          data: (tables) {
+            if (tables.isEmpty) {
+              return 'No tables are set up for this venue. Create a table or open a named tab before sending.';
+            }
+            if (tableId == null ||
+                !tables.any((table) => table.id == tableId)) {
+              return 'Select a valid table or open a named tab before sending this order.';
+            }
+            return null;
+          },
+          loading: () =>
+              'Tables are still loading. Please wait a moment and retry.',
+          error: (_, _) =>
+              'Tables could not be verified. Check the connection and retry.',
+        );
+    if (problem != null) throw StateError(problem);
   }
 
   void _selectPersistedOrder(String? orderId) =>

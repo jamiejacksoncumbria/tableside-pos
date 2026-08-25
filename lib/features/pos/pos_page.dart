@@ -110,22 +110,6 @@ class _TablesPanel extends ConsumerWidget {
           },
         );
     final namedTabGroups = _groupOpenNamedTabs(namedTabs);
-    // A new live venue will not have the demo's `table-2` ID. As soon as its
-    // table stream arrives, open the first available table rather than leaving
-    // a hidden invalid selection that would fail only when Send is pressed.
-    if (activeOrder.tabName == null &&
-        tables.isNotEmpty &&
-        !tables.any((table) => table.id == selectedTableId)) {
-      final firstTable = tables.first;
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        try {
-          await ref.read(activeOrderProvider.notifier).openTable(firstTable.id);
-          ref.read(selectedTableProvider.notifier).select(firstTable.id);
-        } on Object catch (error, stackTrace) {
-          AppLogger.error('Open initial venue table', error, stackTrace);
-        }
-      });
-    }
     final scheme = Theme.of(context).colorScheme;
     return Card(
       clipBehavior: Clip.antiAlias,
