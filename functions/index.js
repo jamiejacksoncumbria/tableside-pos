@@ -922,6 +922,9 @@ async function addOrderDraftLineFor(caller, rawData) {
       : productData.productionArea === "dessert"
         ? "dessert"
         : "kitchen";
+    const taxRateBasisPoints = validTaxRateBasisPoints(
+      productData.taxRateBasisPoints,
+    );
     const canonicalLine = {
       id: line.id,
       productId: line.productId,
@@ -931,6 +934,11 @@ async function addOrderDraftLineFor(caller, rawData) {
       productionArea,
       trackStock: productData.trackStock === true,
       stockPerSale,
+      taxRateBasisPoints,
+      taxRateId: typeof productData.taxRateId === "string" ? productData.taxRateId : null,
+      taxRateName: typeof productData.taxRateName === "string"
+        ? productData.taxRateName
+        : "Zero rate",
       isSentToProduction: false,
     };
     const current = existingOrder.exists ? existingOrder.data() : null;
@@ -1275,6 +1283,30 @@ function validExchangeRate(value) {
   return {text, scaled};
 }
 
+// Percentages are stored as basis points, so 2,000 represents 20.00%.
+// Products from before tax support are safely treated as zero-rated until a
+// manager sets their rate in Menu management.
+function validTaxRateBasisPoints(value) {
+  if (value == null) return 0;
+  const basisPoints = Number(value);
+  if (!Number.isSafeInteger(basisPoints) || basisPoints < 0 || basisPoints > 100000) {
+    throw new HttpsError(
+      "failed-precondition",
+      "A product has an invalid saved tax rate and cannot be sold.",
+    );
+  }
+  return basisPoints;
+}
+
+function inclusiveTaxMinor(grossMinor, taxRateBasisPoints) {
+  // Prices are tax-inclusive. Half-up rounding keeps gross = net + tax at
+  // the bill currency's minor-unit precision.
+  return Math.floor(
+    ((grossMinor * taxRateBasisPoints) + ((10000 + taxRateBasisPoints) / 2)) /
+      (10000 + taxRateBasisPoints),
+  );
+}
+
 function convertedBaseMinor({amountMinor, tenderCurrencyCode, baseCurrencyCode, exchangeRate}) {
   if (tenderCurrencyCode === baseCurrencyCode) return amountMinor;
   const numerator = BigInt(amountMinor) * exchangeRate.scaled *
@@ -1378,6 +1410,10 @@ async function closeOrderFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const orderId = requiredText(data, "orderId", 180);
+  if (data.printReceipt != null && typeof data.printReceipt !== "boolean") {
+    throw new HttpsError("invalid-argument", "printReceipt must be true or false.");
+  }
+  const printReceipt = data.printReceipt === true;
   const rawPayments = data.payments;
   if (!Array.isArray(rawPayments) || rawPayments.length === 0 || rawPayments.length > 8) {
     throw new HttpsError(
@@ -1391,14 +1427,18 @@ async function closeOrderFor(caller, rawData) {
   const orderRef = tenantRef.collection("orders").doc(orderId);
   // A deterministic bill ID makes a lost HTTP response safe to retry.
   const billRef = tenantRef.collection("bills").doc(orderId);
+  const receiptRouteRef = printReceipt
+    ? tenantRef.collection("printerRoutes").doc(`${venueId}_receipt`)
+    : null;
   const actor = actorSnapshot(await auth.getUser(caller.uid));
 
   return db.runTransaction(async (transaction) => {
-    const [tenant, venue, order, existingBill] = await Promise.all([
+    const [tenant, venue, order, existingBill, receiptRoute] = await Promise.all([
       transaction.get(tenantRef),
       transaction.get(venueRef),
       transaction.get(orderRef),
       transaction.get(billRef),
+      receiptRouteRef == null ? Promise.resolve(null) : transaction.get(receiptRouteRef),
     ]);
     if (!tenant.exists) {
       throw new HttpsError("not-found", "The restaurant was not found.");
@@ -1415,6 +1455,11 @@ async function closeOrderFor(caller, rawData) {
         billId: existingBill.id,
         totalMinor: existing.totalMinor,
         currencyCode: existing.currencyCode,
+        receiptNumber: typeof existing.receiptNumber === "string"
+          ? existing.receiptNumber
+          : existingBill.id,
+        receiptPrintRequested: existing.receiptPrintRequested === true,
+        receiptPrintQueued: existing.receiptPrintQueued === true,
         alreadyClosed: true,
       };
     }
@@ -1439,13 +1484,28 @@ async function closeOrderFor(caller, rawData) {
           !Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0) {
         throw new HttpsError("failed-precondition", `Order line ${index + 1} has invalid saved sale data.`);
       }
+      const taxRateBasisPoints = validTaxRateBasisPoints(
+        line?.taxRateBasisPoints,
+      );
+      const taxRateId = typeof line?.taxRateId === "string" ? line.taxRateId : null;
+      const taxRateName = typeof line?.taxRateName === "string" &&
+          line.taxRateName.trim().length > 0
+        ? line.taxRateName.trim()
+        : "Zero rate";
+      const lineTotalMinor = quantity * unitPriceMinor;
+      const taxMinor = inclusiveTaxMinor(lineTotalMinor, taxRateBasisPoints);
       return {
         id: typeof line.id === "string" ? line.id : "",
         productId: typeof line.productId === "string" ? line.productId : "",
         productName: typeof line.productName === "string" ? line.productName : "Menu item",
         quantity,
         unitPriceMinor,
-        lineTotalMinor: quantity * unitPriceMinor,
+        lineTotalMinor,
+        taxRateBasisPoints,
+        taxRateId,
+        taxRateName,
+        taxMinor,
+        netMinor: lineTotalMinor - taxMinor,
         productionArea: typeof line.productionArea === "string" ? line.productionArea : "kitchen",
       };
     });
@@ -1453,6 +1513,30 @@ async function closeOrderFor(caller, rawData) {
     if (!Number.isSafeInteger(totalMinor) || totalMinor <= 0) {
       throw new HttpsError("failed-precondition", "This order has no payable total.");
     }
+    const taxByRate = new Map();
+    for (const line of lines) {
+      const taxKey = line.taxRateId ?? `${line.taxRateName}_${line.taxRateBasisPoints}`;
+      const current = taxByRate.get(taxKey) ?? {
+        taxRateId: line.taxRateId,
+        taxRateName: line.taxRateName,
+        taxRateBasisPoints: line.taxRateBasisPoints,
+        grossMinor: 0,
+        netMinor: 0,
+        taxMinor: 0,
+      };
+      current.grossMinor += line.lineTotalMinor;
+      current.netMinor += line.netMinor;
+      current.taxMinor += line.taxMinor;
+      taxByRate.set(taxKey, current);
+    }
+    const taxBreakdown = [...taxByRate.values()].sort(
+      (left, right) => left.taxRateBasisPoints - right.taxRateBasisPoints,
+    );
+    const taxTotalMinor = taxBreakdown.reduce(
+      (total, entry) => total + entry.taxMinor,
+      0,
+    );
+    const netTotalMinor = totalMinor - taxTotalMinor;
     const currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
     const payments = rawPayments.map((payment, index) =>
       validClosePayment(payment, index, currencyCode));
@@ -1489,6 +1573,24 @@ async function closeOrderFor(caller, rawData) {
     const businessDate = billBusinessDate(timeZone, cutoffMinutes);
     const receiptNumber = `${businessDate.replaceAll("-", "")}-${orderId.slice(-6).toUpperCase()}`;
     const receiptLines = lines.map((line) => ({...line}));
+    const receiptTargetDeviceId = receiptRoute?.exists &&
+        typeof receiptRoute.data().primaryDeviceId === "string"
+      ? receiptRoute.data().primaryDeviceId
+      : null;
+    const receiptDeviceRef = receiptTargetDeviceId == null
+      ? null
+      : tenantRef.collection("devices").doc(receiptTargetDeviceId);
+    // Reads must happen before the transaction writes. This separately-routed
+    // device is the only printer allowed to receive paid bill totals.
+    const receiptDevice = receiptDeviceRef == null
+      ? null
+      : await transaction.get(receiptDeviceRef);
+    const receiptPrintQueued = printReceipt &&
+      receiptTargetDeviceId != null &&
+      activeRouteDevice(receiptDevice, venueId, "receipt");
+    const receiptPrintJobId = receiptPrintQueued
+      ? `receipt_${orderId}_${receiptTargetDeviceId}`
+      : null;
 
     transaction.create(billRef, {
       venueId,
@@ -1503,13 +1605,55 @@ async function closeOrderFor(caller, rawData) {
       businessDayCutoffMinutes: cutoffMinutes,
       venueTimeZone: timeZone,
       totalMinor,
+      grossTotalMinor: totalMinor,
+      netTotalMinor,
+      taxTotalMinor,
+      taxBreakdown,
       payments,
+      receiptPrintRequested: printReceipt,
+      receiptPrintQueued,
+      receiptPrintJobId,
       lines: receiptLines,
       openedAt: orderData.openedAt ?? null,
       closedAt: FieldValue.serverTimestamp(),
       closedByActor: actor,
       createdAt: FieldValue.serverTimestamp(),
     });
+    if (receiptPrintQueued) {
+      transaction.create(tenantRef.collection("printJobs").doc(receiptPrintJobId), {
+        venueId,
+        targetDeviceId: receiptTargetDeviceId,
+        fallbackDeviceId: typeof receiptRoute.data().fallbackDeviceId === "string"
+          ? receiptRoute.data().fallbackDeviceId
+          : null,
+        orderId,
+        ticketId: `receipt_${orderId}`,
+        productionArea: "receipt",
+        status: "queued",
+        attempts: 0,
+        idempotencyKey: receiptPrintJobId,
+        payload: {
+          type: "receipt",
+          receiptNumber,
+          restaurantName: typeof tenant.data().displayName === "string"
+            ? tenant.data().displayName
+            : "TABLESIDE POS",
+          currencyCode,
+          businessDate,
+          tableLabel: typeof orderData.tableLabel === "string"
+            ? orderData.tableLabel
+            : null,
+          tabName,
+          totalMinor,
+          netTotalMinor,
+          taxTotalMinor,
+          taxBreakdown,
+          lines: receiptLines,
+          payments,
+        },
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    }
     transaction.update(orderRef, {
       status: "closed",
       closedAt: FieldValue.serverTimestamp(),
@@ -1535,12 +1679,25 @@ async function closeOrderFor(caller, rawData) {
       billId: billRef.id,
       receiptNumber,
       totalMinor,
+      netTotalMinor,
+      taxTotalMinor,
+      receiptPrintRequested: printReceipt,
+      receiptPrintQueued,
+      receiptPrintJobId,
       currencyCode,
       paymentMethods: payments.map((payment) => payment.method),
       actor,
       createdAt: FieldValue.serverTimestamp(),
     });
-    return {billId: billRef.id, totalMinor, currencyCode, receiptNumber, alreadyClosed: false};
+    return {
+      billId: billRef.id,
+      totalMinor,
+      currencyCode,
+      receiptNumber,
+      receiptPrintRequested: printReceipt,
+      receiptPrintQueued,
+      alreadyClosed: false,
+    };
   });
 }
 
@@ -1778,6 +1935,9 @@ async function sendOrderToProductionFor(caller, rawData) {
         : product.productionArea === "dessert"
           ? "dessert"
           : "kitchen";
+      const taxRateBasisPoints = validTaxRateBasisPoints(
+        product.taxRateBasisPoints,
+      );
       return {
         ...line,
         productName: typeof product.name === "string" ? product.name : "Menu item",
@@ -1785,6 +1945,11 @@ async function sendOrderToProductionFor(caller, rawData) {
         productionArea,
         trackStock: product.trackStock === true,
         stockPerSale,
+        taxRateBasisPoints,
+        taxRateId: typeof product.taxRateId === "string" ? product.taxRateId : null,
+        taxRateName: typeof product.taxRateName === "string"
+          ? product.taxRateName
+          : "Zero rate",
         showOnOrderFlow: product.showOnOrderFlow !== false,
       };
     });
@@ -1851,6 +2016,9 @@ async function sendOrderToProductionFor(caller, rawData) {
       productionArea: line.productionArea,
       trackStock: line.trackStock,
       stockPerSale: line.stockPerSale,
+      taxRateBasisPoints: line.taxRateBasisPoints,
+      taxRateId: line.taxRateId,
+      taxRateName: line.taxRateName,
       isSentToProduction: true,
     });
     // Draft lines already exist on the order so every device can see them.

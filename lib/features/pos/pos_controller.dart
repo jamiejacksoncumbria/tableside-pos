@@ -163,6 +163,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
       productionArea: product.productionArea,
       trackStock: product.trackStock,
       stockPerSale: product.stockPerSale,
+      taxRateBasisPoints: product.taxRateBasisPoints,
+      taxRateId: product.taxRateId,
+      taxRateName: product.taxRateName,
     );
     state = state.copyWith(
       lines: [...state.lines, line],
@@ -449,6 +452,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
   /// will later create child allocations; they must never bypass this command.
   Future<BillCloseResult> closeBill({
     required List<BillPaymentInput> payments,
+    required bool printReceipt,
   }) async {
     if (_isSavingDraft) {
       throw StateError('The basket is still saving. Please wait a moment.');
@@ -469,7 +473,12 @@ class ActiveOrderController extends Notifier<PosOrder> {
     final order = state;
     final result = await ref
         .read(productionCommandRepositoryProvider)
-        .closeOrder(scope: scope, order: order, payments: payments);
+        .closeOrder(
+          scope: scope,
+          order: order,
+          payments: payments,
+          printReceipt: printReceipt,
+        );
     _pendingDraftQuantities.clear();
     _selectPersistedOrder(null);
     ref.read(selectedTableProvider.notifier).select('');

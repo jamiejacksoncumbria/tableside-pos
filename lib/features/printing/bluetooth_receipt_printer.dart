@@ -60,6 +60,74 @@ class BluetoothProductionTicketLine {
   final int quantity;
 }
 
+/// A money-bearing ticket that is accepted only by a printer device routed as
+/// `receipt`. Kitchen/bar jobs retain their deliberately price-free payload.
+class BluetoothBillReceipt {
+  const BluetoothBillReceipt({
+    required this.receiptNumber,
+    required this.restaurantName,
+    required this.currencyCode,
+    required this.lines,
+    required this.totalMinor,
+    required this.taxTotalMinor,
+    this.netTotalMinor,
+    this.tableLabel,
+    this.tabName,
+    this.businessDate,
+    this.payments = const <BluetoothReceiptPayment>[],
+    this.taxBreakdown = const <BluetoothReceiptTaxBreakdown>[],
+  });
+
+  final String receiptNumber;
+  final String restaurantName;
+  final String currencyCode;
+  final List<BluetoothBillReceiptLine> lines;
+  final int totalMinor;
+  final int taxTotalMinor;
+  final int? netTotalMinor;
+  final String? tableLabel;
+  final String? tabName;
+  final String? businessDate;
+  final List<BluetoothReceiptPayment> payments;
+  final List<BluetoothReceiptTaxBreakdown> taxBreakdown;
+}
+
+class BluetoothBillReceiptLine {
+  const BluetoothBillReceiptLine({
+    required this.name,
+    required this.quantity,
+    required this.lineTotalMinor,
+  });
+
+  final String name;
+  final int quantity;
+  final int lineTotalMinor;
+}
+
+class BluetoothReceiptPayment {
+  const BluetoothReceiptPayment({
+    required this.method,
+    required this.amountMinor,
+    required this.currencyCode,
+  });
+
+  final String method;
+  final int amountMinor;
+  final String currencyCode;
+}
+
+class BluetoothReceiptTaxBreakdown {
+  const BluetoothReceiptTaxBreakdown({
+    required this.name,
+    required this.basisPoints,
+    required this.taxMinor,
+  });
+
+  final String name;
+  final int basisPoints;
+  final int taxMinor;
+}
+
 class BluetoothReceiptPrinterException implements Exception {
   const BluetoothReceiptPrinterException(this.message);
 
@@ -106,5 +174,10 @@ abstract interface class BluetoothReceiptPrinter {
   Future<void> printProductionTicket({
     required BluetoothReceiptPrinterDevice device,
     required BluetoothProductionTicket ticket,
+  });
+
+  Future<void> printBillReceipt({
+    required BluetoothReceiptPrinterDevice device,
+    required BluetoothBillReceipt receipt,
   });
 }

@@ -200,6 +200,120 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     );
   }
 
+  @override
+  Future<void> printBillReceipt({
+    required BluetoothReceiptPrinterDevice device,
+    required BluetoothBillReceipt receipt,
+  }) async {
+    final profile = await CapabilityProfile.load();
+    final generator = Generator(PaperSize.mm58, profile);
+    final location = receipt.tabName?.trim().isNotEmpty == true
+        ? 'Tab: ${receipt.tabName!.trim()}'
+        : receipt.tableLabel?.trim().isNotEmpty == true
+        ? 'Table: ${receipt.tableLabel!.trim()}'
+        : null;
+    final now = DateTime.now();
+    final printedAt =
+        '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} '
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final bytes = <int>[
+      ...generator.reset(),
+      ...generator.text(
+        receipt.restaurantName.isEmpty
+            ? 'TABLESIDE POS'
+            : receipt.restaurantName,
+        styles: const PosStyles(
+          align: PosAlign.center,
+          bold: true,
+          height: PosTextSize.size2,
+          width: PosTextSize.size2,
+        ),
+      ),
+      ...generator.text(
+        'PAID RECEIPT',
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      ),
+      ...generator.hr(),
+      ...generator.text('Receipt: ${receipt.receiptNumber}'),
+      if (location != null) ...generator.text(location),
+      if (receipt.businessDate?.trim().isNotEmpty == true)
+        ...generator.text('Business date: ${receipt.businessDate}'),
+      ...generator.text('Printed: $printedAt'),
+      ...generator.hr(),
+      for (final line in receipt.lines) ...[
+        ...generator.text('${line.quantity} x ${line.name}'),
+        ...generator.row([
+          PosColumn(text: '', width: 5),
+          PosColumn(
+            text: _money(line.lineTotalMinor, receipt.currencyCode),
+            width: 7,
+            styles: const PosStyles(align: PosAlign.right),
+          ),
+        ]),
+      ],
+      ...generator.hr(),
+      if (receipt.netTotalMinor != null)
+        ...generator.row([
+          PosColumn(text: 'Net', width: 6),
+          PosColumn(
+            text: _money(receipt.netTotalMinor!, receipt.currencyCode),
+            width: 6,
+            styles: const PosStyles(align: PosAlign.right),
+          ),
+        ]),
+      ...generator.row([
+        PosColumn(text: 'Tax included', width: 6),
+        PosColumn(
+          text: _money(receipt.taxTotalMinor, receipt.currencyCode),
+          width: 6,
+          styles: const PosStyles(align: PosAlign.right),
+        ),
+      ]),
+      for (final tax in receipt.taxBreakdown)
+        ...generator.text(
+          '${tax.name} (${_percentage(tax.basisPoints)}): ${_money(tax.taxMinor, receipt.currencyCode)}',
+        ),
+      ...generator.row([
+        PosColumn(text: 'TOTAL', width: 6, styles: const PosStyles(bold: true)),
+        PosColumn(
+          text: _money(receipt.totalMinor, receipt.currencyCode),
+          width: 6,
+          styles: const PosStyles(align: PosAlign.right, bold: true),
+        ),
+      ]),
+      if (receipt.payments.isNotEmpty) ...[
+        ...generator.hr(),
+        ...generator.text('Payments', styles: const PosStyles(bold: true)),
+        for (final payment in receipt.payments)
+          ...generator.text(
+            '${payment.method}: ${_money(payment.amountMinor, payment.currencyCode)}',
+          ),
+      ],
+      ...generator.feed(4),
+    ];
+    await _write(
+      device,
+      bytes,
+      failureMessage:
+          'The printer connection was lost before the paid receipt was accepted.',
+    );
+  }
+
+  String _money(int minor, String currencyCode) {
+    final negative = minor < 0;
+    final absolute = minor.abs();
+    final major = absolute ~/ 100;
+    final remainder = absolute % 100;
+    return '${negative ? '-' : ''}$currencyCode $major.${remainder.toString().padLeft(2, '0')}';
+  }
+
+  String _percentage(int basisPoints) {
+    final percentage = basisPoints / 100;
+    return percentage == percentage.roundToDouble()
+        ? '${percentage.toStringAsFixed(0)}%'
+        : '${percentage.toStringAsFixed(2)}%';
+  }
+
   String _routingPreferenceKey(String venueRoutingKey) =>
       '$_routingPreferencePrefix$venueRoutingKey';
 

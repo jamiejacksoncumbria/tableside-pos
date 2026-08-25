@@ -1088,6 +1088,7 @@ Future<void> _showCheckoutSheet(
       var tenderedCurrencyCode = currencyCode.toUpperCase();
       var cardApproved = false;
       var saving = false;
+      var printReceipt = false;
       final paymentEntries = <_CheckoutPaymentDraft>[];
       return StatefulBuilder(
         builder: (context, setSheetState) {
@@ -1323,6 +1324,19 @@ Future<void> _showCheckoutSheet(
                       ),
                     ),
                   ],
+                  CheckboxListTile(
+                    value: printReceipt,
+                    contentPadding: EdgeInsets.zero,
+                    onChanged: saving
+                        ? null
+                        : (value) => setSheetState(
+                            () => printReceipt = value ?? false,
+                          ),
+                    title: const Text('Print paid receipt'),
+                    subtitle: const Text(
+                      'Queues the full bill to this venue’s dedicated receipt printer after payment is recorded.',
+                    ),
+                  ),
                   const SizedBox(height: 12),
                   Text(
                     isForeignCash
@@ -1411,6 +1425,7 @@ Future<void> _showCheckoutSheet(
                                             (entry) => entry.toPaymentInput(),
                                           )
                                           .toList(growable: false),
+                                      printReceipt: printReceipt,
                                     );
                                 if (!sheetContext.mounted) return;
                                 Navigator.of(sheetContext).pop();
@@ -1422,7 +1437,7 @@ Future<void> _showCheckoutSheet(
                                       ? 'Bill was already closed'
                                       : 'Payment recorded',
                                   message:
-                                      'Receipt ${result.receiptNumber} closed at ${formatMoney(result.totalMinor, currencyCode: result.currencyCode)}.',
+                                      'Receipt ${result.receiptNumber} closed at ${formatMoney(result.totalMinor, currencyCode: result.currencyCode)}.${result.receiptPrintRequested ? (result.receiptPrintQueued ? ' Printing has been queued.' : ' No dedicated receipt printer is configured.') : ''}',
                                   level: AppNotificationLevel.success,
                                 );
                               } on Object catch (error, stackTrace) {

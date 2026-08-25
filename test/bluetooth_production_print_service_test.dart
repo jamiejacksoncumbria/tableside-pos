@@ -24,35 +24,34 @@ void main() {
         productionAreas: {'bar'},
       ),
     );
-    final result = await BluetoothProductionPrintService(
-      printer: printer,
-    ).printNewLines(
-      scope: scope,
-      order: order,
-      lines: const [
-        OrderLine(
-          id: 'bar-line',
-          productId: 'cola',
-          productName: 'Cola',
-          quantity: 2,
-          unitPriceMinor: 500,
-          productionArea: ProductionArea.bar,
-          trackStock: false,
-        ),
-        OrderLine(
-          id: 'kitchen-line',
-          productId: 'curry',
-          productName: 'Chicken curry',
-          quantity: 1,
-          unitPriceMinor: 1200,
-          productionArea: ProductionArea.kitchen,
-          trackStock: false,
-        ),
-      ],
-      restaurantName: 'Spice Garden',
-      tableLabel: '2',
-      createdByName: 'Jamie',
-    );
+    final result = await BluetoothProductionPrintService(printer: printer)
+        .printNewLines(
+          scope: scope,
+          order: order,
+          lines: const [
+            OrderLine(
+              id: 'bar-line',
+              productId: 'cola',
+              productName: 'Cola',
+              quantity: 2,
+              unitPriceMinor: 500,
+              productionArea: ProductionArea.bar,
+              trackStock: false,
+            ),
+            OrderLine(
+              id: 'kitchen-line',
+              productId: 'curry',
+              productName: 'Chicken curry',
+              quantity: 1,
+              unitPriceMinor: 1200,
+              productionArea: ProductionArea.kitchen,
+              trackStock: false,
+            ),
+          ],
+          restaurantName: 'Spice Garden',
+          tableLabel: '2',
+          createdByName: 'Jamie',
+        );
 
     expect(result.ticketsPrinted, 1);
     expect(result.skippedProductionAreas, ['kitchen']);
@@ -66,26 +65,25 @@ void main() {
 
   test('does nothing when live production routing is disabled', () async {
     final printer = _FakePrinter();
-    final result = await BluetoothProductionPrintService(
-      printer: printer,
-    ).printNewLines(
-      scope: scope,
-      order: order,
-      lines: const [
-        OrderLine(
-          id: 'kitchen-line',
-          productId: 'curry',
-          productName: 'Chicken curry',
-          quantity: 1,
-          unitPriceMinor: 1200,
-          productionArea: ProductionArea.kitchen,
-          trackStock: false,
-        ),
-      ],
-      restaurantName: 'Spice Garden',
-      tableLabel: '2',
-      createdByName: 'Jamie',
-    );
+    final result = await BluetoothProductionPrintService(printer: printer)
+        .printNewLines(
+          scope: scope,
+          order: order,
+          lines: const [
+            OrderLine(
+              id: 'kitchen-line',
+              productId: 'curry',
+              productName: 'Chicken curry',
+              quantity: 1,
+              unitPriceMinor: 1200,
+              productionArea: ProductionArea.kitchen,
+              trackStock: false,
+            ),
+          ],
+          restaurantName: 'Spice Garden',
+          tableLabel: '2',
+          createdByName: 'Jamie',
+        );
 
     expect(result.ticketsPrinted, 0);
     expect(printer.productionTickets, isEmpty);
@@ -93,9 +91,7 @@ void main() {
 }
 
 class _FakePrinter implements BluetoothReceiptPrinter {
-  _FakePrinter({
-    this.routing = const BluetoothProductionRouting(),
-  });
+  _FakePrinter({this.routing = const BluetoothProductionRouting()});
 
   final BluetoothProductionRouting routing;
   final productionTickets = <BluetoothProductionTicket>[];
@@ -116,6 +112,12 @@ class _FakePrinter implements BluetoothReceiptPrinter {
   }) async {
     productionTickets.add(ticket);
   }
+
+  @override
+  Future<void> printBillReceipt({
+    required BluetoothReceiptPrinterDevice device,
+    required BluetoothBillReceipt receipt,
+  }) async {}
 
   @override
   Future<void> printTestTicket({

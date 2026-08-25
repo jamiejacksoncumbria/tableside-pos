@@ -2,7 +2,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../core/tenant_scope.dart';
 
-const productionRouteAreas = <String>['bar', 'kitchen', 'dessert'];
+/// `receipt` is deliberately a separate route: a production printer never
+/// receives prices or payment details, while the dedicated receipt printer
+/// gets the full paid bill only when staff request it at checkout.
+const productionRouteAreas = <String>['bar', 'kitchen', 'dessert', 'receipt'];
 
 class PrinterRoute {
   const PrinterRoute({

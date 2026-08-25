@@ -146,7 +146,10 @@ class _VenuePrinterRoutingPageState
     required List<PrinterDevice> devices,
     PrinterRoute? existing,
   }) async {
-    final availableIds = devices.map((device) => device.id).toSet();
+    final eligibleDevices = devices
+        .where((device) => device.productionAreas.contains(area))
+        .toList(growable: false);
+    final availableIds = eligibleDevices.map((device) => device.id).toSet();
     var primaryDeviceId = availableIds.contains(existing?.primaryDeviceId)
         ? existing?.primaryDeviceId
         : null;
@@ -169,7 +172,7 @@ class _VenuePrinterRoutingPageState
                     value: null,
                     child: Text('No shared printer'),
                   ),
-                  for (final device in devices)
+                  for (final device in eligibleDevices)
                     DropdownMenuItem<String?>(
                       value: device.id,
                       child: Text(device.name),
@@ -191,7 +194,7 @@ class _VenuePrinterRoutingPageState
                     value: null,
                     child: Text('No fallback printer'),
                   ),
-                  for (final device in devices.where(
+                  for (final device in eligibleDevices.where(
                     (device) => device.id != primaryDeviceId,
                   ))
                     DropdownMenuItem<String?>(
@@ -204,8 +207,10 @@ class _VenuePrinterRoutingPageState
                     : (value) => setDialogState(() => fallbackDeviceId = value),
               ),
               const SizedBox(height: 12),
-              const Text(
-                'A failed printer retries three times before the fallback device is used.',
+              Text(
+                eligibleDevices.isEmpty
+                    ? 'No registered device supports this route yet. Re-register the relevant device so it can handle ${_areaLabel(area).toLowerCase()} tickets.'
+                    : 'A failed printer retries three times before the fallback device is used.',
               ),
             ],
           ),
@@ -246,6 +251,7 @@ class _VenuePrinterRoutingPageState
   String _areaLabel(String area) => switch (area) {
     'bar' => 'Bar',
     'dessert' => 'Dessert',
+    'receipt' => 'Paid receipt',
     _ => 'Kitchen',
   };
 
@@ -391,12 +397,12 @@ class _VenuePrinterRoutingPageState
                 ],
                 const SizedBox(height: 24),
                 Text(
-                  'Production routing',
+                  'Ticket and receipt routing',
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  'Orders are queued by the server after it validates stock and the menu. Choose a primary and optional fallback device for each area.',
+                  'Orders and paid receipts are queued by the server after it validates stock, the menu and payment. Choose a primary and optional fallback device for each route.',
                 ),
                 const SizedBox(height: 12),
                 StreamBuilder<List<PrinterDevice>>(
@@ -445,6 +451,7 @@ class _VenuePrinterRoutingPageState
                                   leading: Icon(switch (area) {
                                     'bar' => Icons.local_bar_rounded,
                                     'dessert' => Icons.cake_outlined,
+                                    'receipt' => Icons.receipt_long_outlined,
                                     _ => Icons.restaurant_rounded,
                                   }),
                                   title: Text(_areaLabel(area)),

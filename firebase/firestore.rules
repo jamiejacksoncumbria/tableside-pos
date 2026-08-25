@@ -118,6 +118,14 @@ service cloud.firestore {
         allow write: if isPlatformAdmin() || managesTenant(tenantId);
       }
 
+      // Venue tax-rate setup is manager-owned. Product selections copy the
+      // named rate and fixed basis-point value; the order function snapshots
+      // that value again when a sale is made.
+      match /taxRates/{taxRateId} {
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if isPlatformAdmin() || managesTenant(tenantId);
+      }
+
       // Stock movements are immutable and server-created alongside a verified
       // release-to-production command. A client must never decrement stock by
       // writing a movement or product value directly.
@@ -190,9 +198,9 @@ service cloud.firestore {
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastHeartbeatAt']));
       }
 
-      // Only a manager can choose where a venue's kitchen, bar, and dessert
-      // tickets go. The trusted order command verifies a configured device
-      // belongs to this venue before creating the job.
+      // Only a manager can choose where a venue's kitchen, bar, dessert and
+      // paid-receipt tickets go. The trusted command verifies a configured
+      // device belongs to this venue before creating the job.
       match /printerRoutes/{routeId} {
         allow read: if isPlatformAdmin() || isMember(tenantId);
         allow create, update: if (isPlatformAdmin() || managesTenant(tenantId))

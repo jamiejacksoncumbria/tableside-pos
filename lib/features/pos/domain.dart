@@ -205,6 +205,36 @@ class MenuSection {
   final String? parentSectionId;
 }
 
+/// A venue-owned reusable, tax-inclusive sales rate. The product also stores
+/// a snapshot of its selected rate so historic orders cannot change when a
+/// manager later edits the tax setup.
+class TaxRate {
+  const TaxRate({
+    required this.id,
+    required this.name,
+    required this.basisPoints,
+    this.active = true,
+  });
+
+  static const zero = TaxRate(
+    id: 'zero-rate',
+    name: 'Zero rate',
+    basisPoints: 0,
+  );
+
+  final String id;
+  final String name;
+  final int basisPoints;
+  final bool active;
+
+  String get percentageLabel {
+    final percent = basisPoints / 100;
+    return percent == percent.roundToDouble()
+        ? '${percent.toStringAsFixed(0)}%'
+        : '${percent.toStringAsFixed(2)}%';
+  }
+}
+
 class MenuProduct {
   const MenuProduct({
     required this.id,
@@ -218,6 +248,9 @@ class MenuProduct {
     this.stockPerSale = 1,
     this.isAvailable = true,
     this.showOnOrderFlow = true,
+    this.taxRateBasisPoints = 0,
+    this.taxRateId,
+    this.taxRateName = 'Zero rate',
   });
 
   final String id;
@@ -234,6 +267,21 @@ class MenuProduct {
   /// Drinks can still print to the bar while being omitted from the live
   /// kitchen/manager flow board.
   final bool showOnOrderFlow;
+
+  /// Tax percentage in basis points: 2,000 represents 20.00%. Menu prices
+  /// are tax-inclusive, so this rate derives the net and tax portions only
+  /// when the server creates an immutable bill.
+  final int taxRateBasisPoints;
+  final String? taxRateId;
+  final String taxRateName;
+
+  String get taxRateLabel {
+    final percent = taxRateBasisPoints / 100;
+    final percentage = percent == percent.roundToDouble()
+        ? '${percent.toStringAsFixed(0)}%'
+        : '${percent.toStringAsFixed(2)}%';
+    return '$taxRateName ($percentage)';
+  }
 }
 
 class DiningTable {
@@ -277,6 +325,9 @@ class OrderLine {
     required this.trackStock,
     this.stockPerSale = 1,
     this.isSentToProduction = false,
+    this.taxRateBasisPoints = 0,
+    this.taxRateId,
+    this.taxRateName = 'Zero rate',
   });
 
   final String id;
@@ -288,6 +339,9 @@ class OrderLine {
   final bool trackStock;
   final double stockPerSale;
   final bool isSentToProduction;
+  final int taxRateBasisPoints;
+  final String? taxRateId;
+  final String taxRateName;
 
   int get totalMinor => quantity * unitPriceMinor;
 
@@ -301,6 +355,9 @@ class OrderLine {
     trackStock: trackStock,
     stockPerSale: stockPerSale,
     isSentToProduction: isSentToProduction ?? this.isSentToProduction,
+    taxRateBasisPoints: taxRateBasisPoints,
+    taxRateId: taxRateId,
+    taxRateName: taxRateName,
   );
 }
 

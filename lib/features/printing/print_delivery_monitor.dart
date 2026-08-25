@@ -257,6 +257,7 @@ class _PrintDeliveryMonitorHostState
   String _areaLabel(PrintJob job) => switch (job.productionArea) {
     'bar' => 'Bar',
     'dessert' => 'Dessert',
+    'receipt' => 'Receipt',
     _ => 'Kitchen',
   };
 

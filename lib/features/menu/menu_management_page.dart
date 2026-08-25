@@ -21,6 +21,7 @@ class MenuManagementPage extends ConsumerWidget {
     final scope = ref.watch(activeVenueScopeProvider);
     final sectionsValue = ref.watch(menuSectionsProvider);
     final productsValue = ref.watch(menuProductsProvider);
+    final taxRatesValue = ref.watch(taxRatesProvider);
     final sections = sectionsValue.when(
       data: (items) => items,
       loading: () => scope == null ? demoSections : const <MenuSection>[],
@@ -30,6 +31,11 @@ class MenuManagementPage extends ConsumerWidget {
       data: (items) => items,
       loading: () => scope == null ? demoProducts : const <MenuProduct>[],
       error: (_, _) => scope == null ? demoProducts : const <MenuProduct>[],
+    );
+    final taxRates = taxRatesValue.when(
+      data: (items) => items,
+      loading: () => const <TaxRate>[],
+      error: (_, _) => const <TaxRate>[],
     );
 
     return ListView(
@@ -70,6 +76,17 @@ class MenuManagementPage extends ConsumerWidget {
                   icon: const Icon(Icons.segment_outlined),
                   label: const Text('Add section'),
                 ),
+                OutlinedButton.icon(
+                  onPressed: scope == null
+                      ? null
+                      : () => _showTaxRateDialog(
+                          context: context,
+                          ref: ref,
+                          scope: scope,
+                        ),
+                  icon: const Icon(Icons.percent_rounded),
+                  label: const Text('Add tax rate'),
+                ),
                 FilledButton.icon(
                   onPressed: scope == null || sections.isEmpty
                       ? null
@@ -78,6 +95,7 @@ class MenuManagementPage extends ConsumerWidget {
                           ref: ref,
                           scope: scope,
                           sections: sections,
+                          taxRates: [TaxRate.zero, ...taxRates],
                           currencyCode: currencyCode,
                         ),
                   icon: const Icon(Icons.add_rounded),
@@ -148,6 +166,49 @@ class MenuManagementPage extends ConsumerWidget {
             ),
           ),
         const SizedBox(height: 24),
+        Text('Tax rates', style: Theme.of(context).textTheme.titleLarge),
+        const SizedBox(height: 8),
+        Card(
+          child: ExpansionTile(
+            leading: const Icon(Icons.percent_rounded),
+            title: Text(
+              taxRates.isEmpty
+                  ? 'Only Zero rate is available'
+                  : 'Manage ${taxRates.length} venue tax rate${taxRates.length == 1 ? '' : 's'}',
+            ),
+            subtitle: const Text(
+              'Prices are inclusive. Editing a rate updates future product sales only; closed bills remain unchanged.',
+            ),
+            children: [
+              ListTile(
+                leading: const CircleAvatar(child: Text('0%')),
+                title: Text(TaxRate.zero.name),
+                subtitle: const Text('Built-in rate — cannot be removed'),
+              ),
+              for (final taxRate in taxRates)
+                _TaxRateTile(
+                  rate: taxRate,
+                  onEdit: scope == null
+                      ? null
+                      : () => _showTaxRateDialog(
+                          context: context,
+                          ref: ref,
+                          scope: scope,
+                          existing: taxRate,
+                        ),
+                  onDelete: scope == null
+                      ? null
+                      : () => _deleteTaxRate(
+                          context: context,
+                          ref: ref,
+                          scope: scope,
+                          rate: taxRate,
+                        ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 24),
         Text('Products', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 8),
         if (products.isEmpty)
@@ -174,6 +235,7 @@ class MenuManagementPage extends ConsumerWidget {
                             ref: ref,
                             scope: scope,
                             sections: sections,
+                            taxRates: [TaxRate.zero, ...taxRates],
                             currencyCode: currencyCode,
                             existing: product,
                           ),
@@ -343,7 +405,9 @@ class _ProductTile extends StatelessWidget {
         }),
       ),
       title: Text(product.name),
-      subtitle: Text('$sectionNames\n${product.productionArea.label} · $stock'),
+      subtitle: Text(
+        '$sectionNames\n${product.productionArea.label} · ${product.taxRateLabel} · $stock',
+      ),
       trailing: Wrap(
         crossAxisAlignment: WrapCrossAlignment.center,
         spacing: 4,
@@ -369,6 +433,183 @@ class _ProductTile extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _TaxRateTile extends StatelessWidget {
+  const _TaxRateTile({
+    required this.rate,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  final TaxRate rate;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+    leading: CircleAvatar(child: Text(rate.percentageLabel)),
+    title: Text(rate.name),
+    subtitle: const Text('Used for tax-inclusive menu prices'),
+    trailing: Wrap(
+      children: [
+        IconButton(
+          tooltip: 'Edit tax rate',
+          onPressed: onEdit,
+          icon: const Icon(Icons.edit_outlined),
+        ),
+        IconButton(
+          tooltip: 'Delete tax rate',
+          onPressed: onDelete,
+          icon: const Icon(Icons.delete_outline_rounded),
+        ),
+      ],
+    ),
+  );
+}
+
+Future<void> _showTaxRateDialog({
+  required BuildContext context,
+  required WidgetRef ref,
+  required VenueScope scope,
+  TaxRate? existing,
+}) async {
+  final name = TextEditingController(text: existing?.name ?? '');
+  final percentage = TextEditingController(
+    text: _taxPercentText(existing?.basisPoints ?? 0),
+  );
+  final formKey = GlobalKey<FormState>();
+  try {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(existing == null ? 'Add tax rate' : 'Edit tax rate'),
+        content: SizedBox(
+          width: 420,
+          child: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: name,
+                  autofocus: true,
+                  maxLength: 80,
+                  decoration: const InputDecoration(
+                    labelText: 'Tax rate name',
+                    hintText: 'For example, Food VAT',
+                  ),
+                  validator: _requiredText,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: percentage,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'Rate (%)',
+                    helperText:
+                        'Prices are inclusive. 20 means 20% of the price is tax-inclusive.',
+                  ),
+                  validator: (value) => _taxBasisPointsFromText(value) == null
+                      ? 'Enter a rate from 0% to 1,000% with at most two decimals.'
+                      : null,
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              if (!(formKey.currentState?.validate() ?? false)) return;
+              try {
+                final basisPoints = _taxBasisPointsFromText(percentage.text)!;
+                final repository = ref.read(firestorePosRepositoryProvider);
+                if (existing == null) {
+                  await repository.createTaxRate(
+                    scope: scope,
+                    name: name.text,
+                    basisPoints: basisPoints,
+                  );
+                } else {
+                  await repository.updateTaxRate(
+                    scope: scope,
+                    existing: existing,
+                    name: name.text,
+                    basisPoints: basisPoints,
+                  );
+                }
+                if (dialogContext.mounted) Navigator.pop(dialogContext);
+              } on Object catch (error, stackTrace) {
+                AppLogger.error('Save tax rate', error, stackTrace);
+                if (!dialogContext.mounted) return;
+                showAppNotification(
+                  dialogContext,
+                  ref: ref,
+                  title: 'Could not save tax rate',
+                  message: '$error',
+                  level: AppNotificationLevel.error,
+                );
+              }
+            },
+            child: Text(existing == null ? 'Save rate' : 'Save changes'),
+          ),
+        ],
+      ),
+    );
+  } finally {
+    name.dispose();
+    percentage.dispose();
+  }
+}
+
+Future<void> _deleteTaxRate({
+  required BuildContext context,
+  required WidgetRef ref,
+  required VenueScope scope,
+  required TaxRate rate,
+}) async {
+  final approved = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Delete tax rate?'),
+      content: Text(
+        '“${rate.name}” can be deleted only when no products use it. Closed bills always retain their own tax records.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton.tonal(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text('Delete'),
+        ),
+      ],
+    ),
+  );
+  if (approved != true) return;
+  try {
+    await ref
+        .read(firestorePosRepositoryProvider)
+        .deleteTaxRate(scope: scope, rate: rate);
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('Delete tax rate', error, stackTrace);
+    if (!context.mounted) return;
+    showAppNotification(
+      context,
+      ref: ref,
+      title: 'Could not delete tax rate',
+      message: '$error',
+      level: AppNotificationLevel.error,
     );
   }
 }
@@ -573,6 +814,7 @@ Future<void> _showProductDialog({
   required WidgetRef ref,
   required VenueScope scope,
   required List<MenuSection> sections,
+  required List<TaxRate> taxRates,
   required String currencyCode,
   MenuProduct? existing,
 }) async {
@@ -591,6 +833,10 @@ Future<void> _showProductDialog({
   var productionArea = existing?.productionArea ?? ProductionArea.kitchen;
   var trackStock = existing?.trackStock ?? false;
   var showOnOrderFlow = existing?.showOnOrderFlow ?? true;
+  var selectedTaxRateId =
+      taxRates.map((rate) => rate.id).contains(existing?.taxRateId)
+      ? existing!.taxRateId!
+      : TaxRate.zero.id;
 
   try {
     await showDialog<void>(
@@ -629,6 +875,27 @@ Future<void> _showProductDialog({
                       validator: (value) => _minorFromPriceText(value) == null
                           ? 'Enter a valid non-negative price.'
                           : null,
+                    ),
+                    const SizedBox(height: 18),
+                    DropdownButtonFormField<String>(
+                      initialValue: selectedTaxRateId,
+                      decoration: const InputDecoration(
+                        labelText: 'Tax rate',
+                        helperText:
+                            'Inclusive prices contain the selected tax rate.',
+                      ),
+                      items: [
+                        for (final rate in taxRates)
+                          DropdownMenuItem(
+                            value: rate.id,
+                            child: Text(
+                              '${rate.name} (${rate.percentageLabel})',
+                            ),
+                          ),
+                      ],
+                      onChanged: (value) => setDialogState(
+                        () => selectedTaxRateId = value ?? TaxRate.zero.id,
+                      ),
                     ),
                     const SizedBox(height: 18),
                     Text(
@@ -752,6 +1019,10 @@ Future<void> _showProductDialog({
                 }
                 try {
                   final priceMinor = _minorFromPriceText(price.text)!;
+                  final selectedTaxRate = taxRates.firstWhere(
+                    (rate) => rate.id == selectedTaxRateId,
+                    orElse: () => TaxRate.zero,
+                  );
                   final currentStock = trackStock ? _decimal(stock.text) : null;
                   final unitStock = trackStock
                       ? _decimal(stockPerSale.text)!
@@ -768,6 +1039,11 @@ Future<void> _showProductDialog({
                       stockOnHand: currentStock,
                       stockPerSale: unitStock,
                       showOnOrderFlow: showOnOrderFlow,
+                      taxRateBasisPoints: selectedTaxRate.basisPoints,
+                      taxRateId: selectedTaxRate.id == TaxRate.zero.id
+                          ? null
+                          : selectedTaxRate.id,
+                      taxRateName: selectedTaxRate.name,
                     );
                   } else {
                     await repository.updateProduct(
@@ -781,6 +1057,11 @@ Future<void> _showProductDialog({
                       stockOnHand: currentStock,
                       stockPerSale: unitStock,
                       showOnOrderFlow: showOnOrderFlow,
+                      taxRateBasisPoints: selectedTaxRate.basisPoints,
+                      taxRateId: selectedTaxRate.id == TaxRate.zero.id
+                          ? null
+                          : selectedTaxRate.id,
+                      taxRateName: selectedTaxRate.name,
                     );
                   }
                   if (dialogContext.mounted) Navigator.pop(dialogContext);
@@ -816,6 +1097,20 @@ String? _requiredText(String? value) =>
 double? _decimal(String? value) {
   if (value == null) return null;
   return double.tryParse(value.trim().replaceAll(',', '.'));
+}
+
+int? _taxBasisPointsFromText(String? value) {
+  final percent = _decimal(value);
+  if (percent == null || percent < 0 || percent > 1000) return null;
+  final basisPoints = (percent * 100).round();
+  return (basisPoints / 100 - percent).abs() < 0.00001 ? basisPoints : null;
+}
+
+String _taxPercentText(int basisPoints) {
+  final percent = basisPoints / 100;
+  return percent == percent.roundToDouble()
+      ? percent.toStringAsFixed(0)
+      : percent.toStringAsFixed(2);
 }
 
 int? _minorFromPriceText(String? value) {

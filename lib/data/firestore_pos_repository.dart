@@ -11,6 +11,12 @@ final firestorePosRepositoryProvider = Provider<FirestorePosRepository>(
   (ref) => FirestorePosRepository(FirebaseFirestore.instance),
 );
 
+final taxRatesProvider = StreamProvider<List<TaxRate>>((ref) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  if (scope == null) return Stream.value(const <TaxRate>[]);
+  return ref.watch(firestorePosRepositoryProvider).watchTaxRates(scope);
+});
+
 class FirestorePosRepository {
   FirestorePosRepository(this._firestore);
 
@@ -89,6 +95,11 @@ class FirestorePosRepository {
     return seconds.clamp(1, 60).toInt();
   }
 
+  int _taxRateBasisPoints(Object? value) {
+    final rate = value is int ? value : 0;
+    return rate.clamp(0, 100000).toInt();
+  }
+
   Stream<List<MenuSection>> watchMenuSections(VenueScope scope) async* {
     AppLogger.info(
       'Load menu sections: tenant=${scope.tenantId}, venue=${scope.venueId}.',
@@ -158,6 +169,11 @@ class FirestorePosRepository {
                 stockPerSale: (data['stockPerSale'] as num?)?.toDouble() ?? 1,
                 isAvailable: data['isAvailable'] as bool? ?? true,
                 showOnOrderFlow: data['showOnOrderFlow'] as bool? ?? true,
+                taxRateBasisPoints: _taxRateBasisPoints(
+                  data['taxRateBasisPoints'],
+                ),
+                taxRateId: data['taxRateId'] as String?,
+                taxRateName: data['taxRateName'] as String? ?? 'Zero rate',
               );
             })
             .toList(growable: false);
@@ -371,6 +387,9 @@ class FirestorePosRepository {
             trackStock: line['trackStock'] as bool? ?? false,
             stockPerSale: (line['stockPerSale'] as num?)?.toDouble() ?? 1,
             isSentToProduction: line['isSentToProduction'] as bool? ?? true,
+            taxRateBasisPoints: _taxRateBasisPoints(line['taxRateBasisPoints']),
+            taxRateId: line['taxRateId'] as String?,
+            taxRateName: line['taxRateName'] as String? ?? 'Zero rate',
           );
         })
         .where((line) => line.id.isNotEmpty && line.productId.isNotEmpty)
@@ -481,6 +500,9 @@ class FirestorePosRepository {
     required double? stockOnHand,
     required double stockPerSale,
     required bool showOnOrderFlow,
+    required int taxRateBasisPoints,
+    required String? taxRateId,
+    required String taxRateName,
   }) async {
     final cleanedName = name.trim();
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
@@ -493,6 +515,8 @@ class FirestorePosRepository {
     if (stockPerSale <= 0 || !stockPerSale.isFinite) {
       throw ArgumentError.value(stockPerSale, 'stockPerSale');
     }
+    _validateTaxRateBasisPoints(taxRateBasisPoints);
+    final cleanedTaxRateName = _cleanTaxRateName(taxRateName);
     await _firestore.collection('tenants/${scope.tenantId}/products').add({
       'venueId': scope.venueId,
       'name': cleanedName,
@@ -505,6 +529,9 @@ class FirestorePosRepository {
       'stockPerSale': stockPerSale,
       'isAvailable': true,
       'showOnOrderFlow': showOnOrderFlow,
+      'taxRateBasisPoints': taxRateBasisPoints,
+      'taxRateId': taxRateId,
+      'taxRateName': cleanedTaxRateName,
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
@@ -534,6 +561,9 @@ class FirestorePosRepository {
     required double? stockOnHand,
     required double stockPerSale,
     required bool showOnOrderFlow,
+    required int taxRateBasisPoints,
+    required String? taxRateId,
+    required String taxRateName,
   }) async {
     final cleanedName = name.trim();
     if (cleanedName.isEmpty || priceMinor < 0 || sectionIds.isEmpty) {
@@ -542,6 +572,8 @@ class FirestorePosRepository {
     if (stockPerSale <= 0 || !stockPerSale.isFinite) {
       throw ArgumentError.value(stockPerSale, 'stockPerSale');
     }
+    _validateTaxRateBasisPoints(taxRateBasisPoints);
+    final cleanedTaxRateName = _cleanTaxRateName(taxRateName);
     await _firestore
         .doc('tenants/${scope.tenantId}/products/$productId')
         .update({
@@ -553,8 +585,184 @@ class FirestorePosRepository {
           'stockOnHand': trackStock ? (stockOnHand ?? 0) : null,
           'stockPerSale': stockPerSale,
           'showOnOrderFlow': showOnOrderFlow,
+          'taxRateBasisPoints': taxRateBasisPoints,
+          'taxRateId': taxRateId,
+          'taxRateName': cleanedTaxRateName,
           'updatedAt': FieldValue.serverTimestamp(),
         });
+  }
+
+  void _validateTaxRateBasisPoints(int value) {
+    if (value < 0 || value > 100000) {
+      throw ArgumentError.value(
+        value,
+        'taxRateBasisPoints',
+        'Tax must be between 0% and 1,000%.',
+      );
+    }
+  }
+
+  String _cleanTaxRateName(String value) {
+    final name = value.trim();
+    if (name.isEmpty || name.length > 80) {
+      throw ArgumentError.value(value, 'taxRateName');
+    }
+    return name;
+  }
+
+  CollectionReference<Map<String, dynamic>> _taxRates(String tenantId) =>
+      _firestore.collection('tenants/$tenantId/taxRates');
+
+  Stream<List<TaxRate>> watchTaxRates(VenueScope scope) =>
+      _taxRates(
+        scope.tenantId,
+      ).where('venueId', isEqualTo: scope.venueId).snapshots().map((snapshot) {
+        final rates =
+            snapshot.docs
+                .map((document) {
+                  final data = document.data();
+                  return TaxRate(
+                    id: document.id,
+                    name: data['name'] as String? ?? 'Unnamed tax rate',
+                    basisPoints: _taxRateBasisPoints(data['basisPoints']),
+                    active: data['active'] as bool? ?? true,
+                  );
+                })
+                .where((rate) => rate.active)
+                .toList(growable: false)
+              ..sort((left, right) => left.name.compareTo(right.name));
+        return rates;
+      });
+
+  Future<void> createTaxRate({
+    required VenueScope scope,
+    required String name,
+    required int basisPoints,
+  }) async {
+    final cleanedName = _cleanTaxRateName(name);
+    _validateTaxRateBasisPoints(basisPoints);
+    await _ensureUniqueTaxRateName(scope, cleanedName);
+    await _taxRates(scope.tenantId).add({
+      'venueId': scope.venueId,
+      'name': cleanedName,
+      'basisPoints': basisPoints,
+      'active': true,
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> updateTaxRate({
+    required VenueScope scope,
+    required TaxRate existing,
+    required String name,
+    required int basisPoints,
+  }) async {
+    final cleanedName = _cleanTaxRateName(name);
+    _validateTaxRateBasisPoints(basisPoints);
+    await _ensureUniqueTaxRateName(scope, cleanedName, exceptId: existing.id);
+    final rateRef = _taxRates(scope.tenantId).doc(existing.id);
+    final rate = await rateRef.get();
+    if (!rate.exists || rate.data()?['venueId'] != scope.venueId) {
+      throw StateError(
+        'This tax rate no longer belongs to the selected venue.',
+      );
+    }
+    final productSnapshots = await _firestore
+        .collection('tenants/${scope.tenantId}/products')
+        .where('taxRateId', isEqualTo: existing.id)
+        .get();
+    final references = productSnapshots.docs
+        .where((product) => product.data()['venueId'] == scope.venueId)
+        .map((product) => product.reference)
+        .toList(growable: false);
+    await _commitTaxRateAndProductUpdates(
+      rateRef: rateRef,
+      productReferences: references,
+      name: cleanedName,
+      basisPoints: basisPoints,
+    );
+  }
+
+  Future<void> deleteTaxRate({
+    required VenueScope scope,
+    required TaxRate rate,
+  }) async {
+    final products = await _firestore
+        .collection('tenants/${scope.tenantId}/products')
+        .where('taxRateId', isEqualTo: rate.id)
+        .get();
+    final inUse = products.docs.any(
+      (product) => product.data()['venueId'] == scope.venueId,
+    );
+    if (inUse) {
+      throw StateError(
+        'Assign another tax rate to its products before deleting this rate.',
+      );
+    }
+    final reference = _taxRates(scope.tenantId).doc(rate.id);
+    final current = await reference.get();
+    if (!current.exists || current.data()?['venueId'] != scope.venueId) {
+      throw StateError(
+        'This tax rate no longer belongs to the selected venue.',
+      );
+    }
+    await reference.delete();
+  }
+
+  Future<void> _ensureUniqueTaxRateName(
+    VenueScope scope,
+    String name, {
+    String? exceptId,
+  }) async {
+    final normalised = name.toLowerCase();
+    final existing = await _taxRates(scope.tenantId).get();
+    if (existing.docs.any(
+      (document) =>
+          document.id != exceptId &&
+          document.data()['venueId'] == scope.venueId &&
+          (document.data()['name'] as String? ?? '').trim().toLowerCase() ==
+              normalised,
+    )) {
+      throw StateError(
+        'A tax rate with this name already exists at this venue.',
+      );
+    }
+  }
+
+  Future<void> _commitTaxRateAndProductUpdates({
+    required DocumentReference<Map<String, dynamic>> rateRef,
+    required List<DocumentReference<Map<String, dynamic>>> productReferences,
+    required String name,
+    required int basisPoints,
+  }) async {
+    // Keep below Firestore's 500-write limit. Selected product rate snapshots
+    // are updated too, so future orders reflect a manager's amended rate.
+    const maximumProductsPerBatch = 450;
+    var offset = 0;
+    do {
+      final end = (offset + maximumProductsPerBatch).clamp(
+        0,
+        productReferences.length,
+      );
+      final batch = _firestore.batch();
+      if (offset == 0) {
+        batch.update(rateRef, {
+          'name': name,
+          'basisPoints': basisPoints,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+      for (final product in productReferences.sublist(offset, end)) {
+        batch.update(product, {
+          'taxRateName': name,
+          'taxRateBasisPoints': basisPoints,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+      await batch.commit();
+      offset = end;
+    } while (offset < productReferences.length);
   }
 
   /// Streams production-safe order summaries for the kitchen/bar/manager

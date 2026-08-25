@@ -473,9 +473,9 @@ class _QueuedPrintWorkerHostState
           showAppNotification(
             context,
             ref: ref,
-            title: 'Production ticket needs attention',
+            title: 'Printer job needs attention',
             message:
-                'A production ticket could not print. It will retry automatically.',
+                'A queued ticket or paid receipt could not print. It will retry automatically.',
             level: AppNotificationLevel.error,
           );
           // A failed job is requeued for a delayed retry, so do not spin on it.

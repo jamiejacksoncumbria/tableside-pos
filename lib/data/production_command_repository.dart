@@ -32,6 +32,8 @@ class BillCloseResult {
     required this.currencyCode,
     required this.receiptNumber,
     required this.alreadyClosed,
+    required this.receiptPrintRequested,
+    required this.receiptPrintQueued,
   });
 
   final String billId;
@@ -39,6 +41,8 @@ class BillCloseResult {
   final String currencyCode;
   final String receiptNumber;
   final bool alreadyClosed;
+  final bool receiptPrintRequested;
+  final bool receiptPrintQueued;
 }
 
 /// A tender allocation as entered at checkout. The server derives the
@@ -233,12 +237,14 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required PosOrder order,
     required List<BillPaymentInput> payments,
+    required bool printReceipt,
   }) async {
     final response = await _call('closeOrder', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'orderId': order.id,
       'payments': payments.map((payment) => payment.toRequestData()).toList(),
+      'printReceipt': printReceipt,
     });
     final billId = response['billId'];
     final totalMinor = response['totalMinor'];
@@ -256,6 +262,8 @@ class ProductionCommandRepository {
       currencyCode: resultCurrency,
       receiptNumber: receiptNumber,
       alreadyClosed: response['alreadyClosed'] == true,
+      receiptPrintRequested: response['receiptPrintRequested'] == true,
+      receiptPrintQueued: response['receiptPrintQueued'] == true,
     );
   }
 
