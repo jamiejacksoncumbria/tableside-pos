@@ -613,12 +613,18 @@ class FirestorePosRepository {
   CollectionReference<Map<String, dynamic>> _taxRates(String tenantId) =>
       _firestore.collection('tenants/$tenantId/taxRates');
 
-  Stream<List<TaxRate>> watchTaxRates(VenueScope scope) =>
-      _taxRates(
-        scope.tenantId,
-      ).where('venueId', isEqualTo: scope.venueId).snapshots().map((snapshot) {
+  Stream<List<TaxRate>> watchTaxRates(VenueScope scope) async* {
+    AppLogger.info(
+      'Load tax rates: tenant=${scope.tenantId}, venue=${scope.venueId}.',
+    );
+    try {
+      await for (final snapshot in _taxRates(scope.tenantId).snapshots()) {
         final rates =
             snapshot.docs
+                .where(
+                  (document) =>
+                      (document.data()['venueId'] as String?) == scope.venueId,
+                )
                 .map((document) {
                   final data = document.data();
                   return TaxRate(
@@ -631,8 +637,16 @@ class FirestorePosRepository {
                 .where((rate) => rate.active)
                 .toList(growable: false)
               ..sort((left, right) => left.name.compareTo(right.name));
-        return rates;
-      });
+        AppLogger.info(
+          'Tax rates loaded: ${snapshot.size} document(s) received, ${rates.length} for the active venue.',
+        );
+        yield rates;
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Load tax rates', error, stackTrace);
+      rethrow;
+    }
+  }
 
   Future<void> createTaxRate({
     required VenueScope scope,

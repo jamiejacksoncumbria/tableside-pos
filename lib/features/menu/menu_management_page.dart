@@ -112,11 +112,13 @@ class MenuManagementPage extends ConsumerWidget {
             text:
                 'Demo menu shown. Select a restaurant and venue after signing in to configure its live menu.',
           )
-        else if (sectionsValue.hasError || productsValue.hasError)
+        else if (sectionsValue.hasError ||
+            productsValue.hasError ||
+            taxRatesValue.hasError)
           const _SetupHint(
             icon: Icons.error_outline_rounded,
             text:
-                'The menu could not be loaded. Check the debug console and your Firestore rules.',
+                'The menu or tax rates could not be loaded. Check the debug console and your Firestore rules.',
           )
         else if (sections.isEmpty)
           const _SetupHint(
@@ -170,6 +172,10 @@ class MenuManagementPage extends ConsumerWidget {
         const SizedBox(height: 8),
         Card(
           child: ExpansionTile(
+            key: ValueKey(
+              'tax-rates-${taxRates.map((rate) => rate.id).join('-')}',
+            ),
+            initiallyExpanded: taxRates.isNotEmpty,
             leading: const Icon(Icons.percent_rounded),
             title: Text(
               taxRates.isEmpty
@@ -547,7 +553,20 @@ Future<void> _showTaxRateDialog({
                     basisPoints: basisPoints,
                   );
                 }
+                ref.invalidate(taxRatesProvider);
                 if (dialogContext.mounted) Navigator.pop(dialogContext);
+                if (context.mounted) {
+                  showAppNotification(
+                    context,
+                    ref: ref,
+                    title: existing == null
+                        ? 'Tax rate added'
+                        : 'Tax rate updated',
+                    message:
+                        '${name.text.trim()} is now available for products.',
+                    level: AppNotificationLevel.success,
+                  );
+                }
               } on Object catch (error, stackTrace) {
                 AppLogger.error('Save tax rate', error, stackTrace);
                 if (!dialogContext.mounted) return;
@@ -601,6 +620,16 @@ Future<void> _deleteTaxRate({
     await ref
         .read(firestorePosRepositoryProvider)
         .deleteTaxRate(scope: scope, rate: rate);
+    ref.invalidate(taxRatesProvider);
+    if (context.mounted) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Tax rate deleted',
+        message: '${rate.name} is no longer available for new products.',
+        level: AppNotificationLevel.success,
+      );
+    }
   } on Object catch (error, stackTrace) {
     AppLogger.error('Delete tax rate', error, stackTrace);
     if (!context.mounted) return;
