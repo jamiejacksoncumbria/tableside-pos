@@ -45,6 +45,27 @@ class BillCloseResult {
   final bool receiptPrintQueued;
 }
 
+/// An indicative exchange-rate quote fetched by the server from the official
+/// CBRT daily bulletin. The manager still reviews it before adding cash
+/// tender, and the exact chosen rate remains on the final bill.
+class ExchangeRateQuote {
+  const ExchangeRateQuote({
+    required this.tenderCurrencyCode,
+    required this.baseCurrencyCode,
+    required this.exchangeRateToBase,
+    required this.source,
+    required this.publishedDate,
+    required this.fetchedAt,
+  });
+
+  final String tenderCurrencyCode;
+  final String baseCurrencyCode;
+  final String exchangeRateToBase;
+  final String source;
+  final String? publishedDate;
+  final String fetchedAt;
+}
+
 /// A tender allocation as entered at checkout. The server derives the
 /// reporting-currency value from the amount, currency and rate; it does not
 /// trust a client-provided converted total.
@@ -56,6 +77,9 @@ class BillPaymentInput {
     required this.exchangeRateToBase,
     required this.cardPaymentApproved,
     this.terminalLabel,
+    this.exchangeRateSource,
+    this.exchangeRatePublishedDate,
+    this.exchangeRateFetchedAt,
   });
 
   final PaymentMethod method;
@@ -64,6 +88,9 @@ class BillPaymentInput {
   final String exchangeRateToBase;
   final bool cardPaymentApproved;
   final String? terminalLabel;
+  final String? exchangeRateSource;
+  final String? exchangeRatePublishedDate;
+  final String? exchangeRateFetchedAt;
 
   Map<String, Object?> toRequestData() => {
     'method': method.name,
@@ -72,6 +99,9 @@ class BillPaymentInput {
     'exchangeRateToBase': exchangeRateToBase,
     'cardPaymentApproved': cardPaymentApproved,
     'terminalLabel': terminalLabel,
+    'exchangeRateSource': exchangeRateSource,
+    'exchangeRatePublishedDate': exchangeRatePublishedDate,
+    'exchangeRateFetchedAt': exchangeRateFetchedAt,
   };
 }
 
@@ -231,6 +261,39 @@ class ProductionCommandRepository {
       'flowStatus': flowStatus,
       'isDelayed': isDelayed,
     });
+  }
+
+  Future<ExchangeRateQuote> lookupExchangeRate({
+    required VenueScope scope,
+    required String tenderCurrencyCode,
+  }) async {
+    final response = await _call('lookupExchangeRate', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'tenderCurrencyCode': tenderCurrencyCode,
+    });
+    final exchangeRateToBase = response['exchangeRateToBase'];
+    final baseCurrencyCode = response['baseCurrencyCode'];
+    final returnedTenderCurrencyCode = response['tenderCurrencyCode'];
+    final source = response['source'];
+    final fetchedAt = response['fetchedAt'];
+    final publishedDate = response['publishedDate'];
+    if (exchangeRateToBase is! String ||
+        baseCurrencyCode is! String ||
+        returnedTenderCurrencyCode is! String ||
+        source is! String ||
+        fetchedAt is! String ||
+        (publishedDate != null && publishedDate is! String)) {
+      throw StateError('The exchange-rate server returned an invalid quote.');
+    }
+    return ExchangeRateQuote(
+      tenderCurrencyCode: returnedTenderCurrencyCode,
+      baseCurrencyCode: baseCurrencyCode,
+      exchangeRateToBase: exchangeRateToBase,
+      source: source,
+      publishedDate: publishedDate as String?,
+      fetchedAt: fetchedAt,
+    );
   }
 
   Future<BillCloseResult> closeOrder({

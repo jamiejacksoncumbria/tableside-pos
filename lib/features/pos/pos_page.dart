@@ -1089,6 +1089,8 @@ Future<void> _showCheckoutSheet(
       var cardApproved = false;
       var saving = false;
       var printReceipt = false;
+      var loadingOfficialRate = false;
+      ExchangeRateQuote? officialRateQuote;
       final paymentEntries = <_CheckoutPaymentDraft>[];
       return StatefulBuilder(
         builder: (context, setSheetState) {
@@ -1116,6 +1118,7 @@ Future<void> _showCheckoutSheet(
           final paymentsComplete =
               paymentEntries.isNotEmpty && remainingBaseMinor == 0;
           final isForeignCash = tenderedCurrencyCode != currencyCode;
+          final loadedOfficialRate = officialRateQuote;
           return SafeArea(
             child: Padding(
               padding: EdgeInsets.fromLTRB(
@@ -1189,6 +1192,7 @@ Future<void> _showCheckoutSheet(
                                     currencyCode,
                                   );
                             }
+                            officialRateQuote = null;
                           }),
                   ),
                   const SizedBox(height: 12),
@@ -1209,6 +1213,7 @@ Future<void> _showCheckoutSheet(
                             exchangeRateController.text =
                                 tenderedCurrencyCode == currencyCode ? '1' : '';
                             tenderedAmountController.clear();
+                            officialRateQuote = null;
                           }),
                   ),
                   const SizedBox(height: 12),
@@ -1238,10 +1243,85 @@ Future<void> _showCheckoutSheet(
                         labelText:
                             '1 $tenderedCurrencyCode = how many $currencyCode?',
                         helperText:
-                            'Manager-approved manual rate. The exact rate is retained on the bill.',
+                            'Use the official rate as a starting point, then review or override it. The exact rate is retained on the bill.',
                       ),
-                      onChanged: (_) => setSheetState(() {}),
+                      onChanged: (_) =>
+                          setSheetState(() => officialRateQuote = null),
                     ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: saving || loadingOfficialRate
+                          ? null
+                          : () async {
+                              final scope = ref.read(activeVenueScopeProvider);
+                              if (scope == null) {
+                                showAppNotification(
+                                  sheetContext,
+                                  ref: ref,
+                                  title: 'Rate not loaded',
+                                  message:
+                                      'Select a venue before looking up a rate.',
+                                  level: AppNotificationLevel.error,
+                                );
+                                return;
+                              }
+                              setSheetState(() => loadingOfficialRate = true);
+                              try {
+                                final quote = await ref
+                                    .read(productionCommandRepositoryProvider)
+                                    .lookupExchangeRate(
+                                      scope: scope,
+                                      tenderCurrencyCode: tenderedCurrencyCode,
+                                    );
+                                if (!sheetContext.mounted) return;
+                                setSheetState(() {
+                                  exchangeRateController.text =
+                                      quote.exchangeRateToBase;
+                                  officialRateQuote = quote;
+                                });
+                              } on Object catch (error, stackTrace) {
+                                AppLogger.error(
+                                  'Load official exchange rate',
+                                  error,
+                                  stackTrace,
+                                );
+                                if (!sheetContext.mounted) return;
+                                showAppNotification(
+                                  sheetContext,
+                                  ref: ref,
+                                  title: 'Official rate unavailable',
+                                  message:
+                                      '$error Enter a manager rate manually.',
+                                  level: AppNotificationLevel.error,
+                                );
+                              } finally {
+                                if (sheetContext.mounted) {
+                                  setSheetState(
+                                    () => loadingOfficialRate = false,
+                                  );
+                                }
+                              }
+                            },
+                      icon: loadingOfficialRate
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.currency_exchange_rounded),
+                      label: Text(
+                        loadingOfficialRate
+                            ? 'Loading official rate…'
+                            : 'Use official CBRT rate',
+                      ),
+                    ),
+                    if (loadedOfficialRate != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          '${loadedOfficialRate.source}${loadedOfficialRate.publishedDate == null ? '' : ' · ${loadedOfficialRate.publishedDate}'}. You can edit the rate before adding the payment.',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
                   ],
                   if (convertedBaseMinor != null) ...[
                     const SizedBox(height: 8),
@@ -1380,6 +1460,12 @@ Future<void> _showCheckoutSheet(
                                       cardPaymentApproved: cardApproved,
                                       terminalLabel: terminalController.text
                                           .trim(),
+                                      exchangeRateSource:
+                                          officialRateQuote?.source,
+                                      exchangeRatePublishedDate:
+                                          officialRateQuote?.publishedDate,
+                                      exchangeRateFetchedAt:
+                                          officialRateQuote?.fetchedAt,
                                     ),
                                   );
                                   final nextRemaining =
@@ -1393,6 +1479,7 @@ Future<void> _showCheckoutSheet(
                                   tenderedCurrencyCode = currencyCode;
                                   cardApproved = false;
                                   exchangeRateController.text = '1';
+                                  officialRateQuote = null;
                                   terminalController.clear();
                                   tenderedAmountController.text =
                                       nextRemaining <= 0
@@ -1495,6 +1582,9 @@ class _CheckoutPaymentDraft {
     required this.baseAmountMinor,
     required this.cardPaymentApproved,
     this.terminalLabel,
+    this.exchangeRateSource,
+    this.exchangeRatePublishedDate,
+    this.exchangeRateFetchedAt,
   });
 
   final PaymentMethod method;
@@ -1504,6 +1594,9 @@ class _CheckoutPaymentDraft {
   final int baseAmountMinor;
   final bool cardPaymentApproved;
   final String? terminalLabel;
+  final String? exchangeRateSource;
+  final String? exchangeRatePublishedDate;
+  final String? exchangeRateFetchedAt;
 
   BillPaymentInput toPaymentInput() => BillPaymentInput(
     method: method,
@@ -1512,6 +1605,9 @@ class _CheckoutPaymentDraft {
     exchangeRateToBase: exchangeRateToBase,
     cardPaymentApproved: cardPaymentApproved,
     terminalLabel: terminalLabel,
+    exchangeRateSource: exchangeRateSource,
+    exchangeRatePublishedDate: exchangeRatePublishedDate,
+    exchangeRateFetchedAt: exchangeRateFetchedAt,
   );
 }
 

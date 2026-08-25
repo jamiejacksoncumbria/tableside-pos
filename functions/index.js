@@ -24,6 +24,13 @@ const supportedTimeZones = Object.freeze(Intl.supportedValuesOf("timeZone"));
 const supportedTimeZoneSet = new Set(supportedTimeZones);
 const supportedCurrencyCodes = Object.freeze(Intl.supportedValuesOf("currency"));
 const supportedCurrencyCodeSet = new Set(supportedCurrencyCodes);
+// CBRT is the official Central Bank of the Republic of Türkiye source. It
+// publishes a daily XML bulletin without an API key. Its ForexBuying rate is
+// an indicative starting point when a venue receives foreign physical cash;
+// a manager must still review or override it at checkout.
+const cbrtDailyRatesUrl = "https://www.tcmb.gov.tr/kurlar/today.xml";
+const cbrtRateCacheTtlMs = 15 * 60 * 1000;
+let cbrtRateCache = null;
 
 setGlobalOptions({region, maxInstances: 10});
 
@@ -148,6 +155,169 @@ function validCurrencyCode(data) {
     );
   }
   return currencyCode;
+}
+
+function xmlElementText(xml, tagName) {
+  const match = new RegExp(
+    `<${tagName}\\b[^>]*>\\s*([^<]*?)\\s*</${tagName}>`,
+    "i",
+  ).exec(xml);
+  return match == null ? "" : match[1].trim();
+}
+
+function decimalTextToScaled(value, label) {
+  const text = String(value).trim();
+  if (!/^\d+(?:\.\d+)?$/.test(text)) {
+    throw new HttpsError("unavailable", `${label} was not present in the official rate feed.`);
+  }
+  const [whole, rawFraction = ""] = text.split(".");
+  let scaled = (BigInt(whole) * 1000000n) +
+    BigInt(rawFraction.slice(0, 6).padEnd(6, "0"));
+  // The POS rate has six decimal places. Round the published value once if
+  // CBRT adds additional precision in a future bulletin.
+  if (rawFraction.length > 6 && Number(rawFraction.charAt(6)) >= 5) scaled += 1n;
+  if (scaled <= 0n) {
+    throw new HttpsError("unavailable", `${label} was not a positive official rate.`);
+  }
+  return scaled;
+}
+
+function formatScaledExchangeRate(scaled) {
+  const whole = scaled / 1000000n;
+  const fraction = (scaled % 1000000n).toString().padStart(6, "0").replace(/0+$/, "");
+  return fraction.length === 0 ? whole.toString() : `${whole}.${fraction}`;
+}
+
+function parseCbrtDailyRates(xml) {
+  const publicationDate = /<Tarih_Date\b[^>]*\bDate\s*=\s*["']([^"']+)["']/i
+    .exec(xml)?.[1]
+    ?.trim();
+  if (publicationDate == null || publicationDate.length === 0) {
+    throw new HttpsError("unavailable", "The official rate feed did not include its publication date.");
+  }
+
+  const tryPerCurrency = new Map([["TRY", 1000000n]]);
+  const currencyMatcher = /<Currency\b([^>]*)>([\s\S]*?)<\/Currency>/gi;
+  for (const match of xml.matchAll(currencyMatcher)) {
+    const currencyCode = /\bCurrencyCode\s*=\s*["']([^"']+)["']/i
+      .exec(match[1])?.[1]
+      ?.trim()
+      .toUpperCase();
+    if (currencyCode == null || !/^[A-Z]{3}$/.test(currencyCode)) continue;
+    const unitText = xmlElementText(match[2], "Unit");
+    const forexBuyingText = xmlElementText(match[2], "ForexBuying");
+    if (!/^\d+$/.test(unitText) || forexBuyingText.length === 0) continue;
+    const unit = BigInt(unitText);
+    if (unit <= 0n) continue;
+    const quotedTryScaled = decimalTextToScaled(
+      forexBuyingText,
+      `The official ${currencyCode} ForexBuying value`,
+    );
+    // The CBRT bulletin may quote (for example) 100 JPY. Store every entry
+    // as Turkish lira for one major unit of its currency.
+    tryPerCurrency.set(
+      currencyCode,
+      (quotedTryScaled + (unit / 2n)) / unit,
+    );
+  }
+  return {publicationDate, tryPerCurrency};
+}
+
+async function currentCbrtDailyRates() {
+  const now = Date.now();
+  if (cbrtRateCache != null && cbrtRateCache.expiresAt > now) {
+    return cbrtRateCache.feed;
+  }
+  let response;
+  try {
+    response = await fetch(cbrtDailyRatesUrl, {
+      headers: {accept: "application/xml,text/xml;q=0.9,*/*;q=0.1"},
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch (error) {
+    console.warn("Could not download the CBRT daily rate feed.", error);
+    throw new HttpsError(
+      "unavailable",
+      "The official exchange-rate service is unavailable. Enter a manager rate manually.",
+    );
+  }
+  if (!response.ok) {
+    console.warn(`CBRT daily rate feed returned HTTP ${response.status}.`);
+    throw new HttpsError(
+      "unavailable",
+      "The official exchange-rate service is unavailable. Enter a manager rate manually.",
+    );
+  }
+  const xml = await response.text();
+  if (xml.length === 0 || xml.length > 1024 * 1024) {
+    throw new HttpsError(
+      "unavailable",
+      "The official exchange-rate response was invalid. Enter a manager rate manually.",
+    );
+  }
+  const feed = parseCbrtDailyRates(xml);
+  cbrtRateCache = {feed, expiresAt: now + cbrtRateCacheTtlMs};
+  return feed;
+}
+
+async function lookupExchangeRateFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const tenderCurrencyCode = requiredText(data, "tenderCurrencyCode", 3).toUpperCase();
+  if (!supportedCurrencyCodeSet.has(tenderCurrencyCode)) {
+    throw new HttpsError("invalid-argument", "tenderCurrencyCode must be a supported ISO currency code.");
+  }
+  await requireTenantOperationalMember(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const [tenant, venue] = await Promise.all([tenantRef.get(), venueRef.get()]);
+  if (!tenant.exists) throw new HttpsError("not-found", "The restaurant was not found.");
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const baseCurrencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
+  if (!supportedCurrencyCodeSet.has(baseCurrencyCode)) {
+    throw new HttpsError("failed-precondition", "The restaurant has an invalid reporting currency.");
+  }
+  const fetchedAt = new Date().toISOString();
+  if (tenderCurrencyCode === baseCurrencyCode) {
+    return {
+      tenderCurrencyCode,
+      baseCurrencyCode,
+      exchangeRateToBase: "1",
+      source: "No conversion required",
+      publishedDate: null,
+      fetchedAt,
+    };
+  }
+
+  const feed = await currentCbrtDailyRates();
+  const tenderTryScaled = feed.tryPerCurrency.get(tenderCurrencyCode);
+  const baseTryScaled = feed.tryPerCurrency.get(baseCurrencyCode);
+  if (tenderTryScaled == null || baseTryScaled == null) {
+    throw new HttpsError(
+      "unavailable",
+      `The official CBRT daily bulletin does not provide a ${tenderCurrencyCode}/${baseCurrencyCode} rate. Enter a manager rate manually.`,
+    );
+  }
+  // one tender-currency major unit = X base-currency major units
+  const exchangeRateScaled = ((tenderTryScaled * 1000000n) +
+    (baseTryScaled / 2n)) / baseTryScaled;
+  if (exchangeRateScaled <= 0n) {
+    throw new HttpsError("unavailable", "The official rate calculation was invalid. Enter a manager rate manually.");
+  }
+  console.info(
+    `Official CBRT rate loaded for ${tenantId}/${venueId}: ${tenderCurrencyCode}/${baseCurrencyCode}.`,
+  );
+  return {
+    tenderCurrencyCode,
+    baseCurrencyCode,
+    exchangeRateToBase: formatScaledExchangeRate(exchangeRateScaled),
+    source: "CBRT daily indicative rate (Forex buying)",
+    publishedDate: feed.publicationDate,
+    fetchedAt,
+  };
 }
 
 function validTimeZone(data) {
@@ -1343,6 +1513,13 @@ function validClosePayment(value, index, baseCurrencyCode) {
     );
   }
   const terminalLabel = optionalText(payment, "terminalLabel", 120) || null;
+  const exchangeRateSource = optionalText(payment, "exchangeRateSource", 160) || null;
+  const exchangeRatePublishedDate =
+    optionalText(payment, "exchangeRatePublishedDate", 80) || null;
+  const exchangeRateFetchedAt = optionalText(payment, "exchangeRateFetchedAt", 80) || null;
+  if (exchangeRateFetchedAt != null && Number.isNaN(Date.parse(exchangeRateFetchedAt))) {
+    throw new HttpsError("invalid-argument", `payments[${index}].exchangeRateFetchedAt is invalid.`);
+  }
   if (method === "cardTerminal" && tenderedCurrencyCode !== baseCurrencyCode) {
     throw new HttpsError(
       "failed-precondition",
@@ -1371,6 +1548,9 @@ function validClosePayment(value, index, baseCurrencyCode) {
     exchangeRateToBase: exchangeRate.text,
     baseAmountMinor,
     terminalLabel,
+    exchangeRateSource,
+    exchangeRatePublishedDate,
+    exchangeRateFetchedAt,
     cardPaymentApproved: method === "cardTerminal",
   };
 }
@@ -2321,6 +2501,8 @@ async function invokePosAction(action, caller, data) {
       return deleteTableFor(caller, data);
     case "updateVenueNotificationSettings":
       return updateVenueNotificationSettingsFor(caller, data);
+    case "lookupExchangeRate":
+      return lookupExchangeRateFor(caller, data);
     case "sendOrderToProduction":
       return sendOrderToProductionFor(caller, data);
     case "closeOrder":
@@ -2378,6 +2560,7 @@ function httpStatusFor(error) {
     case "not-found": return 404;
     case "already-exists": return 409;
     case "failed-precondition": return 412;
+    case "unavailable": return 503;
     default: return 500;
   }
 }
@@ -2490,6 +2673,8 @@ export const updateOrderDraftLine = onCall((request) =>
   updateOrderDraftLineFor(callerFromCall(request), request.data));
 export const updateVenueNotificationSettings = onCall((request) =>
   updateVenueNotificationSettingsFor(callerFromCall(request), request.data));
+export const lookupExchangeRate = onCall((request) =>
+  lookupExchangeRateFor(callerFromCall(request), request.data));
 export const createTable = onCall((request) =>
   createTableFor(callerFromCall(request), request.data));
 export const updateTable = onCall((request) =>
