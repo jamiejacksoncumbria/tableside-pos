@@ -32,6 +32,18 @@ final openNamedTabsProvider = StreamProvider<List<OpenNamedTab>>((ref) {
   return ref.watch(firestorePosRepositoryProvider).watchOpenNamedTabs(scope);
 });
 
+/// Each open table tile listens to its own server-owned order. This keeps the
+/// amount shown on the floor view current across all signed-in devices without
+/// duplicating a financial total onto the table record.
+final tableOpenOrderProvider = StreamProvider.autoDispose
+    .family<PosOrder?, String>((ref, orderId) {
+      final scope = ref.watch(activeVenueScopeProvider);
+      if (scope == null || orderId.trim().isEmpty) return Stream.value(null);
+      return ref
+          .watch(firestorePosRepositoryProvider)
+          .watchOrder(scope: scope, orderId: orderId);
+    });
+
 /// Identifies the server-owned order currently visible in the POS. A newly
 /// started local basket has no document to listen to until it is first sent.
 final activePersistedOrderIdProvider =

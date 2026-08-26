@@ -201,11 +201,15 @@ class FirestorePosRepository {
               )
               .map((document) {
                 final data = document.data();
+                final currentOrderId = data['currentOrderId'] as String?;
                 return DiningTable(
                   id: document.id,
                   label: data['label'] as String? ?? 'Table',
                   seats: data['seats'] as int? ?? 0,
-                  hasOpenOrder: data['currentOrderId'] != null,
+                  hasOpenOrder: currentOrderId?.trim().isNotEmpty == true,
+                  currentOrderId: currentOrderId?.trim().isNotEmpty == true
+                      ? currentOrderId
+                      : null,
                 );
               })
               .toList(growable: false),

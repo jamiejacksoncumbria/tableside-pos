@@ -290,12 +290,17 @@ class DiningTable {
     required this.label,
     required this.seats,
     this.hasOpenOrder = false,
+    this.currentOrderId,
   });
 
   final String id;
   final String label;
   final int seats;
   final bool hasOpenOrder;
+
+  /// The server-owned open order for this table, if one exists.  The POS uses
+  /// this identifier to stream the live total directly on the table tile.
+  final String? currentOrderId;
 }
 
 /// A venue-local customer-name tab. Its server-created registry is what makes

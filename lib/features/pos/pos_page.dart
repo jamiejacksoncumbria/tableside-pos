@@ -28,7 +28,10 @@ class PosPage extends ConsumerWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const SizedBox(width: 238, child: _TablesPanel()),
+                SizedBox(
+                  width: 238,
+                  child: _TablesPanel(currencyCode: currencyCode),
+                ),
                 const SizedBox(width: 16),
                 Expanded(child: _MenuPanel(currencyCode: currencyCode)),
                 const SizedBox(width: 16),
@@ -68,7 +71,7 @@ class PosPage extends ConsumerWidget {
                 Expanded(
                   child: TabBarView(
                     children: [
-                      const _TablesPanel(compact: true),
+                      _TablesPanel(currencyCode: currencyCode, compact: true),
                       _MenuPanel(currencyCode: currencyCode),
                       _OrderPanel(currencyCode: currencyCode),
                     ],
@@ -84,8 +87,9 @@ class PosPage extends ConsumerWidget {
 }
 
 class _TablesPanel extends ConsumerWidget {
-  const _TablesPanel({this.compact = false});
+  const _TablesPanel({required this.currencyCode, this.compact = false});
 
+  final String currencyCode;
   final bool compact;
 
   @override
@@ -159,6 +163,8 @@ class _TablesPanel extends ConsumerWidget {
                           for (final table in tables)
                             _TableButton(
                               table: table,
+                              scope: scope,
+                              currencyCode: currencyCode,
                               selected:
                                   activeOrder.tabName == null &&
                                   table.id == selectedTableId,
@@ -251,42 +257,66 @@ class _TablesPanel extends ConsumerWidget {
   }
 }
 
-class _TableButton extends StatelessWidget {
+class _TableButton extends ConsumerWidget {
   const _TableButton({
     required this.table,
+    required this.scope,
+    required this.currencyCode,
     required this.selected,
     required this.compact,
     required this.onTap,
   });
 
   final DiningTable table;
+  final VenueScope? scope;
+  final String currencyCode;
   final bool selected;
   final bool compact;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
-    final background = selected
+    final openOrderValue = scope == null || table.currentOrderId == null
+        ? null
+        : ref.watch(tableOpenOrderProvider(table.currentOrderId!));
+    final amountDueMinor = openOrderValue?.when(
+      data: (order) => order?.totalMinor,
+      loading: () => null,
+      error: (_, _) => null,
+    );
+    final isOpen = table.hasOpenOrder;
+    final openGreen = Theme.of(context).brightness == Brightness.dark
+        ? Colors.green.shade700
+        : Colors.green.shade600;
+    final background = isOpen
+        ? openGreen
+        : selected
         ? scheme.primary
-        : table.hasOpenOrder
-        ? scheme.secondaryContainer
         : scheme.surfaceContainerHighest;
-    final foreground = selected ? scheme.onPrimary : scheme.onSurface;
-    final width = compact ? 62.0 : 96.0;
+    final foreground = isOpen || selected ? Colors.white : scheme.onSurface;
+    final width = compact ? 72.0 : 104.0;
     return Semantics(
       button: true,
       selected: selected,
-      label: 'Table ${table.label}',
+      label: isOpen
+          ? 'Table ${table.label}, open, ${amountDueMinor == null ? 'amount loading' : formatMoney(amountDueMinor, currencyCode: currencyCode)} owed'
+          : 'Table ${table.label}, available',
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(14),
         child: Ink(
           width: width,
-          height: compact ? 62 : 82,
+          height: compact ? 72 : 92,
           decoration: BoxDecoration(
             color: background,
             borderRadius: BorderRadius.circular(14),
+            border: selected
+                ? Border.all(
+                    color: isOpen ? Colors.white : scheme.primary,
+                    width: 2,
+                  )
+                : null,
           ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -299,13 +329,45 @@ class _TableButton extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 3),
-              Text(
-                '${table.seats} seats',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: foreground.withValues(alpha: .8),
+              if (isOpen) ...[
+                Text(
+                  'OPEN',
+                  style: TextStyle(
+                    fontSize: compact ? 9 : 10,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: .6,
+                    color: foreground.withValues(alpha: .84),
+                  ),
                 ),
-              ),
+                const SizedBox(height: 2),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      amountDueMinor == null
+                          ? 'Loading...'
+                          : formatMoney(
+                              amountDueMinor,
+                              currencyCode: currencyCode,
+                            ),
+                      maxLines: 1,
+                      style: TextStyle(
+                        fontSize: compact ? 11 : 13,
+                        fontWeight: FontWeight.w800,
+                        color: foreground,
+                      ),
+                    ),
+                  ),
+                ),
+              ] else
+                Text(
+                  '${table.seats} seats',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: foreground.withValues(alpha: .8),
+                  ),
+                ),
             ],
           ),
         ),
