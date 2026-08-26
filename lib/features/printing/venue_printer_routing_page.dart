@@ -11,6 +11,8 @@ import '../../data/printer_route_repository.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
 import 'local_printer_device_identity.dart';
+import 'windows_print_queue.dart';
+import 'windows_print_queue_factory.dart';
 
 /// A manager-only venue configuration page. The Firestore rules enforce the
 /// permission as well, so a waiter cannot create a route by calling the API
@@ -33,11 +35,13 @@ class _VenuePrinterRoutingPageState
   );
   final LocalPrinterDeviceIdentity _identity = LocalPrinterDeviceIdentity();
   final BluetoothReceiptPrinter _bluetooth = createBluetoothReceiptPrinter();
+  final WindowsPrintQueue _windowsPrinter = createWindowsPrintQueue();
   final TextEditingController _deviceName = TextEditingController();
 
   String? _deviceId;
   String? _assignedUserId;
   BluetoothReceiptPrinterDevice? _selectedBluetoothPrinter;
+  WindowsPrintQueueDevice? _selectedWindowsPrinter;
   bool _loading = true;
   bool _registering = false;
   String? _error;
@@ -60,13 +64,18 @@ class _VenuePrinterRoutingPageState
       final selectedPrinter = _bluetooth.isSupported
           ? await _bluetooth.selectedDevice()
           : null;
+      final selectedWindowsPrinter = _windowsPrinter.isSupported
+          ? await _windowsPrinter.selectedPrinter()
+          : null;
       if (!mounted) return;
       setState(() {
         _deviceId = deviceId;
         _assignedUserId = FirebaseAuth.instance.currentUser?.uid;
         _selectedBluetoothPrinter = selectedPrinter;
-        if (_deviceName.text.trim().isEmpty && selectedPrinter != null) {
-          _deviceName.text = selectedPrinter.name;
+        _selectedWindowsPrinter = selectedWindowsPrinter;
+        if (_deviceName.text.trim().isEmpty) {
+          _deviceName.text =
+              selectedWindowsPrinter?.name ?? selectedPrinter?.name ?? '';
         }
       });
     } on Object catch (error, stackTrace) {
@@ -87,10 +96,14 @@ class _VenuePrinterRoutingPageState
       setState(() => _error = 'Sign in and wait for device setup to finish.');
       return;
     }
-    if (_selectedBluetoothPrinter == null) {
+    final transports = <String>[
+      if (_selectedBluetoothPrinter != null) 'bluetooth',
+      if (_selectedWindowsPrinter != null) 'windowsPrintQueue',
+    ];
+    if (transports.isEmpty) {
       setState(
         () => _error =
-            'Select a Bluetooth printer before registering this device.',
+            'Select a Bluetooth printer on Android or a Windows print queue before registering this device.',
       );
       return;
     }
@@ -111,7 +124,7 @@ class _VenuePrinterRoutingPageState
           name: name,
           platform: _platformName(),
           productionAreas: productionRouteAreas,
-          transports: const ['bluetooth'],
+          transports: transports,
           assignedUserId: assignedUserId,
           active: true,
         ),
@@ -318,11 +331,18 @@ class _VenuePrinterRoutingPageState
                               ),
                             ),
                             const SizedBox(height: 12),
-                            Text(
-                              _selectedBluetoothPrinter == null
-                                  ? 'No Bluetooth printer selected on this device.'
-                                  : 'Bluetooth printer: ${_selectedBluetoothPrinter!.name}',
-                            ),
+                            if (_selectedWindowsPrinter != null)
+                              Text(
+                                'Windows print queue: ${_selectedWindowsPrinter!.name}',
+                              )
+                            else if (_selectedBluetoothPrinter != null)
+                              Text(
+                                'Bluetooth printer: ${_selectedBluetoothPrinter!.name}',
+                              )
+                            else
+                              const Text(
+                                'No printer selected on this device. Configure Bluetooth on Android or a Windows print queue before registering.',
+                              ),
                             const SizedBox(height: 12),
                             DropdownButtonFormField<String?>(
                               key: ValueKey('assigned-user-$selectedUserId'),

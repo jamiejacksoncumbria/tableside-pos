@@ -1,9 +1,8 @@
-import 'dart:typed_data';
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -15,6 +14,7 @@ import '../auth/session_providers.dart';
 import '../notifications/notification_centre.dart';
 import '../printing/bluetooth_printer_setup_page.dart';
 import '../printing/venue_printer_routing_page.dart';
+import '../printing/windows_printer_setup_page.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 import '../tables/table_management_page.dart';
@@ -382,25 +382,47 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   ),
                 ),
               ),
-              const Divider(),
-              ListTile(
-                leading: const Icon(Icons.print_outlined),
-                title: const Text('Bluetooth printer setup'),
-                subtitle: const Text(
-                  'Pair a 58 mm ESC/POS printer and send a test ticket.',
-                ),
-                trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => BluetoothPrinterSetupPage(
-                      restaurantName: profile.displayName,
-                      venueRoutingKey: venueScope == null
-                          ? 'demo'
-                          : '${venueScope.tenantId}_${venueScope.venueId}',
+              if (!kIsWeb &&
+                  defaultTargetPlatform == TargetPlatform.android) ...[
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.bluetooth_rounded),
+                  title: const Text('Bluetooth printer setup'),
+                  subtitle: const Text(
+                    'Pair a 58 mm ESC/POS printer and send a test ticket.',
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => BluetoothPrinterSetupPage(
+                        restaurantName: profile.displayName,
+                        venueRoutingKey: venueScope == null
+                            ? 'demo'
+                            : '${venueScope.tenantId}_${venueScope.venueId}',
+                      ),
                     ),
                   ),
                 ),
-              ),
+              ],
+              if (!kIsWeb &&
+                  defaultTargetPlatform == TargetPlatform.windows) ...[
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.print_rounded),
+                  title: const Text('Windows USB/network printer setup'),
+                  subtitle: const Text(
+                    'Choose an installed Windows printer and send a test ticket.',
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => WindowsPrinterSetupPage(
+                        restaurantName: profile.displayName,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
               const Divider(),
               ListTile(
                 leading: const Icon(Icons.account_tree_outlined),

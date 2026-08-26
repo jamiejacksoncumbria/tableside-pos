@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
@@ -8,12 +10,13 @@ import '../../data/printer_device_repository.dart';
 import 'local_printer_device_identity.dart';
 import 'native_print_worker.dart';
 import 'queued_bluetooth_receipt_printer.dart';
+import 'queued_windows_receipt_printer.dart';
 
 /// Runs only in a foreground native app session. Android boot/background
 /// services are a later device-agent step; this worker gives each registered
 /// Android or Windows device reliable foreground queue processing now.
-class QueuedBluetoothPrintWorker {
-  QueuedBluetoothPrintWorker({
+class QueuedNativePrintWorker {
+  QueuedNativePrintWorker({
     PrintJobRepository? queue,
     PrinterDeviceRepository? devices,
     LocalPrinterDeviceIdentity? identity,
@@ -26,6 +29,12 @@ class QueuedBluetoothPrintWorker {
   final PrinterDeviceRepository _devices;
   final LocalPrinterDeviceIdentity _identity;
   DateTime? _lastHeartbeatAt;
+
+  String? get _requiredTransport => Platform.isWindows
+      ? 'windowsPrintQueue'
+      : Platform.isAndroid
+      ? 'bluetooth'
+      : null;
 
   /// Signals that a venue has queued work. The host listens to this stream and
   /// claims jobs immediately; it does not wait for a periodic scan.
@@ -43,7 +52,8 @@ class QueuedBluetoothPrintWorker {
     }
     try {
       final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
+      final requiredTransport = _requiredTransport;
+      if (user == null || requiredTransport == null) return;
       final deviceId = await _identity.getOrCreate();
       final device = await _devices.getDevice(
         tenantId: scope.tenantId,
@@ -53,7 +63,7 @@ class QueuedBluetoothPrintWorker {
           !device.active ||
           device.venueId != scope.venueId ||
           device.assignedUserId != user.uid ||
-          !device.transports.contains('bluetooth')) {
+          !device.transports.contains(requiredTransport)) {
         return;
       }
       await _devices.heartbeat(tenantId: scope.tenantId, deviceId: deviceId);
@@ -65,7 +75,10 @@ class QueuedBluetoothPrintWorker {
 
   Future<PrintWorkerResult> processNext(VenueScope scope) async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return PrintWorkerResult.noWork;
+    final requiredTransport = _requiredTransport;
+    if (user == null || requiredTransport == null) {
+      return PrintWorkerResult.noWork;
+    }
     final deviceId = await _identity.getOrCreate();
     final device = await _devices.getDevice(
       tenantId: scope.tenantId,
@@ -75,7 +88,7 @@ class QueuedBluetoothPrintWorker {
         !device.active ||
         device.venueId != scope.venueId ||
         device.assignedUserId != user.uid ||
-        !device.transports.contains('bluetooth')) {
+        !device.transports.contains(requiredTransport)) {
       return PrintWorkerResult.noWork;
     }
 
@@ -87,7 +100,9 @@ class QueuedBluetoothPrintWorker {
     }
     final worker = NativePrintWorker(
       queue: _queue,
-      printer: QueuedBluetoothReceiptPrinter(),
+      printer: Platform.isWindows
+          ? QueuedWindowsReceiptPrinter()
+          : QueuedBluetoothReceiptPrinter(),
       tenantId: scope.tenantId,
       venueId: scope.venueId,
       deviceId: deviceId,
@@ -95,7 +110,7 @@ class QueuedBluetoothPrintWorker {
     try {
       return await worker.processNext();
     } on Object catch (error, stackTrace) {
-      AppLogger.error('Process queued Bluetooth print job', error, stackTrace);
+      AppLogger.error('Process queued native print job', error, stackTrace);
       return PrintWorkerResult.failed;
     }
   }

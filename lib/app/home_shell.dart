@@ -385,7 +385,7 @@ class _QueuedPrintWorkerHost extends ConsumerStatefulWidget {
 
 class _QueuedPrintWorkerHostState
     extends ConsumerState<_QueuedPrintWorkerHost> {
-  final QueuedBluetoothPrintWorker _worker = QueuedBluetoothPrintWorker();
+  final QueuedNativePrintWorker _worker = QueuedNativePrintWorker();
   Timer? _retryTimer;
   StreamSubscription<int>? _queuedJobsSubscription;
   VenueScope? _scope;
@@ -461,10 +461,10 @@ class _QueuedPrintWorkerHostState
         if (!mounted || _scope != scope) return;
         if (result == PrintWorkerResult.noWork) return;
         if (result == PrintWorkerResult.printed) {
-          AppLogger.info('Queued Bluetooth printer: ticket printed.');
+          AppLogger.info('Queued native printer: ticket printed.');
         } else {
           AppLogger.error(
-            'Queued Bluetooth printer',
+            'Queued native printer',
             StateError(
               'A queued ticket failed and will be retried or flagged.',
             ),
@@ -483,7 +483,7 @@ class _QueuedPrintWorkerHostState
         }
       }
     } on Object catch (error, stackTrace) {
-      AppLogger.error('Queued Bluetooth print worker', error, stackTrace);
+      AppLogger.error('Queued native print worker', error, stackTrace);
       if (mounted) {
         showAppNotification(
           context,

@@ -24,7 +24,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   final SharedPreferencesAsync _preferences = SharedPreferencesAsync();
 
   @override
-  bool get isSupported => Platform.isAndroid || Platform.isWindows;
+  bool get isSupported => Platform.isAndroid;
 
   @override
   Future<List<BluetoothReceiptPrinterDevice>> pairedDevices() async {
@@ -354,7 +354,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   Future<void> _ensureReady() async {
     if (!isSupported) {
       throw const BluetoothReceiptPrinterException(
-        'Bluetooth receipt printing is supported only by the native Android or Windows app.',
+        'Bluetooth receipt printing is supported only by the native Android app.',
       );
     }
     if (Platform.isAndroid) {

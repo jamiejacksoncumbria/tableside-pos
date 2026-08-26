@@ -42,7 +42,7 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
       setState(() {
         _loading = false;
         _error =
-            'Bluetooth receipt printing is available only in the native Android or Windows app.';
+            'Bluetooth receipt printing is available only in the native Android app.';
       });
       return;
     }
