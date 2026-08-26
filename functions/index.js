@@ -2587,6 +2587,18 @@ function httpStatusFor(error) {
   }
 }
 
+function diagnosticErrorMessage(error) {
+  // Preserve a concise, actionable message for authenticated debug clients.
+  // Stacks remain server-only, but swallowing the message turns every server
+  // fault into an indistinguishable HTTP 500 and makes safe POS recovery
+  // impossible for staff.
+  if (error != null && typeof error === "object" &&
+      typeof error.message === "string" && error.message.trim().length > 0) {
+    return error.message.trim().slice(0, 300);
+  }
+  return "An unexpected server error occurred.";
+}
+
 // This endpoint is used by the Flutter app because the FlutterFire Functions
 // plugin does not yet support Windows. It verifies the Firebase ID token on
 // every call, then uses exactly the same handlers as the callable functions.
@@ -2622,6 +2634,7 @@ export const platformAdminApi = onRequest({cors: true}, async (request, response
 // prices, stock and printer-facing data as untrusted and derives the canonical
 // values from Firestore inside the command handler.
 export const posApi = onRequest({cors: true}, async (request, response) => {
+  let action = "unknown";
   try {
     if (request.method !== "POST") {
       response.status(405).json({error: {code: "method-not-allowed", message: "Use POST."}});
@@ -2629,7 +2642,7 @@ export const posApi = onRequest({cors: true}, async (request, response) => {
     }
     await verifyAppCheckFromHttpRequest(request, "posApi");
     const body = requireObject(request.body);
-    const action = requiredText(body, "action", 80);
+    action = requiredText(body, "action", 80);
     const data = requireObject(body.data ?? {});
     const caller = await callerFromHttpRequest(request);
     const result = await invokePosAction(action, caller, data);
@@ -2641,9 +2654,18 @@ export const posApi = onRequest({cors: true}, async (request, response) => {
       });
       return;
     }
-    console.error("Unexpected POS command error", error);
+    const message = diagnosticErrorMessage(error);
+    console.error("Unexpected POS command error", {
+      action,
+      code: error != null && typeof error === "object" ? error.code ?? null : null,
+      message,
+      stack: error != null && typeof error === "object" ? error.stack ?? null : null,
+    });
     response.status(500).json({
-      error: {code: "internal", message: "The POS action could not be completed."},
+      error: {
+        code: "internal",
+        message: `The POS action could not be completed: ${message}`,
+      },
     });
   }
 });
