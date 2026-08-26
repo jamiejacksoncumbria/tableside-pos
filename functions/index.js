@@ -220,8 +220,10 @@ function configuredProductVariants(productData) {
   const ids = new Set();
   return raw.map((rawVariant) => {
     const variant = requireObject(rawVariant);
-    const id = requiredText(variant, "variant.id", 180);
-    const name = requiredText(variant, "variant.name", 100);
+    // [variant] is the individual saved variant object. Read its direct
+    // fields rather than diagnostic dotted paths.
+    const id = requiredText(variant, "id", 180);
+    const name = requiredText(variant, "name", 100);
     const priceDeltaMinor = Number(variant.priceDeltaMinor ?? 0);
     if (!Number.isSafeInteger(priceDeltaMinor) ||
         priceDeltaMinor < -100000000 || priceDeltaMinor > 100000000 || ids.has(id)) {
