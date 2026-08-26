@@ -163,6 +163,11 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       'dessert' => 'DESSERT',
       _ => 'KITCHEN',
     };
+    final ticketHeading = ticket.isReprint
+        ? '$areaLabel REPRINT'
+        : ticket.isAddition
+        ? '$areaLabel ADDITION'
+        : areaLabel;
     final now = DateTime.now();
     final printedAt =
         '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} '
@@ -179,7 +184,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         ),
       ),
       ...generator.text(
-        ticket.isAddition ? '$areaLabel ADDITION' : areaLabel,
+        ticketHeading,
         styles: const PosStyles(align: PosAlign.center, bold: true),
       ),
       ...generator.hr(),
@@ -196,7 +201,11 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         ),
       ...generator.hr(),
       ...generator.text(
-        ticket.isAddition ? 'ADDITION TO EXISTING ORDER' : 'NEW ORDER',
+        ticket.isReprint
+            ? 'REPRINT OF EXISTING ORDER'
+            : ticket.isAddition
+            ? 'ADDITION TO EXISTING ORDER'
+            : 'NEW ORDER',
         styles: const PosStyles(align: PosAlign.center, bold: true),
       ),
       ...generator.feed(4),
@@ -255,7 +264,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           styles: const PosStyles(align: PosAlign.center, bold: true),
         ),
       ...generator.text(
-        'PAID RECEIPT',
+        receipt.isReprint ? 'REPRINT - PAID RECEIPT' : 'PAID RECEIPT',
         styles: const PosStyles(align: PosAlign.center, bold: true),
       ),
       ...generator.hr(),

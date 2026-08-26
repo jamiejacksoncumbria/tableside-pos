@@ -48,6 +48,7 @@ class BluetoothProductionTicket {
     this.tabName,
     this.createdByName,
     this.isAddition = false,
+    this.isReprint = false,
   });
 
   final String ticketId;
@@ -59,6 +60,7 @@ class BluetoothProductionTicket {
   final String? tabName;
   final String? createdByName;
   final bool isAddition;
+  final bool isReprint;
 }
 
 class BluetoothProductionTicketLine {
@@ -88,6 +90,7 @@ class BluetoothBillReceipt {
     this.businessAddress = '',
     this.businessPhoneNumbers = const <String>[],
     this.receiptFooter = '',
+    this.isReprint = false,
     this.payments = const <BluetoothReceiptPayment>[],
     this.taxBreakdown = const <BluetoothReceiptTaxBreakdown>[],
   });
@@ -105,6 +108,7 @@ class BluetoothBillReceipt {
   final String businessAddress;
   final List<String> businessPhoneNumbers;
   final String receiptFooter;
+  final bool isReprint;
   final List<BluetoothReceiptPayment> payments;
   final List<BluetoothReceiptTaxBreakdown> taxBreakdown;
 }

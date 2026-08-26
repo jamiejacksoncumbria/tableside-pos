@@ -59,6 +59,7 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
         tabName: payload['tabName'] as String?,
         createdByName: payload['createdByName'] as String?,
         isAddition: payload['isAddition'] as bool? ?? false,
+        isReprint: payload['isReprint'] as bool? ?? false,
         lines: lines,
       ),
     );
@@ -145,6 +146,7 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
         businessAddress: business['address'] as String? ?? '',
         businessPhoneNumbers: phoneNumbers,
         receiptFooter: business['receiptFooter'] as String? ?? '',
+        isReprint: payload['isReprint'] as bool? ?? false,
       ),
     );
   }

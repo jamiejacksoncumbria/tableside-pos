@@ -13,6 +13,7 @@ import '../../data/production_command_repository.dart';
 import '../auth/session_providers.dart';
 import '../notifications/notification_centre.dart';
 import '../printing/bluetooth_printer_setup_page.dart';
+import '../printing/print_queue_recovery_page.dart';
 import '../printing/venue_printer_routing_page.dart';
 import '../printing/windows_printer_setup_page.dart';
 import '../pos/domain.dart';
@@ -423,6 +424,20 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   ),
                 ),
               ],
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.restart_alt_rounded),
+                title: const Text('Print queue recovery'),
+                subtitle: const Text(
+                  'See live printer failures and let a manager reprint safely.',
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const PrintQueueRecoveryPage(),
+                  ),
+                ),
+              ),
               const Divider(),
               ListTile(
                 leading: const Icon(Icons.account_tree_outlined),

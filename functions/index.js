@@ -1940,6 +1940,110 @@ function activeRouteDevice(device, venueId, productionArea) {
     && data.productionAreas.includes(productionArea);
 }
 
+// A failed ticket is never edited or silently deleted. A manager can only
+// return it to its original active printer route, and the payload is marked as
+// a reprint so kitchen/bar staff can safely recognise a possible duplicate.
+async function retryFailedPrintJobFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const jobId = requiredText(data, "jobId", 240);
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError(
+      "permission-denied",
+      "Only a manager can reprint a failed ticket.",
+    );
+  }
+
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const jobRef = tenantRef.collection("printJobs").doc(jobId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  return db.runTransaction(async (transaction) => {
+    const [venue, job] = await Promise.all([
+      transaction.get(venueRef),
+      transaction.get(jobRef),
+    ]);
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (!job.exists || job.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "This failed print job does not belong to the selected venue.");
+    }
+    const jobData = job.data();
+    if (jobData.status !== "failed") {
+      throw new HttpsError("failed-precondition", "This print job is no longer failed.");
+    }
+    if (jobData.fallbackDeliveryStatus === "printed") {
+      throw new HttpsError(
+        "failed-precondition",
+        "A fallback printer already delivered this ticket, so it must not be reprinted.",
+      );
+    }
+    const hasConfiguredFallback = typeof jobData.fallbackDeviceId === "string" &&
+      jobData.fallbackDeviceId.length > 0;
+    const isFallbackJob = typeof jobData.fallbackFromJobId === "string" &&
+      jobData.fallbackFromJobId.length > 0;
+    if (hasConfiguredFallback && !isFallbackJob) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This ticket has a fallback printer. Reprint the failed fallback ticket instead, so the original and fallback cannot both print food.",
+      );
+    }
+    const productionArea = typeof jobData.productionArea === "string"
+      ? jobData.productionArea
+      : "";
+    const targetDeviceId = typeof jobData.targetDeviceId === "string"
+      ? jobData.targetDeviceId
+      : "";
+    if (!productionArea || !targetDeviceId) {
+      throw new HttpsError("failed-precondition", "This print job has no recoverable printer route.");
+    }
+    const targetDevice = await transaction.get(
+      tenantRef.collection("devices").doc(targetDeviceId),
+    );
+    if (!activeRouteDevice(targetDevice, venueId, productionArea)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The original printer route is no longer active. Restore or reconfigure the route before reprinting.",
+      );
+    }
+    const existingPayload = jobData.payload;
+    const payload = existingPayload != null &&
+        typeof existingPayload === "object" && !Array.isArray(existingPayload)
+      ? {...existingPayload}
+      : {};
+    payload.isReprint = true;
+    payload.reprintOfJobId = jobId;
+    transaction.update(jobRef, {
+      status: "queued",
+      attempts: 0,
+      payload,
+      failureReason: FieldValue.delete(),
+      nextAttemptAt: FieldValue.delete(),
+      claimedByDeviceId: FieldValue.delete(),
+      claimedAt: FieldValue.delete(),
+      completedAt: FieldValue.delete(),
+      manualRetryCount: FieldValue.increment(1),
+      manualRetryRequestedAt: FieldValue.serverTimestamp(),
+      manualRetryRequestedByActor: actor,
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "retryFailedPrintJob",
+      venueId,
+      jobId,
+      orderId: typeof jobData.orderId === "string" ? jobData.orderId : null,
+      ticketId: typeof jobData.ticketId === "string" ? jobData.ticketId : null,
+      productionArea,
+      targetDeviceId,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {jobId, queued: true, isReprint: true};
+  });
+}
+
 // A ticket is deliberately queued to one device at a time.  The original
 // device gets three attempts (managed by the client worker); only then does
 // this server-side trigger create a separate, idempotent fallback job.  That
@@ -2559,6 +2663,8 @@ async function invokePosAction(action, caller, data) {
       return closeOrderFor(caller, data);
     case "updateProductionTicket":
       return updateProductionTicketFor(caller, data);
+    case "retryFailedPrintJob":
+      return retryFailedPrintJobFor(caller, data);
     default:
       throw new HttpsError("not-found", "That POS action does not exist.");
   }

@@ -266,6 +266,20 @@ class ProductionCommandRepository {
     });
   }
 
+  /// Requeues a job which exhausted its automatic retries. The server keeps
+  /// the original job/audit trail, verifies the original route is still safe,
+  /// and marks the payload as a visible REPRINT before any device can claim it.
+  Future<void> retryFailedPrintJob({
+    required VenueScope scope,
+    required String jobId,
+  }) {
+    return _call('retryFailedPrintJob', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'jobId': jobId,
+    });
+  }
+
   Future<ExchangeRateQuote> lookupExchangeRate({
     required VenueScope scope,
     required String tenderCurrencyCode,

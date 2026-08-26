@@ -62,6 +62,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       'dessert' => 'DESSERT',
       _ => 'KITCHEN',
     };
+    final isReprint = payload['isReprint'] == true;
     final tabName = payload['tabName'] as String?;
     final tableLabel = payload['tableLabel'] as String?;
     final location = tabName?.trim().isNotEmpty == true
@@ -78,7 +79,11 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         fontSizeDelta: 2,
       ),
       WindowsPrintLine(
-        payload['isAddition'] == true ? '$area ADDITION' : area,
+        isReprint
+            ? '$area REPRINT'
+            : payload['isAddition'] == true
+            ? '$area ADDITION'
+            : area,
         alignment: WindowsPrintTextAlignment.center,
         bold: true,
       ),
@@ -91,7 +96,9 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       ...items.map((item) => WindowsPrintLine(item)),
       const WindowsPrintLine(''),
       WindowsPrintLine(
-        payload['isAddition'] == true
+        isReprint
+            ? 'REPRINT OF EXISTING ORDER'
+            : payload['isAddition'] == true
             ? 'ADDITION TO EXISTING ORDER'
             : 'NEW ORDER',
         bold: true,
@@ -160,8 +167,10 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
               fontSizeDelta: 1,
             ),
           ),
-      const WindowsPrintLine(
-        'PAID RECEIPT',
+      WindowsPrintLine(
+        payload['isReprint'] == true
+            ? 'REPRINT - PAID RECEIPT'
+            : 'PAID RECEIPT',
         alignment: WindowsPrintTextAlignment.center,
         bold: true,
       ),
