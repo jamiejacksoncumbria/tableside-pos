@@ -6,6 +6,7 @@ import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'bluetooth_receipt_printer.dart';
+import 'receipt_paper_width.dart';
 
 BluetoothReceiptPrinter createBluetoothReceiptPrinter() =>
     _NativeBluetoothReceiptPrinter();
@@ -13,6 +14,8 @@ BluetoothReceiptPrinter createBluetoothReceiptPrinter() =>
 class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   static const _namePreferenceKey = 'tableside.bluetoothPrinter.name';
   static const _addressPreferenceKey = 'tableside.bluetoothPrinter.address';
+  static const _paperWidthPreferencePrefix =
+      'tableside.bluetoothPrinter.paperWidth.';
   static const _routingPreferencePrefix =
       'tableside.bluetoothPrinter.productionRouting.';
 
@@ -30,16 +33,17 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   Future<List<BluetoothReceiptPrinterDevice>> pairedDevices() async {
     await _ensureReady();
     final devices = await PrintBluetoothThermal.pairedBluetooths;
-    return devices
-        .map(
-          (device) => BluetoothReceiptPrinterDevice(
-            name: device.name.trim().isEmpty
-                ? 'Unnamed Bluetooth printer'
-                : device.name,
-            address: device.macAdress,
-          ),
-        )
-        .toList(growable: false);
+    return Future.wait(
+      devices.map(
+        (device) async => BluetoothReceiptPrinterDevice(
+          name: device.name.trim().isEmpty
+              ? 'Unnamed Bluetooth printer'
+              : device.name,
+          address: device.macAdress,
+          paperWidth: await _paperWidthFor(device.macAdress),
+        ),
+      ),
+    );
   }
 
   @override
@@ -50,6 +54,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     return BluetoothReceiptPrinterDevice(
       name: name?.isNotEmpty == true ? name! : 'Configured Bluetooth printer',
       address: address,
+      paperWidth: await _paperWidthFor(address),
     );
   }
 
@@ -57,6 +62,10 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   Future<void> selectDevice(BluetoothReceiptPrinterDevice device) async {
     await _preferences.setString(_namePreferenceKey, device.name);
     await _preferences.setString(_addressPreferenceKey, device.address);
+    await _preferences.setInt(
+      _paperWidthPreferenceKey(device.address),
+      device.paperWidth.millimetres,
+    );
   }
 
   @override
@@ -101,7 +110,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     required String restaurantName,
   }) async {
     final profile = await CapabilityProfile.load();
-    final generator = Generator(PaperSize.mm58, profile);
+    final generator = Generator(_paperSize(device.paperWidth), profile);
     final bytes = <int>[
       ...generator.reset(),
       ...generator.text(
@@ -120,7 +129,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       ...generator.hr(),
       ...generator.text('Printer: ${device.name}'),
       ...generator.text('Address: ${device.address}'),
-      ...generator.text('Paper: 58 mm ESC/POS'),
+      ...generator.text('Paper: ${device.paperWidth.label} ESC/POS'),
       ...generator.text('Status: TEST PRINT'),
       ...generator.hr(),
       ...generator.text(
@@ -143,7 +152,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     required BluetoothProductionTicket ticket,
   }) async {
     final profile = await CapabilityProfile.load();
-    final generator = Generator(PaperSize.mm58, profile);
+    final generator = Generator(_paperSize(device.paperWidth), profile);
     final location = ticket.tabName?.trim().isNotEmpty == true
         ? 'Tab: ${ticket.tabName!.trim()}'
         : ticket.tableLabel?.trim().isNotEmpty == true
@@ -206,7 +215,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     required BluetoothBillReceipt receipt,
   }) async {
     final profile = await CapabilityProfile.load();
-    final generator = Generator(PaperSize.mm58, profile);
+    final generator = Generator(_paperSize(device.paperWidth), profile);
     final location = receipt.tabName?.trim().isNotEmpty == true
         ? 'Tab: ${receipt.tabName!.trim()}'
         : receipt.tableLabel?.trim().isNotEmpty == true
@@ -241,7 +250,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       ...generator.text('Printed: $printedAt'),
       ...generator.hr(),
       for (final line in receipt.lines) ...[
-        ...generator.text('${line.quantity} x ${line.name}'),
+        ...generator.text('${line.name} x${line.quantity}'),
         ...generator.row([
           PosColumn(text: '', width: 5),
           PosColumn(
@@ -316,6 +325,17 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
 
   String _routingPreferenceKey(String venueRoutingKey) =>
       '$_routingPreferencePrefix$venueRoutingKey';
+
+  Future<ReceiptPaperWidth> _paperWidthFor(String address) async =>
+      ReceiptPaperWidth.fromMillimetres(
+        await _preferences.getInt(_paperWidthPreferenceKey(address)),
+      );
+
+  String _paperWidthPreferenceKey(String address) =>
+      '$_paperWidthPreferencePrefix${Uri.encodeComponent(address)}';
+
+  PaperSize _paperSize(ReceiptPaperWidth paperWidth) =>
+      paperWidth.isNarrow ? PaperSize.mm58 : PaperSize.mm80;
 
   Future<void> _write(
     BluetoothReceiptPrinterDevice device,

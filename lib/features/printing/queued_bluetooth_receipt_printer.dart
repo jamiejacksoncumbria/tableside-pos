@@ -1,6 +1,7 @@
 import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
 import 'native_print_worker.dart';
+import 'receipt_line_aggregation.dart';
 
 /// Translates server-created printer payloads into ESC/POS bytes. Production
 /// jobs deliberately remain price-free; paid receipts can only be created for
@@ -68,23 +69,15 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
     required Map<String, Object?> payload,
     required String idempotencyKey,
   }) async {
-    final rawLines = payload['lines'];
-    final lines = rawLines is List
-        ? rawLines
-              .whereType<Map>()
-              .map(
-                (line) => BluetoothBillReceiptLine(
-                  name:
-                      line['productName'] as String? ??
-                      line['name'] as String? ??
-                      'Item',
-                  quantity: (line['quantity'] as num?)?.toInt() ?? 1,
-                  lineTotalMinor:
-                      (line['lineTotalMinor'] as num?)?.toInt() ?? 0,
-                ),
-              )
-              .toList(growable: false)
-        : const <BluetoothBillReceiptLine>[];
+    final lines = aggregateReceiptPayloadLines(payload['lines'])
+        .map(
+          (line) => BluetoothBillReceiptLine(
+            name: line.name,
+            quantity: line.quantity,
+            lineTotalMinor: line.lineTotalMinor,
+          ),
+        )
+        .toList(growable: false);
     if (lines.isEmpty) {
       throw const BluetoothReceiptPrinterException(
         'The queued paid receipt does not contain any bill lines.',

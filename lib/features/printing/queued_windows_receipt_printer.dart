@@ -1,4 +1,6 @@
 import 'native_print_worker.dart';
+import 'receipt_line_aggregation.dart';
+import 'receipt_paper_width.dart';
 import 'windows_print_queue.dart';
 import 'windows_print_queue_factory.dart';
 
@@ -24,7 +26,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     }
     final isReceipt = payload['type'] == 'receipt';
     final lines = isReceipt
-        ? _receiptLines(payload, idempotencyKey)
+        ? _receiptLines(payload, idempotencyKey, selectedPrinter.paperWidth)
         : _productionLines(payload, idempotencyKey);
     await _printer.printText(
       printer: selectedPrinter,
@@ -88,23 +90,21 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
   List<String> _receiptLines(
     Map<String, Object?> payload,
     String idempotencyKey,
+    ReceiptPaperWidth paperWidth,
   ) {
     final currency = payload['currencyCode'] as String? ?? 'GBP';
-    final rawLines = payload['lines'];
-    final itemLines = rawLines is List
-        ? rawLines
-              .whereType<Map>()
-              .expand((line) {
-                final quantity = (line['quantity'] as num?)?.toInt() ?? 1;
-                final name =
-                    line['productName'] as String? ??
-                    line['name'] as String? ??
-                    'Item';
-                final amount = (line['lineTotalMinor'] as num?)?.toInt() ?? 0;
-                return ['$quantity x $name', _money(amount, currency)];
-              })
-              .toList(growable: false)
-        : const <String>[];
+    final summaries = aggregateReceiptPayloadLines(payload['lines']);
+    final itemLines = summaries
+        .expand(
+          (line) => _receiptItemLines(
+            name: line.name,
+            quantity: line.quantity,
+            lineTotalMinor: line.lineTotalMinor,
+            currencyCode: currency,
+            paperWidth: paperWidth,
+          ),
+        )
+        .toList(growable: false);
     if (itemLines.isEmpty) {
       throw const WindowsPrintQueueException(
         'The queued paid receipt does not contain any bill lines.',
@@ -166,5 +166,19 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     final sign = amountMinor < 0 ? '-' : '';
     final absolute = amountMinor.abs();
     return '$sign$currencyCode ${absolute ~/ 100}.${(absolute % 100).toString().padLeft(2, '0')}';
+  }
+
+  List<String> _receiptItemLines({
+    required String name,
+    required int quantity,
+    required int lineTotalMinor,
+    required String currencyCode,
+    required ReceiptPaperWidth paperWidth,
+  }) {
+    final description = '$name x$quantity';
+    final amount = _money(lineTotalMinor, currencyCode);
+    return paperWidth.isNarrow
+        ? [description, amount]
+        : ['$description    $amount'];
   }
 }

@@ -88,10 +88,10 @@ Do **not** let a web client directly write a completed print job, and do not mak
 The Windows desktop app prints through installed Windows print queues. This supports a USB receipt printer such as the SAM4S GIANT100 and a network printer added through a Windows TCP/IP port using exactly the same flow:
 
 1. Install the manufacturer driver and confirm Windows can print a test page. Set the queue's 58 mm/80 mm paper and cutter preferences in Windows first.
-2. In TableSide, open **Settings → Windows USB/network printer setup**, select the installed queue and print a TableSide test ticket.
+2. In TableSide, open **Settings → Windows USB/network printer setup**, select the installed queue, select the matching TableSide receipt width (58 mm or 80 mm), and print a test ticket.
 3. Open **Settings → Shared printer routes**, register the Windows PC as a venue printer device, then assign the kitchen, bar, dessert and/or paid-receipt routes to it.
 
-Jobs are rendered through the driver, not sent directly to USB. This means the driver controls the correct paper width, feed and cutter behaviour, while TableSide retains its queue, retry and fallback safeguards.
+Jobs are rendered through the driver, not sent directly to USB. The printer-driver setting controls the physical paper, while TableSide's per-queue width selection controls receipt layout and must match it. Paid receipts combine identical products into compact lines such as `Efes x3`; kitchen/bar tickets remain uncombined.
 
 ## Payments
 

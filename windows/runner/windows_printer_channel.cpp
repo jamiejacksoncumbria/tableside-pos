@@ -4,6 +4,7 @@
 #include <winspool.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -93,6 +94,18 @@ std::optional<std::vector<std::wstring>> TextLinesArgument(
   return result;
 }
 
+int PaperWidthArgument(const EncodableMap& arguments) {
+  const EncodableValue* value = FindArgument(arguments, "paperWidthMm");
+  if (value == nullptr) return 80;
+  if (const auto number = std::get_if<int32_t>(value); number != nullptr) {
+    return *number == 58 ? 58 : 80;
+  }
+  if (const auto number = std::get_if<int64_t>(value); number != nullptr) {
+    return *number == 58 ? 58 : 80;
+  }
+  return 80;
+}
+
 std::wstring DefaultPrinterName() {
   DWORD character_count = 0;
   GetDefaultPrinterW(nullptr, &character_count);
@@ -139,7 +152,8 @@ EncodableList InstalledPrinters() {
 }
 
 bool PrintText(const std::wstring& printer_name, const std::wstring& title,
-               const std::vector<std::wstring>& lines, std::string* error) {
+               const std::vector<std::wstring>& lines, int paper_width_mm,
+               std::string* error) {
   HDC printer_dc =
       CreateDCW(L"WINSPOOL", printer_name.c_str(), nullptr, nullptr);
   if (printer_dc == nullptr) {
@@ -170,7 +184,8 @@ bool PrintText(const std::wstring& printer_name, const std::wstring& title,
   }
 
   const int dpi_y = std::max(72, GetDeviceCaps(printer_dc, LOGPIXELSY));
-  HFONT font = CreateFontW(-MulDiv(9, dpi_y, 72), 0, 0, 0, FW_NORMAL, FALSE,
+  const int point_size = paper_width_mm == 58 ? 8 : 10;
+  HFONT font = CreateFontW(-MulDiv(point_size, dpi_y, 72), 0, 0, 0, FW_NORMAL, FALSE,
                            FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                            CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
                            FF_DONTCARE, L"Segoe UI");
@@ -258,7 +273,7 @@ WindowsPrinterChannel::WindowsPrinterChannel(flutter::BinaryMessenger* messenger
         }
         std::string error;
         if (!PrintText(Utf8ToWide(*printer_name), Utf8ToWide(*title), *lines,
-                       &error)) {
+                       PaperWidthArgument(*arguments), &error)) {
           result->Error("print-failed", error);
           return;
         }

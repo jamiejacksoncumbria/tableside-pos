@@ -1,12 +1,23 @@
+import 'receipt_paper_width.dart';
+
 /// A printer paired in the operating system's Bluetooth settings.
 class BluetoothReceiptPrinterDevice {
   const BluetoothReceiptPrinterDevice({
     required this.name,
     required this.address,
+    this.paperWidth = ReceiptPaperWidth.mm58,
   });
 
   final String name;
   final String address;
+  final ReceiptPaperWidth paperWidth;
+
+  BluetoothReceiptPrinterDevice copyWith({ReceiptPaperWidth? paperWidth}) =>
+      BluetoothReceiptPrinterDevice(
+        name: name,
+        address: address,
+        paperWidth: paperWidth ?? this.paperWidth,
+      );
 }
 
 /// Local routing for the printer paired with this physical device. The route

@@ -4,6 +4,7 @@ import '../../core/app_logger.dart';
 import '../notifications/notification_centre.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
+import 'receipt_paper_width.dart';
 
 class BluetoothPrinterSetupPage extends StatefulWidget {
   const BluetoothPrinterSetupPage({
@@ -59,10 +60,12 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
       if (!mounted) return;
       setState(() {
         _devices = devices;
-        _selected = devices.cast<BluetoothReceiptPrinterDevice?>().firstWhere(
-          (device) => device?.address == selected?.address,
-          orElse: () => selected,
+        final matching = devices.where(
+          (device) => device.address == selected?.address,
         );
+        _selected = matching.isEmpty
+            ? selected
+            : matching.first.copyWith(paperWidth: selected?.paperWidth);
         _routing = routing;
       });
     } on Object catch (error, stackTrace) {
@@ -111,6 +114,12 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
         level: AppNotificationLevel.error,
       );
     }
+  }
+
+  Future<void> _selectPaperWidth(ReceiptPaperWidth paperWidth) async {
+    final selected = _selected;
+    if (selected == null) return;
+    await _select(selected.copyWith(paperWidth: paperWidth));
   }
 
   Future<void> _testPrint() async {
@@ -272,6 +281,37 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                 ),
               ),
             ),
+          if (_selected != null) ...[
+            const SizedBox(height: 16),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: DropdownButtonFormField<ReceiptPaperWidth>(
+                  key: ValueKey(
+                    'paper-width-${_selected!.address}-${_selected!.paperWidth.millimetres}',
+                  ),
+                  initialValue: _selected!.paperWidth,
+                  decoration: const InputDecoration(
+                    labelText: 'Receipt paper width',
+                    helperText:
+                        'Choose the physical roll width fitted to this paired printer.',
+                  ),
+                  items: [
+                    for (final width in ReceiptPaperWidth.values)
+                      DropdownMenuItem<ReceiptPaperWidth>(
+                        value: width,
+                        child: Text(width.label),
+                      ),
+                  ],
+                  onChanged: _printing
+                      ? null
+                      : (width) {
+                          if (width != null) _selectPaperWidth(width);
+                        },
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           Card(
             child: Padding(

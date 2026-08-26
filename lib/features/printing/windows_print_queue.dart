@@ -1,3 +1,5 @@
+import 'receipt_paper_width.dart';
+
 /// A printer installed in Windows. Windows treats locally USB-connected and
 /// network-connected hardware alike once its driver and queue have been added.
 class WindowsPrintQueueDevice {
@@ -6,12 +8,23 @@ class WindowsPrintQueueDevice {
     required this.driverName,
     required this.portName,
     required this.isDefault,
+    this.paperWidth = ReceiptPaperWidth.mm80,
   });
 
   final String name;
   final String driverName;
   final String portName;
   final bool isDefault;
+  final ReceiptPaperWidth paperWidth;
+
+  WindowsPrintQueueDevice copyWith({ReceiptPaperWidth? paperWidth}) =>
+      WindowsPrintQueueDevice(
+        name: name,
+        driverName: driverName,
+        portName: portName,
+        isDefault: isDefault,
+        paperWidth: paperWidth ?? this.paperWidth,
+      );
 }
 
 class WindowsPrintQueueException implements Exception {

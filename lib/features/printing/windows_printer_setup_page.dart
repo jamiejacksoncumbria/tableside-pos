@@ -4,6 +4,7 @@ import '../../core/app_logger.dart';
 import '../notifications/notification_centre.dart';
 import 'windows_print_queue.dart';
 import 'windows_print_queue_factory.dart';
+import 'receipt_paper_width.dart';
 
 /// Chooses a Windows-installed queue for this physical PC. A USB receipt
 /// printer and a network printer need no different TableSide setup: install
@@ -52,10 +53,12 @@ class _WindowsPrinterSetupPageState extends State<WindowsPrinterSetupPage> {
       if (!mounted) return;
       setState(() {
         _printers = printers;
-        _selected = printers.cast<WindowsPrintQueueDevice?>().firstWhere(
-          (printer) => printer?.name == selected?.name,
-          orElse: () => selected,
+        final matching = printers.where(
+          (printer) => printer.name == selected?.name,
         );
+        _selected = matching.isEmpty
+            ? selected
+            : matching.first.copyWith(paperWidth: selected?.paperWidth);
       });
     } on Object catch (error, stackTrace) {
       AppLogger.error('Load installed Windows printers', error, stackTrace);
@@ -87,6 +90,12 @@ class _WindowsPrinterSetupPageState extends State<WindowsPrinterSetupPage> {
         level: AppNotificationLevel.error,
       );
     }
+  }
+
+  Future<void> _selectPaperWidth(ReceiptPaperWidth paperWidth) async {
+    final selected = _selected;
+    if (selected == null) return;
+    await _select(selected.copyWith(paperWidth: paperWidth));
   }
 
   Future<void> _clearSelection() async {
@@ -237,6 +246,37 @@ class _WindowsPrinterSetupPageState extends State<WindowsPrinterSetupPage> {
                 ),
               ),
             ),
+          if (_selected != null) ...[
+            const SizedBox(height: 16),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: DropdownButtonFormField<ReceiptPaperWidth>(
+                  key: ValueKey(
+                    'paper-width-${_selected!.name}-${_selected!.paperWidth.millimetres}',
+                  ),
+                  initialValue: _selected!.paperWidth,
+                  decoration: const InputDecoration(
+                    labelText: 'TableSide receipt paper width',
+                    helperText:
+                        'This must match the paper size selected in Windows printer preferences.',
+                  ),
+                  items: [
+                    for (final width in ReceiptPaperWidth.values)
+                      DropdownMenuItem<ReceiptPaperWidth>(
+                        value: width,
+                        child: Text(width.label),
+                      ),
+                  ],
+                  onChanged: _printing
+                      ? null
+                      : (width) {
+                          if (width != null) _selectPaperWidth(width);
+                        },
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           FilledButton.icon(
             onPressed: _selected == null || _printing ? null : _testPrint,
