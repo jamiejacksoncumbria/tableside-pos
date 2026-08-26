@@ -163,7 +163,10 @@ function validModifierSelections(value, label) {
   const groupIds = new Set();
   return value.map((raw, groupIndex) => {
     const data = requireObject(raw);
-    const groupId = requiredText(data, `${label}[${groupIndex}].groupId`, 180);
+    // [data] is the individual selection object. The surrounding [label] is
+    // only for diagnostics; using it as the property key accidentally looked
+    // for a literal `lines[0]...groupId` key in every valid request.
+    const groupId = requiredText(data, "groupId", 180);
     if (groupIds.has(groupId)) {
       throw new HttpsError("invalid-argument", `${label} contains the same group twice.`);
     }
