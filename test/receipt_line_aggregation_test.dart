@@ -54,4 +54,39 @@ void main() {
 
     expect(lines, hasLength(2));
   });
+
+  test('keeps variants and modifiers distinct on a paid receipt', () {
+    final lines = aggregateReceiptPayloadLines([
+      {
+        'productId': 'steak',
+        'productName': 'Ribeye steak',
+        'quantity': 1,
+        'unitPriceMinor': 180000,
+        'lineTotalMinor': 180000,
+        'taxRateId': 'food',
+        'taxRateBasisPoints': 1000,
+        'variantName': 'Large',
+        'modifierSelections': [
+          {'groupName': 'Cooking', 'optionName': 'Medium rare'},
+        ],
+      },
+      {
+        'productId': 'steak',
+        'productName': 'Ribeye steak',
+        'quantity': 1,
+        'unitPriceMinor': 180000,
+        'lineTotalMinor': 180000,
+        'taxRateId': 'food',
+        'taxRateBasisPoints': 1000,
+        'variantName': 'Large',
+        'modifierSelections': [
+          {'groupName': 'Cooking', 'optionName': 'Well done'},
+        ],
+      },
+    ]);
+
+    expect(lines, hasLength(2));
+    expect(lines.first.name, contains('Cooking: Medium rare'));
+    expect(lines.last.name, contains('Cooking: Well done'));
+  });
 }

@@ -51,7 +51,8 @@ class BluetoothProductionPrintService {
       await _printer.printProductionTicket(
         device: device,
         ticket: BluetoothProductionTicket(
-          ticketId: '${order.id}_${entry.key}_${entry.value.map((line) => line.id).join('_')}',
+          ticketId:
+              '${order.id}_${entry.key}_${entry.value.map((line) => line.id).join('_')}',
           restaurantName: restaurantName,
           productionArea: entry.key,
           reference: order.id.split('-').last,
@@ -64,6 +65,7 @@ class BluetoothProductionPrintService {
                 (line) => BluetoothProductionTicketLine(
                   name: line.productName,
                   quantity: line.quantity,
+                  details: line.productionDetails,
                 ),
               )
               .toList(growable: false),

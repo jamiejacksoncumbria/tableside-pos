@@ -39,6 +39,11 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
                 (line) => BluetoothProductionTicketLine(
                   name: line['name'] as String? ?? 'Item',
                   quantity: line['quantity'] as int? ?? 1,
+                  details: line['details'] is List
+                      ? (line['details'] as List).whereType<String>().toList(
+                          growable: false,
+                        )
+                      : const <String>[],
                 ),
               )
               .toList(growable: false)

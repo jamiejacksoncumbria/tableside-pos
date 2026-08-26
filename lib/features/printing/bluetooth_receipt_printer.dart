@@ -67,10 +67,12 @@ class BluetoothProductionTicketLine {
   const BluetoothProductionTicketLine({
     required this.name,
     required this.quantity,
+    this.details = const <String>[],
   });
 
   final String name;
   final int quantity;
+  final List<String> details;
 }
 
 /// A money-bearing ticket that is accepted only by a printer device routed as

@@ -192,6 +192,9 @@ class ProductionCommandRepository {
         'id': line.id,
         'productId': line.productId,
         'quantity': line.quantity,
+        'variantId': line.variantId,
+        'modifierSelections': _modifierSelections(line),
+        'itemNote': line.itemNote,
       },
     });
   }
@@ -240,6 +243,9 @@ class ProductionCommandRepository {
               'id': line.id,
               'productId': line.productId,
               'quantity': line.quantity,
+              'variantId': line.variantId,
+              'modifierSelections': _modifierSelections(line),
+              'itemNote': line.itemNote,
             },
           )
           .toList(growable: false),
@@ -416,4 +422,21 @@ class ProductionCommandRepository {
   List<String> _stringList(Object? value) => value is List
       ? value.whereType<String>().toList(growable: false)
       : const <String>[];
+
+  List<Map<String, Object?>> _modifierSelections(OrderLine line) {
+    final selectionsByGroup = <String, List<String>>{};
+    for (final selection in line.modifiers) {
+      selectionsByGroup
+          .putIfAbsent(selection.groupId, () => <String>[])
+          .add(selection.optionId);
+    }
+    return selectionsByGroup.entries
+        .map(
+          (entry) => <String, Object?>{
+            'groupId': entry.key,
+            'optionIds': entry.value.toSet().toList(growable: false),
+          },
+        )
+        .toList(growable: false);
+  }
 }

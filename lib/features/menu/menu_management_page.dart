@@ -8,6 +8,7 @@ import '../../data/firestore_pos_repository.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
+import 'modifier_groups_page.dart';
 
 /// Venue-scoped menu setup. A product may be attached to several sections but
 /// keeps one default production area, allowing separate food/bar tickets.
@@ -22,6 +23,7 @@ class MenuManagementPage extends ConsumerWidget {
     final sectionsValue = ref.watch(menuSectionsProvider);
     final productsValue = ref.watch(menuProductsProvider);
     final taxRatesValue = ref.watch(taxRatesProvider);
+    final modifierGroupsValue = ref.watch(menuModifierGroupsProvider);
     final sections = sectionsValue.when(
       data: (items) => items,
       loading: () => scope == null ? demoSections : const <MenuSection>[],
@@ -36,6 +38,11 @@ class MenuManagementPage extends ConsumerWidget {
       data: (items) => items,
       loading: () => const <TaxRate>[],
       error: (_, _) => const <TaxRate>[],
+    );
+    final modifierGroups = modifierGroupsValue.when(
+      data: (items) => items,
+      loading: () => const <MenuModifierGroup>[],
+      error: (_, _) => const <MenuModifierGroup>[],
     );
 
     return ListView(
@@ -63,6 +70,18 @@ class MenuManagementPage extends ConsumerWidget {
               spacing: 8,
               runSpacing: 8,
               children: [
+                OutlinedButton.icon(
+                  onPressed: scope == null
+                      ? null
+                      : () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) =>
+                                ModifierGroupsPage(currencyCode: currencyCode),
+                          ),
+                        ),
+                  icon: const Icon(Icons.tune_rounded),
+                  label: const Text('Product options'),
+                ),
                 OutlinedButton.icon(
                   onPressed: scope == null
                       ? null
@@ -96,6 +115,7 @@ class MenuManagementPage extends ConsumerWidget {
                           scope: scope,
                           sections: sections,
                           taxRates: [TaxRate.zero, ...taxRates],
+                          modifierGroups: modifierGroups,
                           currencyCode: currencyCode,
                         ),
                   icon: const Icon(Icons.add_rounded),
@@ -242,6 +262,7 @@ class MenuManagementPage extends ConsumerWidget {
                             scope: scope,
                             sections: sections,
                             taxRates: [TaxRate.zero, ...taxRates],
+                            modifierGroups: modifierGroups,
                             currencyCode: currencyCode,
                             existing: product,
                           ),
@@ -844,6 +865,7 @@ Future<void> _showProductDialog({
   required VenueScope scope,
   required List<MenuSection> sections,
   required List<TaxRate> taxRates,
+  required List<MenuModifierGroup> modifierGroups,
   required String currencyCode,
   MenuProduct? existing,
 }) async {
@@ -859,6 +881,8 @@ Future<void> _showProductDialog({
   );
   final formKey = GlobalKey<FormState>();
   final selectedSections = <String>{...?existing?.sectionIds};
+  final selectedModifierGroupIds = <String>{...?existing?.modifierGroupIds};
+  var variants = <MenuProductVariant>[...?existing?.variants];
   var productionArea = existing?.productionArea ?? ProductionArea.kitchen;
   var trackStock = existing?.trackStock ?? false;
   var showOnOrderFlow = existing?.showOnOrderFlow ?? true;
@@ -926,6 +950,65 @@ Future<void> _showProductDialog({
                         () => selectedTaxRateId = value ?? TaxRate.zero.id,
                       ),
                     ),
+                    const SizedBox(height: 18),
+                    Text(
+                      'Variants',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      variants.isEmpty
+                          ? 'No variants. The base price is used.'
+                          : '${variants.length} variant${variants.length == 1 ? '' : 's'} configured. Customers must choose one.',
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        final next = await _showVariantsDialog(
+                          context: dialogContext,
+                          currencyCode: currencyCode,
+                          initialVariants: variants,
+                        );
+                        if (next != null) {
+                          setDialogState(() => variants = next);
+                        }
+                      },
+                      icon: const Icon(Icons.straighten_rounded),
+                      label: Text(
+                        variants.isEmpty ? 'Add variants' : 'Edit variants',
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      'Product options',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 4),
+                    if (modifierGroups.isEmpty)
+                      const Text(
+                        'Create reusable cooking, spice or drink options first.',
+                      )
+                    else
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final group in modifierGroups)
+                            FilterChip(
+                              label: Text(
+                                '${group.name}${group.isRequired ? ' *' : ''}',
+                              ),
+                              selected: selectedModifierGroupIds.contains(
+                                group.id,
+                              ),
+                              onSelected: (selected) => setDialogState(() {
+                                selected
+                                    ? selectedModifierGroupIds.add(group.id)
+                                    : selectedModifierGroupIds.remove(group.id);
+                              }),
+                            ),
+                        ],
+                      ),
                     const SizedBox(height: 18),
                     Text(
                       'Menu sections',
@@ -1073,6 +1156,10 @@ Future<void> _showProductDialog({
                           ? null
                           : selectedTaxRate.id,
                       taxRateName: selectedTaxRate.name,
+                      variants: variants,
+                      modifierGroupIds: selectedModifierGroupIds.toList(
+                        growable: false,
+                      ),
                     );
                   } else {
                     await repository.updateProduct(
@@ -1091,6 +1178,10 @@ Future<void> _showProductDialog({
                           ? null
                           : selectedTaxRate.id,
                       taxRateName: selectedTaxRate.name,
+                      variants: variants,
+                      modifierGroupIds: selectedModifierGroupIds.toList(
+                        growable: false,
+                      ),
                     );
                   }
                   if (dialogContext.mounted) Navigator.pop(dialogContext);
@@ -1123,6 +1214,218 @@ Future<void> _showProductDialog({
 String? _requiredText(String? value) =>
     value == null || value.trim().isEmpty ? 'This field is required.' : null;
 
+Future<List<MenuProductVariant>?> _showVariantsDialog({
+  required BuildContext context,
+  required String currencyCode,
+  required List<MenuProductVariant> initialVariants,
+}) async {
+  final drafts = initialVariants
+      .map(
+        (variant) => _VariantDraft(
+          id: variant.id,
+          name: variant.name,
+          priceDelta: _priceText(variant.priceDeltaMinor),
+          isAvailable: variant.isAvailable,
+        ),
+      )
+      .toList(growable: true);
+  if (drafts.isEmpty) drafts.add(_VariantDraft.empty());
+  String? validationMessage;
+
+  try {
+    return await showDialog<List<MenuProductVariant>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Product variants'),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Examples: Small, Large, Glass or Bottle. Prices are adjustments from the product’s base price ($currencyCode).',
+                  ),
+                  const SizedBox(height: 12),
+                  for (var index = 0; index < drafts.length; index++) ...[
+                    _VariantDraftRow(
+                      draft: drafts[index],
+                      canRemove: drafts.length > 1,
+                      onRemove: () =>
+                          setDialogState(() => drafts.removeAt(index)),
+                      onChanged: () =>
+                          setDialogState(() => validationMessage = null),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  TextButton.icon(
+                    onPressed: drafts.length >= 30
+                        ? null
+                        : () => setDialogState(
+                            () => drafts.add(_VariantDraft.empty()),
+                          ),
+                    icon: const Icon(Icons.add_rounded),
+                    label: const Text('Add another variant'),
+                  ),
+                  if (validationMessage != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      validationMessage!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final variants = <MenuProductVariant>[];
+                final names = <String>{};
+                for (final draft in drafts) {
+                  final variantName = draft.name.text.trim();
+                  final priceDelta = _minorFromSignedPriceText(
+                    draft.priceDelta.text,
+                  );
+                  if (variantName.isEmpty || priceDelta == null) {
+                    setDialogState(
+                      () => validationMessage =
+                          'Every variant needs a name and valid price adjustment.',
+                    );
+                    return;
+                  }
+                  if (!names.add(variantName.toLowerCase())) {
+                    setDialogState(
+                      () => validationMessage = 'Variant names must be unique.',
+                    );
+                    return;
+                  }
+                  variants.add(
+                    MenuProductVariant(
+                      id: draft.id,
+                      name: variantName,
+                      priceDeltaMinor: priceDelta,
+                      isAvailable: draft.isAvailable,
+                    ),
+                  );
+                }
+                Navigator.pop(dialogContext, variants);
+              },
+              child: const Text('Save variants'),
+            ),
+          ],
+        ),
+      ),
+    );
+  } finally {
+    for (final draft in drafts) {
+      draft.dispose();
+    }
+  }
+}
+
+class _VariantDraftRow extends StatelessWidget {
+  const _VariantDraftRow({
+    required this.draft,
+    required this.canRemove,
+    required this.onRemove,
+    required this.onChanged,
+  });
+
+  final _VariantDraft draft;
+  final bool canRemove;
+  final VoidCallback onRemove;
+  final VoidCallback onChanged;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Expanded(
+        flex: 3,
+        child: TextField(
+          controller: draft.name,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(labelText: 'Variant name'),
+          onChanged: (_) => onChanged(),
+        ),
+      ),
+      const SizedBox(width: 10),
+      Expanded(
+        flex: 2,
+        child: TextField(
+          controller: draft.priceDelta,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(labelText: 'Price +/-'),
+          onChanged: (_) => onChanged(),
+        ),
+      ),
+      const SizedBox(width: 4),
+      Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Tooltip(
+            message: draft.isAvailable ? 'Available' : 'Unavailable',
+            child: Switch(
+              value: draft.isAvailable,
+              onChanged: (value) {
+                draft.isAvailable = value;
+                onChanged();
+              },
+            ),
+          ),
+          IconButton(
+            tooltip: 'Remove variant',
+            onPressed: canRemove ? onRemove : null,
+            icon: const Icon(Icons.delete_outline_rounded),
+          ),
+        ],
+      ),
+    ],
+  );
+}
+
+class _VariantDraft {
+  _VariantDraft({
+    required this.id,
+    required String name,
+    required String priceDelta,
+    required this.isAvailable,
+  }) : name = TextEditingController(text: name),
+       priceDelta = TextEditingController(text: priceDelta);
+
+  factory _VariantDraft.empty() => _VariantDraft(
+    id: _nextVariantDraftId(),
+    name: '',
+    priceDelta: '0.00',
+    isAvailable: true,
+  );
+
+  final String id;
+  final TextEditingController name;
+  final TextEditingController priceDelta;
+  bool isAvailable;
+
+  void dispose() {
+    name.dispose();
+    priceDelta.dispose();
+  }
+}
+
+var _variantDraftCounter = 0;
+
+String _nextVariantDraftId() =>
+    'variant-${DateTime.now().microsecondsSinceEpoch}-${_variantDraftCounter++}';
+
 double? _decimal(String? value) {
   if (value == null) return null;
   return double.tryParse(value.trim().replaceAll(',', '.'));
@@ -1147,6 +1450,13 @@ int? _minorFromPriceText(String? value) {
   if (parsed == null || parsed < 0 || !parsed.isFinite) return null;
   final minor = (parsed * 100).round();
   return minor >= 0 ? minor : null;
+}
+
+int? _minorFromSignedPriceText(String? value) {
+  final parsed = _decimal(value);
+  if (parsed == null || !parsed.isFinite) return null;
+  final minor = (parsed * 100).round();
+  return minor.abs() <= 100000000 ? minor : null;
 }
 
 String _priceText(int minor) {

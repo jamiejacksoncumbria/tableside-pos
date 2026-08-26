@@ -146,7 +146,196 @@ function validProductionLine(value, index) {
     id: requiredText(data, "id", 180),
     productId: requiredText(data, "productId", 180),
     quantity: requiredPositiveInteger(data.quantity, `lines[${index}].quantity`, 100),
+    variantId: optionalText(data, "variantId", 180) || null,
+    modifierSelections: validModifierSelections(
+      data.modifierSelections,
+      `lines[${index}].modifierSelections`,
+    ),
+    itemNote: optionalText(data, "itemNote", 500),
   };
+}
+
+function validModifierSelections(value, label) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > 20) {
+    throw new HttpsError("invalid-argument", `${label} must contain up to 20 groups.`);
+  }
+  const groupIds = new Set();
+  return value.map((raw, groupIndex) => {
+    const data = requireObject(raw);
+    const groupId = requiredText(data, `${label}[${groupIndex}].groupId`, 180);
+    if (groupIds.has(groupId)) {
+      throw new HttpsError("invalid-argument", `${label} contains the same group twice.`);
+    }
+    groupIds.add(groupId);
+    if (!Array.isArray(data.optionIds) || data.optionIds.length > 50) {
+      throw new HttpsError(
+        "invalid-argument",
+        `${label}[${groupIndex}].optionIds must contain up to 50 options.`,
+      );
+    }
+    const optionIds = data.optionIds.map((optionId, optionIndex) => {
+      if (typeof optionId !== "string" || optionId.trim().length === 0 || optionId.trim().length > 180) {
+        throw new HttpsError(
+          "invalid-argument",
+          `${label}[${groupIndex}].optionIds[${optionIndex}] is invalid.`,
+        );
+      }
+      return optionId.trim();
+    });
+    if (new Set(optionIds).size !== optionIds.length) {
+      throw new HttpsError("invalid-argument", `${label} contains the same option twice.`);
+    }
+    return {groupId, optionIds};
+  });
+}
+
+function configuredModifierGroupIds(productData) {
+  const raw = productData?.modifierGroupIds;
+  if (raw == null) return [];
+  if (!Array.isArray(raw) || raw.length > 20) {
+    throw new HttpsError("failed-precondition", "This product has an invalid modifier configuration.");
+  }
+  const ids = raw.map((id) => {
+    if (typeof id !== "string" || id.trim().length === 0 || id.trim().length > 180) {
+      throw new HttpsError("failed-precondition", "This product has an invalid modifier group.");
+    }
+    return id.trim();
+  });
+  if (new Set(ids).size !== ids.length) {
+    throw new HttpsError("failed-precondition", "This product repeats a modifier group.");
+  }
+  return ids;
+}
+
+function configuredProductVariants(productData) {
+  const raw = productData?.variants;
+  if (raw == null) return [];
+  if (!Array.isArray(raw) || raw.length > 30) {
+    throw new HttpsError("failed-precondition", "This product has an invalid variant configuration.");
+  }
+  const ids = new Set();
+  return raw.map((rawVariant) => {
+    const variant = requireObject(rawVariant);
+    const id = requiredText(variant, "variant.id", 180);
+    const name = requiredText(variant, "variant.name", 100);
+    const priceDeltaMinor = Number(variant.priceDeltaMinor ?? 0);
+    if (!Number.isSafeInteger(priceDeltaMinor) ||
+        priceDeltaMinor < -100000000 || priceDeltaMinor > 100000000 || ids.has(id)) {
+      throw new HttpsError("failed-precondition", "This product has an invalid variant option.");
+    }
+    ids.add(id);
+    return {
+      id,
+      name,
+      priceDeltaMinor,
+      isAvailable: variant.isAvailable !== false,
+    };
+  });
+}
+
+function canonicalLineConfiguration({productData, modifierGroupsById, line}) {
+  const variants = configuredProductVariants(productData);
+  let variant = null;
+  if (variants.length > 0) {
+    if (line.variantId == null) {
+      throw new HttpsError("failed-precondition", "Choose a variant for this product.");
+    }
+    variant = variants.find((item) => item.id === line.variantId) ?? null;
+    if (variant == null || !variant.isAvailable) {
+      throw new HttpsError("failed-precondition", "The selected product variant is unavailable.");
+    }
+  } else if (line.variantId != null) {
+    throw new HttpsError("failed-precondition", "This product does not have variants.");
+  }
+
+  const configuredGroupIds = configuredModifierGroupIds(productData);
+  const requestedByGroup = new Map(
+    line.modifierSelections.map((selection) => [selection.groupId, selection]),
+  );
+  for (const requestedGroupId of requestedByGroup.keys()) {
+    if (!configuredGroupIds.includes(requestedGroupId)) {
+      throw new HttpsError("failed-precondition", "A selected option does not belong to this product.");
+    }
+  }
+  const modifierSelections = [];
+  for (const groupId of configuredGroupIds) {
+    const group = modifierGroupsById.get(groupId);
+    if (group == null || group.isAvailable === false) {
+      throw new HttpsError("failed-precondition", "A required product option group is no longer available.");
+    }
+    const groupName = typeof group.name === "string" ? group.name.trim() : "";
+    const options = Array.isArray(group.options) ? group.options : null;
+    const minimum = Number(group.minimumSelections ?? 0);
+    const maximum = Number(group.maximumSelections ?? options?.length ?? 0);
+    if (groupName.length === 0 || options == null ||
+        !Number.isInteger(minimum) || !Number.isInteger(maximum) ||
+        minimum < 0 || maximum < minimum || maximum > options.length) {
+      throw new HttpsError("failed-precondition", "A product option group is configured incorrectly.");
+    }
+    const requested = requestedByGroup.get(groupId)?.optionIds ?? [];
+    if (requested.length < minimum || requested.length > maximum) {
+      const countLabel = minimum === maximum
+        ? `exactly ${minimum}`
+        : `${minimum} to ${maximum}`;
+      throw new HttpsError(
+        "failed-precondition",
+        `Choose ${countLabel} option${maximum === 1 ? "" : "s"} for ${groupName}.`,
+      );
+    }
+    for (const optionId of requested) {
+      const option = options.find((item) => item?.id === optionId) ?? null;
+      const optionName = typeof option?.name === "string" ? option.name.trim() : "";
+      const priceDeltaMinor = Number(option?.priceDeltaMinor ?? 0);
+      if (option == null || option.isAvailable === false || optionName.length === 0 ||
+          !Number.isSafeInteger(priceDeltaMinor) ||
+          priceDeltaMinor < -100000000 || priceDeltaMinor > 100000000) {
+        throw new HttpsError("failed-precondition", `The selected ${groupName} option is unavailable.`);
+      }
+      modifierSelections.push({
+        groupId,
+        groupName,
+        optionId,
+        optionName,
+        priceDeltaMinor,
+      });
+    }
+  }
+  const priceDeltaMinor = (variant?.priceDeltaMinor ?? 0) + modifierSelections.reduce(
+    (total, selection) => total + selection.priceDeltaMinor,
+    0,
+  );
+  if (!Number.isSafeInteger(priceDeltaMinor)) {
+    throw new HttpsError("failed-precondition", "The selected product options have an invalid price.");
+  }
+  return {
+    variantId: variant?.id ?? null,
+    variantName: variant?.name ?? null,
+    variantPriceDeltaMinor: variant?.priceDeltaMinor ?? 0,
+    modifierSelections,
+    itemNote: line.itemNote,
+    priceDeltaMinor,
+  };
+}
+
+function productionLineDetails(line) {
+  const details = [];
+  if (typeof line.variantName === "string" && line.variantName.trim().length > 0) {
+    details.push(line.variantName.trim());
+  }
+  if (Array.isArray(line.modifierSelections)) {
+    for (const selection of line.modifierSelections) {
+      const groupName = typeof selection?.groupName === "string" ? selection.groupName.trim() : "";
+      const optionName = typeof selection?.optionName === "string" ? selection.optionName.trim() : "";
+      if (groupName.length > 0 && optionName.length > 0) {
+        details.push(`${groupName}: ${optionName}`);
+      }
+    }
+  }
+  if (typeof line.itemNote === "string" && line.itemNote.trim().length > 0) {
+    details.push(`NOTE: ${line.itemNote.trim()}`);
+  }
+  return details;
 }
 
 function requiredNonNegativeInteger(value, label, maximum = 100000000) {
@@ -1096,10 +1285,24 @@ async function addOrderDraftLineFor(caller, rawData) {
       throw new HttpsError("not-found", "A selected menu product no longer exists at this venue.");
     }
     const productData = product.data();
+    const modifierGroupIds = configuredModifierGroupIds(productData);
+    const modifierGroups = await Promise.all(
+      modifierGroupIds.map((groupId) =>
+        transaction.get(tenantRef.collection("modifierGroups").doc(groupId))),
+    );
+    const modifierGroupsById = new Map(
+      modifierGroups.map((group) => [group.id, group.exists ? group.data() : null]),
+    );
+    const configuration = canonicalLineConfiguration({
+      productData,
+      modifierGroupsById,
+      line,
+    });
     if (productData.isAvailable === false) {
       throw new HttpsError("failed-precondition", "This product is currently unavailable.");
     }
-    const unitPriceMinor = Number(productData.priceMinor);
+    const basePriceMinor = Number(productData.priceMinor);
+    const unitPriceMinor = basePriceMinor + configuration.priceDeltaMinor;
     const stockPerSale = Number(productData.stockPerSale ?? 1);
     if (!Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0
         || !Number.isFinite(stockPerSale) || stockPerSale <= 0) {
@@ -1136,6 +1339,11 @@ async function addOrderDraftLineFor(caller, rawData) {
       taxRateName: typeof productData.taxRateName === "string"
         ? productData.taxRateName
         : "Zero rate",
+      variantId: configuration.variantId,
+      variantName: configuration.variantName,
+      variantPriceDeltaMinor: configuration.variantPriceDeltaMinor,
+      modifierSelections: configuration.modifierSelections,
+      itemNote: configuration.itemNote,
       isSentToProduction: false,
     };
     const current = existingOrder.exists ? existingOrder.data() : null;
@@ -2245,12 +2453,32 @@ async function sendOrderToProductionFor(caller, rawData) {
       productById.set(snapshot.id, snapshot.data());
     }
 
+    const configuredModifierGroupIdsForOrder = [...new Set(
+      [...productById.values()].flatMap((product) =>
+        configuredModifierGroupIds(product)),
+    )];
+    const modifierGroupSnapshots = await Promise.all(
+      configuredModifierGroupIdsForOrder.map((groupId) =>
+        transaction.get(tenantRef.collection("modifierGroups").doc(groupId))),
+    );
+    const modifierGroupsById = new Map(
+      modifierGroupSnapshots.map((group) => [
+        group.id,
+        group.exists ? group.data() : null,
+      ]),
+    );
+
     const canonicalLines = lines.map((line) => {
       const product = productById.get(line.productId);
       if (product.isAvailable === false) {
         throw new HttpsError("failed-precondition", "A selected product is unavailable.");
       }
-      const unitPriceMinor = Number(product.priceMinor);
+      const configuration = canonicalLineConfiguration({
+        productData: product,
+        modifierGroupsById,
+        line,
+      });
+      const unitPriceMinor = Number(product.priceMinor) + configuration.priceDeltaMinor;
       if (!Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0) {
         throw new HttpsError(
           "failed-precondition",
@@ -2284,6 +2512,11 @@ async function sendOrderToProductionFor(caller, rawData) {
         taxRateName: typeof product.taxRateName === "string"
           ? product.taxRateName
           : "Zero rate",
+        variantId: configuration.variantId,
+        variantName: configuration.variantName,
+        variantPriceDeltaMinor: configuration.variantPriceDeltaMinor,
+        modifierSelections: configuration.modifierSelections,
+        itemNote: configuration.itemNote,
         showOnOrderFlow: product.showOnOrderFlow !== false,
       };
     });
@@ -2353,6 +2586,11 @@ async function sendOrderToProductionFor(caller, rawData) {
       taxRateBasisPoints: line.taxRateBasisPoints,
       taxRateId: line.taxRateId,
       taxRateName: line.taxRateName,
+      variantId: line.variantId,
+      variantName: line.variantName,
+      variantPriceDeltaMinor: line.variantPriceDeltaMinor,
+      modifierSelections: line.modifierSelections,
+      itemNote: line.itemNote,
       isSentToProduction: true,
     });
     // Draft lines already exist on the order so every device can see them.
@@ -2407,12 +2645,14 @@ async function sendOrderToProductionFor(caller, rawData) {
         productionItems: ticket.lines.map((line) => ({
           name: line.productName,
           quantity: line.quantity,
+          details: productionLineDetails(line),
         })),
         orderFlowItems: ticket.lines
           .filter((line) => line.showOnOrderFlow)
           .map((line) => ({
             name: line.productName,
             quantity: line.quantity,
+            details: productionLineDetails(line),
           })),
         showOnOrderFlow: ticket.lines.some((line) => line.showOnOrderFlow),
         hasAllergyAlert: false,
@@ -2455,6 +2695,7 @@ async function sendOrderToProductionFor(caller, rawData) {
               lines: ticket.lines.map((line) => ({
                 name: line.productName,
                 quantity: line.quantity,
+                details: productionLineDetails(line),
               })),
             },
             createdAt: FieldValue.serverTimestamp(),

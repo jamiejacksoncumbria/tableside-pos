@@ -235,6 +235,98 @@ class TaxRate {
   }
 }
 
+/// A named sellable form of a product, such as Small/Large or Glass/Bottle.
+/// The base product price is adjusted by [priceDeltaMinor]; this keeps every
+/// variant tax-inclusive and makes the server the final price authority.
+class MenuProductVariant {
+  const MenuProductVariant({
+    required this.id,
+    required this.name,
+    this.priceDeltaMinor = 0,
+    this.isAvailable = true,
+  });
+
+  final String id;
+  final String name;
+  final int priceDeltaMinor;
+  final bool isAvailable;
+}
+
+/// One selectable option inside a venue's reusable modifier group.
+class MenuModifierOption {
+  const MenuModifierOption({
+    required this.id,
+    required this.name,
+    this.priceDeltaMinor = 0,
+    this.isAvailable = true,
+  });
+
+  final String id;
+  final String name;
+  final int priceDeltaMinor;
+  final bool isAvailable;
+}
+
+/// Reusable choices such as "Cooking preference", "Spice level" or "Ice".
+/// A product stores only the group IDs, so one venue-wide change is reflected
+/// on every attached product while historic order lines keep their snapshot.
+class MenuModifierGroup {
+  const MenuModifierGroup({
+    required this.id,
+    required this.name,
+    required this.minimumSelections,
+    required this.maximumSelections,
+    required this.options,
+    this.isAvailable = true,
+  });
+
+  final String id;
+  final String name;
+  final int minimumSelections;
+  final int maximumSelections;
+  final List<MenuModifierOption> options;
+  final bool isAvailable;
+
+  bool get isRequired => minimumSelections > 0;
+}
+
+/// An immutable, priced option snapshot recorded on a draft/order line.
+class OrderModifierSelection {
+  const OrderModifierSelection({
+    required this.groupId,
+    required this.groupName,
+    required this.optionId,
+    required this.optionName,
+    this.priceDeltaMinor = 0,
+  });
+
+  final String groupId;
+  final String groupName;
+  final String optionId;
+  final String optionName;
+  final int priceDeltaMinor;
+
+  String get displayLabel => '$groupName: $optionName';
+}
+
+/// The product chooser returns this typed selection before the order line is
+/// sent to Firebase for independent canonical validation and pricing.
+class ProductConfigurationSelection {
+  const ProductConfigurationSelection({
+    this.variant,
+    this.modifiers = const <OrderModifierSelection>[],
+    this.itemNote = '',
+  });
+
+  final MenuProductVariant? variant;
+  final List<OrderModifierSelection> modifiers;
+  final String itemNote;
+
+  int get priceDeltaMinor =>
+      (variant?.priceDeltaMinor ?? 0) +
+      modifiers.fold(0, (total, modifier) => total + modifier.priceDeltaMinor);
+}
+
 class MenuProduct {
   const MenuProduct({
     required this.id,
@@ -251,6 +343,8 @@ class MenuProduct {
     this.taxRateBasisPoints = 0,
     this.taxRateId,
     this.taxRateName = 'Zero rate',
+    this.variants = const <MenuProductVariant>[],
+    this.modifierGroupIds = const <String>[],
   });
 
   final String id;
@@ -274,6 +368,11 @@ class MenuProduct {
   final int taxRateBasisPoints;
   final String? taxRateId;
   final String taxRateName;
+  final List<MenuProductVariant> variants;
+  final List<String> modifierGroupIds;
+
+  bool get requiresConfiguration =>
+      variants.isNotEmpty || modifierGroupIds.isNotEmpty;
 
   String get taxRateLabel {
     final percent = taxRateBasisPoints / 100;
@@ -333,6 +432,11 @@ class OrderLine {
     this.taxRateBasisPoints = 0,
     this.taxRateId,
     this.taxRateName = 'Zero rate',
+    this.variantId,
+    this.variantName,
+    this.variantPriceDeltaMinor = 0,
+    this.modifiers = const <OrderModifierSelection>[],
+    this.itemNote = '',
   });
 
   final String id;
@@ -347,8 +451,24 @@ class OrderLine {
   final int taxRateBasisPoints;
   final String? taxRateId;
   final String taxRateName;
+  final String? variantId;
+  final String? variantName;
+  final int variantPriceDeltaMinor;
+  final List<OrderModifierSelection> modifiers;
+  final String itemNote;
 
   int get totalMinor => quantity * unitPriceMinor;
+
+  /// Kitchen-safe detail lines, excluding any money. These are also used in
+  /// the POS basket so a waiter can verify a guest's choices before sending.
+  List<String> get productionDetails => [
+    if (variantName?.trim().isNotEmpty == true) variantName!.trim(),
+    ...modifiers.map((modifier) => modifier.displayLabel),
+    if (itemNote.trim().isNotEmpty) 'NOTE: ${itemNote.trim()}',
+  ];
+
+  String get receiptDescription =>
+      [productName, ...productionDetails].join('\n');
 
   OrderLine copyWith({int? quantity, bool? isSentToProduction}) => OrderLine(
     id: id,
@@ -363,6 +483,11 @@ class OrderLine {
     taxRateBasisPoints: taxRateBasisPoints,
     taxRateId: taxRateId,
     taxRateName: taxRateName,
+    variantId: variantId,
+    variantName: variantName,
+    variantPriceDeltaMinor: variantPriceDeltaMinor,
+    modifiers: modifiers,
+    itemNote: itemNote,
   );
 }
 

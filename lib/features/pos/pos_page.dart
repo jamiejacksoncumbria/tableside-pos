@@ -8,6 +8,7 @@ import '../../data/production_command_repository.dart';
 import '../notifications/notification_centre.dart';
 import 'domain.dart';
 import 'pos_controller.dart';
+import 'product_configuration_sheet.dart';
 
 class PosPage extends ConsumerWidget {
   const PosPage({super.key, required this.currencyCode});
@@ -482,6 +483,7 @@ class _MenuPanel extends ConsumerWidget {
     final scope = ref.watch(activeVenueScopeProvider);
     final sectionsState = ref.watch(menuSectionsProvider);
     final catalogState = ref.watch(menuProductsProvider);
+    final modifierGroupsState = ref.watch(menuModifierGroupsProvider);
     final sections = sectionsState.when(
       data: (items) => items,
       loading: () => scope == null ? demoSections : const [],
@@ -496,6 +498,14 @@ class _MenuPanel extends ConsumerWidget {
       error: (error, stackTrace) {
         AppLogger.error('Display menu products', error, stackTrace);
         return scope == null ? demoProducts : const [];
+      },
+    );
+    final modifierGroups = modifierGroupsState.when(
+      data: (items) => items,
+      loading: () => const <MenuModifierGroup>[],
+      error: (error, stackTrace) {
+        AppLogger.error('Display menu modifier groups', error, stackTrace);
+        return const <MenuModifierGroup>[];
       },
     );
     final loading = sectionsState.isLoading || catalogState.isLoading;
@@ -676,12 +686,52 @@ class _MenuPanel extends ConsumerWidget {
                             canAdd: activeOrder.canAddProduct(products[index]),
                             onTap: () async {
                               try {
+                                final product = products[index];
+                                final selection = product.requiresConfiguration
+                                    ? await showProductConfigurationSheet(
+                                        context: context,
+                                        product: product,
+                                        availableGroups: modifierGroups,
+                                        currencyCode: currencyCode,
+                                      )
+                                    : const ProductConfigurationSelection();
+                                if (selection == null) return;
                                 await ref
                                     .read(activeOrderProvider.notifier)
-                                    .addProduct(products[index]);
+                                    .addProduct(product, selection: selection);
                               } on Object catch (error, stackTrace) {
                                 AppLogger.error(
                                   'Add item to shared draft order',
+                                  error,
+                                  stackTrace,
+                                );
+                                if (!context.mounted) return;
+                                showAppNotification(
+                                  context,
+                                  ref: ref,
+                                  title: 'Item was not added',
+                                  message: '$error',
+                                  level: AppNotificationLevel.error,
+                                );
+                              }
+                            },
+                            onLongPress: () async {
+                              try {
+                                final product = products[index];
+                                final selection =
+                                    await showProductConfigurationSheet(
+                                      context: context,
+                                      product: product,
+                                      availableGroups: modifierGroups,
+                                      currencyCode: currencyCode,
+                                    );
+                                if (selection == null) return;
+                                await ref
+                                    .read(activeOrderProvider.notifier)
+                                    .addProduct(product, selection: selection);
+                              } on Object catch (error, stackTrace) {
+                                AppLogger.error(
+                                  'Configure item for shared draft order',
                                   error,
                                   stackTrace,
                                 );
@@ -755,12 +805,14 @@ class _ProductTile extends StatelessWidget {
     required this.currencyCode,
     required this.canAdd,
     required this.onTap,
+    required this.onLongPress,
   });
 
   final MenuProduct product;
   final String currencyCode;
   final bool canAdd;
   final VoidCallback onTap;
+  final VoidCallback onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -775,6 +827,7 @@ class _ProductTile extends StatelessWidget {
           : 'Add ${product.name}',
       child: InkWell(
         onTap: unavailable ? null : onTap,
+        onLongPress: unavailable ? null : onLongPress,
         borderRadius: BorderRadius.circular(16),
         child: Ink(
           decoration: BoxDecoration(
@@ -800,6 +853,11 @@ class _ProductTile extends StatelessWidget {
                       size: compact ? 20 : null,
                       color: unavailable ? scheme.outline : scheme.primary,
                     ),
+                    if (!compact && product.requiresConfiguration)
+                      const Align(
+                        alignment: Alignment.centerRight,
+                        child: Icon(Icons.tune_rounded, size: 16),
+                      ),
                     if (compact) const SizedBox(height: 4) else const Spacer(),
                     Text(
                       product.name,
@@ -990,6 +1048,15 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                     ),
+                                    if (line.productionDetails.isNotEmpty)
+                                      Text(
+                                        line.productionDetails.join(' · '),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.labelSmall,
+                                      ),
                                     Text(
                                       '${line.quantity} × ${formatMoney(line.unitPriceMinor, currencyCode: widget.currencyCode)}',
                                       style: Theme.of(

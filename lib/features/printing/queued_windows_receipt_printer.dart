@@ -42,16 +42,20 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     String idempotencyKey,
   ) {
     final rawLines = payload['lines'];
-    final items = rawLines is List
-        ? rawLines
-              .whereType<Map>()
-              .map((line) {
-                final quantity = (line['quantity'] as num?)?.toInt() ?? 1;
-                final name = line['name'] as String? ?? 'Item';
-                return '$quantity x $name';
-              })
-              .toList(growable: false)
-        : const <String>[];
+    final items = <WindowsPrintLine>[];
+    if (rawLines is List) {
+      for (final line in rawLines.whereType<Map>()) {
+        final quantity = (line['quantity'] as num?)?.toInt() ?? 1;
+        final name = line['name'] as String? ?? 'Item';
+        items.add(WindowsPrintLine('$quantity x $name', bold: true));
+        if (line['details'] is List) {
+          for (final detail in (line['details'] as List).whereType<String>()) {
+            final trimmed = detail.trim();
+            if (trimmed.isNotEmpty) items.add(WindowsPrintLine('  - $trimmed'));
+          }
+        }
+      }
+    }
     if (items.isEmpty) {
       throw const WindowsPrintQueueException(
         'The queued production ticket does not contain any items.',
@@ -93,7 +97,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       if ((payload['createdByName'] as String?)?.trim().isNotEmpty == true)
         WindowsPrintLine('By: ${(payload['createdByName'] as String).trim()}'),
       const WindowsPrintLine(''),
-      ...items.map((item) => WindowsPrintLine(item)),
+      ...items,
       const WindowsPrintLine(''),
       WindowsPrintLine(
         isReprint

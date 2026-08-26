@@ -100,6 +100,93 @@ class FirestorePosRepository {
     return rate.clamp(0, 100000).toInt();
   }
 
+  List<String> _stringIds(Object? value) {
+    if (value is! List) return const <String>[];
+    final unique = <String>{};
+    for (final item in value.whereType<String>()) {
+      final id = item.trim();
+      if (id.isNotEmpty) unique.add(id);
+    }
+    return unique.toList(growable: false);
+  }
+
+  List<MenuProductVariant> _productVariants(Object? value) {
+    if (value is! List) return const <MenuProductVariant>[];
+    final variants = <MenuProductVariant>[];
+    final ids = <String>{};
+    for (final raw in value.whereType<Map>()) {
+      final data = Map<Object?, Object?>.from(raw);
+      final id = data['id'] as String? ?? '';
+      final name = data['name'] as String? ?? '';
+      if (id.trim().isEmpty || name.trim().isEmpty || !ids.add(id.trim())) {
+        continue;
+      }
+      variants.add(
+        MenuProductVariant(
+          id: id.trim(),
+          name: name.trim(),
+          priceDeltaMinor: (data['priceDeltaMinor'] as num?)?.toInt() ?? 0,
+          isAvailable: data['isAvailable'] as bool? ?? true,
+        ),
+      );
+    }
+    return variants;
+  }
+
+  List<MenuModifierOption> _modifierOptions(Object? value) {
+    if (value is! List) return const <MenuModifierOption>[];
+    final options = <MenuModifierOption>[];
+    final ids = <String>{};
+    for (final raw in value.whereType<Map>()) {
+      final data = Map<Object?, Object?>.from(raw);
+      final id = data['id'] as String? ?? '';
+      final name = data['name'] as String? ?? '';
+      if (id.trim().isEmpty || name.trim().isEmpty || !ids.add(id.trim())) {
+        continue;
+      }
+      options.add(
+        MenuModifierOption(
+          id: id.trim(),
+          name: name.trim(),
+          priceDeltaMinor: (data['priceDeltaMinor'] as num?)?.toInt() ?? 0,
+          isAvailable: data['isAvailable'] as bool? ?? true,
+        ),
+      );
+    }
+    return options;
+  }
+
+  List<OrderModifierSelection> _orderModifierSelections(Object? value) {
+    if (value is! List) return const <OrderModifierSelection>[];
+    final selections = <OrderModifierSelection>[];
+    final ids = <String>{};
+    for (final raw in value.whereType<Map>()) {
+      final data = Map<Object?, Object?>.from(raw);
+      final groupId = data['groupId'] as String? ?? '';
+      final optionId = data['optionId'] as String? ?? '';
+      final groupName = data['groupName'] as String? ?? '';
+      final optionName = data['optionName'] as String? ?? '';
+      final key = '$groupId::$optionId';
+      if (groupId.trim().isEmpty ||
+          optionId.trim().isEmpty ||
+          groupName.trim().isEmpty ||
+          optionName.trim().isEmpty ||
+          !ids.add(key)) {
+        continue;
+      }
+      selections.add(
+        OrderModifierSelection(
+          groupId: groupId.trim(),
+          groupName: groupName.trim(),
+          optionId: optionId.trim(),
+          optionName: optionName.trim(),
+          priceDeltaMinor: (data['priceDeltaMinor'] as num?)?.toInt() ?? 0,
+        ),
+      );
+    }
+    return selections;
+  }
+
   Stream<List<MenuSection>> watchMenuSections(VenueScope scope) async* {
     AppLogger.info(
       'Load menu sections: tenant=${scope.tenantId}, venue=${scope.venueId}.',
@@ -174,6 +261,8 @@ class FirestorePosRepository {
                 ),
                 taxRateId: data['taxRateId'] as String?,
                 taxRateName: data['taxRateName'] as String? ?? 'Zero rate',
+                variants: _productVariants(data['variants']),
+                modifierGroupIds: _stringIds(data['modifierGroupIds']),
               );
             })
             .toList(growable: false);
@@ -394,6 +483,12 @@ class FirestorePosRepository {
             taxRateBasisPoints: _taxRateBasisPoints(line['taxRateBasisPoints']),
             taxRateId: line['taxRateId'] as String?,
             taxRateName: line['taxRateName'] as String? ?? 'Zero rate',
+            variantId: line['variantId'] as String?,
+            variantName: line['variantName'] as String?,
+            variantPriceDeltaMinor:
+                (line['variantPriceDeltaMinor'] as num?)?.toInt() ?? 0,
+            modifiers: _orderModifierSelections(line['modifierSelections']),
+            itemNote: line['itemNote'] as String? ?? '',
           );
         })
         .where((line) => line.id.isNotEmpty && line.productId.isNotEmpty)
@@ -507,6 +602,8 @@ class FirestorePosRepository {
     required int taxRateBasisPoints,
     required String? taxRateId,
     required String taxRateName,
+    required List<MenuProductVariant> variants,
+    required List<String> modifierGroupIds,
   }) async {
     final cleanedName = name.trim();
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
@@ -536,6 +633,8 @@ class FirestorePosRepository {
       'taxRateBasisPoints': taxRateBasisPoints,
       'taxRateId': taxRateId,
       'taxRateName': cleanedTaxRateName,
+      'variants': _variantsToMap(variants),
+      'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
@@ -568,6 +667,8 @@ class FirestorePosRepository {
     required int taxRateBasisPoints,
     required String? taxRateId,
     required String taxRateName,
+    required List<MenuProductVariant> variants,
+    required List<String> modifierGroupIds,
   }) async {
     final cleanedName = name.trim();
     if (cleanedName.isEmpty || priceMinor < 0 || sectionIds.isEmpty) {
@@ -592,8 +693,205 @@ class FirestorePosRepository {
           'taxRateBasisPoints': taxRateBasisPoints,
           'taxRateId': taxRateId,
           'taxRateName': cleanedTaxRateName,
+          'variants': _variantsToMap(variants),
+          'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
           'updatedAt': FieldValue.serverTimestamp(),
         });
+  }
+
+  List<Map<String, Object?>> _variantsToMap(List<MenuProductVariant> variants) {
+    final cleaned = <Map<String, Object?>>[];
+    final ids = <String>{};
+    final names = <String>{};
+    for (final variant in variants) {
+      final id = variant.id.trim();
+      final name = variant.name.trim();
+      final nameKey = name.toLowerCase();
+      if (id.isEmpty ||
+          name.isEmpty ||
+          !ids.add(id) ||
+          !names.add(nameKey) ||
+          variant.priceDeltaMinor < -100000000 ||
+          variant.priceDeltaMinor > 100000000) {
+        throw ArgumentError(
+          'Each variant needs a unique name and valid price adjustment.',
+        );
+      }
+      cleaned.add({
+        'id': id,
+        'name': name,
+        'priceDeltaMinor': variant.priceDeltaMinor,
+        'isAvailable': variant.isAvailable,
+      });
+    }
+    if (cleaned.length > 30) {
+      throw ArgumentError('A product can have at most 30 variants.');
+    }
+    return cleaned;
+  }
+
+  List<String> _cleanModifierGroupIds(List<String> ids) {
+    final cleaned = <String>{};
+    for (final raw in ids) {
+      final id = raw.trim();
+      if (id.isEmpty || id.length > 180) {
+        throw ArgumentError('A modifier group identifier is invalid.');
+      }
+      cleaned.add(id);
+    }
+    if (cleaned.length > 20) {
+      throw ArgumentError('A product can have at most 20 modifier groups.');
+    }
+    return cleaned.toList(growable: false);
+  }
+
+  Stream<List<MenuModifierGroup>> watchModifierGroups(VenueScope scope) {
+    return _firestore
+        .collection('tenants/${scope.tenantId}/modifierGroups')
+        .orderBy('name')
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .where(
+                (document) =>
+                    (document.data()['venueId'] as String?) == scope.venueId,
+              )
+              .map((document) {
+                final data = document.data();
+                final options = _modifierOptions(data['options']);
+                final minimum =
+                    (data['minimumSelections'] as num?)?.toInt() ?? 0;
+                final maximum =
+                    (data['maximumSelections'] as num?)?.toInt() ??
+                    options.length;
+                final safeMinimum = minimum.clamp(0, options.length).toInt();
+                return MenuModifierGroup(
+                  id: document.id,
+                  name: data['name'] as String? ?? 'Unnamed options',
+                  minimumSelections: safeMinimum,
+                  maximumSelections: maximum
+                      .clamp(safeMinimum, options.length)
+                      .toInt(),
+                  options: options,
+                  isAvailable: data['isAvailable'] as bool? ?? true,
+                );
+              })
+              .toList(growable: false),
+        );
+  }
+
+  Future<void> createModifierGroup({
+    required VenueScope scope,
+    required String name,
+    required int minimumSelections,
+    required int maximumSelections,
+    required List<MenuModifierOption> options,
+  }) async {
+    final data = _validatedModifierGroupData(
+      name: name,
+      minimumSelections: minimumSelections,
+      maximumSelections: maximumSelections,
+      options: options,
+    );
+    await _firestore
+        .collection('tenants/${scope.tenantId}/modifierGroups')
+        .add({
+          'venueId': scope.venueId,
+          ...data,
+          'isAvailable': true,
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+  }
+
+  Future<void> updateModifierGroup({
+    required VenueScope scope,
+    required String groupId,
+    required String name,
+    required int minimumSelections,
+    required int maximumSelections,
+    required List<MenuModifierOption> options,
+  }) async {
+    final data = _validatedModifierGroupData(
+      name: name,
+      minimumSelections: minimumSelections,
+      maximumSelections: maximumSelections,
+      options: options,
+    );
+    await _firestore
+        .doc('tenants/${scope.tenantId}/modifierGroups/$groupId')
+        .update({...data, 'updatedAt': FieldValue.serverTimestamp()});
+  }
+
+  Future<void> deleteModifierGroup({
+    required VenueScope scope,
+    required MenuModifierGroup group,
+  }) async {
+    final products = await _firestore
+        .collection('tenants/${scope.tenantId}/products')
+        .get();
+    final inUse = products.docs.any((product) {
+      final data = product.data();
+      return data['venueId'] == scope.venueId &&
+          _stringIds(data['modifierGroupIds']).contains(group.id);
+    });
+    if (inUse) {
+      throw StateError(
+        'Remove ${group.name} from its products before deleting it.',
+      );
+    }
+    await _firestore
+        .doc('tenants/${scope.tenantId}/modifierGroups/${group.id}')
+        .delete();
+  }
+
+  Map<String, Object?> _validatedModifierGroupData({
+    required String name,
+    required int minimumSelections,
+    required int maximumSelections,
+    required List<MenuModifierOption> options,
+  }) {
+    final cleanedName = name.trim();
+    if (cleanedName.isEmpty || cleanedName.length > 80) {
+      throw ArgumentError.value(name, 'name');
+    }
+    if (options.isEmpty || options.length > 50) {
+      throw ArgumentError('Add between one and 50 options.');
+    }
+    if (minimumSelections < 0 ||
+        maximumSelections < minimumSelections ||
+        maximumSelections > options.length) {
+      throw ArgumentError('Selection limits do not match the option list.');
+    }
+    final ids = <String>{};
+    final names = <String>{};
+    final optionData = <Map<String, Object?>>[];
+    for (final option in options) {
+      final id = option.id.trim();
+      final optionName = option.name.trim();
+      if (id.isEmpty ||
+          optionName.isEmpty ||
+          !ids.add(id) ||
+          !names.add(optionName.toLowerCase()) ||
+          option.priceDeltaMinor < -100000000 ||
+          option.priceDeltaMinor > 100000000) {
+        throw ArgumentError(
+          'Each option needs a unique name and valid price adjustment.',
+        );
+      }
+      optionData.add({
+        'id': id,
+        'name': optionName,
+        'priceDeltaMinor': option.priceDeltaMinor,
+        'isAvailable': option.isAvailable,
+      });
+    }
+    return {
+      'name': cleanedName,
+      'minimumSelections': minimumSelections,
+      'maximumSelections': maximumSelections,
+      'options': optionData,
+    };
   }
 
   void _validateTaxRateBasisPoints(int value) {
@@ -828,7 +1126,17 @@ class FirestorePosRepository {
                 if (item is Map) {
                   final quantity = item['quantity'];
                   final name = item['name'] ?? item['productName'];
-                  return '${quantity ?? 1} × ${name ?? 'Item'}';
+                  final details = item['details'] is List
+                      ? (item['details'] as List)
+                            .whereType<String>()
+                            .map((detail) => detail.trim())
+                            .where((detail) => detail.isNotEmpty)
+                            .toList(growable: false)
+                      : const <String>[];
+                  final suffix = details.isEmpty
+                      ? ''
+                      : '\n  ${details.join('\n  ')}';
+                  return '${quantity ?? 1} × ${name ?? 'Item'}$suffix';
                 }
                 return 'Item';
               })

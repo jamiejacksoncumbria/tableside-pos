@@ -32,6 +32,14 @@ final openNamedTabsProvider = StreamProvider<List<OpenNamedTab>>((ref) {
   return ref.watch(firestorePosRepositoryProvider).watchOpenNamedTabs(scope);
 });
 
+final menuModifierGroupsProvider = StreamProvider<List<MenuModifierGroup>>((
+  ref,
+) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  if (scope == null) return Stream.value(const <MenuModifierGroup>[]);
+  return ref.watch(firestorePosRepositoryProvider).watchModifierGroups(scope);
+});
+
 /// Each open table tile listens to its own server-owned order. This keeps the
 /// amount shown on the floor view current across all signed-in devices without
 /// duplicating a financial total onto the table record.
@@ -154,12 +162,19 @@ class ActiveOrderController extends Notifier<PosOrder> {
     );
   }
 
-  Future<void> addProduct(MenuProduct product) async {
+  Future<void> addProduct(
+    MenuProduct product, {
+    ProductConfigurationSelection selection =
+        const ProductConfigurationSelection(),
+  }) async {
     if (!state.canAddProduct(product)) {
       AppLogger.info(
         'Stock prevented adding ${product.id} to active order ${state.id}.',
       );
       return;
+    }
+    if (product.priceMinor + selection.priceDeltaMinor < 0) {
+      throw StateError('The selected options produce an invalid item price.');
     }
     final scope = ref.read(activeVenueScopeProvider);
     if (scope != null) _requireValidLiveOrderLocation();
@@ -171,13 +186,18 @@ class ActiveOrderController extends Notifier<PosOrder> {
       productId: product.id,
       productName: product.name,
       quantity: 1,
-      unitPriceMinor: product.priceMinor,
+      unitPriceMinor: product.priceMinor + selection.priceDeltaMinor,
       productionArea: product.productionArea,
       trackStock: product.trackStock,
       stockPerSale: product.stockPerSale,
       taxRateBasisPoints: product.taxRateBasisPoints,
       taxRateId: product.taxRateId,
       taxRateName: product.taxRateName,
+      variantId: selection.variant?.id,
+      variantName: selection.variant?.name,
+      variantPriceDeltaMinor: selection.variant?.priceDeltaMinor ?? 0,
+      modifiers: selection.modifiers,
+      itemNote: selection.itemNote.trim(),
     );
     state = state.copyWith(
       lines: [...state.lines, line],

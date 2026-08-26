@@ -118,6 +118,14 @@ service cloud.firestore {
         allow write: if isPlatformAdmin() || managesTenant(tenantId);
       }
 
+      // Reusable cooking, spice, drink and similar option groups. Products
+      // store only the group ids; authoritative order pricing/validation is
+      // performed by the server function when a line is added or released.
+      match /modifierGroups/{groupId} {
+        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow write: if isPlatformAdmin() || managesTenant(tenantId);
+      }
+
       // Venue tax-rate setup is manager-owned. Product selections copy the
       // named rate and fixed basis-point value; the order function snapshots
       // that value again when a sale is made.

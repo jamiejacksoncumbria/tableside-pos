@@ -88,6 +88,49 @@ void main() {
     expect(result.ticketsPrinted, 0);
     expect(printer.productionTickets, isEmpty);
   });
+
+  test('includes configured choices and notes on production tickets', () async {
+    final printer = _FakePrinter(
+      routing: const BluetoothProductionRouting(
+        enabled: true,
+        productionAreas: {'kitchen'},
+      ),
+    );
+    await BluetoothProductionPrintService(printer: printer).printNewLines(
+      scope: scope,
+      order: order,
+      lines: const [
+        OrderLine(
+          id: 'steak-line',
+          productId: 'steak',
+          productName: 'Ribeye steak',
+          quantity: 1,
+          unitPriceMinor: 1800,
+          productionArea: ProductionArea.kitchen,
+          trackStock: false,
+          variantName: 'Large',
+          modifiers: [
+            OrderModifierSelection(
+              groupId: 'cooking',
+              groupName: 'Cooking',
+              optionId: 'medium-rare',
+              optionName: 'Medium rare',
+            ),
+          ],
+          itemNote: 'No butter',
+        ),
+      ],
+      restaurantName: 'Spice Garden',
+      tableLabel: '2',
+      createdByName: 'Jamie',
+    );
+
+    expect(printer.productionTickets.single.lines.single.details, [
+      'Large',
+      'Cooking: Medium rare',
+      'NOTE: No butter',
+    ]);
+  });
 }
 
 class _FakePrinter implements BluetoothReceiptPrinter {

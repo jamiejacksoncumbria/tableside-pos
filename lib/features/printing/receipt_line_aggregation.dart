@@ -19,8 +19,22 @@ List<ReceiptLineSummary> aggregateReceiptPayloadLines(Object? rawLines) {
   for (final raw in rawLines.whereType<Map>()) {
     final quantity = (raw['quantity'] as num?)?.toInt() ?? 1;
     if (quantity <= 0) continue;
-    final name =
+    final baseName =
         raw['productName'] as String? ?? raw['name'] as String? ?? 'Item';
+    final details = <String>[
+      if ((raw['variantName'] as String?)?.trim().isNotEmpty == true)
+        (raw['variantName'] as String).trim(),
+      if (raw['modifierSelections'] is List)
+        for (final group
+            in (raw['modifierSelections'] as List).whereType<Map>())
+          '${group['groupName'] ?? 'Option'}: ${group['optionName'] ?? ''}'
+              .trim(),
+      if ((raw['itemNote'] as String?)?.trim().isNotEmpty == true)
+        'Note: ${(raw['itemNote'] as String).trim()}',
+    ].where((detail) => detail.isNotEmpty).toList(growable: false);
+    final name = details.isEmpty
+        ? baseName
+        : '$baseName\n${details.join('\n')}';
     final lineTotalMinor = (raw['lineTotalMinor'] as num?)?.toInt() ?? 0;
     // Do not merge lines which have a different sale price or tax snapshot.
     // It keeps a historic receipt auditable even when a product is sold at a

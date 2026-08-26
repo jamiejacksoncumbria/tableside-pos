@@ -194,11 +194,13 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       if (ticket.createdByName?.trim().isNotEmpty == true)
         ...generator.text('By: ${ticket.createdByName!.trim()}'),
       ...generator.hr(),
-      for (final line in ticket.lines)
+      for (final line in ticket.lines) ...[
         ...generator.text(
           '${line.quantity} x ${line.name}',
           styles: const PosStyles(bold: true),
         ),
+        for (final detail in line.details) ...generator.text('  - $detail'),
+      ],
       ...generator.hr(),
       ...generator.text(
         ticket.isReprint
