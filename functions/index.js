@@ -1544,7 +1544,7 @@ function validClosePayment(value, index, baseCurrencyCode) {
     : validExchangeRate(payment.exchangeRateToBase);
   const tenderedBaseAmountMinor = convertedBaseMinor({
     amountMinor: tenderedAmountMinor,
-    tenderCurrencyCode,
+    tenderCurrencyCode: tenderedCurrencyCode,
     baseCurrencyCode,
     exchangeRate,
   });
