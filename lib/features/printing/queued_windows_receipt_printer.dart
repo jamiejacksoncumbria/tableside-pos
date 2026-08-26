@@ -37,7 +37,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     );
   }
 
-  List<String> _productionLines(
+  List<WindowsPrintLine> _productionLines(
     Map<String, Object?> payload,
     String idempotencyKey,
   ) {
@@ -71,23 +71,35 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         : 'Order location unavailable';
     final reference = payload['reference'] as String? ?? idempotencyKey;
     return [
-      payload['restaurantName'] as String? ?? 'TABLESIDE POS',
-      payload['isAddition'] == true ? '$area ADDITION' : area,
-      '',
-      location,
-      'Order #$reference',
+      WindowsPrintLine(
+        payload['restaurantName'] as String? ?? 'TABLESIDE POS',
+        alignment: WindowsPrintTextAlignment.center,
+        bold: true,
+        fontSizeDelta: 2,
+      ),
+      WindowsPrintLine(
+        payload['isAddition'] == true ? '$area ADDITION' : area,
+        alignment: WindowsPrintTextAlignment.center,
+        bold: true,
+      ),
+      const WindowsPrintLine(''),
+      WindowsPrintLine(location),
+      WindowsPrintLine('Order #$reference'),
       if ((payload['createdByName'] as String?)?.trim().isNotEmpty == true)
-        'By: ${(payload['createdByName'] as String).trim()}',
-      '',
-      ...items,
-      '',
-      payload['isAddition'] == true
-          ? 'ADDITION TO EXISTING ORDER'
-          : 'NEW ORDER',
+        WindowsPrintLine('By: ${(payload['createdByName'] as String).trim()}'),
+      const WindowsPrintLine(''),
+      ...items.map((item) => WindowsPrintLine(item)),
+      const WindowsPrintLine(''),
+      WindowsPrintLine(
+        payload['isAddition'] == true
+            ? 'ADDITION TO EXISTING ORDER'
+            : 'NEW ORDER',
+        bold: true,
+      ),
     ];
   }
 
-  List<String> _receiptLines(
+  List<WindowsPrintLine> _receiptLines(
     Map<String, Object?> payload,
     String idempotencyKey,
     ReceiptPaperWidth paperWidth,
@@ -95,13 +107,10 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     final currency = payload['currencyCode'] as String? ?? 'GBP';
     final summaries = aggregateReceiptPayloadLines(payload['lines']);
     final itemLines = summaries
-        .expand(
-          (line) => _receiptItemLines(
-            name: line.name,
-            quantity: line.quantity,
-            lineTotalMinor: line.lineTotalMinor,
-            currencyCode: currency,
-            paperWidth: paperWidth,
+        .map(
+          (line) => WindowsPrintLine(
+            '${line.name} x${line.quantity}',
+            rightText: _money(line.lineTotalMinor, currency),
           ),
         )
         .toList(growable: false);
@@ -112,41 +121,100 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     }
     final tabName = payload['tabName'] as String?;
     final tableLabel = payload['tableLabel'] as String?;
-    final lines = <String>[
-      payload['restaurantName'] as String? ?? 'TABLESIDE POS',
-      'PAID RECEIPT',
-      '',
-      'Receipt: ${payload['receiptNumber'] as String? ?? idempotencyKey}',
-      if (tabName?.trim().isNotEmpty == true) 'Tab: ${tabName!.trim()}',
+    final business = payload['business'] is Map
+        ? Map<Object?, Object?>.from(payload['business'] as Map)
+        : const <Object?, Object?>{};
+    final businessName =
+        business['name'] as String? ??
+        payload['restaurantName'] as String? ??
+        'TABLESIDE POS';
+    final addressLines = (business['address'] as String? ?? '')
+        .split(RegExp(r'\r?\n'))
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty);
+    final phoneNumbers = business['phoneNumbers'] is List
+        ? (business['phoneNumbers'] as List).whereType<String>()
+        : const Iterable<String>.empty();
+    final lines = <WindowsPrintLine>[
+      WindowsPrintLine(
+        businessName,
+        alignment: WindowsPrintTextAlignment.center,
+        bold: true,
+        fontSizeDelta: 2,
+      ),
+      ...addressLines.map(
+        (line) => WindowsPrintLine(
+          line,
+          alignment: WindowsPrintTextAlignment.center,
+          bold: true,
+          fontSizeDelta: 1,
+        ),
+      ),
+      ...phoneNumbers
+          .take(3)
+          .map(
+            (number) => WindowsPrintLine(
+              'Tel: ${number.trim()}',
+              alignment: WindowsPrintTextAlignment.center,
+              bold: true,
+              fontSizeDelta: 1,
+            ),
+          ),
+      const WindowsPrintLine(
+        'PAID RECEIPT',
+        alignment: WindowsPrintTextAlignment.center,
+        bold: true,
+      ),
+      const WindowsPrintLine(''),
+      WindowsPrintLine(
+        'Receipt: ${payload['receiptNumber'] as String? ?? idempotencyKey}',
+      ),
+      if (tabName?.trim().isNotEmpty == true)
+        WindowsPrintLine('Tab: ${tabName!.trim()}'),
       if (tabName?.trim().isNotEmpty != true &&
           tableLabel?.trim().isNotEmpty == true)
-        'Table: ${tableLabel!.trim()}',
+        WindowsPrintLine('Table: ${tableLabel!.trim()}'),
       if ((payload['businessDate'] as String?)?.trim().isNotEmpty == true)
-        'Business date: ${payload['businessDate'] as String}',
-      '',
+        WindowsPrintLine('Business date: ${payload['businessDate'] as String}'),
+      const WindowsPrintLine(''),
       ...itemLines,
-      '',
+      const WindowsPrintLine(''),
     ];
     final net = (payload['netTotalMinor'] as num?)?.toInt();
-    if (net != null) lines.add('Net: ${_money(net, currency)}');
+    if (net != null) {
+      lines.add(WindowsPrintLine('Net', rightText: _money(net, currency)));
+    }
     lines.add(
-      'Tax included: ${_money((payload['taxTotalMinor'] as num?)?.toInt() ?? 0, currency)}',
+      WindowsPrintLine(
+        'Tax included',
+        rightText: _money(
+          (payload['taxTotalMinor'] as num?)?.toInt() ?? 0,
+          currency,
+        ),
+      ),
     );
     final rawTax = payload['taxBreakdown'];
     if (rawTax is List) {
       for (final value in rawTax.whereType<Map>()) {
         final name = value['taxRateName'] as String? ?? 'Tax';
         final amount = (value['taxMinor'] as num?)?.toInt() ?? 0;
-        lines.add('$name: ${_money(amount, currency)}');
+        lines.add(WindowsPrintLine(name, rightText: _money(amount, currency)));
       }
     }
     lines.add(
-      'TOTAL: ${_money((payload['totalMinor'] as num?)?.toInt() ?? 0, currency)}',
+      WindowsPrintLine(
+        'TOTAL',
+        rightText: _money(
+          (payload['totalMinor'] as num?)?.toInt() ?? 0,
+          currency,
+        ),
+        bold: true,
+      ),
     );
     final rawPayments = payload['payments'];
     if (rawPayments is List && rawPayments.isNotEmpty) {
-      lines.add('');
-      lines.add('Payments');
+      lines.add(const WindowsPrintLine(''));
+      lines.add(const WindowsPrintLine('Payments', bold: true));
       for (final value in rawPayments.whereType<Map>()) {
         final amount =
             (value['tenderedAmountMinor'] as num?)?.toInt() ??
@@ -155,9 +223,22 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         final paymentCurrency =
             value['tenderedCurrencyCode'] as String? ?? currency;
         lines.add(
-          '${value['method'] as String? ?? 'Payment'}: ${_money(amount, paymentCurrency)}',
+          WindowsPrintLine(
+            value['method'] as String? ?? 'Payment',
+            rightText: _money(amount, paymentCurrency),
+          ),
         );
       }
+    }
+    final footer = business['receiptFooter'] as String? ?? '';
+    if (footer.trim().isNotEmpty) {
+      lines.add(const WindowsPrintLine(''));
+      lines.add(
+        WindowsPrintLine(
+          footer.trim(),
+          alignment: WindowsPrintTextAlignment.center,
+        ),
+      );
     }
     return lines;
   }
@@ -166,19 +247,5 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     final sign = amountMinor < 0 ? '-' : '';
     final absolute = amountMinor.abs();
     return '$sign$currencyCode ${absolute ~/ 100}.${(absolute % 100).toString().padLeft(2, '0')}';
-  }
-
-  List<String> _receiptItemLines({
-    required String name,
-    required int quantity,
-    required int lineTotalMinor,
-    required String currencyCode,
-    required ReceiptPaperWidth paperWidth,
-  }) {
-    final description = '$name x$quantity';
-    final amount = _money(lineTotalMinor, currencyCode);
-    return paperWidth.isNarrow
-        ? [description, amount]
-        : ['$description    $amount'];
   }
 }

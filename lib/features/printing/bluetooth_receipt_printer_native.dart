@@ -225,6 +225,12 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     final printedAt =
         '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} '
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final businessAddressLines = _nonEmptyLines(receipt.businessAddress);
+    final businessPhoneNumbers = receipt.businessPhoneNumbers
+        .map((number) => number.trim())
+        .where((number) => number.isNotEmpty)
+        .take(3)
+        .toList(growable: false);
     final bytes = <int>[
       ...generator.reset(),
       ...generator.text(
@@ -238,6 +244,16 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           width: PosTextSize.size2,
         ),
       ),
+      for (final line in businessAddressLines)
+        ...generator.text(
+          line,
+          styles: const PosStyles(align: PosAlign.center, bold: true),
+        ),
+      for (final number in businessPhoneNumbers)
+        ...generator.text(
+          'Tel: $number',
+          styles: const PosStyles(align: PosAlign.center, bold: true),
+        ),
       ...generator.text(
         'PAID RECEIPT',
         styles: const PosStyles(align: PosAlign.center, bold: true),
@@ -249,17 +265,13 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         ...generator.text('Business date: ${receipt.businessDate}'),
       ...generator.text('Printed: $printedAt'),
       ...generator.hr(),
-      for (final line in receipt.lines) ...[
-        ...generator.text('${line.name} x${line.quantity}'),
-        ...generator.row([
-          PosColumn(text: '', width: 5),
-          PosColumn(
-            text: _money(line.lineTotalMinor, receipt.currencyCode),
-            width: 7,
-            styles: const PosStyles(align: PosAlign.right),
-          ),
-        ]),
-      ],
+      for (final line in receipt.lines)
+        ..._receiptItemBytes(
+          generator: generator,
+          paperWidth: device.paperWidth,
+          description: '${line.name} x${line.quantity}',
+          price: _money(line.lineTotalMinor, receipt.currencyCode),
+        ),
       ...generator.hr(),
       if (receipt.netTotalMinor != null)
         ...generator.row([
@@ -298,6 +310,13 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
             '${payment.method}: ${_money(payment.amountMinor, payment.currencyCode)}',
           ),
       ],
+      if (receipt.receiptFooter.trim().isNotEmpty) ...[
+        ...generator.hr(),
+        ...generator.text(
+          receipt.receiptFooter.trim(),
+          styles: const PosStyles(align: PosAlign.center),
+        ),
+      ],
       ...generator.feed(4),
     ];
     await _write(
@@ -321,6 +340,74 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     return percentage == percentage.roundToDouble()
         ? '${percentage.toStringAsFixed(0)}%'
         : '${percentage.toStringAsFixed(2)}%';
+  }
+
+  List<String> _nonEmptyLines(String value) => value
+      .split(RegExp(r'\r?\n'))
+      .map((line) => line.trim())
+      .where((line) => line.isNotEmpty)
+      .toList(growable: false);
+
+  List<int> _receiptItemBytes({
+    required Generator generator,
+    required ReceiptPaperWidth paperWidth,
+    required String description,
+    required String price,
+  }) {
+    final nameColumnWidth = paperWidth.isNarrow ? 7 : 8;
+    final priceColumnWidth = 12 - nameColumnWidth;
+    final maximumNameCharacters = paperWidth.isNarrow ? 18 : 30;
+    final wrappedDescription = _wrapReceiptText(
+      description,
+      maximumNameCharacters,
+    );
+    final bytes = <int>[];
+    for (final line in wrappedDescription.take(wrappedDescription.length - 1)) {
+      bytes.addAll(generator.text(line));
+    }
+    bytes.addAll(
+      generator.row([
+        PosColumn(text: wrappedDescription.last, width: nameColumnWidth),
+        PosColumn(
+          text: price,
+          width: priceColumnWidth,
+          styles: const PosStyles(align: PosAlign.right),
+        ),
+      ]),
+    );
+    return bytes;
+  }
+
+  List<String> _wrapReceiptText(String value, int maximumCharacters) {
+    final words = value.trim().split(RegExp(r'\s+'));
+    final lines = <String>[];
+    var current = '';
+    for (final word in words) {
+      if (word.length > maximumCharacters) {
+        if (current.isNotEmpty) {
+          lines.add(current);
+          current = '';
+        }
+        for (var index = 0; index < word.length; index += maximumCharacters) {
+          lines.add(
+            word.substring(
+              index,
+              (index + maximumCharacters).clamp(0, word.length),
+            ),
+          );
+        }
+        continue;
+      }
+      final candidate = current.isEmpty ? word : '$current $word';
+      if (candidate.length > maximumCharacters && current.isNotEmpty) {
+        lines.add(current);
+        current = word;
+      } else {
+        current = candidate;
+      }
+    }
+    if (current.isNotEmpty) lines.add(current);
+    return lines.isEmpty ? const ['Item'] : lines;
   }
 
   String _routingPreferenceKey(String venueRoutingKey) =>

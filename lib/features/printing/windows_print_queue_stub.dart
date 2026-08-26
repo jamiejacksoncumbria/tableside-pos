@@ -33,7 +33,7 @@ class _UnsupportedWindowsPrintQueue implements WindowsPrintQueue {
   Future<void> printText({
     required WindowsPrintQueueDevice printer,
     required String title,
-    required List<String> lines,
+    required List<WindowsPrintLine> lines,
   }) {
     throw const WindowsPrintQueueException(
       'Windows printer support is not available in this app target.',

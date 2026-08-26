@@ -103,7 +103,7 @@ class _NativeWindowsPrintQueue implements WindowsPrintQueue {
   Future<void> printText({
     required WindowsPrintQueueDevice printer,
     required String title,
-    required List<String> lines,
+    required List<WindowsPrintLine> lines,
   }) async {
     _ensureSupported();
     if (lines.isEmpty) {
@@ -113,7 +113,7 @@ class _NativeWindowsPrintQueue implements WindowsPrintQueue {
       await _channel.invokeMethod<void>('printText', {
         'printerName': printer.name,
         'title': title,
-        'lines': lines,
+        'lines': lines.map((line) => line.toMessage()).toList(growable: false),
         'paperWidthMm': printer.paperWidth.millimetres,
       });
     } on MissingPluginException {
@@ -136,16 +136,28 @@ class _NativeWindowsPrintQueue implements WindowsPrintQueue {
       printer: printer,
       title: 'TableSide printer test',
       lines: [
-        restaurantName.trim().isEmpty ? 'TABLESIDE POS' : restaurantName,
-        '',
-        'WINDOWS PRINTER TEST',
-        'Queue: ${printer.name}',
+        WindowsPrintLine(
+          restaurantName.trim().isEmpty ? 'TABLESIDE POS' : restaurantName,
+          alignment: WindowsPrintTextAlignment.center,
+          bold: true,
+          fontSizeDelta: 2,
+        ),
+        const WindowsPrintLine(''),
+        const WindowsPrintLine(
+          'WINDOWS PRINTER TEST',
+          alignment: WindowsPrintTextAlignment.center,
+          bold: true,
+        ),
+        WindowsPrintLine('Queue: ${printer.name}'),
         if (printer.driverName.trim().isNotEmpty)
-          'Driver: ${printer.driverName}',
-        if (printer.portName.trim().isNotEmpty) 'Port: ${printer.portName}',
-        'TableSide layout: ${printer.paperWidth.label}',
-        '',
-        'If this ticket is clear and complete, this Windows printer is ready for TableSide routes.',
+          WindowsPrintLine('Driver: ${printer.driverName}'),
+        if (printer.portName.trim().isNotEmpty)
+          WindowsPrintLine('Port: ${printer.portName}'),
+        WindowsPrintLine('TableSide layout: ${printer.paperWidth.label}'),
+        const WindowsPrintLine(''),
+        const WindowsPrintLine(
+          'If this ticket is clear and complete, this Windows printer is ready for TableSide routes.',
+        ),
       ],
     );
   }

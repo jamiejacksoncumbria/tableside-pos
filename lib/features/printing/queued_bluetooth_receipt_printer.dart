@@ -116,11 +116,22 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
               )
               .toList(growable: false)
         : const <BluetoothReceiptTaxBreakdown>[];
+    final business = payload['business'] is Map
+        ? Map<Object?, Object?>.from(payload['business'] as Map)
+        : const <Object?, Object?>{};
+    final phoneNumbers = business['phoneNumbers'] is List
+        ? (business['phoneNumbers'] as List).whereType<String>().toList(
+            growable: false,
+          )
+        : const <String>[];
     await _printer.printBillReceipt(
       device: selectedDevice,
       receipt: BluetoothBillReceipt(
         receiptNumber: payload['receiptNumber'] as String? ?? idempotencyKey,
-        restaurantName: payload['restaurantName'] as String? ?? 'TABLESIDE POS',
+        restaurantName:
+            business['name'] as String? ??
+            payload['restaurantName'] as String? ??
+            'TABLESIDE POS',
         currencyCode: payload['currencyCode'] as String? ?? 'GBP',
         tableLabel: payload['tableLabel'] as String?,
         tabName: payload['tabName'] as String?,
@@ -131,6 +142,9 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
         lines: lines,
         payments: payments,
         taxBreakdown: taxBreakdown,
+        businessAddress: business['address'] as String? ?? '',
+        businessPhoneNumbers: phoneNumbers,
+        receiptFooter: business['receiptFooter'] as String? ?? '',
       ),
     );
   }

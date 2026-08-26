@@ -36,6 +36,34 @@ class WindowsPrintQueueException implements Exception {
   String toString() => message;
 }
 
+enum WindowsPrintTextAlignment { left, center, right }
+
+/// One formatted line on a Windows-driver receipt. [rightText] keeps a price
+/// flush right while the item description wraps within the remaining width.
+class WindowsPrintLine {
+  const WindowsPrintLine(
+    this.text, {
+    this.rightText,
+    this.alignment = WindowsPrintTextAlignment.left,
+    this.bold = false,
+    this.fontSizeDelta = 0,
+  });
+
+  final String text;
+  final String? rightText;
+  final WindowsPrintTextAlignment alignment;
+  final bool bold;
+  final int fontSizeDelta;
+
+  Map<String, Object?> toMessage() => {
+    'text': text,
+    if (rightText != null) 'rightText': rightText,
+    'alignment': alignment.name,
+    'bold': bold,
+    'fontSizeDelta': fontSizeDelta,
+  };
+}
+
 /// Small platform boundary for printing through Windows' installed print
 /// queues. This deliberately uses the vendor driver instead of talking to USB
 /// directly, so USB and TCP/IP printers share the same reliable setup path.
@@ -53,7 +81,7 @@ abstract interface class WindowsPrintQueue {
   Future<void> printText({
     required WindowsPrintQueueDevice printer,
     required String title,
-    required List<String> lines,
+    required List<WindowsPrintLine> lines,
   });
 
   Future<void> printTestTicket({

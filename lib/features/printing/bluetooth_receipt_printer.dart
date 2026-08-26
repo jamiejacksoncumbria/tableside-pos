@@ -85,6 +85,9 @@ class BluetoothBillReceipt {
     this.tableLabel,
     this.tabName,
     this.businessDate,
+    this.businessAddress = '',
+    this.businessPhoneNumbers = const <String>[],
+    this.receiptFooter = '',
     this.payments = const <BluetoothReceiptPayment>[],
     this.taxBreakdown = const <BluetoothReceiptTaxBreakdown>[],
   });
@@ -99,6 +102,9 @@ class BluetoothBillReceipt {
   final String? tableLabel;
   final String? tabName;
   final String? businessDate;
+  final String businessAddress;
+  final List<String> businessPhoneNumbers;
+  final String receiptFooter;
   final List<BluetoothReceiptPayment> payments;
   final List<BluetoothReceiptTaxBreakdown> taxBreakdown;
 }

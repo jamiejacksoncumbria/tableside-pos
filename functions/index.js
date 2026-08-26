@@ -106,6 +106,33 @@ function optionalText(data, name, maxLength = 500) {
   return value.trim();
 }
 
+function receiptBusinessSnapshot(tenantData) {
+  const clean = (value, maximum) => typeof value === "string"
+    ? value.trim().slice(0, maximum)
+    : "";
+  const phoneNumbers = [];
+  if (Array.isArray(tenantData?.phoneNumbers)) {
+    for (const value of tenantData.phoneNumbers) {
+      const phone = clean(value, 60);
+      if (phone.length > 0 && !phoneNumbers.includes(phone)) {
+        phoneNumbers.push(phone);
+      }
+      if (phoneNumbers.length === 3) break;
+    }
+  }
+  const legacyPhone = clean(tenantData?.phone, 60);
+  if (legacyPhone.length > 0 && !phoneNumbers.includes(legacyPhone) &&
+      phoneNumbers.length < 3) {
+    phoneNumbers.push(legacyPhone);
+  }
+  return {
+    name: clean(tenantData?.displayName, 120) || "TABLESIDE POS",
+    address: clean(tenantData?.address, 400),
+    phoneNumbers,
+    receiptFooter: clean(tenantData?.receiptFooter, 300),
+  };
+}
+
 function requiredPositiveInteger(value, name, maximum = 1000) {
   if (!Number.isInteger(value) || value <= 0 || value > maximum) {
     throw new HttpsError("invalid-argument", `${name} must be a positive whole number.`);
@@ -1740,6 +1767,7 @@ async function closeOrderFor(caller, rawData) {
     );
     const netTotalMinor = totalMinor - taxTotalMinor;
     const currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
+    const receiptBusiness = receiptBusinessSnapshot(tenant.data());
     const payments = rawPayments.map((payment, index) =>
       validClosePayment(payment, index, currencyCode));
     if (payments.some((payment) => payment.tenderedCurrencyCode !== currencyCode) &&
@@ -1815,6 +1843,7 @@ async function closeOrderFor(caller, rawData) {
       receiptPrintRequested: printReceipt,
       receiptPrintQueued,
       receiptPrintJobId,
+      receiptBusiness,
       lines: receiptLines,
       openedAt: orderData.openedAt ?? null,
       closedAt: FieldValue.serverTimestamp(),
@@ -1837,9 +1866,8 @@ async function closeOrderFor(caller, rawData) {
         payload: {
           type: "receipt",
           receiptNumber,
-          restaurantName: typeof tenant.data().displayName === "string"
-            ? tenant.data().displayName
-            : "TABLESIDE POS",
+          restaurantName: receiptBusiness.name,
+          business: receiptBusiness,
           currencyCode,
           businessDate,
           tableLabel: typeof orderData.tableLabel === "string"
