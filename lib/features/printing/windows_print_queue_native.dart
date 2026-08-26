@@ -49,6 +49,10 @@ class _NativeWindowsPrintQueue implements WindowsPrintQueue {
           }
           return left.name.toLowerCase().compareTo(right.name.toLowerCase());
         });
+    } on MissingPluginException {
+      throw const WindowsPrintQueueException(
+        'Windows printer support was added after this app started. Stop the Windows app completely and run it again so the native printer component is loaded.',
+      );
     } on PlatformException catch (error) {
       throw WindowsPrintQueueException(
         error.message ?? 'Windows could not list installed printers.',
@@ -99,6 +103,10 @@ class _NativeWindowsPrintQueue implements WindowsPrintQueue {
         'title': title,
         'lines': lines,
       });
+    } on MissingPluginException {
+      throw const WindowsPrintQueueException(
+        'Windows printer support was added after this app started. Stop the Windows app completely and run it again so the native printer component is loaded.',
+      );
     } on PlatformException catch (error) {
       throw WindowsPrintQueueException(
         error.message ?? 'Windows could not send the receipt to the printer.',

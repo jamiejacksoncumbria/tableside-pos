@@ -115,3 +115,12 @@ class QueuedNativePrintWorker {
     }
   }
 }
+
+/// Retained for hot-reload compatibility with older running sessions. New code
+/// uses [QueuedNativePrintWorker], but keeping the previous class name lets a
+/// pre-upgrade State object complete its timer callback until the required
+/// full Windows restart installs the native printer channel.
+@Deprecated('Use QueuedNativePrintWorker instead.')
+class QueuedBluetoothPrintWorker extends QueuedNativePrintWorker {
+  QueuedBluetoothPrintWorker({super.queue, super.devices, super.identity});
+}
