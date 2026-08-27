@@ -18,9 +18,9 @@ final venuePrintJobsProvider = StreamProvider.autoDispose
       ).watchVenueJobs(tenantId: scope.tenantId, venueId: scope.venueId),
     );
 
-/// The venue's live print-recovery desk. It deliberately retains failed job
-/// data rather than offering deletion: staff can diagnose the reason and an
-/// owner/manager can issue an audited, clearly marked reprint.
+/// The venue's live print-recovery desk. Jobs are never physically deleted:
+/// managers can clear unprinted work with a reason, leaving an audit record
+/// while safely stopping any linked fallback copy.
 class PrintQueueRecoveryPage extends ConsumerStatefulWidget {
   const PrintQueueRecoveryPage({super.key});
 
@@ -33,7 +33,9 @@ class _PrintQueueRecoveryPageState
     extends ConsumerState<PrintQueueRecoveryPage> {
   final ProductionCommandRepository _commands = ProductionCommandRepository();
   final Set<String> _retryingJobIds = <String>{};
+  final Set<String> _cancellingJobIds = <String>{};
   bool _retryingAll = false;
+  bool _clearingAll = false;
 
   Future<void> _retryJob(PrintJob job, {bool skipConfirmation = false}) async {
     final scope = ref.read(activeVenueScopeProvider);
@@ -149,11 +151,171 @@ class _PrintQueueRecoveryPageState
     );
   }
 
+  Future<String?> _confirmCancellation({
+    required int count,
+    PrintJob? job,
+  }) async {
+    final reasonController = TextEditingController(text: 'No longer required.');
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(
+            count == 1 ? 'Clear print job?' : 'Clear $count print jobs?',
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  job == null
+                      ? 'Only queued or failed jobs will be cleared. Jobs already printing stay protected. Any safe linked fallback job will also be stopped.'
+                      : '${_ticketLabel(job)} will be removed from the active queue. It will not be deleted: the ticket, reason and manager action remain in the audit history.',
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: reasonController,
+                  maxLength: 300,
+                  minLines: 2,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'Reason',
+                    hintText: 'Why should this ticket not print?',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Keep jobs'),
+            ),
+            FilledButton.icon(
+              onPressed: () {
+                final reason = reasonController.text.trim();
+                if (reason.isEmpty) return;
+                Navigator.of(context).pop(reason);
+              },
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.error,
+                foregroundColor: Theme.of(context).colorScheme.onError,
+              ),
+              icon: const Icon(Icons.remove_circle_outline_rounded),
+              label: Text(count == 1 ? 'Clear job' : 'Clear jobs'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      reasonController.dispose();
+    }
+  }
+
+  Future<void> _cancelJob(PrintJob job, {String? reason}) async {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null ||
+        _clearingAll ||
+        _cancellingJobIds.contains(job.id) ||
+        !_canCancel(job)) {
+      return;
+    }
+    final cancellationReason =
+        reason ?? await _confirmCancellation(count: 1, job: job);
+    if (cancellationReason == null || !mounted) return;
+
+    setState(() => _cancellingJobIds.add(job.id));
+    try {
+      final cancelledJobIds = await _commands.cancelPrintJob(
+        scope: scope,
+        jobId: job.id,
+        reason: cancellationReason,
+      );
+      AppLogger.info(
+        'Cleared print queue job ${job.id}; linked jobs: ${cancelledJobIds.join(', ')}.',
+      );
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Print job cleared',
+        message: cancelledJobIds.length > 1
+            ? '${_ticketLabel(job)} and its linked fallback copy were removed from the active queue.'
+            : '${_ticketLabel(job)} was removed from the active queue.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Clear print queue job', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not clear print job',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _cancellingJobIds.remove(job.id));
+    }
+  }
+
+  Future<void> _clearAll(List<PrintJob> jobs) async {
+    if (_clearingAll) return;
+    final scope = ref.read(activeVenueScopeProvider);
+    final eligible = jobs.where(_canCancel).toList(growable: false);
+    if (scope == null || eligible.isEmpty) return;
+    final reason = await _confirmCancellation(count: eligible.length);
+    if (reason == null || !mounted) return;
+
+    setState(() => _clearingAll = true);
+    final clearedJobIds = <String>{};
+    var cleared = 0;
+    var failed = 0;
+    try {
+      for (final job in eligible) {
+        if (clearedJobIds.contains(job.id)) continue;
+        try {
+          final cancelled = await _commands.cancelPrintJob(
+            scope: scope,
+            jobId: job.id,
+            reason: reason,
+          );
+          clearedJobIds.addAll(cancelled);
+          cleared += 1;
+          AppLogger.info('Batch-cleared print job ${job.id}.');
+        } on Object catch (error, stackTrace) {
+          failed += 1;
+          AppLogger.error('Clear print queue job in batch', error, stackTrace);
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _clearingAll = false);
+    }
+    if (!mounted) return;
+    showAppNotification(
+      context,
+      ref: ref,
+      title: failed == 0 ? 'Print queue cleared' : 'Queue partly cleared',
+      message: failed == 0
+          ? '$cleared job${cleared == 1 ? '' : 's'} ${cleared == 1 ? 'was' : 'were'} removed from the active queue.'
+          : '$cleared job${cleared == 1 ? '' : 's'} ${cleared == 1 ? 'was' : 'were'} cleared; $failed still need${failed == 1 ? 's' : ''} attention.',
+      level: failed == 0
+          ? AppNotificationLevel.success
+          : AppNotificationLevel.warning,
+    );
+  }
+
   bool _canRetry(PrintJob job) =>
       job.status == PrintJobStatus.failed &&
       job.fallbackDeliveryStatus != 'printed' &&
       (job.fallbackFromJobId?.isNotEmpty == true ||
           job.fallbackDeviceId?.isNotEmpty != true);
+
+  bool _canCancel(PrintJob job) =>
+      job.status == PrintJobStatus.queued ||
+      job.status == PrintJobStatus.failed;
 
   @override
   Widget build(BuildContext context) {
@@ -182,7 +344,7 @@ class _PrintQueueRecoveryPageState
                   return const <TenantMembership>[];
                 },
               );
-    final canManageReprints = memberships.any(
+    final canManagePrintQueue = memberships.any(
       (membership) =>
           membership.tenantId == scope.tenantId &&
           (membership.roles.contains('owner') ||
@@ -214,6 +376,10 @@ class _PrintQueueRecoveryPageState
                   .toList(growable: false)
                 ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
           final eligible = failed.where(_canRetry).toList(growable: false);
+          final cancellable = allJobs.where(_canCancel).toList(growable: false);
+          final queuedCount = waiting
+              .where((job) => job.status == PrintJobStatus.queued)
+              .length;
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
@@ -227,18 +393,20 @@ class _PrintQueueRecoveryPageState
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        failed.isEmpty
+                        failed.isNotEmpty
+                            ? '${failed.length} failed print job${failed.length == 1 ? '' : 's'}'
+                            : waiting.isEmpty
                             ? 'All print jobs are clear'
-                            : '${failed.length} failed print job${failed.length == 1 ? '' : 's'}',
+                            : '$queuedCount ticket${queuedCount == 1 ? '' : 's'} waiting to print',
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                       const SizedBox(height: 6),
                       Text(
-                        canManageReprints
-                            ? 'Reprints return only to the original active route and are clearly marked REPRINT.'
-                            : 'Managers and owners can reprint failed tickets. You can still see the live printer status here.',
+                        canManagePrintQueue
+                            ? 'Reprints use the original route and say REPRINT. You can also clear only jobs that have not started printing.'
+                            : 'Managers and owners can reprint or clear unprinted tickets. You can still see the live printer status here.',
                       ),
-                      if (canManageReprints && eligible.isNotEmpty) ...[
+                      if (canManagePrintQueue && eligible.isNotEmpty) ...[
                         const SizedBox(height: 12),
                         FilledButton.icon(
                           onPressed: _retryingAll
@@ -260,6 +428,28 @@ class _PrintQueueRecoveryPageState
                           ),
                         ),
                       ],
+                      if (canManagePrintQueue && cancellable.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        OutlinedButton.icon(
+                          onPressed: _clearingAll
+                              ? null
+                              : () => _clearAll(cancellable),
+                          icon: _clearingAll
+                              ? const SizedBox(
+                                  height: 18,
+                                  width: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.remove_circle_outline_rounded),
+                          label: Text(
+                            _clearingAll
+                                ? 'Clearing queue…'
+                                : 'Clear ${cancellable.length} unprinted job${cancellable.length == 1 ? '' : 's'}',
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -274,10 +464,13 @@ class _PrintQueueRecoveryPageState
                 for (final job in failed)
                   _FailedPrintJobCard(
                     job: job,
-                    canManageReprints: canManageReprints,
+                    canManagePrintQueue: canManagePrintQueue,
                     retrying: _retryingJobIds.contains(job.id),
+                    cancelling: _cancellingJobIds.contains(job.id),
                     canRetry: _canRetry(job),
+                    canCancel: _canCancel(job),
                     onRetry: () => _retryJob(job),
+                    onCancel: () => _cancelJob(job),
                   ),
               ],
               if (waiting.isNotEmpty) ...[
@@ -287,7 +480,14 @@ class _PrintQueueRecoveryPageState
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 8),
-                for (final job in waiting) _PendingPrintJobCard(job: job),
+                for (final job in waiting)
+                  _PendingPrintJobCard(
+                    job: job,
+                    canManagePrintQueue: canManagePrintQueue,
+                    cancelling: _cancellingJobIds.contains(job.id),
+                    canCancel: _canCancel(job),
+                    onCancel: () => _cancelJob(job),
+                  ),
               ],
               if (failed.isEmpty && waiting.isEmpty)
                 const Padding(
@@ -323,17 +523,23 @@ class _PrintQueueRecoveryPageState
 class _FailedPrintJobCard extends StatelessWidget {
   const _FailedPrintJobCard({
     required this.job,
-    required this.canManageReprints,
+    required this.canManagePrintQueue,
     required this.retrying,
+    required this.cancelling,
     required this.canRetry,
+    required this.canCancel,
     required this.onRetry,
+    required this.onCancel,
   });
 
   final PrintJob job;
-  final bool canManageReprints;
+  final bool canManagePrintQueue;
   final bool retrying;
+  final bool cancelling;
   final bool canRetry;
+  final bool canCancel;
   final VoidCallback onRetry;
+  final VoidCallback onCancel;
 
   @override
   Widget build(BuildContext context) {
@@ -379,25 +585,48 @@ class _FailedPrintJobCard extends StatelessWidget {
                   : 'Reason: The printer did not confirm this job.',
             ),
             const SizedBox(height: 12),
-            if (!canManageReprints)
-              const Text('Ask a manager or owner to reprint this ticket.')
-            else if (fallbackDelivered)
-              const Text('Delivered by fallback printer.')
-            else if (delegatedToFallback)
-              const Text('Waiting for or using the fallback printer.')
+            if (!canManagePrintQueue)
+              const Text(
+                'Ask a manager or owner to reprint or clear this ticket.',
+              )
             else
               Align(
                 alignment: Alignment.centerRight,
-                child: FilledButton.icon(
-                  onPressed: retrying || !canRetry ? null : onRetry,
-                  icon: retrying
-                      ? const SizedBox(
-                          height: 18,
-                          width: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.print_rounded),
-                  label: Text(retrying ? 'Queueing…' : 'Reprint ticket'),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.end,
+                  children: [
+                    if (!fallbackDelivered && !delegatedToFallback)
+                      FilledButton.icon(
+                        onPressed: retrying || cancelling || !canRetry
+                            ? null
+                            : onRetry,
+                        icon: retrying
+                            ? const SizedBox(
+                                height: 18,
+                                width: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.print_rounded),
+                        label: Text(retrying ? 'Queueing…' : 'Reprint ticket'),
+                      ),
+                    OutlinedButton.icon(
+                      onPressed: retrying || cancelling || !canCancel
+                          ? null
+                          : onCancel,
+                      icon: cancelling
+                          ? const SizedBox(
+                              height: 18,
+                              width: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.remove_circle_outline_rounded),
+                      label: Text(cancelling ? 'Clearing…' : 'Clear job'),
+                    ),
+                  ],
                 ),
               ),
           ],
@@ -408,9 +637,19 @@ class _FailedPrintJobCard extends StatelessWidget {
 }
 
 class _PendingPrintJobCard extends StatelessWidget {
-  const _PendingPrintJobCard({required this.job});
+  const _PendingPrintJobCard({
+    required this.job,
+    required this.canManagePrintQueue,
+    required this.cancelling,
+    required this.canCancel,
+    required this.onCancel,
+  });
 
   final PrintJob job;
+  final bool canManagePrintQueue;
+  final bool cancelling;
+  final bool canCancel;
+  final VoidCallback onCancel;
 
   @override
   Widget build(BuildContext context) => Card(
@@ -427,9 +666,19 @@ class _PendingPrintJobCard extends StatelessWidget {
         '${_jobLocation(job)}\nQueued ${_dateTime(job.createdAt)}',
       ),
       isThreeLine: true,
-      trailing: Text(
-        job.status == PrintJobStatus.claimed ? 'Printing' : 'Waiting',
-      ),
+      trailing: canManagePrintQueue && canCancel
+          ? TextButton.icon(
+              onPressed: cancelling ? null : onCancel,
+              icon: cancelling
+                  ? const SizedBox(
+                      height: 18,
+                      width: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.remove_circle_outline_rounded),
+              label: Text(cancelling ? 'Clearing…' : 'Clear'),
+            )
+          : Text(job.status == PrintJobStatus.claimed ? 'Printing' : 'Waiting'),
     ),
   );
 }

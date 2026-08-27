@@ -2536,6 +2536,109 @@ async function retryFailedPrintJobFor(caller, rawData) {
   });
 }
 
+// Queue jobs are retained for audit, never physically deleted. A manager can
+// cancel work that has not been claimed by a printer yet; a claimed job may
+// already be travelling to the printer and must instead be allowed to finish
+// or fail visibly. Linked fallback work is cancelled together, so a manager
+// never clears the original row only to have the same ticket print elsewhere.
+async function cancelPrintJobFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const jobId = requiredText(data, "jobId", 240);
+  const reason = requiredText(data, "reason", 300);
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError(
+      "permission-denied",
+      "Only a manager can clear a print job.",
+    );
+  }
+
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const jobRef = tenantRef.collection("printJobs").doc(jobId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  return db.runTransaction(async (transaction) => {
+    const [venue, job] = await Promise.all([
+      transaction.get(venueRef),
+      transaction.get(jobRef),
+    ]);
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (!job.exists || job.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "This print job does not belong to the selected venue.");
+    }
+    const jobData = job.data();
+    if (jobData.status !== "queued" && jobData.status !== "failed") {
+      throw new HttpsError(
+        "failed-precondition",
+        "Only queued or failed jobs can be cleared. A job already printing cannot be cancelled safely.",
+      );
+    }
+
+    const primaryJobId = typeof jobData.fallbackFromJobId === "string" &&
+        jobData.fallbackFromJobId.length > 0
+      ? jobData.fallbackFromJobId
+      : null;
+    const linkedJobRef = primaryJobId == null
+      ? tenantRef.collection("printJobs").doc(`${jobId}_fallback`)
+      : tenantRef.collection("printJobs").doc(primaryJobId);
+    const linkedJob = await transaction.get(linkedJobRef);
+    if (linkedJob.exists && linkedJob.data().venueId !== venueId) {
+      throw new HttpsError("failed-precondition", "The linked printer job belongs to another venue.");
+    }
+    if (linkedJob.exists && linkedJob.data().status === "claimed") {
+      throw new HttpsError(
+        "failed-precondition",
+        "A linked fallback job is already printing. Let it finish before clearing this ticket.",
+      );
+    }
+
+    const cancellation = {
+      status: "cancelled",
+      cancellationReason: reason,
+      cancelledAt: FieldValue.serverTimestamp(),
+      cancelledByActor: actor,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+      nextAttemptAt: FieldValue.delete(),
+      claimedByDeviceId: FieldValue.delete(),
+      claimedAt: FieldValue.delete(),
+    };
+    const cancelledJobIds = [jobId];
+    transaction.update(jobRef, cancellation);
+
+    if (linkedJob.exists) {
+      const linkedData = linkedJob.data();
+      if (linkedData.status === "queued" || linkedData.status === "failed") {
+        transaction.update(linkedJobRef, {
+          ...cancellation,
+          cancellationReason: `Linked job cleared: ${reason}`,
+          cancellationLinkedJobId: jobId,
+        });
+        cancelledJobIds.push(linkedJob.id);
+      }
+    }
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "cancelPrintJob",
+      venueId,
+      jobId,
+      cancelledJobIds,
+      orderId: typeof jobData.orderId === "string" ? jobData.orderId : null,
+      ticketId: typeof jobData.ticketId === "string" ? jobData.ticketId : null,
+      productionArea: typeof jobData.productionArea === "string"
+        ? jobData.productionArea
+        : null,
+      reason,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {jobId, cancelledJobIds};
+  });
+}
+
 // A ticket is deliberately queued to one device at a time.  The original
 // device gets three attempts (managed by the client worker); only then does
 // this server-side trigger create a separate, idempotent fallback job.  That
@@ -2599,48 +2702,56 @@ export const enqueueFallbackPrintJob = onDocumentUpdated(
     }
 
     const fallbackJobId = `${jobId}_fallback`;
+    const primaryRef = tenantRef.collection("printJobs").doc(jobId);
     const fallbackRef = tenantRef.collection("printJobs").doc(fallbackJobId);
     const auditRef = tenantRef.collection("auditEvents").doc(`printFallback_${jobId}`);
-    const batch = db.batch();
-    batch.create(fallbackRef, {
-      venueId,
-      targetDeviceId: fallbackDeviceId,
-      fallbackDeviceId: null,
-      orderId: after.orderId,
-      ticketId: after.ticketId,
-      productionArea,
-      status: "queued",
-      attempts: 0,
-      idempotencyKey: fallbackJobId,
-      payload: after.payload ?? {},
-      fallbackFromJobId: jobId,
-      createdAt: FieldValue.serverTimestamp(),
+    const created = await db.runTransaction(async (transaction) => {
+      // The manager's clear command updates this primary in a transaction too.
+      // Reading it here means a concurrent clear retries this work and prevents
+      // an old failure event from reintroducing a cancelled ticket.
+      const [currentPrimary, existingFallback] = await Promise.all([
+        transaction.get(primaryRef),
+        transaction.get(fallbackRef),
+      ]);
+      if (!currentPrimary.exists || currentPrimary.data().status !== "failed") {
+        return false;
+      }
+      if (existingFallback.exists) return false;
+      transaction.create(fallbackRef, {
+        venueId,
+        targetDeviceId: fallbackDeviceId,
+        fallbackDeviceId: null,
+        orderId: after.orderId,
+        ticketId: after.ticketId,
+        productionArea,
+        status: "queued",
+        attempts: 0,
+        idempotencyKey: fallbackJobId,
+        payload: after.payload ?? {},
+        fallbackFromJobId: jobId,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+      transaction.create(auditRef, {
+        action: "queueFallbackPrintJob",
+        venueId,
+        orderId: after.orderId ?? null,
+        ticketId: after.ticketId ?? null,
+        productionArea,
+        failedJobId: jobId,
+        fallbackJobId,
+        primaryDeviceId,
+        fallbackDeviceId,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+      return true;
     });
-    batch.create(auditRef, {
-      action: "queueFallbackPrintJob",
-      venueId,
-      orderId: after.orderId ?? null,
-      ticketId: after.ticketId ?? null,
-      productionArea,
-      failedJobId: jobId,
-      fallbackJobId,
-      primaryDeviceId,
-      fallbackDeviceId,
-      createdAt: FieldValue.serverTimestamp(),
-    });
-    try {
-      await batch.commit();
+    if (created) {
       console.info("Queued fallback print job", {
         tenantId,
         jobId,
         fallbackJobId,
         fallbackDeviceId,
       });
-    } catch (error) {
-      // Firestore triggers are at-least-once. The deterministic document IDs
-      // mean an already-created fallback is a successful previous delivery.
-      if (error?.code === 6 || error?.code === "already-exists") return;
-      throw error;
     }
   },
 );
@@ -3192,6 +3303,8 @@ async function invokePosAction(action, caller, data) {
       return updateProductionTicketFor(caller, data);
     case "retryFailedPrintJob":
       return retryFailedPrintJobFor(caller, data);
+    case "cancelPrintJob":
+      return cancelPrintJobFor(caller, data);
     default:
       throw new HttpsError("not-found", "That POS action does not exist.");
   }
@@ -3372,6 +3485,10 @@ export const splitOrder = onCall((request) =>
   splitOrderFor(callerFromCall(request), request.data));
 export const updateProductionTicket = onCall((request) =>
   updateProductionTicketFor(callerFromCall(request), request.data));
+export const retryFailedPrintJob = onCall((request) =>
+  retryFailedPrintJobFor(callerFromCall(request), request.data));
+export const cancelPrintJob = onCall((request) =>
+  cancelPrintJobFor(callerFromCall(request), request.data));
 export const openNamedTab = onCall((request) =>
   openNamedTabFor(callerFromCall(request), request.data));
 export const addOrderDraftLine = onCall((request) =>

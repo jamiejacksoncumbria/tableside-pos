@@ -303,6 +303,23 @@ class ProductionCommandRepository {
     });
   }
 
+  /// Removes a queued/failed ticket from active printing without deleting its
+  /// record. The server also clears any safe linked fallback copy and audits
+  /// the manager-provided reason.
+  Future<List<String>> cancelPrintJob({
+    required VenueScope scope,
+    required String jobId,
+    required String reason,
+  }) async {
+    final response = await _call('cancelPrintJob', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'jobId': jobId,
+      'reason': reason,
+    });
+    return _stringList(response['cancelledJobIds']);
+  }
+
   Future<ExchangeRateQuote> lookupExchangeRate({
     required VenueScope scope,
     required String tenderCurrencyCode,

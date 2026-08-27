@@ -93,7 +93,7 @@ class OrderFlowOrder {
       );
 }
 
-enum PrintJobStatus { queued, claimed, printed, failed }
+enum PrintJobStatus { queued, claimed, printed, failed, cancelled }
 
 class TenantProfile {
   const TenantProfile({
