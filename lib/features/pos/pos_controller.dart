@@ -32,6 +32,17 @@ final openNamedTabsProvider = StreamProvider<List<OpenNamedTab>>((ref) {
   return ref.watch(firestorePosRepositoryProvider).watchOpenNamedTabs(scope);
 });
 
+final openSplitOrdersProvider = StreamProvider.autoDispose
+    .family<List<PosOrder>, String>((ref, sourceOrderId) {
+      final scope = ref.watch(activeVenueScopeProvider);
+      if (scope == null || sourceOrderId.trim().isEmpty) {
+        return Stream.value(const <PosOrder>[]);
+      }
+      return ref
+          .watch(firestorePosRepositoryProvider)
+          .watchOpenSplitOrders(scope: scope, sourceOrderId: sourceOrderId);
+    });
+
 final menuModifierGroupsProvider = StreamProvider<List<MenuModifierGroup>>((
   ref,
 ) {
@@ -479,9 +490,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
     return printResult;
   }
 
-  /// Records verified payment allocations and releases the table/tab only
-  /// after the server has atomically created its immutable bill. Split bills
-  /// will later create child allocations; they must never bypass this command.
+  /// Records verified payment allocations after the server atomically creates
+  /// an immutable bill. Closing a split returns to its still-open parent,
+  /// whereas closing a main bill releases its table or named-tab reservation.
   Future<BillCloseResult> closeBill({
     required List<BillPaymentInput> payments,
     required bool printReceipt,
@@ -512,6 +523,22 @@ class ActiveOrderController extends Notifier<PosOrder> {
           printReceipt: printReceipt,
         );
     _pendingDraftQuantities.clear();
+    if (order.isSplitOrder && order.splitFromOrderId != null) {
+      final parentOrder = await ref
+          .read(firestorePosRepositoryProvider)
+          .fetchOrder(scope: scope, orderId: order.splitFromOrderId!);
+      if (parentOrder != null) {
+        state = parentOrder;
+        _selectPersistedOrder(parentOrder.id);
+        AppLogger.info(
+          'Closed split bill ${order.id}; returned to parent ${parentOrder.id}.',
+        );
+        return result;
+      }
+      AppLogger.info(
+        'Warning: closed split bill ${order.id}, but its parent ${order.splitFromOrderId} was not available to reopen.',
+      );
+    }
     _selectPersistedOrder(null);
     ref.read(selectedTableProvider.notifier).select('');
     final now = DateTime.now();
@@ -528,6 +555,87 @@ class ActiveOrderController extends Notifier<PosOrder> {
       'Bill ${result.billId} closed for order ${order.id}, receipt ${result.receiptNumber}.',
     );
     return result;
+  }
+
+  /// Creates an independent payment-only child bill from already-sent table
+  /// items. The server reduces the parent order atomically, so a second till
+  /// cannot sell/pay the same portion at the same time.
+  Future<OrderSplitResult> splitBillByItems(
+    Map<String, int> lineQuantities,
+  ) async {
+    if (_isSavingDraft) {
+      throw StateError('The basket is still saving. Please wait a moment.');
+    }
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) {
+      throw StateError('Sign in to split a live restaurant bill.');
+    }
+    _requireValidLiveOrderLocation();
+    final sourceOrder = state;
+    if (sourceOrder.isSplitOrder) {
+      throw StateError(
+        'Return to the main table bill before creating another split.',
+      );
+    }
+    if (sourceOrder.lines.isEmpty ||
+        sourceOrder.lines.any((line) => !line.isSentToProduction)) {
+      throw StateError('Send every item before creating a separate bill.');
+    }
+    final selectedLines = <OrderLine>[];
+    var selectedQuantity = 0;
+    var sourceQuantity = 0;
+    for (final line in sourceOrder.lines) {
+      final quantity = lineQuantities[line.id] ?? 0;
+      if (quantity < 0 || quantity > line.quantity) {
+        throw StateError('A selected item quantity is no longer valid.');
+      }
+      sourceQuantity += line.quantity;
+      if (quantity > 0) {
+        selectedQuantity += quantity;
+        selectedLines.add(line.copyWith(quantity: quantity));
+      }
+    }
+    if (selectedQuantity == 0 || selectedQuantity >= sourceQuantity) {
+      throw StateError(
+        'Move at least one item, but leave at least one item on the main bill.',
+      );
+    }
+    final sourceToken = sourceOrder.id.length > 130
+        ? sourceOrder.id.substring(sourceOrder.id.length - 130)
+        : sourceOrder.id;
+    final splitOrderId =
+        'split-$sourceToken-${DateTime.now().microsecondsSinceEpoch}';
+    final result = await ref
+        .read(productionCommandRepositoryProvider)
+        .splitOrder(
+          scope: scope,
+          order: sourceOrder,
+          splitOrderId: splitOrderId,
+          lineQuantities: lineQuantities,
+        );
+    _selectPersistedOrder(result.splitOrderId);
+    state = sourceOrder.copyWith(
+      id: result.splitOrderId,
+      status: OrderStatus.sent,
+      lines: selectedLines,
+      splitFromOrderId: sourceOrder.id,
+    );
+    AppLogger.info(
+      'Created split bill ${result.splitOrderId} from ${sourceOrder.id} for ${result.splitTotalMinor}.',
+    );
+    return result;
+  }
+
+  void openSplitOrder(PosOrder order) {
+    if (!order.isSplitOrder) return;
+    if (_hasUnsavedLocalDraft()) {
+      throw StateError(
+        'Send or remove the current draft before changing bills.',
+      );
+    }
+    state = order;
+    _selectPersistedOrder(order.id);
+    AppLogger.info('Opened unpaid split bill ${order.id}.');
   }
 
   void _requireValidLiveOrderLocation() {

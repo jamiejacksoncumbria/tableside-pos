@@ -45,6 +45,23 @@ class BillCloseResult {
   final bool receiptPrintQueued;
 }
 
+/// The server-created child order resulting from an item/quantity bill split.
+/// Its total is derived from the already-sent source-line snapshots, not from
+/// a client-supplied price.
+class OrderSplitResult {
+  const OrderSplitResult({
+    required this.splitOrderId,
+    required this.splitTotalMinor,
+    this.remainingTotalMinor,
+    required this.alreadySplit,
+  });
+
+  final String splitOrderId;
+  final int splitTotalMinor;
+  final int? remainingTotalMinor;
+  final bool alreadySplit;
+}
+
 /// An indicative exchange-rate quote fetched by the server from the official
 /// CBRT daily bulletin. The manager still reviews it before adding cash
 /// tender, and the exact chosen rate remains on the final bill.
@@ -350,6 +367,44 @@ class ProductionCommandRepository {
       alreadyClosed: response['alreadyClosed'] == true,
       receiptPrintRequested: response['receiptPrintRequested'] == true,
       receiptPrintQueued: response['receiptPrintQueued'] == true,
+    );
+  }
+
+  Future<OrderSplitResult> splitOrder({
+    required VenueScope scope,
+    required PosOrder order,
+    required String splitOrderId,
+    required Map<String, int> lineQuantities,
+  }) async {
+    final response = await _call('splitOrder', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'orderId': order.id,
+      'splitOrderId': splitOrderId,
+      'splitLines': lineQuantities.entries
+          .where((entry) => entry.value > 0)
+          .map(
+            (entry) => <String, Object?>{
+              'lineId': entry.key,
+              'quantity': entry.value,
+            },
+          )
+          .toList(growable: false),
+    });
+    final returnedOrderId = response['splitOrderId'];
+    final splitTotalMinor = response['splitTotalMinor'];
+    final remainingTotalMinor = response['remainingTotalMinor'];
+    if (returnedOrderId is! String ||
+        returnedOrderId.isEmpty ||
+        splitTotalMinor is! int ||
+        (remainingTotalMinor != null && remainingTotalMinor is! int)) {
+      throw StateError('The server did not return a valid split bill.');
+    }
+    return OrderSplitResult(
+      splitOrderId: returnedOrderId,
+      splitTotalMinor: splitTotalMinor,
+      remainingTotalMinor: remainingTotalMinor as int?,
+      alreadySplit: response['alreadySplit'] == true,
     );
   }
 

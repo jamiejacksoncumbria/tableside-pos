@@ -946,6 +946,19 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
   @override
   Widget build(BuildContext context) {
     final order = ref.watch(activeOrderProvider);
+    final splitOrdersValue = order.isSplitOrder
+        ? null
+        : ref.watch(openSplitOrdersProvider(order.id));
+    final openSplitOrders =
+        splitOrdersValue?.when(
+          data: (orders) => orders,
+          loading: () => const <PosOrder>[],
+          error: (error, stackTrace) {
+            AppLogger.error('Display open split bills', error, stackTrace);
+            return const <PosOrder>[];
+          },
+        ) ??
+        const <PosOrder>[];
     _showLatestLines(order);
     final hasUnsentLines = order.lines.any((line) => !line.isSentToProduction);
     final tableId = order.tableId ?? ref.watch(selectedTableProvider) ?? '';
@@ -991,6 +1004,70 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 context,
               ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
             ),
+            if (order.isSplitOrder)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'Separate bill ${order.splitSequence ?? ''}'.trim(),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.labelLarge?.copyWith(color: scheme.primary),
+                ),
+              ),
+            if (!order.isSplitOrder && openSplitOrders.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: scheme.secondaryContainer,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${openSplitOrders.length} unpaid separate bill${openSplitOrders.length == 1 ? '' : 's'}',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: [
+                        for (final splitOrder in openSplitOrders)
+                          ActionChip(
+                            avatar: const Icon(Icons.receipt_long_rounded),
+                            label: Text(
+                              'Bill ${splitOrder.splitSequence ?? ''} · ${formatMoney(splitOrder.totalMinor, currencyCode: widget.currencyCode)}',
+                            ),
+                            onPressed: () {
+                              try {
+                                ref
+                                    .read(activeOrderProvider.notifier)
+                                    .openSplitOrder(splitOrder);
+                              } on Object catch (error, stackTrace) {
+                                AppLogger.error(
+                                  'Open unpaid split bill',
+                                  error,
+                                  stackTrace,
+                                );
+                                showAppNotification(
+                                  context,
+                                  ref: ref,
+                                  title: 'Could not open split bill',
+                                  message: '$error',
+                                  level: AppNotificationLevel.error,
+                                );
+                              }
+                            },
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const Divider(height: 24),
             Expanded(
               child: order.lines.isEmpty
@@ -1106,7 +1183,17 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: () => _showSplitBillSheet(context),
+                    onPressed:
+                        order.isSplitOrder ||
+                            order.lines.isEmpty ||
+                            hasUnsentLines
+                        ? null
+                        : () => _showSplitBillSheet(
+                            context,
+                            ref: ref,
+                            order: order,
+                            currencyCode: widget.currencyCode,
+                          ),
                     icon: const Icon(Icons.call_split_rounded),
                     label: const Text('Split'),
                   ),
@@ -1114,7 +1201,10 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: order.lines.isEmpty || hasUnsentLines
+                    onPressed:
+                        order.lines.isEmpty ||
+                            hasUnsentLines ||
+                            (!order.isSplitOrder && openSplitOrders.isNotEmpty)
                         ? null
                         : () => _showCheckoutSheet(
                             context,
@@ -1959,39 +2049,224 @@ void _showNamedTabDialog(BuildContext context, WidgetRef ref) {
   ).whenComplete(nameController.dispose);
 }
 
-void _showSplitBillSheet(BuildContext context) {
-  showModalBottomSheet<void>(
-    context: context,
+Future<void> _showSplitBillSheet(
+  BuildContext pageContext, {
+  required WidgetRef ref,
+  required PosOrder order,
+  required String currencyCode,
+}) async {
+  final selectedQuantities = <String, int>{
+    for (final line in order.lines) line.id: 0,
+  };
+  var saving = false;
+  await showModalBottomSheet<void>(
+    context: pageContext,
     showDragHandle: true,
-    builder: (context) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 0, 24, 28),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Split this table',
-              style: Theme.of(context).textTheme.titleLarge,
+    isScrollControlled: true,
+    builder: (sheetContext) => StatefulBuilder(
+      builder: (context, setSheetState) {
+        final selectedQuantity = selectedQuantities.values.fold<int>(
+          0,
+          (total, quantity) => total + quantity,
+        );
+        final totalQuantity = order.lines.fold<int>(
+          0,
+          (total, line) => total + line.quantity,
+        );
+        final splitTotal = order.lines.fold<int>(0, (total, line) {
+          return total +
+              (selectedQuantities[line.id] ?? 0) * line.unitPriceMinor;
+        });
+        final canSplit =
+            !saving && selectedQuantity > 0 && selectedQuantity < totalQuantity;
+
+        return SafeArea(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              20,
+              0,
+              20,
+              20 + MediaQuery.viewInsetsOf(context).bottom,
             ),
-            const SizedBox(height: 8),
-            const Text(
-              'The final workflow will support split by item, cover, or custom amount.',
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 720),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Create a separate bill',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Move the items one guest will pay for. The food has already been sent, so this does not print another kitchen or bar ticket.',
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: saving
+                            ? null
+                            : () => setSheetState(() {
+                                var remainingToSelect = totalQuantity ~/ 2;
+                                for (final line in order.lines) {
+                                  final selected = remainingToSelect
+                                      .clamp(0, line.quantity)
+                                      .toInt();
+                                  selectedQuantities[line.id] = selected;
+                                  remainingToSelect -= selected;
+                                }
+                              }),
+                        icon: const Icon(Icons.balance_rounded),
+                        label: const Text('Select half of items'),
+                      ),
+                      TextButton(
+                        onPressed: saving
+                            ? null
+                            : () => setSheetState(() {
+                                for (final line in order.lines) {
+                                  selectedQuantities[line.id] = 0;
+                                }
+                              }),
+                        child: const Text('Clear'),
+                      ),
+                    ],
+                  ),
+                  const Divider(height: 22),
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: order.lines.length,
+                      separatorBuilder: (_, _) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final line = order.lines[index];
+                        final selected = selectedQuantities[line.id] ?? 0;
+                        return ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(line.productName),
+                          subtitle: Text(
+                            '${line.quantity} available · ${formatMoney(line.unitPriceMinor, currencyCode: currencyCode)} each',
+                          ),
+                          trailing: SizedBox(
+                            width: 140,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.end,
+                              children: [
+                                IconButton(
+                                  tooltip: 'Remove from split',
+                                  onPressed: saving || selected == 0
+                                      ? null
+                                      : () => setSheetState(
+                                          () => selectedQuantities[line.id] =
+                                              selected - 1,
+                                        ),
+                                  icon: const Icon(Icons.remove_circle_outline),
+                                ),
+                                SizedBox(
+                                  width: 24,
+                                  child: Text(
+                                    '$selected',
+                                    textAlign: TextAlign.center,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleSmall,
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Add to split',
+                                  onPressed: saving || selected >= line.quantity
+                                      ? null
+                                      : () => setSheetState(
+                                          () => selectedQuantities[line.id] =
+                                              selected + 1,
+                                        ),
+                                  icon: const Icon(Icons.add_circle_outline),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  const Divider(height: 22),
+                  Row(
+                    children: [
+                      const Text('Separate bill total'),
+                      const Spacer(),
+                      Text(
+                        formatMoney(splitTotal, currencyCode: currencyCode),
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: !canSplit
+                          ? null
+                          : () async {
+                              setSheetState(() => saving = true);
+                              try {
+                                final result = await ref
+                                    .read(activeOrderProvider.notifier)
+                                    .splitBillByItems(selectedQuantities);
+                                if (!sheetContext.mounted) return;
+                                Navigator.pop(sheetContext);
+                                if (!pageContext.mounted) return;
+                                showAppNotification(
+                                  pageContext,
+                                  ref: ref,
+                                  title: 'Separate bill ready',
+                                  message:
+                                      '${formatMoney(result.splitTotalMinor, currencyCode: currencyCode)} is ready for payment. The remaining items stay on the main table bill.',
+                                  level: AppNotificationLevel.success,
+                                );
+                              } on Object catch (error, stackTrace) {
+                                AppLogger.error(
+                                  'Create separate bill',
+                                  error,
+                                  stackTrace,
+                                );
+                                if (!sheetContext.mounted) return;
+                                setSheetState(() => saving = false);
+                                showAppNotification(
+                                  sheetContext,
+                                  ref: ref,
+                                  title: 'Could not split this bill',
+                                  message: '$error',
+                                  level: AppNotificationLevel.error,
+                                );
+                              }
+                            },
+                      icon: saving
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.call_split_rounded),
+                      label: Text(
+                        saving
+                            ? 'Creating separate bill…'
+                            : 'Create separate bill',
+                      ),
+                    ),
+                  ),
+                  if (selectedQuantity == totalQuantity) ...[
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Use Pay to settle every item on this table; a split must leave items on the main bill.',
+                    ),
+                  ],
+                ],
+              ),
             ),
-            const SizedBox(height: 18),
-            ListTile(
-              leading: const Icon(Icons.people_alt_outlined),
-              title: const Text('Split evenly by covers'),
-              onTap: () => Navigator.pop(context),
-            ),
-            ListTile(
-              leading: const Icon(Icons.checklist_rounded),
-              title: const Text('Assign individual items'),
-              onTap: () => Navigator.pop(context),
-            ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     ),
   );
 }

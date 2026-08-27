@@ -503,6 +503,9 @@ class PosOrder {
     this.tableId,
     this.tabName,
     this.isCustomerOriginated = false,
+    this.splitFromOrderId,
+    this.splitSequence,
+    this.openSplitOrderIds = const <String>[],
   });
 
   final String id;
@@ -515,6 +518,17 @@ class PosOrder {
   final OrderStatus status;
   final List<OrderLine> lines;
   final bool isCustomerOriginated;
+
+  /// A payment-only child created from a table/name bill. It inherits the
+  /// production-safe item snapshots but must never print those items again.
+  final String? splitFromOrderId;
+  final int? splitSequence;
+
+  /// The parent order cannot close until these separately payable child bills
+  /// have all been settled. This prevents a table being freed too early.
+  final List<String> openSplitOrderIds;
+
+  bool get isSplitOrder => splitFromOrderId?.trim().isNotEmpty == true;
 
   int get totalMinor => lines.fold(0, (total, line) => total + line.totalMinor);
 
@@ -555,6 +569,9 @@ class PosOrder {
     OrderStatus? status,
     List<OrderLine>? lines,
     bool? isCustomerOriginated,
+    String? splitFromOrderId,
+    int? splitSequence,
+    List<String>? openSplitOrderIds,
   }) {
     return PosOrder(
       id: id ?? this.id,
@@ -567,6 +584,9 @@ class PosOrder {
       status: status ?? this.status,
       lines: lines ?? this.lines,
       isCustomerOriginated: isCustomerOriginated ?? this.isCustomerOriginated,
+      splitFromOrderId: splitFromOrderId ?? this.splitFromOrderId,
+      splitSequence: splitSequence ?? this.splitSequence,
+      openSplitOrderIds: openSplitOrderIds ?? this.openSplitOrderIds,
     );
   }
 }

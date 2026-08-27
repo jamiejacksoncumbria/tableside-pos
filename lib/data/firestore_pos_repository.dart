@@ -510,7 +510,40 @@ class FirestorePosRepository {
       openedAt: date,
       status: status,
       lines: lines,
+      splitFromOrderId: data['splitFromOrderId'] as String?,
+      splitSequence: (data['splitSequence'] as num?)?.toInt(),
+      openSplitOrderIds: _stringIds(data['openSplitOrderIds']),
     );
+  }
+
+  /// Streams only active child bills for a parent table/name order. This lets
+  /// a waiter safely return to an unpaid split rather than losing it after
+  /// creating another guest's bill.
+  Stream<List<PosOrder>> watchOpenSplitOrders({
+    required VenueScope scope,
+    required String sourceOrderId,
+  }) {
+    if (sourceOrderId.trim().isEmpty) {
+      return Stream.value(const <PosOrder>[]);
+    }
+    return _firestore
+        .collection('tenants/${scope.tenantId}/orders')
+        .where('splitFromOrderId', isEqualTo: sourceOrderId)
+        .snapshots()
+        .map((snapshot) {
+          final orders = snapshot.docs
+              .map(
+                (document) => _orderFromSnapshot(scope: scope, order: document),
+              )
+              .whereType<PosOrder>()
+              .where((order) => order.venueId == scope.venueId)
+              .toList(growable: false);
+          orders.sort(
+            (left, right) =>
+                (left.splitSequence ?? 0).compareTo(right.splitSequence ?? 0),
+          );
+          return orders;
+        });
   }
 
   Future<void> createMenuSection({

@@ -155,6 +155,35 @@ function validProductionLine(value, index) {
   };
 }
 
+function validSplitLineAllocations(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Select between one and 100 order lines to split.",
+    );
+  }
+  const selectedLineIds = new Set();
+  return value.map((raw, index) => {
+    const allocation = requireObject(raw);
+    const lineId = requiredText(allocation, "lineId", 180);
+    if (selectedLineIds.has(lineId)) {
+      throw new HttpsError(
+        "invalid-argument",
+        `splitLines[${index}] repeats an order line.`,
+      );
+    }
+    selectedLineIds.add(lineId);
+    return {
+      lineId,
+      quantity: requiredPositiveInteger(
+        allocation.quantity,
+        `splitLines[${index}].quantity`,
+        100,
+      ),
+    };
+  });
+}
+
 function validModifierSelections(value, label) {
   if (value == null) return [];
   if (!Array.isArray(value) || value.length > 20) {
@@ -1843,10 +1872,9 @@ function billBusinessDate(timeZone, cutoffMinutes, now = new Date()) {
   return localDate.toISOString().slice(0, 10);
 }
 
-/// Closes an entire open order against verified payment allocations. Splits
-/// will create child bills later; this foundation keeps every tender allocation
-/// and its conversion inside one transaction so an accidental double tap
-/// cannot create two sales or free a table before its record exists.
+/// Closes an entire open order against verified payment allocations. A split
+/// child can close independently, while the parent table remains occupied
+/// until its own remaining amount is settled.
 async function closeOrderFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -1909,6 +1937,17 @@ async function closeOrderFor(caller, rawData) {
       throw new HttpsError("failed-precondition", "This order is no longer open at this venue.");
     }
     const orderData = order.data();
+    const openSplitOrderIds = Array.isArray(orderData.openSplitOrderIds)
+      ? orderData.openSplitOrderIds.filter(
+        (splitOrderId) => typeof splitOrderId === "string" && splitOrderId.length > 0,
+      )
+      : [];
+    if (openSplitOrderIds.length > 0) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Settle every separate split bill before closing the remaining table bill.",
+      );
+    }
     const rawLines = Array.isArray(orderData.lines) ? orderData.lines : [];
     if (rawLines.length === 0) {
       throw new HttpsError("failed-precondition", "An empty order cannot be closed.");
@@ -1949,6 +1988,17 @@ async function closeOrderFor(caller, rawData) {
         taxMinor,
         netMinor: lineTotalMinor - taxMinor,
         productionArea: typeof line.productionArea === "string" ? line.productionArea : "kitchen",
+        variantId: typeof line.variantId === "string" ? line.variantId : null,
+        variantName: typeof line.variantName === "string" ? line.variantName : null,
+        variantPriceDeltaMinor: Number.isSafeInteger(Number(line.variantPriceDeltaMinor))
+          ? Number(line.variantPriceDeltaMinor)
+          : 0,
+        modifierSelections: Array.isArray(line.modifierSelections)
+          ? line.modifierSelections
+              .filter((selection) => selection != null && typeof selection === "object")
+              .map((selection) => ({...selection}))
+          : [],
+        itemNote: typeof line.itemNote === "string" ? line.itemNote : "",
       };
     });
     const totalMinor = lines.reduce((total, line) => total + line.lineTotalMinor, 0);
@@ -2000,6 +2050,19 @@ async function closeOrderFor(caller, rawData) {
 
     const tableId = typeof orderData.tableId === "string" ? orderData.tableId : null;
     const tabName = typeof orderData.tabName === "string" ? orderData.tabName : null;
+    const splitFromOrderId = typeof orderData.splitFromOrderId === "string"
+      ? orderData.splitFromOrderId
+      : null;
+    const splitParentRef = splitFromOrderId == null
+      ? null
+      : tenantRef.collection("orders").doc(splitFromOrderId);
+    const splitParent = splitParentRef == null
+      ? null
+      : await transaction.get(splitParentRef);
+    if (splitParentRef != null && (!splitParent?.exists ||
+        splitParent.data().venueId !== venueId)) {
+      throw new HttpsError("failed-precondition", "The parent table bill is no longer available.");
+    }
     const tableRef = tableId == null ? null : tenantRef.collection("tables").doc(tableId);
     const tabRef = tabName == null ? null : openTabRegistryRef(tenantId, venueId, tabName);
     const [table, namedTab] = await Promise.all([
@@ -2043,6 +2106,10 @@ async function closeOrderFor(caller, rawData) {
       tableId,
       tableLabel: typeof orderData.tableLabel === "string" ? orderData.tableLabel : null,
       tabName,
+      splitFromOrderId,
+      splitSequence: Number.isInteger(orderData.splitSequence)
+        ? orderData.splitSequence
+        : null,
       currencyCode,
       businessDate,
       businessDayCutoffMinutes: cutoffMinutes,
@@ -2106,6 +2173,13 @@ async function closeOrderFor(caller, rawData) {
       updatedAt: FieldValue.serverTimestamp(),
       updatedByActor: actor,
     });
+    if (splitParentRef != null && splitParent?.exists) {
+      transaction.update(splitParentRef, {
+        openSplitOrderIds: FieldValue.arrayRemove(orderId),
+        updatedAt: FieldValue.serverTimestamp(),
+        updatedByActor: actor,
+      });
+    }
     if (tableRef != null && table?.exists && table.data().currentOrderId === orderId) {
       transaction.update(tableRef, {
         currentOrderId: FieldValue.delete(),
@@ -2128,6 +2202,7 @@ async function closeOrderFor(caller, rawData) {
       receiptPrintQueued,
       receiptPrintJobId,
       currencyCode,
+      splitFromOrderId,
       paymentMethods: payments.map((payment) => payment.method),
       actor,
       createdAt: FieldValue.serverTimestamp(),
@@ -2140,6 +2215,210 @@ async function closeOrderFor(caller, rawData) {
       receiptPrintRequested: printReceipt,
       receiptPrintQueued,
       alreadyClosed: false,
+    };
+  });
+}
+
+/// Moves selected already-sent items into a separate payable child order. No
+/// stock movement or production ticket is created here: the food/drinks have
+/// already been released. Only the financially safe sale allocation changes.
+async function splitOrderFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const sourceOrderId = requiredText(data, "orderId", 180);
+  const splitOrderId = requiredText(data, "splitOrderId", 180);
+  const allocations = validSplitLineAllocations(data.splitLines);
+  await requireTenantOperationalMember(caller, tenantId);
+
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const sourceOrderRef = tenantRef.collection("orders").doc(sourceOrderId);
+  const splitOrderRef = tenantRef.collection("orders").doc(splitOrderId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+
+  return db.runTransaction(async (transaction) => {
+    const [venue, sourceOrder, existingSplit] = await Promise.all([
+      transaction.get(venueRef),
+      transaction.get(sourceOrderRef),
+      transaction.get(splitOrderRef),
+    ]);
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (existingSplit.exists) {
+      const splitData = existingSplit.data();
+      if (splitData.venueId !== venueId || splitData.splitFromOrderId !== sourceOrderId) {
+        throw new HttpsError("failed-precondition", "This split reference belongs to a different order.");
+      }
+      const existingLines = Array.isArray(splitData.lines) ? splitData.lines : [];
+      const totalMinor = existingLines.reduce((total, line) => {
+        const quantity = Number(line?.quantity);
+        const unitPriceMinor = Number(line?.unitPriceMinor);
+        return Number.isInteger(quantity) && Number.isSafeInteger(unitPriceMinor)
+          ? total + quantity * unitPriceMinor
+          : total;
+      }, 0);
+      return {
+        splitOrderId,
+        splitTotalMinor: totalMinor,
+        remainingTotalMinor: null,
+        alreadySplit: true,
+      };
+    }
+    if (!sourceOrder.exists || sourceOrder.data().venueId !== venueId ||
+        sourceOrder.data().status === "closed" ||
+        typeof sourceOrder.data().splitFromOrderId === "string") {
+      throw new HttpsError(
+        "failed-precondition",
+        "Only an open main table or named tab can be split.",
+      );
+    }
+    const sourceData = sourceOrder.data();
+    const rawLines = Array.isArray(sourceData.lines) ? sourceData.lines : [];
+    if (rawLines.length === 0) {
+      throw new HttpsError("failed-precondition", "An empty order cannot be split.");
+    }
+    const sourceLines = rawLines.map((rawLine, index) => {
+      const line = requireObject(rawLine);
+      const id = requiredText(line, "id", 180);
+      const quantity = requiredPositiveInteger(
+        line.quantity,
+        `order line ${index + 1} quantity`,
+        100,
+      );
+      const unitPriceMinor = Number(line.unitPriceMinor);
+      if (!Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0 ||
+          line.isSentToProduction !== true) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Send every item before creating a separate bill.",
+        );
+      }
+      return {id, quantity, unitPriceMinor, raw: line};
+    });
+    const sourceLineById = new Map(sourceLines.map((line) => [line.id, line]));
+    const allocationByLineId = new Map(allocations.map((allocation) => [
+      allocation.lineId,
+      allocation.quantity,
+    ]));
+    for (const allocation of allocations) {
+      const sourceLine = sourceLineById.get(allocation.lineId);
+      if (sourceLine == null || allocation.quantity > sourceLine.quantity) {
+        throw new HttpsError(
+          "failed-precondition",
+          "One selected item is no longer available in this table bill.",
+        );
+      }
+    }
+    const selectedQuantity = allocations.reduce((total, allocation) => total + allocation.quantity, 0);
+    const sourceQuantity = sourceLines.reduce((total, line) => total + line.quantity, 0);
+    if (selectedQuantity >= sourceQuantity) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Keep at least one item on the main bill, or use Pay to settle the whole table.",
+      );
+    }
+    const splitLines = [];
+    const remainingLines = [];
+    let splitTotalMinor = 0;
+    let remainingTotalMinor = 0;
+    for (const [index, sourceLine] of sourceLines.entries()) {
+      const splitQuantity = allocationByLineId.get(sourceLine.id) ?? 0;
+      const remainingQuantity = sourceLine.quantity - splitQuantity;
+      if (splitQuantity > 0) {
+        splitLines.push({
+          ...sourceLine.raw,
+          id: `split-${splitOrderId.slice(-18)}-${index}-${sourceLine.id.slice(-18)}`,
+          quantity: splitQuantity,
+          splitFromLineId: sourceLine.id,
+          isSentToProduction: true,
+        });
+        splitTotalMinor += splitQuantity * sourceLine.unitPriceMinor;
+      }
+      if (remainingQuantity > 0) {
+        remainingLines.push({...sourceLine.raw, quantity: remainingQuantity});
+        remainingTotalMinor += remainingQuantity * sourceLine.unitPriceMinor;
+      }
+    }
+    if (splitLines.length === 0 || remainingLines.length === 0 ||
+        !Number.isSafeInteger(splitTotalMinor) || !Number.isSafeInteger(remainingTotalMinor)) {
+      throw new HttpsError("failed-precondition", "This split has invalid order totals.");
+    }
+    const currentSequence = Number(sourceData.splitSequence ?? 0);
+    const splitSequence = Number.isInteger(currentSequence) && currentSequence >= 0
+      ? currentSequence + 1
+      : 1;
+    const tableId = typeof sourceData.tableId === "string" ? sourceData.tableId : null;
+    const tabName = typeof sourceData.tabName === "string" ? sourceData.tabName : null;
+    // A split only applies to the live bill currently attached to this table
+    // or named tab. This prevents an old open document from being split after
+    // another device has moved or replaced that table's order.
+    const tableRef = tableId == null
+      ? null
+      : tenantRef.collection("tables").doc(tableId);
+    const tabRef = tabName == null
+      ? null
+      : openTabRegistryRef(tenantId, venueId, tabName);
+    const [table, namedTab] = await Promise.all([
+      tableRef == null ? Promise.resolve(null) : transaction.get(tableRef),
+      tabRef == null ? Promise.resolve(null) : transaction.get(tabRef),
+    ]);
+    if (tableRef != null && (!table?.exists ||
+        table.data().venueId !== venueId ||
+        table.data().currentOrderId !== sourceOrderId)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This table is now using a different open order. Refresh and retry.",
+      );
+    }
+    if (tabRef != null && (!namedTab?.exists ||
+        namedTab.data().venueId !== venueId ||
+        namedTab.data().orderId !== sourceOrderId)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This named tab is now using a different open order. Refresh and retry.",
+      );
+    }
+    transaction.create(splitOrderRef, {
+      venueId,
+      tableId,
+      tableLabel: typeof sourceData.tableLabel === "string" ? sourceData.tableLabel : null,
+      tabName,
+      status: "sent",
+      openedAt: FieldValue.serverTimestamp(),
+      createdByActor: actor,
+      lines: splitLines,
+      splitFromOrderId: sourceOrderId,
+      splitSequence,
+      splitCreatedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+    transaction.update(sourceOrderRef, {
+      lines: remainingLines,
+      splitSequence,
+      openSplitOrderIds: FieldValue.arrayUnion(splitOrderId),
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "splitOrder",
+      venueId,
+      sourceOrderId,
+      splitOrderId,
+      splitSequence,
+      splitTotalMinor,
+      remainingTotalMinor,
+      itemCount: selectedQuantity,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {
+      splitOrderId,
+      splitTotalMinor,
+      remainingTotalMinor,
+      alreadySplit: false,
     };
   });
 }
@@ -2907,6 +3186,8 @@ async function invokePosAction(action, caller, data) {
       return sendOrderToProductionFor(caller, data);
     case "closeOrder":
       return closeOrderFor(caller, data);
+    case "splitOrder":
+      return splitOrderFor(caller, data);
     case "updateProductionTicket":
       return updateProductionTicketFor(caller, data);
     case "retryFailedPrintJob":
@@ -3087,6 +3368,8 @@ export const sendOrderToProduction = onCall((request) =>
   sendOrderToProductionFor(callerFromCall(request), request.data));
 export const closeOrder = onCall((request) =>
   closeOrderFor(callerFromCall(request), request.data));
+export const splitOrder = onCall((request) =>
+  splitOrderFor(callerFromCall(request), request.data));
 export const updateProductionTicket = onCall((request) =>
   updateProductionTicketFor(callerFromCall(request), request.data));
 export const openNamedTab = onCall((request) =>
