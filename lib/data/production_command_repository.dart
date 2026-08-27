@@ -427,14 +427,18 @@ class ProductionCommandRepository {
 
   /// Owner-only, venue-specific notification timing. This remains a trusted
   /// server mutation because venue records themselves are server-owned.
-  Future<void> updateVenueNotificationRetention({
+  Future<void> updateVenueOperationalSettings({
     required VenueScope scope,
     required int seconds,
+    required int orderFlowAmberMinutes,
+    required int orderFlowRedMinutes,
   }) {
     return _call('updateVenueNotificationSettings', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'notificationRetentionSeconds': seconds,
+      'orderFlowAmberMinutes': orderFlowAmberMinutes,
+      'orderFlowRedMinutes': orderFlowRedMinutes,
     });
   }
 

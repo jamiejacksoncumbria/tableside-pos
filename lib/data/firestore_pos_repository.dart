@@ -84,6 +84,14 @@ class FirestorePosRepository {
                   notificationRetentionSeconds: _notificationRetentionSeconds(
                     data['notificationRetentionSeconds'],
                   ),
+                  orderFlowAmberMinutes: _orderFlowMinutes(
+                    data['orderFlowAmberMinutes'],
+                    15,
+                  ),
+                  orderFlowRedMinutes: _orderFlowMinutes(
+                    data['orderFlowRedMinutes'],
+                    25,
+                  ),
                 );
               })
               .toList(growable: false),
@@ -93,6 +101,11 @@ class FirestorePosRepository {
   int _notificationRetentionSeconds(Object? value) {
     final seconds = value is int ? value : 5;
     return seconds.clamp(1, 60).toInt();
+  }
+
+  int _orderFlowMinutes(Object? value, int fallback) {
+    final minutes = value is int ? value : fallback;
+    return minutes.clamp(1, 480).toInt();
   }
 
   int _taxRateBasisPoints(Object? value) {

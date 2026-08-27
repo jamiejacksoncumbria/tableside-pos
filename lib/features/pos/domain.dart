@@ -165,6 +165,8 @@ class Venue {
     required this.name,
     required this.timeZone,
     this.notificationRetentionSeconds = 5,
+    this.orderFlowAmberMinutes = 15,
+    this.orderFlowRedMinutes = 25,
   });
 
   final String id;
@@ -172,6 +174,8 @@ class Venue {
   final String name;
   final String timeZone;
   final int notificationRetentionSeconds;
+  final int orderFlowAmberMinutes;
+  final int orderFlowRedMinutes;
 }
 
 class TenantMembership {

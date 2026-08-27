@@ -804,6 +804,8 @@ async function createTenantFor(caller, rawData) {
       nameKey: venueNameKey(venueName),
       timeZone,
       notificationRetentionSeconds: 5,
+      orderFlowAmberMinutes: 15,
+      orderFlowRedMinutes: 25,
       status: "active",
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -882,6 +884,8 @@ async function createVenueFor(caller, rawData) {
       nameKey,
       timeZone,
       notificationRetentionSeconds: 5,
+      orderFlowAmberMinutes: 15,
+      orderFlowRedMinutes: 25,
       status: "active",
       createdAt: FieldValue.serverTimestamp(),
       createdBy: caller.uid,
@@ -1656,7 +1660,20 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
     "notificationRetentionSeconds",
     60,
   );
-  await requireTenantOwner(caller, tenantId);
+  const orderFlowAmberMinutes = requiredPositiveInteger(
+    data.orderFlowAmberMinutes,
+    "orderFlowAmberMinutes",
+    240,
+  );
+  const orderFlowRedMinutes = requiredPositiveInteger(
+    data.orderFlowRedMinutes,
+    "orderFlowRedMinutes",
+    480,
+  );
+  if (orderFlowRedMinutes <= orderFlowAmberMinutes) {
+    throw new HttpsError("invalid-argument", "The red warning must be later than the amber warning.");
+  }
+  await requireTenantManager(caller, tenantId);
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
   const actor = actorSnapshot(await auth.getUser(caller.uid));
@@ -1667,6 +1684,8 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
     }
     transaction.update(venueRef, {
       notificationRetentionSeconds,
+      orderFlowAmberMinutes,
+      orderFlowRedMinutes,
       updatedAt: FieldValue.serverTimestamp(),
       updatedByActor: actor,
     });
@@ -1674,11 +1693,13 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
       action: "updateVenueNotificationSettings",
       venueId,
       notificationRetentionSeconds,
+      orderFlowAmberMinutes,
+      orderFlowRedMinutes,
       actor,
       createdAt: FieldValue.serverTimestamp(),
     });
   });
-  return {notificationRetentionSeconds};
+  return {notificationRetentionSeconds, orderFlowAmberMinutes, orderFlowRedMinutes};
 }
 
 function currencyDecimalDigits(currencyCode) {

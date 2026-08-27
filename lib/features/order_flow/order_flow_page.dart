@@ -19,7 +19,14 @@ final orderFlowProvider = StreamProvider<List<OrderFlowOrder>>((ref) {
 /// Live, production-safe board used by kitchen/bar and managers. This screen
 /// intentionally does not display money or customer contact information.
 class OrderFlowPage extends ConsumerStatefulWidget {
-  const OrderFlowPage({super.key});
+  const OrderFlowPage({
+    super.key,
+    this.amberMinutes = 15,
+    this.redMinutes = 25,
+  });
+
+  final int amberMinutes;
+  final int redMinutes;
 
   @override
   ConsumerState<OrderFlowPage> createState() => _OrderFlowPageState();
@@ -95,7 +102,11 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                   ),
                 ],
               ),
-              _BoardHealth(allOrders: allOrders),
+              _BoardHealth(
+                allOrders: allOrders,
+                amberMinutes: widget.amberMinutes,
+                redMinutes: widget.redMinutes,
+              ),
             ],
           ),
           const SizedBox(height: 20),
@@ -131,13 +142,15 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                   itemCount: orders.length,
                   gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: columns,
-                    mainAxisExtent: 268,
+                    mainAxisExtent: 330,
                     mainAxisSpacing: 12,
                     crossAxisSpacing: 12,
                   ),
                   itemBuilder: (context, index) => _OrderFlowCard(
                     order: orders[index],
                     now: DateTime.now(),
+                    amberMinutes: widget.amberMinutes,
+                    redMinutes: widget.redMinutes,
                     onAction: (action) => _applyAction(orders[index], action),
                   ),
                 );
@@ -153,7 +166,13 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     return switch (_filter) {
       _FlowFilter.all => true,
       _FlowFilter.late =>
-        _lateState(order, DateTime.now()) != _LateState.normal,
+        _lateState(
+              order,
+              DateTime.now(),
+              widget.amberMinutes,
+              widget.redMinutes,
+            ) !=
+            _LateState.normal,
       _FlowFilter.allergy => order.hasAllergyAlert,
       _FlowFilter.ready => order.status == OrderFlowStatus.ready,
     };
@@ -220,25 +239,40 @@ enum _OrderFlowAction {
 
 enum _LateState { normal, amber, red }
 
-_LateState _lateState(OrderFlowOrder order, DateTime now) {
+_LateState _lateState(
+  OrderFlowOrder order,
+  DateTime now,
+  int amberMinutes,
+  int redMinutes,
+) {
   if (order.isDelayed) return _LateState.red;
   if (order.status.isTerminal) return _LateState.normal;
   final elapsed = now.difference(order.ticketReleasedAt);
-  if (elapsed >= const Duration(minutes: 25)) return _LateState.red;
-  if (elapsed >= const Duration(minutes: 15)) return _LateState.amber;
+  if (elapsed >= Duration(minutes: redMinutes)) return _LateState.red;
+  if (elapsed >= Duration(minutes: amberMinutes)) return _LateState.amber;
   return _LateState.normal;
 }
 
 class _BoardHealth extends StatelessWidget {
-  const _BoardHealth({required this.allOrders});
+  const _BoardHealth({
+    required this.allOrders,
+    required this.amberMinutes,
+    required this.redMinutes,
+  });
 
   final List<OrderFlowOrder> allOrders;
+  final int amberMinutes;
+  final int redMinutes;
 
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
     final late = allOrders
-        .where((order) => _lateState(order, now) == _LateState.red)
+        .where(
+          (order) =>
+              _lateState(order, now, amberMinutes, redMinutes) ==
+              _LateState.red,
+        )
         .length;
     final ready = allOrders
         .where((order) => order.status == OrderFlowStatus.ready)
@@ -363,16 +397,20 @@ class _OrderFlowCard extends StatelessWidget {
   const _OrderFlowCard({
     required this.order,
     required this.now,
+    required this.amberMinutes,
+    required this.redMinutes,
     required this.onAction,
   });
 
   final OrderFlowOrder order;
   final DateTime now;
+  final int amberMinutes;
+  final int redMinutes;
   final ValueChanged<_OrderFlowAction> onAction;
 
   @override
   Widget build(BuildContext context) {
-    final late = _lateState(order, now);
+    final late = _lateState(order, now, amberMinutes, redMinutes);
     final scheme = Theme.of(context).colorScheme;
     final accent = switch (late) {
       _LateState.red => scheme.error,
@@ -425,7 +463,7 @@ class _OrderFlowCard extends StatelessWidget {
             const SizedBox(height: 10),
             Expanded(
               child: ListView(
-                physics: const NeverScrollableScrollPhysics(),
+                primary: false,
                 children: [
                   for (final item in order.itemSummary)
                     Padding(
@@ -444,6 +482,8 @@ class _OrderFlowCard extends StatelessWidget {
               ),
             ],
             const SizedBox(height: 8),
+            _PrimaryFlowAction(order: order, onAction: onAction),
+            const SizedBox(height: 8),
             _AlertRow(
               icon: late == _LateState.normal
                   ? Icons.timer_outlined
@@ -455,6 +495,99 @@ class _OrderFlowCard extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _PrimaryFlowAction extends StatelessWidget {
+  const _PrimaryFlowAction({required this.order, required this.onAction});
+
+  final OrderFlowOrder order;
+  final ValueChanged<_OrderFlowAction> onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final action = switch (order.status) {
+      OrderFlowStatus.newOrder => _OrderFlowAction.startPreparing,
+      OrderFlowStatus.preparing => _OrderFlowAction.markReady,
+      OrderFlowStatus.ready => _OrderFlowAction.markCollected,
+      OrderFlowStatus.collected => _OrderFlowAction.markServed,
+      _ => null,
+    };
+    if (action == null) return const SizedBox.shrink();
+    final label = switch (action) {
+      _OrderFlowAction.startPreparing => 'Start preparing',
+      _OrderFlowAction.markReady => 'Mark ready',
+      _OrderFlowAction.markCollected => 'Mark collected',
+      _OrderFlowAction.markServed => 'Mark served',
+      _OrderFlowAction.toggleDelayed => '',
+    };
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton.tonal(
+        onPressed: () => onAction(action),
+        child: Text(label),
+      ),
+    );
+  }
+}
+
+/// Watches the same Firestore ticket stream as the KDS and raises a durable
+/// in-app notification only when an existing ticket transitions to ready.
+class OrderFlowNotificationHost extends ConsumerStatefulWidget {
+  const OrderFlowNotificationHost({super.key});
+
+  @override
+  ConsumerState<OrderFlowNotificationHost> createState() =>
+      _OrderFlowNotificationHostState();
+}
+
+class _OrderFlowNotificationHostState
+    extends ConsumerState<OrderFlowNotificationHost> {
+  String? _scopeKey;
+  bool _seeded = false;
+  Map<String, OrderFlowStatus> _knownStatuses = const {};
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = ref.watch(activeVenueScopeProvider);
+    final scopeKey = scope == null
+        ? null
+        : '${scope.tenantId}/${scope.venueId}';
+    if (_scopeKey != scopeKey) {
+      _scopeKey = scopeKey;
+      _seeded = false;
+      _knownStatuses = const {};
+    }
+    ref.listen<AsyncValue<List<OrderFlowOrder>>>(orderFlowProvider, (_, next) {
+      next.whenData(_handleOrders);
+    });
+    return const SizedBox.shrink();
+  }
+
+  void _handleOrders(List<OrderFlowOrder> orders) {
+    if (!_seeded) {
+      _knownStatuses = {for (final order in orders) order.id: order.status};
+      _seeded = true;
+      return;
+    }
+    for (final order in orders) {
+      final previous = _knownStatuses[order.id];
+      if (previous != null &&
+          previous != OrderFlowStatus.ready &&
+          order.status == OrderFlowStatus.ready) {
+        final location =
+            order.tableLabel ?? order.tabName ?? 'Unassigned order';
+        showAppNotification(
+          context,
+          ref: ref,
+          deduplicationKey: 'order-ready-${order.id}',
+          title: '${order.productionArea.label} order ready',
+          message: '$location · Order #${order.reference}',
+          level: AppNotificationLevel.success,
+        );
+      }
+    }
+    _knownStatuses = {for (final order in orders) order.id: order.status};
   }
 }
 

@@ -10,6 +10,18 @@ void main() {
     expect(OrderFlowStatus.preparing.isTerminal, isFalse);
   });
 
+  test('venues use safe default order-flow warning thresholds', () {
+    const venue = Venue(
+      id: 'venue-1',
+      tenantId: 'tenant-1',
+      name: 'Spice Garden',
+      timeZone: 'Asia/Famagusta',
+    );
+
+    expect(venue.orderFlowAmberMinutes, 15);
+    expect(venue.orderFlowRedMinutes, 25);
+  });
+
   test(
     'order line can be marked sent without losing immutable line details',
     () {

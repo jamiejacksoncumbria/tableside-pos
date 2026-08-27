@@ -189,6 +189,7 @@ class HomeShell extends ConsumerWidget {
                 Positioned.fill(child: _buildBody(section, profile)),
                 const _QueuedPrintWorkerHost(),
                 const PrintDeliveryMonitorHost(),
+                const OrderFlowNotificationHost(),
               ],
             ),
           ),
@@ -223,7 +224,10 @@ class HomeShell extends ConsumerWidget {
   Widget _buildBody(HomeSection section, TenantProfile profile) =>
       switch (section) {
         HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
-        HomeSection.orderFlow => const OrderFlowPage(),
+        HomeSection.orderFlow => OrderFlowPage(
+          amberMinutes: venueOverride?.orderFlowAmberMinutes ?? 15,
+          redMinutes: venueOverride?.orderFlowRedMinutes ?? 25,
+        ),
         HomeSection.menu => MenuManagementPage(
           currencyCode: profile.currencyCode,
         ),

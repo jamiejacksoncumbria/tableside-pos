@@ -43,6 +43,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final List<TextEditingController> _phoneNumbers;
   late final TextEditingController _footer;
   late final TextEditingController _notificationRetentionSeconds;
+  late final TextEditingController _orderFlowAmberMinutes;
+  late final TextEditingController _orderFlowRedMinutes;
   Uint8List? _logoBytes;
   String? _logoName;
   bool _saving = false;
@@ -69,6 +71,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _notificationRetentionSeconds = TextEditingController(
       text: '${widget.venueOverride?.notificationRetentionSeconds ?? 5}',
     );
+    _orderFlowAmberMinutes = TextEditingController(
+      text: '${widget.venueOverride?.orderFlowAmberMinutes ?? 15}',
+    );
+    _orderFlowRedMinutes = TextEditingController(
+      text: '${widget.venueOverride?.orderFlowRedMinutes ?? 25}',
+    );
   }
 
   @override
@@ -81,6 +89,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     }
     _footer.dispose();
     _notificationRetentionSeconds.dispose();
+    _orderFlowAmberMinutes.dispose();
+    _orderFlowRedMinutes.dispose();
     super.dispose();
   }
 
@@ -163,6 +173,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   Future<void> _saveVenueNotificationRetention(VenueScope scope) async {
     if (_savingNotificationRetention) return;
     final seconds = int.tryParse(_notificationRetentionSeconds.text.trim());
+    final amberMinutes = int.tryParse(_orderFlowAmberMinutes.text.trim());
+    final redMinutes = int.tryParse(_orderFlowRedMinutes.text.trim());
     if (seconds == null || seconds < 1 || seconds > 60) {
       showAppNotification(
         context,
@@ -173,17 +185,39 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       );
       return;
     }
+    if (amberMinutes == null ||
+        amberMinutes < 1 ||
+        amberMinutes > 240 ||
+        redMinutes == null ||
+        redMinutes <= amberMinutes ||
+        redMinutes > 480) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Enter valid order warning times',
+        message:
+            'Amber must be 1–240 minutes and red must be later than amber (up to 480 minutes).',
+        level: AppNotificationLevel.warning,
+      );
+      return;
+    }
     setState(() => _savingNotificationRetention = true);
     try {
       await ref
           .read(productionCommandRepositoryProvider)
-          .updateVenueNotificationRetention(scope: scope, seconds: seconds);
+          .updateVenueOperationalSettings(
+            scope: scope,
+            seconds: seconds,
+            orderFlowAmberMinutes: amberMinutes,
+            orderFlowRedMinutes: redMinutes,
+          );
       if (!mounted) return;
       showAppNotification(
         context,
         ref: ref,
         title: 'Venue notification timing saved',
-        message: 'Notifications will now dismiss after $seconds seconds.',
+        message:
+            'Notifications dismiss after $seconds seconds; orders warn at $amberMinutes/$redMinutes minutes.',
         level: AppNotificationLevel.success,
       );
     } on Object catch (error, stackTrace) {
@@ -231,12 +265,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   return const <TenantMembership>[];
                 },
               );
-    final isVenueOwner =
+    final canManageVenue =
         venueScope != null &&
         memberships.any(
           (membership) =>
               membership.tenantId == venueScope.tenantId &&
-              membership.roles.contains('owner'),
+              membership.roles.any(
+                (role) => role == 'owner' || role == 'manager',
+              ),
         );
     return ListView(
       padding: const EdgeInsets.all(20),
@@ -455,10 +491,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             ],
           ),
         ),
-        if (venueScope != null && isVenueOwner) ...[
+        if (venueScope != null && canManageVenue) ...[
           const SizedBox(height: 16),
           _SettingsCard(
-            title: 'Owner venue administration',
+            title: 'Venue operational settings',
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -482,6 +518,47 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   ),
                 ),
                 const SizedBox(height: 14),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final amberField = TextField(
+                      controller: _orderFlowAmberMinutes,
+                      keyboardType: TextInputType.number,
+                      enabled: !_savingNotificationRetention,
+                      decoration: const InputDecoration(
+                        labelText: 'Order amber warning',
+                        helperText: 'Default: 15 minutes',
+                        suffixText: 'minutes',
+                      ),
+                    );
+                    final redField = TextField(
+                      controller: _orderFlowRedMinutes,
+                      keyboardType: TextInputType.number,
+                      enabled: !_savingNotificationRetention,
+                      decoration: const InputDecoration(
+                        labelText: 'Order red warning',
+                        helperText: 'Must be later than amber',
+                        suffixText: 'minutes',
+                      ),
+                    );
+                    if (constraints.maxWidth < 560) {
+                      return Column(
+                        children: [
+                          amberField,
+                          const SizedBox(height: 12),
+                          redField,
+                        ],
+                      );
+                    }
+                    return Row(
+                      children: [
+                        Expanded(child: amberField),
+                        const SizedBox(width: 12),
+                        Expanded(child: redField),
+                      ],
+                    );
+                  },
+                ),
+                const SizedBox(height: 14),
                 Align(
                   alignment: Alignment.centerRight,
                   child: FilledButton.icon(
@@ -492,7 +569,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     label: Text(
                       _savingNotificationRetention
                           ? 'Saving…'
-                          : 'Save notification timing',
+                          : 'Save venue timings',
                     ),
                   ),
                 ),
