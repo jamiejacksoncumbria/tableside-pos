@@ -97,6 +97,18 @@ function requiredText(data, name, maxLength = 160) {
   return text;
 }
 
+// Firestore document IDs may be considerably longer than ordinary API text
+// fields. Validate against Firestore's actual constraints so generated,
+// auditable queue IDs are accepted without allowing a path to be injected.
+function requiredDocumentId(data, name) {
+  const value = requiredText(data, name, 1500);
+  if (Buffer.byteLength(value, "utf8") > 1500 ||
+      value.includes("/") || value === "." || value === "..") {
+    throw new HttpsError("invalid-argument", `${name} is invalid.`);
+  }
+  return value;
+}
+
 function optionalText(data, name, maxLength = 500) {
   const value = data[name];
   if (value == null) return "";
@@ -2460,7 +2472,7 @@ async function retryFailedPrintJobFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  const jobId = requiredText(data, "jobId", 240);
+  const jobId = requiredDocumentId(data, "jobId");
   const {roles} = await requireTenantOperationalMember(caller, tenantId);
   if (!roles.some((role) => role === "owner" || role === "manager")) {
     throw new HttpsError(
@@ -2566,7 +2578,7 @@ async function cancelPrintJobFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  const jobId = requiredText(data, "jobId", 240);
+  const jobId = requiredDocumentId(data, "jobId");
   const reason = requiredText(data, "reason", 300);
   const {roles} = await requireTenantOperationalMember(caller, tenantId);
   if (!roles.some((role) => role === "owner" || role === "manager")) {
