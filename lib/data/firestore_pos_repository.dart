@@ -1210,6 +1210,20 @@ class FirestorePosRepository {
           );
         })
         .toList(growable: false);
+    final taxBreakdown =
+        List<Object?>.from(data['taxBreakdown'] as List? ?? const [])
+            .whereType<Map>()
+            .map((raw) {
+              final tax = Map<String, Object?>.from(raw);
+              return SalesReportTaxEntry(
+                name: tax['taxRateName'] as String? ?? 'Tax',
+                basisPoints: (tax['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
+                grossMinor: (tax['grossMinor'] as num?)?.toInt() ?? 0,
+                netMinor: (tax['netMinor'] as num?)?.toInt() ?? 0,
+                taxMinor: (tax['taxMinor'] as num?)?.toInt() ?? 0,
+              );
+            })
+            .toList(growable: false);
     final lines = List<Object?>.from(data['lines'] as List? ?? const [])
         .whereType<Map>()
         .map((raw) {
@@ -1228,6 +1242,7 @@ class FirestorePosRepository {
     final actor = data['closedByActor'];
     return SalesReportBill(
       id: document.id,
+      receiptNumber: data['receiptNumber'] as String? ?? document.id,
       venueId: venueId,
       businessDate: businessDate,
       currencyCode: data['currencyCode'] as String? ?? 'GBP',
@@ -1239,6 +1254,7 @@ class FirestorePosRepository {
       taxMinor: (data['taxTotalMinor'] as num?)?.toInt() ?? 0,
       payments: payments,
       lines: lines,
+      taxBreakdown: taxBreakdown,
       closedByName: actor is Map
           ? actor['displayName'] as String? ?? actor['email'] as String? ?? ''
           : '',

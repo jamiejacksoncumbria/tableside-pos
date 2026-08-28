@@ -216,12 +216,29 @@ class SalesReportLine {
   final int grossMinor;
 }
 
+class SalesReportTaxEntry {
+  const SalesReportTaxEntry({
+    required this.name,
+    required this.basisPoints,
+    required this.grossMinor,
+    required this.netMinor,
+    required this.taxMinor,
+  });
+
+  final String name;
+  final int basisPoints;
+  final int grossMinor;
+  final int netMinor;
+  final int taxMinor;
+}
+
 /// Immutable financial snapshot produced only when the trusted close-order
 /// command succeeds. Reports aggregate these snapshots and never recalculate
 /// historic tax or prices from the current menu.
 class SalesReportBill {
   const SalesReportBill({
     required this.id,
+    required this.receiptNumber,
     required this.venueId,
     required this.businessDate,
     required this.currencyCode,
@@ -230,10 +247,12 @@ class SalesReportBill {
     required this.taxMinor,
     required this.payments,
     required this.lines,
+    required this.taxBreakdown,
     this.closedByName = '',
   });
 
   final String id;
+  final String receiptNumber;
   final String venueId;
   final DateTime businessDate;
   final String currencyCode;
@@ -242,6 +261,7 @@ class SalesReportBill {
   final int taxMinor;
   final List<SalesReportPayment> payments;
   final List<SalesReportLine> lines;
+  final List<SalesReportTaxEntry> taxBreakdown;
   final String closedByName;
 }
 

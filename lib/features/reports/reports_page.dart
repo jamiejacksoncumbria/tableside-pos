@@ -35,6 +35,7 @@ class ReportsPage extends ConsumerStatefulWidget {
 class _ReportsPageState extends ConsumerState<ReportsPage> {
   _ReportPeriod _period = _ReportPeriod.day;
   DateTimeRange? _customRange;
+  DateTime? _anchorDate;
 
   @override
   Widget build(BuildContext context) {
@@ -92,11 +93,12 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
   }
 
   Widget _buildReport(List<SalesReportBill> allBills, int openOrderCount) {
-    final anchor = allBills.isEmpty
+    final latestAnchor = allBills.isEmpty
         ? DateTime.now()
         : allBills
               .map((bill) => bill.businessDate)
               .reduce((left, right) => left.isAfter(right) ? left : right);
+    final anchor = _anchorDate ?? latestAnchor;
     final bills = allBills
         .where(
           (bill) => _inPeriod(bill.businessDate, anchor, _period, _customRange),
@@ -109,6 +111,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
     final paymentTotals = <String, (String, int)>{};
     final productTotals = <String, (String, int, int)>{};
     final staffTotals = <String, int>{};
+    final taxTotals = <String, (String, int, int, int, int)>{};
     for (final bill in bills) {
       final staff = bill.closedByName.trim().isEmpty
           ? 'Unknown staff member'
@@ -131,6 +134,17 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
           line.productName,
           (existing?.$2 ?? 0) + line.quantity,
           (existing?.$3 ?? 0) + line.grossMinor,
+        );
+      }
+      for (final tax in bill.taxBreakdown) {
+        final key = '${tax.name}_${tax.basisPoints}';
+        final existing = taxTotals[key];
+        taxTotals[key] = (
+          tax.name,
+          tax.basisPoints,
+          (existing?.$3 ?? 0) + tax.grossMinor,
+          (existing?.$4 ?? 0) + tax.netMinor,
+          (existing?.$5 ?? 0) + tax.taxMinor,
         );
       }
     }
@@ -178,6 +192,30 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                 icon: const Icon(Icons.date_range_rounded),
                 label: const Text('Custom dates'),
               ),
+            if (_period != _ReportPeriod.custom) ...[
+              IconButton.filledTonal(
+                tooltip: 'Previous period',
+                onPressed: () => setState(
+                  () => _anchorDate = _shiftPeriod(anchor, _period, -1),
+                ),
+                icon: const Icon(Icons.chevron_left_rounded),
+              ),
+              IconButton.filledTonal(
+                tooltip: 'Next period',
+                onPressed: _samePeriod(anchor, latestAnchor, _period)
+                    ? null
+                    : () => setState(
+                        () => _anchorDate = _shiftPeriod(anchor, _period, 1),
+                      ),
+                icon: const Icon(Icons.chevron_right_rounded),
+              ),
+              TextButton(
+                onPressed: _anchorDate == null
+                    ? null
+                    : () => setState(() => _anchorDate = null),
+                child: const Text('Latest'),
+              ),
+            ],
           ],
         ),
         const SizedBox(height: 18),
@@ -207,6 +245,18 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
         ),
         const SizedBox(height: 12),
         _BreakdownCard(
+          title: 'Tax by rate',
+          rows: taxTotals.values
+              .map(
+                (entry) => (
+                  '${entry.$1} · ${(entry.$2 / 100).toStringAsFixed(2)}% · net ${formatMoney(entry.$4, currencyCode: widget.currencyCode)}',
+                  formatMoney(entry.$5, currencyCode: widget.currencyCode),
+                ),
+              )
+              .toList(),
+        ),
+        const SizedBox(height: 12),
+        _BreakdownCard(
           title: 'Products',
           rows: products
               .take(20)
@@ -226,6 +276,18 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                 (entry) => (
                   entry.key,
                   formatMoney(entry.value, currencyCode: widget.currencyCode),
+                ),
+              )
+              .toList(),
+        ),
+        const SizedBox(height: 12),
+        _BreakdownCard(
+          title: 'Closed bill audit',
+          rows: bills
+              .map(
+                (bill) => (
+                  '${bill.receiptNumber} · ${_dateLabel(bill.businessDate)} · ${bill.closedByName.trim().isEmpty ? 'Unknown staff' : bill.closedByName}',
+                  formatMoney(bill.grossMinor, currencyCode: bill.currencyCode),
                 ),
               )
               .toList(),
@@ -288,6 +350,34 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
     });
   }
 }
+
+DateTime _shiftPeriod(DateTime anchor, _ReportPeriod period, int direction) =>
+    switch (period) {
+      _ReportPeriod.day => anchor.add(Duration(days: direction)),
+      _ReportPeriod.week => anchor.add(Duration(days: 7 * direction)),
+      _ReportPeriod.month => DateTime(anchor.year, anchor.month + direction, 1),
+      _ReportPeriod.custom => anchor,
+    };
+
+bool _samePeriod(DateTime left, DateTime right, _ReportPeriod period) =>
+    switch (period) {
+      _ReportPeriod.day =>
+        left.year == right.year &&
+            left.month == right.month &&
+            left.day == right.day,
+      _ReportPeriod.week => _weekStart(left) == _weekStart(right),
+      _ReportPeriod.month =>
+        left.year == right.year && left.month == right.month,
+      _ReportPeriod.custom => true,
+    };
+
+DateTime _weekStart(DateTime value) {
+  final day = DateTime(value.year, value.month, value.day);
+  return day.subtract(Duration(days: day.weekday - 1));
+}
+
+String _dateLabel(DateTime value) =>
+    '${value.year}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
 
 bool _inPeriod(
   DateTime value,
