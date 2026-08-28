@@ -165,17 +165,25 @@ class Venue {
     required this.name,
     required this.timeZone,
     this.notificationRetentionSeconds = 5,
-    this.orderFlowAmberMinutes = 15,
-    this.orderFlowRedMinutes = 25,
-  });
+    int orderFlowAmberMinutes = 15,
+    int orderFlowRedMinutes = 25,
+  }) : _orderFlowAmberMinutes = orderFlowAmberMinutes,
+       _orderFlowRedMinutes = orderFlowRedMinutes;
 
   final String id;
   final String tenantId;
   final String name;
   final String timeZone;
   final int notificationRetentionSeconds;
-  final int orderFlowAmberMinutes;
-  final int orderFlowRedMinutes;
+
+  // Nullable backing fields deliberately protect a running debug session
+  // whose Venue instances pre-date these fields after a hot reload. Existing
+  // Firestore venue documents are also mapped to the same safe defaults.
+  final int? _orderFlowAmberMinutes;
+  final int? _orderFlowRedMinutes;
+
+  int get orderFlowAmberMinutes => _orderFlowAmberMinutes ?? 15;
+  int get orderFlowRedMinutes => _orderFlowRedMinutes ?? 25;
 }
 
 class TenantMembership {
