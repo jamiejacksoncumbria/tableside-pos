@@ -127,34 +127,19 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
           else if (orders.isEmpty)
             _EmptyBoard(filter: _filter, area: _area)
           else
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final columns = constraints.maxWidth >= 1250
-                    ? 4
-                    : constraints.maxWidth >= 880
-                    ? 3
-                    : constraints.maxWidth >= 560
-                    ? 2
-                    : 1;
-                return GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: orders.length,
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: columns,
-                    mainAxisExtent: 330,
-                    mainAxisSpacing: 12,
-                    crossAxisSpacing: 12,
-                  ),
-                  itemBuilder: (context, index) => _OrderFlowCard(
-                    order: orders[index],
+            Column(
+              children: [
+                for (final order in orders) ...[
+                  _OrderFlowCard(
+                    order: order,
                     now: DateTime.now(),
                     amberMinutes: widget.amberMinutes,
                     redMinutes: widget.redMinutes,
-                    onAction: (action) => _applyAction(orders[index], action),
+                    onAction: (action) => _applyAction(order, action),
                   ),
-                );
-              },
+                  const SizedBox(height: 12),
+                ],
+              ],
             ),
         ],
       ),
@@ -465,17 +450,36 @@ class _OrderFlowCard extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 10),
-                Expanded(
-                  child: ListView(
-                    primary: false,
-                    children: [
-                      for (final item in order.itemSummary)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 4),
-                          child: Text(item),
-                        ),
-                    ],
-                  ),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final maximumItemWidth = constraints.maxWidth < 360
+                        ? constraints.maxWidth
+                        : 320.0;
+                    return Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final item in order.itemSummary)
+                          ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: maximumItemWidth,
+                            ),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 7,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.white12,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: Colors.white24),
+                              ),
+                              child: Text(item),
+                            ),
+                          ),
+                      ],
+                    );
+                  },
                 ),
                 if (order.hasAllergyAlert) ...[
                   const SizedBox(height: 8),
