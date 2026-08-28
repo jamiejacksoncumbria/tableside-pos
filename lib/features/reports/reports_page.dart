@@ -168,13 +168,13 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
             ),
             if (_period == _ReportPeriod.custom)
               FilledButton.icon(
-                onPressed: () => _selectCustomRange(anchor),
+                onPressed: () => _selectCustomRange(anchor, allBills),
                 icon: const Icon(Icons.date_range_rounded),
                 label: Text(_customRangeLabel(_customRange)),
               )
             else
               OutlinedButton.icon(
-                onPressed: () => _selectCustomRange(anchor),
+                onPressed: () => _selectCustomRange(anchor, allBills),
                 icon: const Icon(Icons.date_range_rounded),
                 label: const Text('Custom dates'),
               ),
@@ -234,14 +234,32 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
     );
   }
 
-  Future<void> _selectCustomRange(DateTime anchor) async {
+  Future<void> _selectCustomRange(
+    DateTime anchor,
+    List<SalesReportBill> bills,
+  ) async {
     final now = DateTime.now();
     final latestAllowed = DateTime(now.year, now.month, now.day);
-    final earliestAllowed = DateTime(
+    final sevenYearsAgo = DateTime(
       latestAllowed.year - 7,
       latestAllowed.month,
       latestAllowed.day,
     );
+    final firstRecordedDate = bills.isEmpty
+        ? null
+        : bills
+              .map(
+                (bill) => DateTime(
+                  bill.businessDate.year,
+                  bill.businessDate.month,
+                  bill.businessDate.day,
+                ),
+              )
+              .reduce((left, right) => left.isBefore(right) ? left : right);
+    final earliestAllowed =
+        firstRecordedDate != null && firstRecordedDate.isBefore(sevenYearsAgo)
+        ? firstRecordedDate
+        : sevenYearsAgo;
     final anchorDay = DateTime(anchor.year, anchor.month, anchor.day);
     final safeAnchor = anchorDay.isBefore(earliestAllowed)
         ? earliestAllowed
