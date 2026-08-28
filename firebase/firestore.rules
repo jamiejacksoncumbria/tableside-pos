@@ -171,7 +171,7 @@ service cloud.firestore {
       }
 
       match /bills/{billId} {
-        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow read: if isPlatformAdmin() || managesTenant(tenantId);
         // Payment, tax, stock, and close-of-day writes must be made by a
         // trusted Cloud Function using the Admin SDK, not by a client.
         allow write: if false;

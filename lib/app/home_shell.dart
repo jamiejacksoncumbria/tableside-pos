@@ -15,6 +15,7 @@ import '../features/platform_admin/platform_admin_page.dart';
 import '../features/printing/native_print_worker.dart';
 import '../features/printing/queued_bluetooth_print_worker.dart';
 import '../features/printing/print_delivery_monitor.dart';
+import '../features/reports/reports_page.dart';
 import '../features/settings/settings_page.dart';
 
 enum HomeSection { pos, orderFlow, menu, reports, settings, platformAdmin }
@@ -231,7 +232,7 @@ class HomeShell extends ConsumerWidget {
         HomeSection.menu => MenuManagementPage(
           currencyCode: profile.currencyCode,
         ),
-        HomeSection.reports => const _ReportsPage(),
+        HomeSection.reports => ReportsPage(currencyCode: profile.currencyCode),
         HomeSection.settings => SettingsPage(
           profileOverride: profileOverride,
           venueOverride: venueOverride,
@@ -509,82 +510,4 @@ class _Destination {
   final HomeSection section;
   final IconData icon;
   final String label;
-}
-
-class _ReportsPage extends StatelessWidget {
-  const _ReportsPage();
-
-  @override
-  Widget build(BuildContext context) {
-    final metrics = [
-      ('Closed sales', '£1,842.50', Icons.payments_outlined),
-      ('Closed orders', '48', Icons.receipt_long_outlined),
-      ('Open tabs', '6', Icons.tab_rounded),
-      ('Avg. spend', '£38.39', Icons.trending_up_rounded),
-    ];
-    return ListView(
-      padding: const EdgeInsets.all(20),
-      children: [
-        Text('Today’s sales', style: Theme.of(context).textTheme.headlineSmall),
-        const SizedBox(height: 6),
-        const Text(
-          'Closed orders only. Open tabs remain attached to their originating business day.',
-        ),
-        const SizedBox(height: 20),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final columns = constraints.maxWidth >= 800 ? 4 : 2;
-            return GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: metrics.length,
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: columns,
-                mainAxisExtent: 130,
-                crossAxisSpacing: 12,
-                mainAxisSpacing: 12,
-              ),
-              itemBuilder: (context, index) {
-                final metric = metrics[index];
-                return Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(metric.$3),
-                        const Spacer(),
-                        Text(
-                          metric.$2,
-                          style: Theme.of(context).textTheme.headlineSmall,
-                        ),
-                        Text(
-                          metric.$1,
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            );
-          },
-        ),
-        const SizedBox(height: 20),
-        Card(
-          child: ListTile(
-            leading: const Icon(Icons.calendar_month_outlined),
-            title: const Text('Business-day rollover'),
-            subtitle: const Text(
-              'Keep tabs open; close them against the current business day when payment is taken.',
-            ),
-            trailing: TextButton(
-              onPressed: () {},
-              child: const Text('View open tabs'),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
 }

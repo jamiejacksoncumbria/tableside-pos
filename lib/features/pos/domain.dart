@@ -186,6 +186,65 @@ class Venue {
   int get orderFlowRedMinutes => _orderFlowRedMinutes ?? 25;
 }
 
+class SalesReportPayment {
+  const SalesReportPayment({
+    required this.method,
+    required this.currencyCode,
+    required this.tenderedAmountMinor,
+    required this.baseAmountMinor,
+    this.terminalLabel,
+  });
+
+  final String method;
+  final String currencyCode;
+  final int tenderedAmountMinor;
+  final int baseAmountMinor;
+  final String? terminalLabel;
+}
+
+class SalesReportLine {
+  const SalesReportLine({
+    required this.productId,
+    required this.productName,
+    required this.quantity,
+    required this.grossMinor,
+  });
+
+  final String productId;
+  final String productName;
+  final int quantity;
+  final int grossMinor;
+}
+
+/// Immutable financial snapshot produced only when the trusted close-order
+/// command succeeds. Reports aggregate these snapshots and never recalculate
+/// historic tax or prices from the current menu.
+class SalesReportBill {
+  const SalesReportBill({
+    required this.id,
+    required this.venueId,
+    required this.businessDate,
+    required this.currencyCode,
+    required this.grossMinor,
+    required this.netMinor,
+    required this.taxMinor,
+    required this.payments,
+    required this.lines,
+    this.closedByName = '',
+  });
+
+  final String id;
+  final String venueId;
+  final DateTime businessDate;
+  final String currencyCode;
+  final int grossMinor;
+  final int netMinor;
+  final int taxMinor;
+  final List<SalesReportPayment> payments;
+  final List<SalesReportLine> lines;
+  final String closedByName;
+}
+
 class TenantMembership {
   const TenantMembership({
     required this.tenantId,

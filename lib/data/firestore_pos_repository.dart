@@ -1147,6 +1147,104 @@ class FirestorePosRepository {
         );
   }
 
+  /// Streams immutable closed-bill snapshots for manager reporting. Venue and
+  /// period filtering remain client-side so this first report needs no new
+  /// composite index and updates immediately when another till closes a bill.
+  Stream<List<SalesReportBill>> watchSalesReportBills(VenueScope scope) {
+    return _firestore
+        .collection('tenants/${scope.tenantId}/bills')
+        .orderBy('closedAt', descending: true)
+        .limit(5000)
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map(_salesReportBillFromDocument)
+              .whereType<SalesReportBill>()
+              .where((bill) => bill.venueId == scope.venueId)
+              .toList(growable: false),
+        );
+  }
+
+  Stream<List<PosOrder>> watchVenueOpenOrders(VenueScope scope) {
+    return _firestore
+        .collection('tenants/${scope.tenantId}/orders')
+        .limit(1000)
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map(
+                (document) => _orderFromSnapshot(scope: scope, order: document),
+              )
+              .whereType<PosOrder>()
+              .where((order) => order.venueId == scope.venueId)
+              .toList(growable: false),
+        );
+  }
+
+  SalesReportBill? _salesReportBillFromDocument(
+    QueryDocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final data = document.data();
+    final venueId = data['venueId'] as String?;
+    final rawBusinessDate = data['businessDate'] as String?;
+    final businessDate = rawBusinessDate == null
+        ? null
+        : DateTime.tryParse(rawBusinessDate);
+    if (venueId == null || businessDate == null) return null;
+    final payments = List<Object?>.from(data['payments'] as List? ?? const [])
+        .whereType<Map>()
+        .map((raw) {
+          final payment = Map<String, Object?>.from(raw);
+          return SalesReportPayment(
+            method: payment['method'] as String? ?? 'other',
+            currencyCode:
+                payment['tenderedCurrencyCode'] as String? ??
+                data['currencyCode'] as String? ??
+                'GBP',
+            tenderedAmountMinor:
+                (payment['tenderedAmountMinor'] as num?)?.toInt() ??
+                (payment['baseAmountMinor'] as num?)?.toInt() ??
+                0,
+            baseAmountMinor: (payment['baseAmountMinor'] as num?)?.toInt() ?? 0,
+            terminalLabel: payment['terminalLabel'] as String?,
+          );
+        })
+        .toList(growable: false);
+    final lines = List<Object?>.from(data['lines'] as List? ?? const [])
+        .whereType<Map>()
+        .map((raw) {
+          final line = Map<String, Object?>.from(raw);
+          final quantity = (line['quantity'] as num?)?.toInt() ?? 0;
+          final lineTotal = (line['lineTotalMinor'] as num?)?.toInt();
+          final unitPrice = (line['unitPriceMinor'] as num?)?.toInt() ?? 0;
+          return SalesReportLine(
+            productId: line['productId'] as String? ?? '',
+            productName: line['productName'] as String? ?? 'Menu item',
+            quantity: quantity,
+            grossMinor: lineTotal ?? quantity * unitPrice,
+          );
+        })
+        .toList(growable: false);
+    final actor = data['closedByActor'];
+    return SalesReportBill(
+      id: document.id,
+      venueId: venueId,
+      businessDate: businessDate,
+      currencyCode: data['currencyCode'] as String? ?? 'GBP',
+      grossMinor:
+          (data['grossTotalMinor'] as num?)?.toInt() ??
+          (data['totalMinor'] as num?)?.toInt() ??
+          0,
+      netMinor: (data['netTotalMinor'] as num?)?.toInt() ?? 0,
+      taxMinor: (data['taxTotalMinor'] as num?)?.toInt() ?? 0,
+      payments: payments,
+      lines: lines,
+      closedByName: actor is Map
+          ? actor['displayName'] as String? ?? actor['email'] as String? ?? ''
+          : '',
+    );
+  }
+
   OrderFlowOrder? _orderFlowFromDocument(
     QueryDocumentSnapshot<Map<String, dynamic>> document,
     VenueScope scope,
