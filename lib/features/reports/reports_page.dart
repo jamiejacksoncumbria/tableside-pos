@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,6 +11,7 @@ import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../auth/session_providers.dart';
+import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 
 final salesReportBillsProvider = StreamProvider<List<SalesReportBill>>((ref) {
@@ -36,6 +41,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
   _ReportPeriod _period = _ReportPeriod.day;
   DateTimeRange? _customRange;
   DateTime? _anchorDate;
+  bool _exporting = false;
 
   @override
   Widget build(BuildContext context) {
@@ -216,6 +222,16 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                 child: const Text('Latest'),
               ),
             ],
+            FilledButton.icon(
+              onPressed: bills.isEmpty || _exporting
+                  ? null
+                  : () => _exportCsv(
+                      bills,
+                      _periodBounds(anchor, _period, _customRange),
+                    ),
+              icon: const Icon(Icons.download_rounded),
+              label: Text(_exporting ? 'Exporting…' : 'Export CSV'),
+            ),
           ],
         ),
         const SizedBox(height: 18),
@@ -349,6 +365,194 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
       _period = _ReportPeriod.custom;
     });
   }
+
+  Future<void> _exportCsv(
+    List<SalesReportBill> bills,
+    DateTimeRange range,
+  ) async {
+    if (_exporting) return;
+    setState(() => _exporting = true);
+    try {
+      final csv = buildSalesReportCsv(bills, widget.currencyCode);
+      final fileName =
+          'tableside-sales-${_dateLabel(range.start)}-to-${_dateLabel(range.end)}.csv';
+      final path = await FilePicker.saveFile(
+        dialogTitle: 'Export sales report',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: const ['csv'],
+        bytes: Uint8List.fromList([0xEF, 0xBB, 0xBF, ...utf8.encode(csv)]),
+        lockParentWindow: true,
+      );
+      if (!mounted || path == null) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Sales report exported',
+        message:
+            'Saved ${bills.length} closed bill${bills.length == 1 ? '' : 's'} to CSV.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Export sales report CSV', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not export sales report',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+}
+
+DateTimeRange _periodBounds(
+  DateTime anchor,
+  _ReportPeriod period,
+  DateTimeRange? customRange,
+) => switch (period) {
+  _ReportPeriod.day => DateTimeRange(start: anchor, end: anchor),
+  _ReportPeriod.week => DateTimeRange(
+    start: _weekStart(anchor),
+    end: _weekStart(anchor).add(const Duration(days: 6)),
+  ),
+  _ReportPeriod.month => DateTimeRange(
+    start: DateTime(anchor.year, anchor.month, 1),
+    end: DateTime(anchor.year, anchor.month + 1, 0),
+  ),
+  _ReportPeriod.custom =>
+    customRange ?? DateTimeRange(start: anchor, end: anchor),
+};
+
+String buildSalesReportCsv(
+  List<SalesReportBill> bills,
+  String baseCurrencyCode,
+) {
+  const headers = <String>[
+    'record_type',
+    'business_date',
+    'receipt_number',
+    'closed_by',
+    'currency',
+    'gross_amount',
+    'net_amount',
+    'tax_amount',
+    'payment_method',
+    'payment_currency',
+    'payment_tendered_amount',
+    'payment_base_amount',
+    'terminal',
+    'product_id',
+    'product_name',
+    'quantity',
+    'line_gross_amount',
+    'tax_rate_name',
+    'tax_rate_percent',
+    'tax_rate_gross_amount',
+    'tax_rate_net_amount',
+    'tax_rate_tax_amount',
+  ];
+  final rows = <List<Object?>>[headers];
+  for (final bill in bills) {
+    final common = <String, Object?>{
+      'business_date': _dateLabel(bill.businessDate),
+      'receipt_number': bill.receiptNumber,
+      'closed_by': bill.closedByName,
+      'currency': bill.currencyCode,
+    };
+    rows.add(
+      _csvRow(headers, {
+        ...common,
+        'record_type': 'BILL',
+        'gross_amount': _decimalAmount(bill.grossMinor, bill.currencyCode),
+        'net_amount': _decimalAmount(bill.netMinor, bill.currencyCode),
+        'tax_amount': _decimalAmount(bill.taxMinor, bill.currencyCode),
+      }),
+    );
+    for (final payment in bill.payments) {
+      rows.add(
+        _csvRow(headers, {
+          ...common,
+          'record_type': 'PAYMENT',
+          'payment_method': payment.method,
+          'payment_currency': payment.currencyCode,
+          'payment_tendered_amount': _decimalAmount(
+            payment.tenderedAmountMinor,
+            payment.currencyCode,
+          ),
+          'payment_base_amount': _decimalAmount(
+            payment.baseAmountMinor,
+            baseCurrencyCode,
+          ),
+          'terminal': payment.terminalLabel,
+        }),
+      );
+    }
+    for (final line in bill.lines) {
+      rows.add(
+        _csvRow(headers, {
+          ...common,
+          'record_type': 'ITEM',
+          'product_id': line.productId,
+          'product_name': line.productName,
+          'quantity': line.quantity,
+          'line_gross_amount': _decimalAmount(
+            line.grossMinor,
+            bill.currencyCode,
+          ),
+        }),
+      );
+    }
+    for (final tax in bill.taxBreakdown) {
+      rows.add(
+        _csvRow(headers, {
+          ...common,
+          'record_type': 'TAX',
+          'tax_rate_name': tax.name,
+          'tax_rate_percent': (tax.basisPoints / 100).toStringAsFixed(2),
+          'tax_rate_gross_amount': _decimalAmount(
+            tax.grossMinor,
+            bill.currencyCode,
+          ),
+          'tax_rate_net_amount': _decimalAmount(
+            tax.netMinor,
+            bill.currencyCode,
+          ),
+          'tax_rate_tax_amount': _decimalAmount(
+            tax.taxMinor,
+            bill.currencyCode,
+          ),
+        }),
+      );
+    }
+  }
+  return rows.map((row) => row.map(_csvCell).join(',')).join('\r\n');
+}
+
+List<Object?> _csvRow(List<String> headers, Map<String, Object?> values) =>
+    headers.map((header) => values[header]).toList(growable: false);
+
+String _csvCell(Object? value) {
+  final text = value?.toString() ?? '';
+  if (!text.contains(RegExp('[,"\\r\\n]'))) return text;
+  return '"${text.replaceAll('"', '""')}"';
+}
+
+String _decimalAmount(int minorUnits, String currencyCode) {
+  final digits = currencyDecimalDigits(currencyCode.trim().toUpperCase());
+  if (digits == 0) return '$minorUnits';
+  final negative = minorUnits.isNegative;
+  final absolute = minorUnits.abs();
+  var scale = 1;
+  for (var index = 0; index < digits; index++) {
+    scale *= 10;
+  }
+  final amount =
+      '${absolute ~/ scale}.${(absolute % scale).toString().padLeft(digits, '0')}';
+  return negative ? '-$amount' : amount;
 }
 
 DateTime _shiftPeriod(DateTime anchor, _ReportPeriod period, int direction) =>
