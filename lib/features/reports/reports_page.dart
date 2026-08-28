@@ -168,13 +168,13 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
             ),
             if (_period == _ReportPeriod.custom)
               FilledButton.icon(
-                onPressed: () => _selectCustomRange(anchor, allBills),
+                onPressed: () => _selectCustomRange(anchor),
                 icon: const Icon(Icons.date_range_rounded),
                 label: Text(_customRangeLabel(_customRange)),
               )
             else
               OutlinedButton.icon(
-                onPressed: () => _selectCustomRange(anchor, allBills),
+                onPressed: () => _selectCustomRange(anchor),
                 icon: const Icon(Icons.date_range_rounded),
                 label: const Text('Custom dates'),
               ),
@@ -234,20 +234,30 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
     );
   }
 
-  Future<void> _selectCustomRange(
-    DateTime anchor,
-    List<SalesReportBill> bills,
-  ) async {
-    final earliest = bills.isEmpty
-        ? DateTime(anchor.year - 5)
-        : bills
-              .map((bill) => bill.businessDate)
-              .reduce((left, right) => left.isBefore(right) ? left : right);
-    final latestAllowed = DateTime.now().add(const Duration(days: 1));
-    final initial = _customRange ?? DateTimeRange(start: anchor, end: anchor);
+  Future<void> _selectCustomRange(DateTime anchor) async {
+    final now = DateTime.now();
+    final latestAllowed = DateTime(now.year, now.month, now.day);
+    final earliestAllowed = DateTime(
+      latestAllowed.year - 7,
+      latestAllowed.month,
+      latestAllowed.day,
+    );
+    final anchorDay = DateTime(anchor.year, anchor.month, anchor.day);
+    final safeAnchor = anchorDay.isBefore(earliestAllowed)
+        ? earliestAllowed
+        : anchorDay.isAfter(latestAllowed)
+        ? latestAllowed
+        : anchorDay;
+    final savedRange = _customRange;
+    final initial =
+        savedRange != null &&
+            !savedRange.start.isBefore(earliestAllowed) &&
+            !savedRange.end.isAfter(latestAllowed)
+        ? savedRange
+        : DateTimeRange(start: safeAnchor, end: safeAnchor);
     final selected = await showDateRangePicker(
       context: context,
-      firstDate: DateTime(earliest.year, earliest.month, earliest.day),
+      firstDate: earliestAllowed,
       lastDate: latestAllowed,
       initialDateRange: initial,
       helpText: 'Select report business dates',
