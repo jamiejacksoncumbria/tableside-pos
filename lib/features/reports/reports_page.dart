@@ -21,7 +21,7 @@ final openVenueOrdersReportProvider = StreamProvider<List<PosOrder>>((ref) {
   return ref.watch(firestorePosRepositoryProvider).watchVenueOpenOrders(scope);
 });
 
-enum _ReportPeriod { day, week, month }
+enum _ReportPeriod { day, week, month, custom }
 
 class ReportsPage extends ConsumerStatefulWidget {
   const ReportsPage({super.key, required this.currencyCode});
@@ -34,6 +34,7 @@ class ReportsPage extends ConsumerStatefulWidget {
 
 class _ReportsPageState extends ConsumerState<ReportsPage> {
   _ReportPeriod _period = _ReportPeriod.day;
+  DateTimeRange? _customRange;
 
   @override
   Widget build(BuildContext context) {
@@ -97,7 +98,9 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
               .map((bill) => bill.businessDate)
               .reduce((left, right) => left.isAfter(right) ? left : right);
     final bills = allBills
-        .where((bill) => _inPeriod(bill.businessDate, anchor, _period))
+        .where(
+          (bill) => _inPeriod(bill.businessDate, anchor, _period, _customRange),
+        )
         .toList(growable: false);
     final gross = bills.fold<int>(0, (sum, bill) => sum + bill.grossMinor);
     final net = bills.fold<int>(0, (sum, bill) => sum + bill.netMinor);
@@ -139,16 +142,43 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
       children: [
         Text('Sales reports', style: Theme.of(context).textTheme.headlineSmall),
         const SizedBox(height: 6),
-        Text('Closed bills only · ${_periodLabel(anchor, _period)}'),
+        Text(
+          'Closed bills only · ${_periodLabel(anchor, _period, _customRange)}',
+        ),
         const SizedBox(height: 16),
-        SegmentedButton<_ReportPeriod>(
-          segments: const [
-            ButtonSegment(value: _ReportPeriod.day, label: Text('Daily')),
-            ButtonSegment(value: _ReportPeriod.week, label: Text('Weekly')),
-            ButtonSegment(value: _ReportPeriod.month, label: Text('Monthly')),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            SegmentedButton<_ReportPeriod>(
+              segments: const [
+                ButtonSegment(value: _ReportPeriod.day, label: Text('Daily')),
+                ButtonSegment(value: _ReportPeriod.week, label: Text('Weekly')),
+                ButtonSegment(
+                  value: _ReportPeriod.month,
+                  label: Text('Monthly'),
+                ),
+              ],
+              emptySelectionAllowed: true,
+              selected: _period == _ReportPeriod.custom ? const {} : {_period},
+              onSelectionChanged: (value) {
+                if (value.isNotEmpty) setState(() => _period = value.first);
+              },
+            ),
+            if (_period == _ReportPeriod.custom)
+              FilledButton.icon(
+                onPressed: () => _selectCustomRange(anchor, allBills),
+                icon: const Icon(Icons.date_range_rounded),
+                label: Text(_customRangeLabel(_customRange)),
+              )
+            else
+              OutlinedButton.icon(
+                onPressed: () => _selectCustomRange(anchor, allBills),
+                icon: const Icon(Icons.date_range_rounded),
+                label: const Text('Custom dates'),
+              ),
           ],
-          selected: {_period},
-          onSelectionChanged: (value) => setState(() => _period = value.first),
         ),
         const SizedBox(height: 18),
         Wrap(
@@ -203,9 +233,55 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
       ],
     );
   }
+
+  Future<void> _selectCustomRange(
+    DateTime anchor,
+    List<SalesReportBill> bills,
+  ) async {
+    final earliest = bills.isEmpty
+        ? DateTime(anchor.year - 5)
+        : bills
+              .map((bill) => bill.businessDate)
+              .reduce((left, right) => left.isBefore(right) ? left : right);
+    final latestAllowed = DateTime.now().add(const Duration(days: 1));
+    final initial = _customRange ?? DateTimeRange(start: anchor, end: anchor);
+    final selected = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(earliest.year, earliest.month, earliest.day),
+      lastDate: latestAllowed,
+      initialDateRange: initial,
+      helpText: 'Select report business dates',
+      saveText: 'Show report',
+    );
+    if (selected == null || !mounted) return;
+    setState(() {
+      _customRange = selected;
+      _period = _ReportPeriod.custom;
+    });
+  }
 }
 
-bool _inPeriod(DateTime value, DateTime anchor, _ReportPeriod period) {
+bool _inPeriod(
+  DateTime value,
+  DateTime anchor,
+  _ReportPeriod period,
+  DateTimeRange? customRange,
+) {
+  if (period == _ReportPeriod.custom) {
+    if (customRange == null) return false;
+    final day = DateTime(value.year, value.month, value.day);
+    final start = DateTime(
+      customRange.start.year,
+      customRange.start.month,
+      customRange.start.day,
+    );
+    final endExclusive = DateTime(
+      customRange.end.year,
+      customRange.end.month,
+      customRange.end.day,
+    ).add(const Duration(days: 1));
+    return !day.isBefore(start) && day.isBefore(endExclusive);
+  }
   if (period == _ReportPeriod.day) {
     return value.year == anchor.year &&
         value.month == anchor.month &&
@@ -220,14 +296,26 @@ bool _inPeriod(DateTime value, DateTime anchor, _ReportPeriod period) {
   return !value.isBefore(weekStart) && value.isBefore(nextWeek);
 }
 
-String _periodLabel(DateTime date, _ReportPeriod period) => switch (period) {
+String _periodLabel(
+  DateTime date,
+  _ReportPeriod period,
+  DateTimeRange? customRange,
+) => switch (period) {
   _ReportPeriod.day =>
     '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}',
   _ReportPeriod.week =>
     'week containing ${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}',
   _ReportPeriod.month =>
     '${date.year}-${date.month.toString().padLeft(2, '0')}',
+  _ReportPeriod.custom => _customRangeLabel(customRange),
 };
+
+String _customRangeLabel(DateTimeRange? range) {
+  if (range == null) return 'Custom dates';
+  String date(DateTime value) =>
+      '${value.year}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+  return '${date(range.start)} to ${date(range.end)}';
+}
 
 class _Metric extends StatelessWidget {
   const _Metric(this.label, this.value, this.currencyCode);
