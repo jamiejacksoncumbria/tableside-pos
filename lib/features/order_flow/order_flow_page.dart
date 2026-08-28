@@ -411,87 +411,93 @@ class _OrderFlowCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final late = _lateState(order, now, amberMinutes, redMinutes);
-    final scheme = Theme.of(context).colorScheme;
-    final accent = switch (late) {
-      _LateState.red => scheme.error,
+    final background = switch (late) {
+      _LateState.red => Colors.red.shade800,
       _LateState.amber => Colors.orange.shade800,
-      _LateState.normal => scheme.outlineVariant,
+      _LateState.normal => Colors.green.shade700,
     };
     final elapsed = now.difference(order.ticketReleasedAt);
     final location = order.tableLabel ?? order.tabName ?? 'Unassigned';
 
     return Card(
+      color: background,
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: BorderSide(
-          color: accent,
-          width: late == _LateState.normal ? 1 : 2,
-        ),
+        side: BorderSide(color: background, width: 2),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+      child: DefaultTextStyle.merge(
+        style: const TextStyle(color: Colors.white),
+        child: IconTheme.merge(
+          data: const IconThemeData(color: Colors.white),
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _AreaIcon(area: order.productionArea),
-                const SizedBox(width: 8),
+                Row(
+                  children: [
+                    _AreaIcon(area: order.productionArea),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '${order.productionArea.label} · #${order.reference}',
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    _OrderActions(order: order, onAction: onAction),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Icon(
+                      Icons.table_restaurant_outlined,
+                      size: 18,
+                      color: Colors.white,
+                    ),
+                    const SizedBox(width: 5),
+                    Expanded(child: Text(location)),
+                    _StatusPill(status: order.status),
+                  ],
+                ),
+                const SizedBox(height: 10),
                 Expanded(
-                  child: Text(
-                    '${order.productionArea.label} · #${order.reference}',
-                    style: Theme.of(context).textTheme.titleSmall,
+                  child: ListView(
+                    primary: false,
+                    children: [
+                      for (final item in order.itemSummary)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Text(item),
+                        ),
+                    ],
                   ),
                 ),
-                _OrderActions(order: order, onAction: onAction),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Icon(
-                  Icons.table_restaurant_outlined,
-                  size: 18,
-                  color: scheme.onSurfaceVariant,
-                ),
-                const SizedBox(width: 5),
-                Expanded(child: Text(location)),
-                _StatusPill(status: order.status),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Expanded(
-              child: ListView(
-                primary: false,
-                children: [
-                  for (final item in order.itemSummary)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Text(item),
-                    ),
+                if (order.hasAllergyAlert) ...[
+                  const SizedBox(height: 8),
+                  _AlertRow(
+                    icon: Icons.warning_amber_rounded,
+                    text: order.note.isEmpty ? 'Allergy alert' : order.note,
+                    color: Colors.white,
+                  ),
                 ],
-              ),
+                const SizedBox(height: 8),
+                _PrimaryFlowAction(order: order, onAction: onAction),
+                const SizedBox(height: 8),
+                _AlertRow(
+                  icon: late == _LateState.normal
+                      ? Icons.timer_outlined
+                      : Icons.priority_high_rounded,
+                  text: '${_formatElapsed(elapsed)} since ticket release',
+                  color: Colors.white,
+                ),
+              ],
             ),
-            if (order.hasAllergyAlert) ...[
-              const SizedBox(height: 8),
-              _AlertRow(
-                icon: Icons.warning_amber_rounded,
-                text: order.note.isEmpty ? 'Allergy alert' : order.note,
-                color: scheme.error,
-              ),
-            ],
-            const SizedBox(height: 8),
-            _PrimaryFlowAction(order: order, onAction: onAction),
-            const SizedBox(height: 8),
-            _AlertRow(
-              icon: late == _LateState.normal
-                  ? Icons.timer_outlined
-                  : Icons.priority_high_rounded,
-              text: '${_formatElapsed(elapsed)} since ticket release',
-              color: accent,
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -525,6 +531,10 @@ class _PrimaryFlowAction extends StatelessWidget {
       width: double.infinity,
       child: FilledButton.tonal(
         onPressed: () => onAction(action),
+        style: FilledButton.styleFrom(
+          backgroundColor: Colors.white,
+          foregroundColor: Theme.of(context).colorScheme.onSurface,
+        ),
         child: Text(label),
       ),
     );
@@ -599,6 +609,8 @@ class _AreaIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) => CircleAvatar(
     radius: 16,
+    backgroundColor: Colors.white24,
+    foregroundColor: Colors.white,
     child: Icon(switch (area) {
       ProductionArea.bar => Icons.local_bar_rounded,
       ProductionArea.kitchen => Icons.restaurant_rounded,
@@ -617,9 +629,14 @@ class _StatusPill extends StatelessWidget {
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
     decoration: BoxDecoration(
       borderRadius: BorderRadius.circular(20),
-      color: Theme.of(context).colorScheme.secondaryContainer,
+      color: Colors.white24,
     ),
-    child: Text(status.label, style: Theme.of(context).textTheme.labelSmall),
+    child: Text(
+      status.label,
+      style: Theme.of(
+        context,
+      ).textTheme.labelSmall?.copyWith(color: Colors.white),
+    ),
   );
 }
 
