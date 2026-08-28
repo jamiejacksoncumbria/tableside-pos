@@ -432,6 +432,7 @@ class ProductionCommandRepository {
     required int seconds,
     required int orderFlowAmberMinutes,
     required int orderFlowRedMinutes,
+    required int businessDayCutoffMinutes,
   }) {
     return _call('updateVenueNotificationSettings', {
       'tenantId': scope.tenantId,
@@ -439,6 +440,7 @@ class ProductionCommandRepository {
       'notificationRetentionSeconds': seconds,
       'orderFlowAmberMinutes': orderFlowAmberMinutes,
       'orderFlowRedMinutes': orderFlowRedMinutes,
+      'businessDayCutoffMinutes': businessDayCutoffMinutes,
     });
   }
 

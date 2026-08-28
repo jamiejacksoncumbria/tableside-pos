@@ -92,6 +92,15 @@ class FirestorePosRepository {
                     data['orderFlowRedMinutes'],
                     25,
                   ),
+                  businessDayCutoffMinutes: _businessDayCutoffMinutes(
+                    data['businessDayCutoffMinutes'],
+                  ),
+                  pendingBusinessDayCutoffMinutes:
+                      data['pendingBusinessDayCutoffMinutes'] is num
+                      ? (data['pendingBusinessDayCutoffMinutes'] as num).toInt()
+                      : null,
+                  pendingBusinessDayCutoffEffectiveDate:
+                      data['pendingBusinessDayCutoffEffectiveDate'] as String?,
                 );
               })
               .toList(growable: false),
@@ -106,6 +115,11 @@ class FirestorePosRepository {
   int _orderFlowMinutes(Object? value, int fallback) {
     final minutes = value is int ? value : fallback;
     return minutes.clamp(1, 480).toInt();
+  }
+
+  int _businessDayCutoffMinutes(Object? value) {
+    final minutes = value is num ? value.toInt() : 240;
+    return minutes.clamp(0, 1439).toInt();
   }
 
   int _taxRateBasisPoints(Object? value) {

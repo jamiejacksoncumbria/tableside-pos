@@ -29,9 +29,14 @@ final openVenueOrdersReportProvider = StreamProvider<List<PosOrder>>((ref) {
 enum _ReportPeriod { day, week, month, custom }
 
 class ReportsPage extends ConsumerStatefulWidget {
-  const ReportsPage({super.key, required this.currencyCode});
+  const ReportsPage({
+    super.key,
+    required this.currencyCode,
+    required this.businessDayCutoffMinutes,
+  });
 
   final String currencyCode;
+  final int businessDayCutoffMinutes;
 
   @override
   ConsumerState<ReportsPage> createState() => _ReportsPageState();
@@ -164,6 +169,11 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
         const SizedBox(height: 6),
         Text(
           'Closed bills only · ${_periodLabel(anchor, _period, _customRange)}',
+        ),
+        const SizedBox(height: 3),
+        Text(
+          'Venue business day ends at ${_clockLabel(widget.businessDayCutoffMinutes)}. Each bill retains the cut-off used when it closed.',
+          style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 16),
         Wrap(
@@ -582,6 +592,11 @@ DateTime _weekStart(DateTime value) {
 
 String _dateLabel(DateTime value) =>
     '${value.year}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+
+String _clockLabel(int minutes) {
+  final safe = minutes.clamp(0, 1439);
+  return '${(safe ~/ 60).toString().padLeft(2, '0')}:${(safe % 60).toString().padLeft(2, '0')}';
+}
 
 bool _inPeriod(
   DateTime value,

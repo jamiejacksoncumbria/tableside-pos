@@ -167,8 +167,12 @@ class Venue {
     this.notificationRetentionSeconds = 5,
     int orderFlowAmberMinutes = 15,
     int orderFlowRedMinutes = 25,
+    int businessDayCutoffMinutes = 240,
+    this.pendingBusinessDayCutoffMinutes,
+    this.pendingBusinessDayCutoffEffectiveDate,
   }) : _orderFlowAmberMinutes = orderFlowAmberMinutes,
-       _orderFlowRedMinutes = orderFlowRedMinutes;
+       _orderFlowRedMinutes = orderFlowRedMinutes,
+       _businessDayCutoffMinutes = businessDayCutoffMinutes;
 
   final String id;
   final String tenantId;
@@ -181,9 +185,13 @@ class Venue {
   // Firestore venue documents are also mapped to the same safe defaults.
   final int? _orderFlowAmberMinutes;
   final int? _orderFlowRedMinutes;
+  final int? _businessDayCutoffMinutes;
+  final int? pendingBusinessDayCutoffMinutes;
+  final String? pendingBusinessDayCutoffEffectiveDate;
 
   int get orderFlowAmberMinutes => _orderFlowAmberMinutes ?? 15;
   int get orderFlowRedMinutes => _orderFlowRedMinutes ?? 25;
+  int get businessDayCutoffMinutes => _businessDayCutoffMinutes ?? 240;
 }
 
 class SalesReportPayment {

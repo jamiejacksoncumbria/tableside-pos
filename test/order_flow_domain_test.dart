@@ -20,6 +20,7 @@ void main() {
 
     expect(venue.orderFlowAmberMinutes, 15);
     expect(venue.orderFlowRedMinutes, 25);
+    expect(venue.businessDayCutoffMinutes, 240);
   });
 
   test(

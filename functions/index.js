@@ -818,6 +818,7 @@ async function createTenantFor(caller, rawData) {
       notificationRetentionSeconds: 5,
       orderFlowAmberMinutes: 15,
       orderFlowRedMinutes: 25,
+      businessDayCutoffMinutes: 240,
       status: "active",
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -898,6 +899,7 @@ async function createVenueFor(caller, rawData) {
       notificationRetentionSeconds: 5,
       orderFlowAmberMinutes: 15,
       orderFlowRedMinutes: 25,
+      businessDayCutoffMinutes: 240,
       status: "active",
       createdAt: FieldValue.serverTimestamp(),
       createdBy: caller.uid,
@@ -1685,6 +1687,13 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
   if (orderFlowRedMinutes <= orderFlowAmberMinutes) {
     throw new HttpsError("invalid-argument", "The red warning must be later than the amber warning.");
   }
+  const businessDayCutoffMinutes = data.businessDayCutoffMinutes == null
+    ? null
+    : requiredNonNegativeInteger(
+        data.businessDayCutoffMinutes,
+        "businessDayCutoffMinutes",
+        1439,
+      );
   await requireTenantManager(caller, tenantId);
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
@@ -1694,10 +1703,48 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
     if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
     }
+    const venueData = venue.data();
+    const currentCutoff = Number(venueData.businessDayCutoffMinutes ?? 240);
+    const safeCurrentCutoff = Number.isInteger(currentCutoff) &&
+        currentCutoff >= 0 && currentCutoff < 1440
+      ? currentCutoff
+      : 240;
+    const timeZone = typeof venueData.timeZone === "string"
+      ? venueData.timeZone
+      : "Europe/London";
+    const currentBusinessDate = billBusinessDate(timeZone, safeCurrentCutoff);
+    const cutoffRequested = businessDayCutoffMinutes != null;
+    const cutoffChanged = cutoffRequested &&
+      businessDayCutoffMinutes !== safeCurrentCutoff;
+    const existingPendingCutoff = Number(
+      venueData.pendingBusinessDayCutoffMinutes,
+    );
+    const existingPendingEffectiveDate =
+      venueData.pendingBusinessDayCutoffEffectiveDate;
+    const preservesExistingSchedule = cutoffChanged &&
+      existingPendingCutoff === businessDayCutoffMinutes &&
+      typeof existingPendingEffectiveDate === "string";
+    const cutoffEffectiveDate = cutoffChanged
+      ? (preservesExistingSchedule
+          ? existingPendingEffectiveDate
+          : nextIsoDate(currentBusinessDate))
+      : null;
+    const cutoffUpdate = !cutoffRequested
+      ? {}
+      : cutoffChanged
+      ? {
+          pendingBusinessDayCutoffMinutes: businessDayCutoffMinutes,
+          pendingBusinessDayCutoffEffectiveDate: cutoffEffectiveDate,
+        }
+      : {
+          pendingBusinessDayCutoffMinutes: FieldValue.delete(),
+          pendingBusinessDayCutoffEffectiveDate: FieldValue.delete(),
+        };
     transaction.update(venueRef, {
       notificationRetentionSeconds,
       orderFlowAmberMinutes,
       orderFlowRedMinutes,
+      ...cutoffUpdate,
       updatedAt: FieldValue.serverTimestamp(),
       updatedByActor: actor,
     });
@@ -1707,11 +1754,20 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
       notificationRetentionSeconds,
       orderFlowAmberMinutes,
       orderFlowRedMinutes,
+      previousBusinessDayCutoffMinutes: safeCurrentCutoff,
+      pendingBusinessDayCutoffMinutes: businessDayCutoffMinutes,
+      pendingBusinessDayCutoffEffectiveDate: cutoffEffectiveDate,
+      businessDayCutoffChanged: cutoffChanged,
       actor,
       createdAt: FieldValue.serverTimestamp(),
     });
   });
-  return {notificationRetentionSeconds, orderFlowAmberMinutes, orderFlowRedMinutes};
+  return {
+    notificationRetentionSeconds,
+    orderFlowAmberMinutes,
+    orderFlowRedMinutes,
+    requestedBusinessDayCutoffMinutes: businessDayCutoffMinutes,
+  };
 }
 
 function currencyDecimalDigits(currencyCode) {
@@ -1903,6 +1959,13 @@ function billBusinessDate(timeZone, cutoffMinutes, now = new Date()) {
     localDate.setUTCDate(localDate.getUTCDate() - 1);
   }
   return localDate.toISOString().slice(0, 10);
+}
+
+function nextIsoDate(isoDate) {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
 }
 
 /// Closes an entire open order against verified payment allocations. A split
@@ -2106,10 +2169,24 @@ async function closeOrderFor(caller, rawData) {
       ? venue.data().timeZone
       : "Europe/London";
     const configuredCutoff = Number(venue.data().businessDayCutoffMinutes ?? 240);
-    const cutoffMinutes = Number.isInteger(configuredCutoff) && configuredCutoff >= 0 && configuredCutoff < 1440
+    let cutoffMinutes = Number.isInteger(configuredCutoff) && configuredCutoff >= 0 && configuredCutoff < 1440
       ? configuredCutoff
       : 240;
-    const businessDate = billBusinessDate(timeZone, cutoffMinutes);
+    let businessDate = billBusinessDate(timeZone, cutoffMinutes);
+    const pendingCutoff = Number(venue.data().pendingBusinessDayCutoffMinutes);
+    const pendingEffectiveDate = venue.data().pendingBusinessDayCutoffEffectiveDate;
+    const pendingIsValid = Number.isInteger(pendingCutoff) &&
+      pendingCutoff >= 0 && pendingCutoff < 1440 &&
+      typeof pendingEffectiveDate === "string";
+    let activatePendingCutoff = false;
+    if (pendingIsValid) {
+      const candidateBusinessDate = billBusinessDate(timeZone, pendingCutoff);
+      if (candidateBusinessDate >= pendingEffectiveDate) {
+        cutoffMinutes = pendingCutoff;
+        businessDate = candidateBusinessDate;
+        activatePendingCutoff = true;
+      }
+    }
     const receiptNumber = `${businessDate.replaceAll("-", "")}-${orderId.slice(-6).toUpperCase()}`;
     const receiptLines = lines.map((line) => ({...line}));
     const receiptTargetDeviceId = receiptRoute?.exists &&
@@ -2124,6 +2201,24 @@ async function closeOrderFor(caller, rawData) {
     const receiptDevice = receiptDeviceRef == null
       ? null
       : await transaction.get(receiptDeviceRef);
+    // Firestore requires every transaction read to complete before its first
+    // write, so promotion of a scheduled cut-off deliberately happens here.
+    if (activatePendingCutoff) {
+      transaction.update(venueRef, {
+        businessDayCutoffMinutes: pendingCutoff,
+        pendingBusinessDayCutoffMinutes: FieldValue.delete(),
+        pendingBusinessDayCutoffEffectiveDate: FieldValue.delete(),
+        businessDayCutoffActivatedAt: FieldValue.serverTimestamp(),
+      });
+      transaction.create(tenantRef.collection("auditEvents").doc(), {
+        action: "activateBusinessDayCutoff",
+        venueId,
+        businessDayCutoffMinutes: pendingCutoff,
+        effectiveBusinessDate: pendingEffectiveDate,
+        actor,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    }
     const receiptPrintQueued = printReceipt &&
       receiptTargetDeviceId != null &&
       activeRouteDevice(receiptDevice, venueId, "receipt");

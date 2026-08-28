@@ -45,6 +45,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final TextEditingController _notificationRetentionSeconds;
   late final TextEditingController _orderFlowAmberMinutes;
   late final TextEditingController _orderFlowRedMinutes;
+  late int _businessDayCutoffMinutes;
   Uint8List? _logoBytes;
   String? _logoName;
   bool _saving = false;
@@ -77,6 +78,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _orderFlowRedMinutes = TextEditingController(
       text: '${widget.venueOverride?.orderFlowRedMinutes ?? 25}',
     );
+    _businessDayCutoffMinutes =
+        widget.venueOverride?.pendingBusinessDayCutoffMinutes ??
+        widget.venueOverride?.businessDayCutoffMinutes ??
+        240;
   }
 
   @override
@@ -210,6 +215,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             seconds: seconds,
             orderFlowAmberMinutes: amberMinutes,
             orderFlowRedMinutes: redMinutes,
+            businessDayCutoffMinutes: _businessDayCutoffMinutes,
           );
       if (!mounted) return;
       showAppNotification(
@@ -217,7 +223,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         ref: ref,
         title: 'Venue notification timing saved',
         message:
-            'Notifications dismiss after $seconds seconds; orders warn at $amberMinutes/$redMinutes minutes.',
+            'Notifications dismiss after $seconds seconds; orders warn at $amberMinutes/$redMinutes minutes. The day-end setting was saved safely.',
         level: AppNotificationLevel.success,
       );
     } on Object catch (error, stackTrace) {
@@ -233,6 +239,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     } finally {
       if (mounted) setState(() => _savingNotificationRetention = false);
     }
+  }
+
+  Future<void> _pickBusinessDayCutoff() async {
+    final selected = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(
+        hour: _businessDayCutoffMinutes ~/ 60,
+        minute: _businessDayCutoffMinutes % 60,
+      ),
+      helpText: 'Select venue business-day cut-off',
+    );
+    if (selected == null || !mounted) return;
+    setState(() {
+      _businessDayCutoffMinutes = selected.hour * 60 + selected.minute;
+    });
   }
 
   String _contentTypeFor(String fileName) {
@@ -559,6 +580,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   },
                 ),
                 const SizedBox(height: 14),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.schedule_rounded),
+                  title: const Text('Business-day cut-off'),
+                  subtitle: Text(
+                    '${_formatClockMinutes(_businessDayCutoffMinutes)} · changes apply from the next business day and never alter closed bills'
+                    '${widget.venueOverride?.pendingBusinessDayCutoffEffectiveDate == null ? '' : '\nPending from ${widget.venueOverride!.pendingBusinessDayCutoffEffectiveDate}'}',
+                  ),
+                  trailing: OutlinedButton(
+                    onPressed: _savingNotificationRetention
+                        ? null
+                        : _pickBusinessDayCutoff,
+                    child: const Text('Change'),
+                  ),
+                ),
+                const SizedBox(height: 14),
                 Align(
                   alignment: Alignment.centerRight,
                   child: FilledButton.icon(
@@ -589,6 +626,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       ],
     );
   }
+}
+
+String _formatClockMinutes(int minutes) {
+  final safe = minutes.clamp(0, 1439);
+  final hour = safe ~/ 60;
+  final minute = safe % 60;
+  return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
 }
 
 class _SettingsCard extends StatelessWidget {

@@ -222,24 +222,27 @@ class HomeShell extends ConsumerWidget {
     );
   }
 
-  Widget _buildBody(HomeSection section, TenantProfile profile) =>
-      switch (section) {
-        HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
-        HomeSection.orderFlow => OrderFlowPage(
-          amberMinutes: venueOverride?.orderFlowAmberMinutes ?? 15,
-          redMinutes: venueOverride?.orderFlowRedMinutes ?? 25,
-        ),
-        HomeSection.menu => MenuManagementPage(
-          currencyCode: profile.currencyCode,
-        ),
-        HomeSection.reports => ReportsPage(currencyCode: profile.currencyCode),
-        HomeSection.settings => SettingsPage(
-          profileOverride: profileOverride,
-          venueOverride: venueOverride,
-          persistToFirebase: persistCompanyProfile,
-        ),
-        HomeSection.platformAdmin => const PlatformAdminPage(),
-      };
+  Widget _buildBody(
+    HomeSection section,
+    TenantProfile profile,
+  ) => switch (section) {
+    HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
+    HomeSection.orderFlow => OrderFlowPage(
+      amberMinutes: venueOverride?.orderFlowAmberMinutes ?? 15,
+      redMinutes: venueOverride?.orderFlowRedMinutes ?? 25,
+    ),
+    HomeSection.menu => MenuManagementPage(currencyCode: profile.currencyCode),
+    HomeSection.reports => ReportsPage(
+      currencyCode: profile.currencyCode,
+      businessDayCutoffMinutes: venueOverride?.businessDayCutoffMinutes ?? 240,
+    ),
+    HomeSection.settings => SettingsPage(
+      profileOverride: profileOverride,
+      venueOverride: venueOverride,
+      persistToFirebase: persistCompanyProfile,
+    ),
+    HomeSection.platformAdmin => const PlatformAdminPage(),
+  };
 }
 
 /// Keeps the currently selected service location unmistakable on every screen.
