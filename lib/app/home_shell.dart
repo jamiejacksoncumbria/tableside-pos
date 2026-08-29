@@ -40,6 +40,7 @@ class HomeShell extends ConsumerWidget {
     this.venueOverride,
     this.persistCompanyProfile = false,
     this.isPlatformAdmin = false,
+    this.onSwitchVenue,
     this.onSignOut,
   });
 
@@ -47,6 +48,7 @@ class HomeShell extends ConsumerWidget {
   final Venue? venueOverride;
   final bool persistCompanyProfile;
   final bool isPlatformAdmin;
+  final VoidCallback? onSwitchVenue;
   final VoidCallback? onSignOut;
 
   @override
@@ -116,30 +118,56 @@ class HomeShell extends ConsumerWidget {
                   : null,
             ),
             const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  profile.displayName,
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                Text(
-                  venueOverride?.name ?? 'Market Street',
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-              ],
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    profile.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  Text(
+                    venueOverride?.name ?? 'Market Street',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                ],
+              ),
             ),
           ],
         ),
         actions: [
+          if (onSwitchVenue != null)
+            wide
+                ? TextButton.icon(
+                    onPressed: onSwitchVenue,
+                    icon: const Icon(Icons.storefront_rounded),
+                    label: const Text('Switch venue'),
+                  )
+                : IconButton(
+                    tooltip: 'Switch venue',
+                    onPressed: onSwitchVenue,
+                    icon: const Icon(Icons.storefront_rounded),
+                  ),
           if (staffSession != null)
-            TextButton.icon(
-              onPressed: () => ref
-                  .read(activeStaffPinSessionProvider.notifier)
-                  .lock(),
-              icon: const Icon(Icons.switch_account_rounded),
-              label: Text(wide ? staffSession.displayName : 'Switch'),
-            ),
+            wide
+                ? TextButton.icon(
+                    onPressed: () => ref
+                        .read(activeStaffPinSessionProvider.notifier)
+                        .lock(),
+                    icon: const Icon(Icons.switch_account_rounded),
+                    label: Text(staffSession.displayName),
+                  )
+                : IconButton(
+                    tooltip: 'Switch staff: ${staffSession.displayName}',
+                    onPressed: () => ref
+                        .read(activeStaffPinSessionProvider.notifier)
+                        .lock(),
+                    icon: const Icon(Icons.switch_account_rounded),
+                  ),
           if (isPlatformAdmin && !wide)
             IconButton(
               tooltip: 'Platform administration',

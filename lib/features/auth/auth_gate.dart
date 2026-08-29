@@ -400,6 +400,12 @@ class _TenantWorkspace extends ConsumerWidget {
         venueOverride: venue,
         persistCompanyProfile: true,
         isPlatformAdmin: isPlatformAdmin,
+        onSwitchVenue: () {
+          AppLogger.info('Returning to the company and venue picker.');
+          ref.read(activeStaffPinSessionProvider.notifier).lock();
+          ref.read(homeSectionProvider.notifier).select(HomeSection.pos);
+          ref.read(activeVenueScopeProvider.notifier).clear();
+        },
         onSignOut: () {
           ref.read(activeStaffPinSessionProvider.notifier).lock();
           ref.read(activeVenueScopeProvider.notifier).clear();
