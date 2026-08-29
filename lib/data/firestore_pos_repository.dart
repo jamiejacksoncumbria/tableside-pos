@@ -1137,15 +1137,15 @@ class FirestorePosRepository {
   Stream<List<SalesReportBill>> watchSalesReportBills(VenueScope scope) {
     return _firestore
         .collection('tenants/${scope.tenantId}/bills')
-        .orderBy('closedAt', descending: true)
+        .where('venueId', isEqualTo: scope.venueId)
         .limit(5000)
         .snapshots()
         .map(
           (snapshot) => snapshot.docs
               .map(_salesReportBillFromDocument)
               .whereType<SalesReportBill>()
-              .where((bill) => bill.venueId == scope.venueId)
-              .toList(growable: false),
+              .toList(growable: false)
+            ..sort((a, b) => b.businessDate.compareTo(a.businessDate)),
         );
   }
 

@@ -1,5 +1,4 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -7,7 +6,7 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/print_job_repository.dart';
 import '../../data/production_command_repository.dart';
-import '../auth/session_providers.dart';
+import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 
@@ -334,29 +333,12 @@ class _PrintQueueRecoveryPageState
         ),
       );
     }
-    final userId = FirebaseAuth.instance.currentUser?.uid;
-    final memberships = userId == null
-        ? const <TenantMembership>[]
-        : ref
-              .watch(membershipsProvider(userId))
-              .when(
-                data: (items) => items,
-                loading: () => const <TenantMembership>[],
-                error: (error, stackTrace) {
-                  AppLogger.error(
-                    'Load print recovery access',
-                    error,
-                    stackTrace,
-                  );
-                  return const <TenantMembership>[];
-                },
-              );
-    final canManagePrintQueue = memberships.any(
-      (membership) =>
-          membership.tenantId == scope.tenantId &&
-          (membership.roles.contains('owner') ||
-              membership.roles.contains('manager')),
-    );
+    final staffSession = ref.watch(activeStaffPinSessionProvider);
+    final canManagePrintQueue =
+        staffSession?.roles.any(
+          (role) => role == 'owner' || role == 'manager',
+        ) ??
+        false;
     final jobs = ref.watch(venuePrintJobsProvider(scope));
 
     return Scaffold(

@@ -29,6 +29,16 @@ service cloud.firestore {
       return isMember(tenantId) && membership(tenantId).data.roles.hasAny(['owner', 'manager']);
     }
 
+    function managesVenueWithActivePin(tenantId, venueId) {
+      let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
+      return isMember(tenantId)
+        && venueId is string
+        && exists(authorizationPath)
+        && get(authorizationPath).data.venueId == venueId
+        && get(authorizationPath).data.expiresAt > request.time
+        && get(authorizationPath).data.roles.hasAny(['owner', 'manager']);
+    }
+
     // Venue records are server-managed. A venue marked as `deleting` rejects
     // new client writes while the trusted delete function checks whether any
     // operational or historical documents still reference it.
@@ -170,10 +180,18 @@ service cloud.firestore {
       }
 
       match /bills/{billId} {
-        allow read: if isPlatformAdmin() || managesTenant(tenantId);
+        allow read: if isPlatformAdmin()
+          || managesTenant(tenantId)
+          || managesVenueWithActivePin(tenantId, resource.data.venueId);
         // Payment, tax, stock, and close-of-day writes must be made by a
         // trusted Cloud Function using the Admin SDK, not by a client.
         allow write: if false;
+      }
+
+      // Short-lived report-read leases are issued only by the trusted PIN
+      // verification function. Clients cannot inspect, extend or replace one.
+      match /staffPinAuthorizations/{hostUserId} {
+        allow read, write: if false;
       }
 
       match /paymentRequests/{requestId} {

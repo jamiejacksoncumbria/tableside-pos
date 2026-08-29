@@ -1033,7 +1033,19 @@ async function verifyStaffPinFor(caller, rawData) {
   const token = randomBytes(32).toString("base64url");
   const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
   const sessionRef = db.collection(`tenants/${tenantId}/staffPinSessions`).doc();
-  await sessionRef.set({
+  const authorizationRef = db.doc(
+    `tenants/${tenantId}/staffPinAuthorizations/${caller.uid}`,
+  );
+  const [user, platformAdmin, verifiedMembership] = await Promise.all([
+    auth.getUser(userId),
+    db.doc(`platformAdmins/${userId}`).get(),
+    memberRef.get(),
+  ]);
+  const verifiedRoles = Array.isArray(verifiedMembership.data()?.roles)
+    ? verifiedMembership.data().roles
+    : [];
+  const batch = db.batch();
+  batch.set(sessionRef, {
     userId,
     venueId,
     hostUserId: caller.uid,
@@ -1041,11 +1053,18 @@ async function verifyStaffPinFor(caller, rawData) {
     expiresAt,
     createdAt: FieldValue.serverTimestamp(),
   });
-  const [user, platformAdmin, verifiedMembership] = await Promise.all([
-    auth.getUser(userId),
-    db.doc(`platformAdmins/${userId}`).get(),
-    memberRef.get(),
-  ]);
+  // Firestore streams cannot attach the opaque PIN-session token. This
+  // server-owned, short-lived lease lets rules authorize manager-only report
+  // reads for the current Firebase host without permanently elevating it.
+  batch.set(authorizationRef, {
+    userId,
+    venueId,
+    roles: verifiedRoles,
+    sessionId: sessionRef.id,
+    expiresAt,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+  await batch.commit();
   await writeAudit(caller.uid, "verifyStaffPin", userId, {tenantId, venueId});
   return {
     sessionId: sessionRef.id,
@@ -1054,9 +1073,7 @@ async function verifyStaffPinFor(caller, rawData) {
     userId,
     displayName: user.displayName || user.email || "Staff member",
     isPlatformAdmin: platformAdmin.exists || user.customClaims?.platformAdmin === true,
-    roles: Array.isArray(verifiedMembership.data()?.roles)
-      ? verifiedMembership.data().roles
-      : [],
+    roles: verifiedRoles,
   };
 }
 
