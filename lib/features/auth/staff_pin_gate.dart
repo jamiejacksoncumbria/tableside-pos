@@ -254,11 +254,13 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
         ) ??
         false;
     return Scaffold(
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
-          child: Card(
-            margin: const EdgeInsets.all(24),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 760),
+              child: Card(
             child: Padding(
               padding: const EdgeInsets.all(28),
               child: _loading
@@ -273,25 +275,51 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
                         ),
                         const SizedBox(height: 8),
                         const Text(
-                          'Select your name and enter your personal six-digit PIN.',
+                          'Tap your name, then enter your personal six-digit PIN.',
                         ),
                         const SizedBox(height: 20),
-                        DropdownButtonFormField<String>(
-                          initialValue: _selectedUserId,
-                          decoration: const InputDecoration(
-                            labelText: 'Staff member',
-                            border: OutlineInputBorder(),
-                          ),
-                          items: [
-                            for (final item in staff)
-                              DropdownMenuItem(
-                                value: item.userId,
-                                child: Text(item.displayName),
-                              ),
-                          ],
-                          onChanged: _submitting
-                              ? null
-                              : (value) => setState(() => _selectedUserId = value),
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            final columns = constraints.maxWidth >= 620
+                                ? 4
+                                : constraints.maxWidth >= 420
+                                ? 3
+                                : 2;
+                            const spacing = 10.0;
+                            final tileWidth =
+                                (constraints.maxWidth -
+                                    (spacing * (columns - 1))) /
+                                columns;
+                            return Wrap(
+                              spacing: spacing,
+                              runSpacing: spacing,
+                              children: [
+                                for (final item in staff)
+                                  SizedBox(
+                                    width: tileWidth,
+                                    child: _StaffTile(
+                                      staff: item,
+                                      selected:
+                                          item.userId == _selectedUserId,
+                                      enabled: !_submitting,
+                                      onTap: () async {
+                                        setState(() {
+                                          _selectedUserId = item.userId;
+                                          _error = null;
+                                        });
+                                        if (item.pinLocked) return;
+                                        if (item.hasPin) {
+                                          await _enterPin(item);
+                                        } else if (item.userId ==
+                                            currentUserId) {
+                                          await _setOwnPin();
+                                        }
+                                      },
+                                    ),
+                                  ),
+                              ],
+                            );
+                          },
                         ),
                         if (_error != null) ...[
                           const SizedBox(height: 12),
@@ -344,6 +372,79 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
                       ],
                     ),
             ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StaffTile extends StatelessWidget {
+  const _StaffTile({
+    required this.staff,
+    required this.selected,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final VenuePinStaff staff;
+  final bool selected;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final role = staff.roles.isEmpty ? 'Staff' : staff.roles.first;
+    return Card(
+      margin: EdgeInsets.zero,
+      color: selected ? scheme.primaryContainer : scheme.surfaceContainerHigh,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: enabled ? onTap : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+          child: Column(
+            children: [
+              CircleAvatar(
+                backgroundColor: staff.pinLocked
+                    ? scheme.errorContainer
+                    : selected
+                    ? scheme.primary
+                    : scheme.secondaryContainer,
+                foregroundColor: staff.pinLocked
+                    ? scheme.onErrorContainer
+                    : selected
+                    ? scheme.onPrimary
+                    : scheme.onSecondaryContainer,
+                child: Icon(
+                  staff.pinLocked
+                      ? Icons.lock_rounded
+                      : Icons.person_rounded,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                staff.displayName,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 3),
+              Text(
+                staff.pinLocked
+                    ? 'Locked'
+                    : staff.hasPin
+                    ? role
+                    : 'PIN not set',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+            ],
           ),
         ),
       ),
