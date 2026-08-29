@@ -585,9 +585,10 @@ async function verifyStaffPinFor(caller, rawData) {
     expiresAt,
     createdAt: FieldValue.serverTimestamp(),
   });
-  const [user, platformAdmin] = await Promise.all([
+  const [user, platformAdmin, verifiedMembership] = await Promise.all([
     auth.getUser(userId),
     db.doc(`platformAdmins/${userId}`).get(),
+    memberRef.get(),
   ]);
   await writeAudit(caller.uid, "verifyStaffPin", userId, {tenantId, venueId});
   return {
@@ -597,6 +598,9 @@ async function verifyStaffPinFor(caller, rawData) {
     userId,
     displayName: user.displayName || user.email || "Staff member",
     isPlatformAdmin: platformAdmin.exists || user.customClaims?.platformAdmin === true,
+    roles: Array.isArray(verifiedMembership.data()?.roles)
+      ? verifiedMembership.data().roles
+      : [],
   };
 }
 

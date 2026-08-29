@@ -47,6 +47,7 @@ class StaffPinVerification {
     required this.userId,
     required this.displayName,
     required this.isPlatformAdmin,
+    required this.roles,
   });
 
   final String sessionId;
@@ -55,6 +56,7 @@ class StaffPinVerification {
   final String userId;
   final String displayName;
   final bool isPlatformAdmin;
+  final List<String> roles;
 }
 
 /// The server-calculated receipt result. The client never supplies the order
@@ -221,6 +223,7 @@ class ProductionCommandRepository {
       userId: response['userId'] as String,
       displayName: response['displayName'] as String,
       isPlatformAdmin: response['isPlatformAdmin'] == true,
+      roles: List<String>.from(response['roles'] as List? ?? const []),
     );
   }
 

@@ -60,8 +60,18 @@ class HomeShell extends ConsumerWidget {
     final staffSession = ref.watch(activeStaffPinSessionProvider);
     final canOpenPlatformTools =
         isPlatformAdmin && staffSession?.isPlatformAdmin == true;
+    final canManageVenue =
+        staffSession?.roles.any(
+          (role) => role == 'owner' || role == 'manager',
+        ) ??
+        false;
+    final protectedVenueSection =
+        section == HomeSection.menu ||
+        section == HomeSection.reports ||
+        section == HomeSection.settings;
     final visibleSection =
-        section == HomeSection.platformAdmin && !canOpenPlatformTools
+        (section == HomeSection.platformAdmin && !canOpenPlatformTools) ||
+            (protectedVenueSection && !canManageVenue)
         ? HomeSection.pos
         : section;
     final TenantProfile profile =
@@ -74,21 +84,24 @@ class HomeShell extends ConsumerWidget {
         Icons.monitor_heart_outlined,
         'Order flow',
       ),
-      const _Destination(
-        HomeSection.menu,
-        Icons.restaurant_menu_rounded,
-        'Menu',
-      ),
-      const _Destination(
-        HomeSection.reports,
-        Icons.bar_chart_rounded,
-        'Reports',
-      ),
-      const _Destination(
-        HomeSection.settings,
-        Icons.settings_outlined,
-        'Settings',
-      ),
+      if (canManageVenue)
+        const _Destination(
+          HomeSection.menu,
+          Icons.restaurant_menu_rounded,
+          'Menu',
+        ),
+      if (canManageVenue)
+        const _Destination(
+          HomeSection.reports,
+          Icons.bar_chart_rounded,
+          'Reports',
+        ),
+      if (canManageVenue)
+        const _Destination(
+          HomeSection.settings,
+          Icons.settings_outlined,
+          'Settings',
+        ),
       if (canOpenPlatformTools)
         const _Destination(
           HomeSection.platformAdmin,
