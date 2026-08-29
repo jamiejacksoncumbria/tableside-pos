@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
@@ -100,41 +99,13 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
   }
 
   Future<void> _enterPin(VenuePinStaff staff) async {
-    final controller = TextEditingController();
     try {
       final pin = await showDialog<String>(
         context: context,
-        builder: (context) => AlertDialog(
+        builder: (context) => _PinPadDialog(
           title: Text('Enter PIN for ${staff.displayName}'),
-          content: TextField(
-            controller: controller,
-            autofocus: true,
-            obscureText: true,
-            keyboardType: TextInputType.number,
-            maxLength: 6,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            onSubmitted: (value) {
-              if (value.length == 6) Navigator.of(context).pop(value);
-            },
-            decoration: const InputDecoration(
-              labelText: 'Six-digit PIN',
-              border: OutlineInputBorder(),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                if (controller.text.length == 6) {
-                  Navigator.of(context).pop(controller.text);
-                }
-              },
-              child: const Text('Unlock'),
-            ),
-          ],
+          message: 'Enter your six-digit staff PIN.',
+          confirmLabel: 'Unlock',
         ),
       );
       if (pin == null || !mounted) return;
@@ -161,54 +132,31 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
   }
 
   Future<void> _setOwnPin() async {
-    final first = TextEditingController();
-    final second = TextEditingController();
     try {
-      final pin = await showDialog<String>(
+      final firstPin = await showDialog<String>(
         context: context,
-        builder: (context) => AlertDialog(
+        builder: (context) => const _PinPadDialog(
           title: const Text('Create your staff PIN'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('Choose six digits. Do not share this PIN.'),
-              const SizedBox(height: 16),
-              for (final entry in [(first, 'New PIN'), (second, 'Confirm PIN')])
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: TextField(
-                    controller: entry.$1,
-                    obscureText: true,
-                    keyboardType: TextInputType.number,
-                    maxLength: 6,
-                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    decoration: InputDecoration(
-                      labelText: entry.$2,
-                      border: const OutlineInputBorder(),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                if (first.text.length == 6 && first.text == second.text) {
-                  Navigator.of(context).pop(first.text);
-                }
-              },
-              child: const Text('Save PIN'),
-            ),
-          ],
+          message: 'Choose six digits. Do not share this PIN.',
+          confirmLabel: 'Continue',
         ),
       );
-      if (pin == null || !mounted) return;
+      if (firstPin == null || !mounted) return;
+      final confirmedPin = await showDialog<String>(
+        context: context,
+        builder: (context) => const _PinPadDialog(
+          title: Text('Confirm your staff PIN'),
+          message: 'Enter the same six digits again.',
+          confirmLabel: 'Save PIN',
+        ),
+      );
+      if (confirmedPin == null || !mounted) return;
+      if (confirmedPin != firstPin) {
+        setState(() => _error = 'The two PIN entries did not match. Try again.');
+        return;
+      }
       setState(() => _submitting = true);
-      await _repository.setOwnStaffPin(scope: widget.scope, pin: pin);
+      await _repository.setOwnStaffPin(scope: widget.scope, pin: firstPin);
       await _loadStaff();
     } on Object catch (error, stackTrace) {
       AppLogger.error('Set own staff PIN', error, stackTrace);
@@ -450,4 +398,123 @@ class _StaffTile extends StatelessWidget {
       ),
     );
   }
+}
+
+class _PinPadDialog extends StatefulWidget {
+  const _PinPadDialog({
+    required this.title,
+    required this.message,
+    required this.confirmLabel,
+  });
+
+  final Widget title;
+  final String message;
+  final String confirmLabel;
+
+  @override
+  State<_PinPadDialog> createState() => _PinPadDialogState();
+}
+
+class _PinPadDialogState extends State<_PinPadDialog> {
+  String _pin = '';
+
+  void _digit(String digit) {
+    if (_pin.length >= 6) return;
+    setState(() => _pin += digit);
+  }
+
+  void _backspace() {
+    if (_pin.isEmpty) return;
+    setState(() => _pin = _pin.substring(0, _pin.length - 1));
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: widget.title,
+    content: SizedBox(
+      width: 330,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(widget.message),
+          const SizedBox(height: 18),
+          Semantics(
+            label: '${_pin.length} of 6 PIN digits entered',
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(
+                6,
+                (index) => Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 7),
+                  child: Icon(
+                    index < _pin.length
+                        ? Icons.circle
+                        : Icons.circle_outlined,
+                    size: 17,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 18),
+          GridView.count(
+            crossAxisCount: 3,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            mainAxisSpacing: 8,
+            crossAxisSpacing: 8,
+            childAspectRatio: 1.65,
+            children: [
+              for (final digit in const [
+                '1',
+                '2',
+                '3',
+                '4',
+                '5',
+                '6',
+                '7',
+                '8',
+                '9',
+              ])
+                FilledButton.tonal(
+                  onPressed: () => _digit(digit),
+                  child: Text(
+                    digit,
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                ),
+              OutlinedButton(
+                onPressed: _pin.isEmpty ? null : () => setState(() => _pin = ''),
+                child: const Text('Clear'),
+              ),
+              FilledButton.tonal(
+                onPressed: () => _digit('0'),
+                child: Text(
+                  '0',
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+              ),
+              IconButton.filledTonal(
+                tooltip: 'Delete last digit',
+                onPressed: _pin.isEmpty ? null : _backspace,
+                icon: const Icon(Icons.backspace_rounded),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: _pin.length == 6
+            ? () => Navigator.of(context).pop(_pin)
+            : null,
+        child: Text(widget.confirmLabel),
+      ),
+    ],
+  );
 }
