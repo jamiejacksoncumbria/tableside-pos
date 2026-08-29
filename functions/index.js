@@ -2665,9 +2665,10 @@ async function retryFailedPrintJobFor(caller, rawData) {
 }
 
 // Queue jobs are retained for audit, never physically deleted. A manager can
-// cancel work that has not been claimed by a printer yet; a claimed job may
-// already be travelling to the printer and must instead be allowed to finish
-// or fail visibly. Linked fallback work is cancelled together, so a manager
+// cancel work that has not been claimed by a printer yet. A recently claimed
+// job may already be travelling to the printer and remains protected, while a
+// claim abandoned for at least five minutes can be cleared by a manager.
+// Linked fallback work is cancelled together, so a manager
 // never clears the original row only to have the same ticket print elsewhere.
 async function cancelPrintJobFor(caller, rawData) {
   const data = requireObject(rawData);
@@ -2699,10 +2700,16 @@ async function cancelPrintJobFor(caller, rawData) {
       throw new HttpsError("not-found", "This print job does not belong to the selected venue.");
     }
     const jobData = job.data();
-    if (jobData.status !== "queued" && jobData.status !== "failed") {
+    const claimTime = jobData.claimedAt?.toDate?.() ??
+      jobData.createdAt?.toDate?.() ?? null;
+    const staleClaim = jobData.status === "claimed" && claimTime != null &&
+      Date.now() - claimTime.getTime() >= 5 * 60 * 1000;
+    if (jobData.status !== "queued" &&
+        jobData.status !== "failed" &&
+        !staleClaim) {
       throw new HttpsError(
         "failed-precondition",
-        "Only queued or failed jobs can be cleared. A job already printing cannot be cancelled safely.",
+        "Only queued, failed, or printing jobs stuck for at least five minutes can be cleared.",
       );
     }
 
@@ -2717,7 +2724,13 @@ async function cancelPrintJobFor(caller, rawData) {
     if (linkedJob.exists && linkedJob.data().venueId !== venueId) {
       throw new HttpsError("failed-precondition", "The linked printer job belongs to another venue.");
     }
-    if (linkedJob.exists && linkedJob.data().status === "claimed") {
+    const linkedData = linkedJob.exists ? linkedJob.data() : null;
+    const linkedClaimTime = linkedData?.claimedAt?.toDate?.() ??
+      linkedData?.createdAt?.toDate?.() ?? null;
+    const linkedIsActiveClaim = linkedData?.status === "claimed" &&
+      (linkedClaimTime == null ||
+       Date.now() - linkedClaimTime.getTime() < 5 * 60 * 1000);
+    if (linkedIsActiveClaim) {
       throw new HttpsError(
         "failed-precondition",
         "A linked fallback job is already printing. Let it finish before clearing this ticket.",
@@ -2740,7 +2753,14 @@ async function cancelPrintJobFor(caller, rawData) {
 
     if (linkedJob.exists) {
       const linkedData = linkedJob.data();
-      if (linkedData.status === "queued" || linkedData.status === "failed") {
+      const linkedClaimTime = linkedData.claimedAt?.toDate?.() ??
+        linkedData.createdAt?.toDate?.() ?? null;
+      const linkedStaleClaim = linkedData.status === "claimed" &&
+        linkedClaimTime != null &&
+        Date.now() - linkedClaimTime.getTime() >= 5 * 60 * 1000;
+      if (linkedData.status === "queued" ||
+          linkedData.status === "failed" ||
+          linkedStaleClaim) {
         transaction.update(linkedJobRef, {
           ...cancellation,
           cancellationReason: `Linked job cleared: ${reason}`,

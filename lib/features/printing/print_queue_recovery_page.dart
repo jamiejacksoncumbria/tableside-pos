@@ -31,6 +31,7 @@ class PrintQueueRecoveryPage extends ConsumerStatefulWidget {
 
 class _PrintQueueRecoveryPageState
     extends ConsumerState<PrintQueueRecoveryPage> {
+  static const _staleClaimAfter = Duration(minutes: 5);
   final ProductionCommandRepository _commands = ProductionCommandRepository();
   final Set<String> _retryingJobIds = <String>{};
   final Set<String> _cancellingJobIds = <String>{};
@@ -170,7 +171,7 @@ class _PrintQueueRecoveryPageState
               children: [
                 Text(
                   job == null
-                      ? 'Only queued or failed jobs will be cleared. Jobs already printing stay protected. Any safe linked fallback job will also be stopped.'
+                      ? 'Queued, failed, or abandoned printing jobs will be cleared. A job claimed within the last five minutes stays protected. Any safe linked fallback job will also be stopped.'
                       : '${_ticketLabel(job)} will be removed from the active queue. It will not be deleted: the ticket, reason and manager action remain in the audit history.',
                 ),
                 const SizedBox(height: 16),
@@ -313,9 +314,15 @@ class _PrintQueueRecoveryPageState
       (job.fallbackFromJobId?.isNotEmpty == true ||
           job.fallbackDeviceId?.isNotEmpty != true);
 
-  bool _canCancel(PrintJob job) =>
-      job.status == PrintJobStatus.queued ||
-      job.status == PrintJobStatus.failed;
+  bool _canCancel(PrintJob job) {
+    if (job.status == PrintJobStatus.queued ||
+        job.status == PrintJobStatus.failed) {
+      return true;
+    }
+    if (job.status != PrintJobStatus.claimed) return false;
+    final claimedAt = job.claimedAt ?? job.createdAt;
+    return DateTime.now().difference(claimedAt) >= _staleClaimAfter;
+  }
 
   @override
   Widget build(BuildContext context) {
