@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
@@ -417,6 +418,13 @@ class _PinPadDialog extends StatefulWidget {
 
 class _PinPadDialogState extends State<_PinPadDialog> {
   String _pin = '';
+  final FocusNode _keyboardFocus = FocusNode(debugLabel: 'Staff PIN keypad');
+
+  @override
+  void dispose() {
+    _keyboardFocus.dispose();
+    super.dispose();
+  }
 
   void _digit(String digit) {
     if (_pin.length >= 6) return;
@@ -428,80 +436,110 @@ class _PinPadDialogState extends State<_PinPadDialog> {
     setState(() => _pin = _pin.substring(0, _pin.length - 1));
   }
 
+  void _handleKeyEvent(KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return;
+    final label = event.logicalKey.keyLabel;
+    if (RegExp(r'^\d$').hasMatch(label)) {
+      _digit(label);
+      return;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.backspace ||
+        event.logicalKey == LogicalKeyboardKey.delete) {
+      _backspace();
+      return;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.escape) {
+      Navigator.of(context).pop();
+      return;
+    }
+    if ((event.logicalKey == LogicalKeyboardKey.enter ||
+            event.logicalKey == LogicalKeyboardKey.numpadEnter) &&
+        _pin.length == 6) {
+      Navigator.of(context).pop(_pin);
+    }
+  }
+
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: widget.title,
-    content: SizedBox(
-      width: 330,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(widget.message),
-          const SizedBox(height: 18),
-          Semantics(
-            label: '${_pin.length} of 6 PIN digits entered',
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: List.generate(
-                6,
-                (index) => Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 7),
-                  child: Icon(
-                    index < _pin.length
-                        ? Icons.circle
-                        : Icons.circle_outlined,
-                    size: 17,
+    content: KeyboardListener(
+      focusNode: _keyboardFocus,
+      autofocus: true,
+      onKeyEvent: _handleKeyEvent,
+      child: SizedBox(
+        width: 330,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(widget.message),
+            const SizedBox(height: 18),
+            Semantics(
+              label: '${_pin.length} of 6 PIN digits entered',
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(
+                  6,
+                  (index) => Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 7),
+                    child: Icon(
+                      index < _pin.length
+                          ? Icons.circle
+                          : Icons.circle_outlined,
+                      size: 17,
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 18),
-          GridView.count(
-            crossAxisCount: 3,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            mainAxisSpacing: 8,
-            crossAxisSpacing: 8,
-            childAspectRatio: 1.65,
-            children: [
-              for (final digit in const [
-                '1',
-                '2',
-                '3',
-                '4',
-                '5',
-                '6',
-                '7',
-                '8',
-                '9',
-              ])
+            const SizedBox(height: 18),
+            GridView.count(
+              crossAxisCount: 3,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 8,
+              childAspectRatio: 1.65,
+              children: [
+                for (final digit in const [
+                  '1',
+                  '2',
+                  '3',
+                  '4',
+                  '5',
+                  '6',
+                  '7',
+                  '8',
+                  '9',
+                ])
+                  FilledButton.tonal(
+                    onPressed: () => _digit(digit),
+                    child: Text(
+                      digit,
+                      style: Theme.of(context).textTheme.headlineSmall,
+                    ),
+                  ),
+                OutlinedButton(
+                  onPressed: _pin.isEmpty
+                      ? null
+                      : () => setState(() => _pin = ''),
+                  child: const Text('Clear'),
+                ),
                 FilledButton.tonal(
-                  onPressed: () => _digit(digit),
+                  onPressed: () => _digit('0'),
                   child: Text(
-                    digit,
+                    '0',
                     style: Theme.of(context).textTheme.headlineSmall,
                   ),
                 ),
-              OutlinedButton(
-                onPressed: _pin.isEmpty ? null : () => setState(() => _pin = ''),
-                child: const Text('Clear'),
-              ),
-              FilledButton.tonal(
-                onPressed: () => _digit('0'),
-                child: Text(
-                  '0',
-                  style: Theme.of(context).textTheme.headlineSmall,
+                IconButton.filledTonal(
+                  tooltip: 'Delete last digit',
+                  onPressed: _pin.isEmpty ? null : _backspace,
+                  icon: const Icon(Icons.backspace_rounded),
                 ),
-              ),
-              IconButton.filledTonal(
-                tooltip: 'Delete last digit',
-                onPressed: _pin.isEmpty ? null : _backspace,
-                icon: const Icon(Icons.backspace_rounded),
-              ),
-            ],
-          ),
-        ],
+              ],
+            ),
+          ],
+        ),
       ),
     ),
     actions: [

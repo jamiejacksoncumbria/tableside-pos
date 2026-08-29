@@ -58,6 +58,12 @@ class HomeShell extends ConsumerWidget {
       appNotificationsProvider.select(unreadNotificationCount),
     );
     final staffSession = ref.watch(activeStaffPinSessionProvider);
+    final canOpenPlatformTools =
+        isPlatformAdmin && staffSession?.isPlatformAdmin == true;
+    final visibleSection =
+        section == HomeSection.platformAdmin && !canOpenPlatformTools
+        ? HomeSection.pos
+        : section;
     final TenantProfile profile =
         profileOverride ?? ref.watch(tenantProfileProvider);
     final wide = MediaQuery.sizeOf(context).width >= 840;
@@ -83,7 +89,7 @@ class HomeShell extends ConsumerWidget {
         Icons.settings_outlined,
         'Settings',
       ),
-      if (isPlatformAdmin)
+      if (canOpenPlatformTools)
         const _Destination(
           HomeSection.platformAdmin,
           Icons.admin_panel_settings_outlined,
@@ -91,7 +97,7 @@ class HomeShell extends ConsumerWidget {
         ),
     ];
     final index = destinations.indexWhere(
-      (destination) => destination.section == section,
+      (destination) => destination.section == visibleSection,
     );
     // Material NavigationBar intentionally supports at most five destinations.
     // Platform tools stay available on compact devices from the app bar rather
@@ -100,7 +106,7 @@ class HomeShell extends ConsumerWidget {
         .where((item) => item.section != HomeSection.platformAdmin)
         .toList(growable: false);
     final compactIndex = compactDestinations.indexWhere(
-      (destination) => destination.section == section,
+      (destination) => destination.section == visibleSection,
     );
 
     return Scaffold(
@@ -168,7 +174,7 @@ class HomeShell extends ConsumerWidget {
                         .lock(),
                     icon: const Icon(Icons.switch_account_rounded),
                   ),
-          if (isPlatformAdmin && !wide)
+          if (canOpenPlatformTools && !wide)
             IconButton(
               tooltip: 'Platform administration',
               onPressed: () => ref
@@ -225,7 +231,7 @@ class HomeShell extends ConsumerWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                Positioned.fill(child: _buildBody(section, profile)),
+                Positioned.fill(child: _buildBody(visibleSection, profile)),
                 const _QueuedPrintWorkerHost(),
                 const PrintDeliveryMonitorHost(),
                 const OrderFlowNotificationHost(),

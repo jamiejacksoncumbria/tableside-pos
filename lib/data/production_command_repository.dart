@@ -46,6 +46,7 @@ class StaffPinVerification {
     required this.expiresAt,
     required this.userId,
     required this.displayName,
+    required this.isPlatformAdmin,
   });
 
   final String sessionId;
@@ -53,6 +54,7 @@ class StaffPinVerification {
   final DateTime expiresAt;
   final String userId;
   final String displayName;
+  final bool isPlatformAdmin;
 }
 
 /// The server-calculated receipt result. The client never supplies the order
@@ -218,6 +220,7 @@ class ProductionCommandRepository {
       expiresAt: DateTime.parse(response['expiresAt'] as String),
       userId: response['userId'] as String,
       displayName: response['displayName'] as String,
+      isPlatformAdmin: response['isPlatformAdmin'] == true,
     );
   }
 
