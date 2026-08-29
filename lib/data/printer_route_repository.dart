@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../core/tenant_scope.dart';
+import 'production_command_repository.dart';
 
 /// `receipt` is deliberately a separate route: a production printer never
 /// receives prices or payment details, while the dedicated receipt printer
@@ -30,9 +31,13 @@ class PrinterRoute {
 /// configured target again before it creates a job, keeping a stale manager
 /// configuration from routing orders to another venue.
 class PrinterRouteRepository {
-  PrinterRouteRepository(this._firestore);
+  PrinterRouteRepository(
+    this._firestore, {
+    ProductionCommandRepository? commands,
+  }) : _commands = commands ?? ProductionCommandRepository();
 
   final FirebaseFirestore _firestore;
+  final ProductionCommandRepository _commands;
 
   CollectionReference<Map<String, dynamic>> _routes(String tenantId) =>
       _firestore.collection('tenants/$tenantId/printerRoutes');
@@ -84,13 +89,15 @@ class PrinterRouteRepository {
         'The fallback printer must be different from the primary printer.',
       );
     }
-    return _routes(scope.tenantId).doc(routeId(scope, productionArea)).set({
-      'venueId': scope.venueId,
-      'productionArea': productionArea,
-      'primaryDeviceId': primary,
-      'fallbackDeviceId': fallback,
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
+    return _commands.manageVenueConfiguration(
+      scope: scope,
+      resource: 'printerRoute',
+      values: {
+        'productionArea': productionArea,
+        'primaryDeviceId': primary,
+        'fallbackDeviceId': fallback,
+      },
+    );
   }
 
   String? _cleanId(String? value) {

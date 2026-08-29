@@ -1,9 +1,8 @@
 import 'dart:typed_data';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_storage/firebase_storage.dart';
-
 import '../features/pos/domain.dart';
+import '../core/tenant_scope.dart';
+import 'production_command_repository.dart';
 
 /// Keeps tenant-owned branding separate from venue and receipt snapshots.
 ///
@@ -11,28 +10,36 @@ import '../features/pos/domain.dart';
 /// document. That ensures old receipts remain historically accurate after a
 /// company changes its logo or address.
 class TenantProfileRepository {
-  TenantProfileRepository(this._firestore, this._storage);
+  TenantProfileRepository({ProductionCommandRepository? commands})
+    : _commands = commands ?? ProductionCommandRepository();
 
-  final FirebaseFirestore _firestore;
-  final FirebaseStorage _storage;
+  final ProductionCommandRepository _commands;
 
-  Future<void> saveProfile(TenantProfile profile) {
-    return _firestore
-        .doc('tenants/${profile.id}')
-        .set(profile.toMap(), SetOptions(merge: true));
+  Future<void> saveProfile({
+    required VenueScope scope,
+    required TenantProfile profile,
+  }) {
+    if (profile.id != scope.tenantId) {
+      throw ArgumentError('The profile does not belong to the active company.');
+    }
+    return _commands.manageVenueConfiguration(
+      scope: scope,
+      resource: 'tenantProfile',
+      values: profile.toMap(),
+    );
   }
 
   Future<String> uploadLogo({
-    required String tenantId,
+    required VenueScope scope,
     required Uint8List bytes,
     required String fileName,
     required String contentType,
   }) async {
-    final safeName = fileName.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
-    final reference = _storage.ref(
-      'tenants/$tenantId/branding/${DateTime.now().millisecondsSinceEpoch}-$safeName',
+    return _commands.uploadTenantLogo(
+      scope: scope,
+      bytes: bytes,
+      fileName: fileName,
+      contentType: contentType,
     );
-    await reference.putData(bytes, SettableMetadata(contentType: contentType));
-    return reference.getDownloadURL();
   }
 }

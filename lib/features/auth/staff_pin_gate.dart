@@ -167,23 +167,6 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
     }
   }
 
-  Future<void> _unlockStaff(VenuePinStaff staff) async {
-    setState(() => _submitting = true);
-    try {
-      await _repository.unlockStaffPin(
-        scope: widget.scope,
-        userId: staff.userId,
-      );
-      AppLogger.info('Manager unlocked staff PIN for user=${staff.userId}.');
-      await _loadStaff();
-    } on Object catch (error, stackTrace) {
-      AppLogger.error('Unlock staff PIN', error, stackTrace);
-      if (mounted) setState(() => _error = '$error');
-    } finally {
-      if (mounted) setState(() => _submitting = false);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(activeStaffPinSessionProvider);
@@ -195,13 +178,6 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
         .where((item) => item.userId == _selectedUserId)
         .firstOrNull;
     final currentUserId = FirebaseAuth.instance.currentUser?.uid;
-    final currentUser = staff
-        .where((item) => item.userId == currentUserId)
-        .firstOrNull;
-    final currentUserCanUnlock = currentUser?.roles.any(
-          (role) => role == 'owner' || role == 'manager',
-        ) ??
-        false;
     return Scaffold(
       body: SafeArea(
         child: SingleChildScrollView(
@@ -284,17 +260,9 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
                           const Text(
                             'This PIN is locked after three failed attempts.',
                           ),
-                          if (currentUserCanUnlock) ...[
-                            const SizedBox(height: 10),
-                            OutlinedButton.icon(
-                              onPressed: _submitting
-                                  ? null
-                                  : () => _unlockStaff(selected!),
-                              icon: const Icon(Icons.lock_reset_rounded),
-                              label: const Text('Manager unlock'),
-                            ),
-                          ] else
-                            const Text(' Ask a manager or owner to unlock it.'),
+                          const Text(
+                            ' Ask a manager or owner to unlock it from staff management.',
+                          ),
                         ]
                         else if (selected?.hasPin == true)
                           FilledButton.icon(

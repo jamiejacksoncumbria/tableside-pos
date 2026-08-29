@@ -1,5 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../core/tenant_scope.dart';
+import 'production_command_repository.dart';
+
 class PrinterDevice {
   const PrinterDevice({
     required this.id,
@@ -28,22 +31,27 @@ class PrinterDevice {
 /// currently configuring them. This prevents an arbitrary signed-in device
 /// from claiming a printer's queued jobs.
 class PrinterDeviceRepository {
-  PrinterDeviceRepository(this._firestore);
+  PrinterDeviceRepository(
+    this._firestore, {
+    ProductionCommandRepository? commands,
+  }) : _commands = commands ?? ProductionCommandRepository();
 
   final FirebaseFirestore _firestore;
+  final ProductionCommandRepository _commands;
 
   Future<void> register(PrinterDevice device, {required String tenantId}) {
-    return _firestore.doc('tenants/$tenantId/devices/${device.id}').set({
-      'venueId': device.venueId,
-      'name': device.name,
-      'platform': device.platform,
-      'productionAreas': device.productionAreas,
-      'transports': device.transports,
-      'assignedUserId': device.assignedUserId,
-      'active': device.active,
-      'registeredAt': FieldValue.serverTimestamp(),
-      'lastHeartbeatAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    return _commands.manageVenueConfiguration(
+      scope: VenueScope(tenantId: tenantId, venueId: device.venueId),
+      resource: 'printerDevice',
+      values: {
+        'deviceId': device.id,
+        'name': device.name,
+        'platform': device.platform,
+        'productionAreas': device.productionAreas,
+        'transports': device.transports,
+        'active': device.active,
+      },
+    );
   }
 
   Future<void> heartbeat({required String tenantId, required String deviceId}) {

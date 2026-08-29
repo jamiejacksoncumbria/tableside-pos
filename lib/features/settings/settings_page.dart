@@ -1,7 +1,5 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -131,20 +129,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         receiptFooter: _footer.text.trim(),
       );
       if (widget.persistToFirebase) {
-        final repository = TenantProfileRepository(
-          FirebaseFirestore.instance,
-          FirebaseStorage.instance,
-        );
+        final repository = TenantProfileRepository();
+        final scope = ref.read(activeVenueScopeProvider);
+        if (scope == null) {
+          throw StateError('Choose a venue before saving company details.');
+        }
         if (_logoBytes != null && _logoName != null) {
           final logoUrl = await repository.uploadLogo(
-            tenantId: updated.id,
+            scope: scope,
             bytes: _logoBytes!,
             fileName: _logoName!,
             contentType: _contentTypeFor(_logoName!),
           );
           updated = updated.copyWith(logoUrl: logoUrl);
         }
-        await repository.saveProfile(updated);
+        await repository.saveProfile(scope: scope, profile: updated);
       } else {
         ref.read(tenantProfileProvider.notifier).update(updated);
       }

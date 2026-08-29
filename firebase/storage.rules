@@ -25,16 +25,12 @@ service firebase.storage {
 
     match /tenants/{tenantId}/branding/{fileName} {
       allow read: if isPlatformAdmin() || isMember(tenantId);
-      allow write: if isPlatformAdmin() || (managesTenant(tenantId)
-        && request.resource.size < 2 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*'));
+      allow write: if false;
     }
 
     match /tenants/{tenantId}/products/{fileName} {
       allow read: if isPlatformAdmin() || isMember(tenantId);
-      allow write: if isPlatformAdmin() || (managesTenant(tenantId)
-        && request.resource.size < 5 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*'));
+      allow write: if false;
     }
   }
 }

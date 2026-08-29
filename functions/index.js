@@ -1,7 +1,8 @@
-import {createHash, randomBytes, scryptSync, timingSafeEqual} from "node:crypto";
+import {createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual} from "node:crypto";
 import {getApps, initializeApp} from "firebase-admin/app";
 import {getAppCheck} from "firebase-admin/app-check";
 import {getAuth} from "firebase-admin/auth";
+import {getStorage} from "firebase-admin/storage";
 import {FieldValue, getFirestore} from "firebase-admin/firestore";
 import {onDocumentUpdated} from "firebase-functions/v2/firestore";
 import {HttpsError, onCall, onRequest} from "firebase-functions/v2/https";
@@ -394,6 +395,461 @@ function requiredNonNegativeInteger(value, label, maximum = 100000000) {
   return value;
 }
 
+function requiredFiniteNumber(value, label, minimum, maximum) {
+  if (typeof value !== "number" || !Number.isFinite(value) ||
+      value < minimum || value > maximum) {
+    throw new HttpsError(
+      "invalid-argument",
+      `${label} must be between ${minimum} and ${maximum}.`,
+    );
+  }
+  return value;
+}
+
+function requiredStringArray(value, label, maximum, itemMaximum = 180) {
+  if (!Array.isArray(value) || value.length > maximum ||
+      value.some((item) => typeof item !== "string" ||
+        item.trim().length === 0 || item.trim().length > itemMaximum)) {
+    throw new HttpsError("invalid-argument", `${label} is invalid.`);
+  }
+  return [...new Set(value.map((item) => item.trim()))];
+}
+
+function requiredDocumentIdArray(value, label, maximum) {
+  const ids = requiredStringArray(value, label, maximum, 1500);
+  if (ids.some((id) => Buffer.byteLength(id, "utf8") > 1500 ||
+      id.includes("/") || id === "." || id === "..")) {
+    throw new HttpsError("invalid-argument", `${label} contains an invalid document ID.`);
+  }
+  return ids;
+}
+
+function validatedVariants(value) {
+  if (!Array.isArray(value) || value.length > 30) {
+    throw new HttpsError("invalid-argument", "A product can have at most 30 variants.");
+  }
+  const ids = new Set();
+  const names = new Set();
+  return value.map((raw) => {
+    const variant = requireObject(raw);
+    const id = requiredText(variant, "id", 180);
+    const name = requiredText(variant, "name", 80);
+    const priceDeltaMinor = variant.priceDeltaMinor;
+    if (!Number.isInteger(priceDeltaMinor) || Math.abs(priceDeltaMinor) > 100000000 ||
+        ids.has(id) || names.has(name.toLowerCase())) {
+      throw new HttpsError("invalid-argument", "A product variant is invalid or duplicated.");
+    }
+    ids.add(id);
+    names.add(name.toLowerCase());
+    return {id, name, priceDeltaMinor, isAvailable: variant.isAvailable !== false};
+  });
+}
+
+function validatedModifierOptions(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 50) {
+    throw new HttpsError("invalid-argument", "Add between one and 50 modifier options.");
+  }
+  const ids = new Set();
+  const names = new Set();
+  return value.map((raw) => {
+    const option = requireObject(raw);
+    const id = requiredText(option, "id", 180);
+    const name = requiredText(option, "name", 80);
+    const priceDeltaMinor = option.priceDeltaMinor;
+    if (!Number.isInteger(priceDeltaMinor) || Math.abs(priceDeltaMinor) > 100000000 ||
+        ids.has(id) || names.has(name.toLowerCase())) {
+      throw new HttpsError("invalid-argument", "A modifier option is invalid or duplicated.");
+    }
+    ids.add(id);
+    names.add(name.toLowerCase());
+    return {id, name, priceDeltaMinor, isAvailable: option.isAvailable !== false};
+  });
+}
+
+async function manageMenuConfigurationFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const resource = requiredText(data, "resource", 32);
+  const operation = requiredText(data, "operation", 32);
+  const values = data.values == null ? {} : requireObject(data.values);
+  const documentId = data.documentId == null || data.documentId === ""
+    ? null
+    : requiredDocumentId(data, "documentId");
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager can change the menu.");
+  }
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const collectionNames = {
+    section: "menuSections",
+    product: "products",
+    modifierGroup: "modifierGroups",
+    taxRate: "taxRates",
+  };
+  const collectionName = collectionNames[resource];
+  if (collectionName == null) {
+    throw new HttpsError("invalid-argument", "That menu resource is not supported.");
+  }
+  const collection = db.collection(`tenants/${tenantId}/${collectionName}`);
+  const reference = documentId == null ? collection.doc() : collection.doc(documentId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+
+  if (operation === "delete") {
+    if (documentId == null) {
+      throw new HttpsError("invalid-argument", "documentId is required for deletion.");
+    }
+    const current = await reference.get();
+    if (!current.exists || current.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "That menu record was not found at this venue.");
+    }
+    if (resource === "section") {
+      const [children, products] = await Promise.all([
+        collection.where("parentSectionId", "==", documentId).get(),
+        db.collection(`tenants/${tenantId}/products`)
+          .where("sectionIds", "array-contains", documentId).get(),
+      ]);
+      if (children.docs.some((item) => item.data().venueId === venueId) ||
+          products.docs.some((item) => item.data().venueId === venueId)) {
+        throw new HttpsError("failed-precondition", "Move linked subcategories and products before deleting this section.");
+      }
+    }
+    if (resource === "modifierGroup") {
+      const products = await db.collection(`tenants/${tenantId}/products`)
+        .where("modifierGroupIds", "array-contains", documentId).get();
+      if (products.docs.some((item) => item.data().venueId === venueId)) {
+        throw new HttpsError("failed-precondition", "Remove this option group from its products before deleting it.");
+      }
+    }
+    if (resource === "taxRate") {
+      const products = await db.collection(`tenants/${tenantId}/products`)
+        .where("taxRateId", "==", documentId).get();
+      if (products.docs.some((item) => item.data().venueId === venueId)) {
+        throw new HttpsError("failed-precondition", "Assign another tax rate to its products before deleting it.");
+      }
+    }
+    await reference.delete();
+    await writeAudit(caller.uid, "deleteMenuConfiguration", documentId, {
+      tenantId, venueId, resource, actor,
+    });
+    return {documentId, deleted: true};
+  }
+
+  if (operation === "availability") {
+    if (resource !== "product" || documentId == null || typeof values.isAvailable !== "boolean") {
+      throw new HttpsError("invalid-argument", "A valid product availability change is required.");
+    }
+    const current = await reference.get();
+    if (!current.exists || current.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "That product was not found at this venue.");
+    }
+    await reference.update({
+      isAvailable: values.isAvailable,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+    return {documentId, updated: true};
+  }
+
+  if (operation !== "save") {
+    throw new HttpsError("invalid-argument", "That menu operation is not supported.");
+  }
+  if (documentId != null) {
+    const current = await reference.get();
+    if (!current.exists || current.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "That menu record was not found at this venue.");
+    }
+  }
+
+  let cleaned;
+  if (resource === "section") {
+    const rawParentSectionId = optionalText(values, "parentSectionId", 1500);
+    const parentSectionId = rawParentSectionId
+      ? requiredDocumentId({parentSectionId: rawParentSectionId}, "parentSectionId")
+      : null;
+    if (parentSectionId === documentId) {
+      throw new HttpsError("invalid-argument", "A section cannot be its own parent.");
+    }
+    if (parentSectionId != null) {
+      const parent = await collection.doc(parentSectionId).get();
+      if (!parent.exists || parent.data().venueId !== venueId) {
+        throw new HttpsError("failed-precondition", "The selected parent section is not available at this venue.");
+      }
+    }
+    cleaned = {
+      name: requiredText(values, "name", 80),
+      icon: optionalText(values, "icon", 20) || "🍽️",
+      parentSectionId,
+      ...(documentId == null
+        ? {sortOrder: requiredNonNegativeInteger(values.sortOrder, "sortOrder", 100000)}
+        : {}),
+    };
+  } else if (resource === "modifierGroup") {
+    const options = validatedModifierOptions(values.options);
+    const minimumSelections = requiredNonNegativeInteger(
+      values.minimumSelections, "minimumSelections", options.length,
+    );
+    const maximumSelections = requiredNonNegativeInteger(
+      values.maximumSelections, "maximumSelections", options.length,
+    );
+    if (maximumSelections < minimumSelections) {
+      throw new HttpsError("invalid-argument", "Modifier selection limits are invalid.");
+    }
+    cleaned = {
+      name: requiredText(values, "name", 80),
+      minimumSelections,
+      maximumSelections,
+      options,
+      ...(documentId == null ? {isAvailable: true} : {}),
+    };
+  } else if (resource === "taxRate") {
+    const name = requiredText(values, "name", 80);
+    const basisPoints = requiredNonNegativeInteger(values.basisPoints, "basisPoints", 100000);
+    const duplicates = await collection.get();
+    if (duplicates.docs.some((item) => item.id !== documentId &&
+        item.data().venueId === venueId &&
+        String(item.data().name ?? "").trim().toLowerCase() === name.toLowerCase())) {
+      throw new HttpsError("already-exists", "A tax rate with this name already exists at this venue.");
+    }
+    cleaned = {name, basisPoints, ...(documentId == null ? {active: true} : {})};
+  } else {
+    const sectionIds = requiredDocumentIdArray(values.sectionIds, "sectionIds", 20);
+    if (sectionIds.length === 0) {
+      throw new HttpsError("invalid-argument", "Select at least one menu section.");
+    }
+    const modifierGroupIds = requiredDocumentIdArray(
+      values.modifierGroupIds ?? [], "modifierGroupIds", 20,
+    );
+    const linkedIds = [...sectionIds, ...modifierGroupIds];
+    const linkedReferences = [
+      ...sectionIds.map((id) => db.doc(`tenants/${tenantId}/menuSections/${id}`)),
+      ...modifierGroupIds.map((id) => db.doc(`tenants/${tenantId}/modifierGroups/${id}`)),
+    ];
+    const linked = linkedReferences.length === 0
+      ? []
+      : await db.getAll(...linkedReferences);
+    if (linked.some((item, index) => !item.exists ||
+        item.data().venueId !== venueId || item.id !== linkedIds[index])) {
+      throw new HttpsError("failed-precondition", "A selected section or option group is not available at this venue.");
+    }
+    const productionArea = requiredText(values, "productionArea", 32);
+    if (!["bar", "kitchen", "dessert"].includes(productionArea)) {
+      throw new HttpsError("invalid-argument", "The product production area is invalid.");
+    }
+    const trackStock = values.trackStock === true;
+    const rawTaxRateId = optionalText(values, "taxRateId", 1500);
+    const taxRateId = rawTaxRateId
+      ? requiredDocumentId({taxRateId: rawTaxRateId}, "taxRateId")
+      : null;
+    let taxRateName = requiredText(values, "taxRateName", 80);
+    let taxRateBasisPoints = requiredNonNegativeInteger(
+      values.taxRateBasisPoints, "taxRateBasisPoints", 100000,
+    );
+    if (taxRateId != null) {
+      const taxRate = await db.doc(`tenants/${tenantId}/taxRates/${taxRateId}`).get();
+      if (!taxRate.exists || taxRate.data().venueId !== venueId) {
+        throw new HttpsError("failed-precondition", "The selected tax rate is not available at this venue.");
+      }
+      taxRateName = requiredText(taxRate.data(), "name", 80);
+      taxRateBasisPoints = requiredNonNegativeInteger(
+        taxRate.data().basisPoints, "basisPoints", 100000,
+      );
+    }
+    cleaned = {
+      name: requiredText(values, "name", 120),
+      priceMinor: requiredNonNegativeInteger(values.priceMinor, "priceMinor"),
+      sectionIds,
+      productionArea,
+      trackStock,
+      stockOnHand: trackStock
+        ? requiredFiniteNumber(values.stockOnHand ?? 0, "stockOnHand", -1000000000, 1000000000)
+        : null,
+      stockPerSale: requiredFiniteNumber(values.stockPerSale, "stockPerSale", 0.000001, 1000000000),
+      ...(documentId == null ? {stockUnit: "each", isAvailable: true} : {}),
+      showOnOrderFlow: values.showOnOrderFlow === true,
+      taxRateBasisPoints,
+      taxRateId,
+      taxRateName,
+      variants: validatedVariants(values.variants ?? []),
+      modifierGroupIds,
+    };
+  }
+
+  const writeData = {
+    ...cleaned,
+    ...(documentId == null ? {venueId, createdAt: FieldValue.serverTimestamp()} : {}),
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedByActor: actor,
+  };
+  await reference.set(writeData, {merge: documentId != null});
+  if (resource === "taxRate" && documentId != null) {
+    const products = await db.collection(`tenants/${tenantId}/products`)
+      .where("taxRateId", "==", documentId).get();
+    const writer = db.bulkWriter();
+    for (const product of products.docs.filter((item) => item.data().venueId === venueId)) {
+      writer.update(product.ref, {
+        taxRateName: cleaned.name,
+        taxRateBasisPoints: cleaned.basisPoints,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+    await writer.close();
+  }
+  await writeAudit(caller.uid, "saveMenuConfiguration", reference.id, {
+    tenantId, venueId, resource, operation: documentId == null ? "create" : "update", actor,
+  });
+  return {documentId: reference.id, saved: true};
+}
+
+async function manageVenueConfigurationFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const resource = requiredText(data, "resource", 32);
+  const values = requireObject(data.values);
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager can change venue configuration.");
+  }
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+
+  if (resource === "tenantProfile") {
+    const phoneNumbers = requiredStringArray(
+      values.phoneNumbers ?? [], "phoneNumbers", 3, 40,
+    );
+    const logoUrl = optionalText(values, "logoUrl", 2000) || null;
+    await db.doc(`tenants/${tenantId}`).set({
+      displayName: requiredText(values, "displayName", 120),
+      legalName: optionalText(values, "legalName", 160),
+      address: optionalText(values, "address", 500),
+      phone: phoneNumbers[0] ?? "",
+      phoneNumbers,
+      receiptFooter: optionalText(values, "receiptFooter", 300),
+      logoUrl,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    }, {merge: true});
+  } else if (resource === "printerDevice") {
+    const deviceId = requiredDocumentId(values, "deviceId");
+    const productionAreas = requiredStringArray(
+      values.productionAreas, "productionAreas", 4, 32,
+    );
+    const transports = requiredStringArray(values.transports, "transports", 4, 40);
+    if (productionAreas.some((area) =>
+      !["bar", "kitchen", "dessert", "receipt"].includes(area)) ||
+        transports.some((transport) =>
+          !["bluetooth", "windowsPrintQueue", "builtIn"].includes(transport))) {
+      throw new HttpsError("invalid-argument", "The printer capabilities are invalid.");
+    }
+    await db.doc(`tenants/${tenantId}/devices/${deviceId}`).set({
+      venueId,
+      name: requiredText(values, "name", 120),
+      platform: requiredText(values, "platform", 32),
+      productionAreas,
+      transports,
+      assignedUserId: caller.hostUid ?? caller.uid,
+      active: values.active !== false,
+      registeredAt: FieldValue.serverTimestamp(),
+      lastHeartbeatAt: FieldValue.serverTimestamp(),
+      registeredByActor: actor,
+    }, {merge: true});
+  } else if (resource === "printerRoute") {
+    const productionArea = requiredText(values, "productionArea", 32);
+    if (!["bar", "kitchen", "dessert", "receipt"].includes(productionArea)) {
+      throw new HttpsError("invalid-argument", "The printer production area is invalid.");
+    }
+    const rawPrimary = optionalText(values, "primaryDeviceId", 1500);
+    const rawFallback = optionalText(values, "fallbackDeviceId", 1500);
+    const primaryDeviceId = rawPrimary
+      ? requiredDocumentId({primaryDeviceId: rawPrimary}, "primaryDeviceId")
+      : null;
+    const fallbackDeviceId = rawFallback
+      ? requiredDocumentId({fallbackDeviceId: rawFallback}, "fallbackDeviceId")
+      : null;
+    if (primaryDeviceId == null && fallbackDeviceId != null) {
+      throw new HttpsError("invalid-argument", "Choose a primary printer before a fallback.");
+    }
+    if (primaryDeviceId != null && primaryDeviceId === fallbackDeviceId) {
+      throw new HttpsError("invalid-argument", "Primary and fallback printers must differ.");
+    }
+    const deviceIds = [primaryDeviceId, fallbackDeviceId].filter(Boolean);
+    if (deviceIds.length > 0) {
+      const devices = await db.getAll(...deviceIds.map((id) =>
+        db.doc(`tenants/${tenantId}/devices/${id}`)));
+      if (devices.some((device) => !device.exists ||
+          device.data().venueId !== venueId ||
+          device.data().active !== true ||
+          !Array.isArray(device.data().productionAreas) ||
+          !device.data().productionAreas.includes(productionArea))) {
+        throw new HttpsError("failed-precondition", "A selected printer is not active for this venue and area.");
+      }
+    }
+    const routeId = `${venueId}_${productionArea}`;
+    await db.doc(`tenants/${tenantId}/printerRoutes/${routeId}`).set({
+      venueId,
+      productionArea,
+      primaryDeviceId,
+      fallbackDeviceId,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+  } else {
+    throw new HttpsError("invalid-argument", "That venue configuration resource is not supported.");
+  }
+  await writeAudit(caller.uid, "manageVenueConfiguration", resource, {
+    tenantId, venueId, resource, actor,
+  });
+  return {saved: true};
+}
+
+async function uploadTenantLogoFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const fileName = requiredText(data, "fileName", 180)
+    .replace(/[^a-zA-Z0-9._-]/g, "_");
+  const contentType = requiredText(data, "contentType", 80).toLowerCase();
+  if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(contentType)) {
+    throw new HttpsError("invalid-argument", "Upload a PNG, JPEG, WebP, or GIF image.");
+  }
+  const encoded = requiredText(data, "base64Data", 2800000);
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.length === 0 || bytes.length >= 2 * 1024 * 1024 ||
+      bytes.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")) {
+    throw new HttpsError("invalid-argument", "The logo is invalid or exceeds 2 MB.");
+  }
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager can upload company branding.");
+  }
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const downloadToken = randomUUID();
+  const objectPath = `tenants/${tenantId}/branding/${Date.now()}-${fileName}`;
+  const bucket = getStorage().bucket();
+  await bucket.file(objectPath).save(bytes, {
+    resumable: false,
+    metadata: {
+      contentType,
+      metadata: {firebaseStorageDownloadTokens: downloadToken},
+    },
+  });
+  const logoUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(objectPath)}?alt=media&token=${downloadToken}`;
+  await writeAudit(caller.uid, "uploadTenantLogo", objectPath, {
+    tenantId, venueId, contentType, size: bytes.length,
+  });
+  return {logoUrl};
+}
+
 function validRoles(value) {
   const supported = new Set([
     "owner", "manager", "waiter", "cashier", "kitchen", "printer",
@@ -607,7 +1063,12 @@ async function verifyStaffPinFor(caller, rawData) {
 async function actingCallerFromStaffSession(hostCaller, data) {
   const sessionId = optionalText(data, "staffPinSessionId", 128);
   const sessionToken = optionalText(data, "staffPinSessionToken", 128);
-  if (!sessionId && !sessionToken) return hostCaller;
+  if (!sessionId && !sessionToken) {
+    throw new HttpsError(
+      "unauthenticated",
+      "Select your staff name and enter your PIN before using the POS.",
+    );
+  }
   if (!sessionId || !sessionToken) {
     throw new HttpsError("unauthenticated", "The shared-device staff session is incomplete.");
   }
@@ -3748,7 +4209,7 @@ async function invokePlatformAction(action, caller, data) {
 
 async function invokePosAction(action, caller, data) {
   const sessionBootstrapActions = new Set([
-    "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin", "unlockStaffPin",
+    "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
   ]);
   const actingCaller = sessionBootstrapActions.has(action)
     ? caller
@@ -3776,6 +4237,12 @@ async function invokePosAction(action, caller, data) {
       return deleteTableFor(actingCaller, data);
     case "updateVenueNotificationSettings":
       return updateVenueNotificationSettingsFor(actingCaller, data);
+    case "manageMenuConfiguration":
+      return manageMenuConfigurationFor(actingCaller, data);
+    case "manageVenueConfiguration":
+      return manageVenueConfigurationFor(actingCaller, data);
+    case "uploadTenantLogo":
+      return uploadTenantLogoFor(actingCaller, data);
     case "lookupExchangeRate":
       return lookupExchangeRateFor(actingCaller, data);
     case "sendOrderToProduction":
@@ -3960,8 +4427,6 @@ export const setOwnStaffPin = onCall((request) =>
   setOwnStaffPinFor(callerFromCall(request), request.data));
 export const verifyStaffPin = onCall((request) =>
   verifyStaffPinFor(callerFromCall(request), request.data));
-export const unlockStaffPin = onCall((request) =>
-  unlockStaffPinFor(callerFromCall(request), request.data));
 export const deleteVenue = onCall((request) =>
   deleteVenueFor(callerFromCall(request), request.data));
 export const createStaffUser = onCall((request) =>
@@ -3972,30 +4437,6 @@ export const retireStaffUser = onCall((request) =>
   retireStaffUserFor(callerFromCall(request), request.data));
 export const setPlatformAdmin = onCall((request) =>
   setPlatformAdminFor(callerFromCall(request), request.data));
-export const sendOrderToProduction = onCall((request) =>
-  sendOrderToProductionFor(callerFromCall(request), request.data));
-export const closeOrder = onCall((request) =>
-  closeOrderFor(callerFromCall(request), request.data));
-export const splitOrder = onCall((request) =>
-  splitOrderFor(callerFromCall(request), request.data));
-export const updateProductionTicket = onCall((request) =>
-  updateProductionTicketFor(callerFromCall(request), request.data));
-export const retryFailedPrintJob = onCall((request) =>
-  retryFailedPrintJobFor(callerFromCall(request), request.data));
-export const reprintPrintedJob = onCall((request) =>
-  reprintPrintedJobFor(callerFromCall(request), request.data));
-export const cancelPrintJob = onCall((request) =>
-  cancelPrintJobFor(callerFromCall(request), request.data));
-export const openNamedTab = onCall((request) =>
-  openNamedTabFor(callerFromCall(request), request.data));
-export const addOrderDraftLine = onCall((request) =>
-  addOrderDraftLineFor(callerFromCall(request), request.data));
-export const updateOrderDraftLine = onCall((request) =>
-  updateOrderDraftLineFor(callerFromCall(request), request.data));
-export const updateVenueNotificationSettings = onCall((request) =>
-  updateVenueNotificationSettingsFor(callerFromCall(request), request.data));
-export const lookupExchangeRate = onCall((request) =>
-  lookupExchangeRateFor(callerFromCall(request), request.data));
 export const createTable = onCall((request) =>
   createTableFor(callerFromCall(request), request.data));
 export const updateTable = onCall((request) =>

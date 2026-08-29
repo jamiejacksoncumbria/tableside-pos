@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -173,6 +174,61 @@ final productionCommandRepositoryProvider =
 /// Cloud Function verifies the signed-in membership, loads the canonical menu
 /// product, creates production tickets, and records stock movement atomically.
 class ProductionCommandRepository {
+  Future<String> manageMenuConfiguration({
+    required VenueScope scope,
+    required String resource,
+    required String operation,
+    String? documentId,
+    Map<String, Object?> values = const {},
+  }) async {
+    final response = await _call('manageMenuConfiguration', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'resource': resource,
+      'operation': operation,
+      'documentId': documentId,
+      'values': values,
+    });
+    final returnedId = response['documentId'];
+    if (returnedId is! String || returnedId.isEmpty) {
+      throw StateError('The menu server returned an invalid document ID.');
+    }
+    return returnedId;
+  }
+
+  Future<void> manageVenueConfiguration({
+    required VenueScope scope,
+    required String resource,
+    required Map<String, Object?> values,
+  }) {
+    return _call('manageVenueConfiguration', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'resource': resource,
+      'values': values,
+    });
+  }
+
+  Future<String> uploadTenantLogo({
+    required VenueScope scope,
+    required Uint8List bytes,
+    required String fileName,
+    required String contentType,
+  }) async {
+    final response = await _call('uploadTenantLogo', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'fileName': fileName,
+      'contentType': contentType,
+      'base64Data': base64Encode(bytes),
+    });
+    final logoUrl = response['logoUrl'];
+    if (logoUrl is! String || logoUrl.isEmpty) {
+      throw StateError('The branding server returned an invalid logo URL.');
+    }
+    return logoUrl;
+  }
+
   Future<List<VenuePinStaff>> listVenuePinStaff(VenueScope scope) async {
     final response = await _call('listVenuePinStaff', {
       'tenantId': scope.tenantId,

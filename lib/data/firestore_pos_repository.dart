@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../features/pos/domain.dart';
+import 'production_command_repository.dart';
 
 final firestorePosRepositoryProvider = Provider<FirestorePosRepository>(
   (ref) => FirestorePosRepository(FirebaseFirestore.instance),
@@ -18,9 +19,13 @@ final taxRatesProvider = StreamProvider<List<TaxRate>>((ref) {
 });
 
 class FirestorePosRepository {
-  FirestorePosRepository(this._firestore);
+  FirestorePosRepository(
+    this._firestore, {
+    ProductionCommandRepository? commands,
+  }) : _commands = commands ?? ProductionCommandRepository();
 
   final FirebaseFirestore _firestore;
+  final ProductionCommandRepository _commands;
 
   Stream<List<TenantMembership>> watchMemberships(String userId) {
     return _firestore
@@ -582,15 +587,17 @@ class FirestorePosRepository {
   }) async {
     final cleanedName = name.trim();
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
-    await _firestore.collection('tenants/${scope.tenantId}/menuSections').add({
-      'venueId': scope.venueId,
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'section',
+      operation: 'save',
+      values: {
       'name': cleanedName,
       'icon': icon.trim().isEmpty ? '🍽️' : icon.trim(),
       'sortOrder': sortOrder,
       'parentSectionId': parentSectionId,
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
+      },
+    );
   }
 
   Future<void> updateMenuSection({
@@ -605,14 +612,17 @@ class FirestorePosRepository {
     if (parentSectionId == sectionId) {
       throw ArgumentError('A section cannot be its own parent.');
     }
-    await _firestore
-        .doc('tenants/${scope.tenantId}/menuSections/$sectionId')
-        .update({
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'section',
+      operation: 'save',
+      documentId: sectionId,
+      values: {
           'name': cleanedName,
           'icon': icon.trim().isEmpty ? '🍽️' : icon.trim(),
           'parentSectionId': parentSectionId,
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
+      },
+    );
   }
 
   Future<void> deleteMenuSection({
@@ -644,9 +654,12 @@ class FirestorePosRepository {
             : 'Remove this section from its products before deleting it.',
       );
     }
-    await _firestore
-        .doc('tenants/${scope.tenantId}/menuSections/$sectionId')
-        .delete();
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'section',
+      operation: 'delete',
+      documentId: sectionId,
+    );
   }
 
   Future<void> createProduct({
@@ -678,39 +691,40 @@ class FirestorePosRepository {
     }
     _validateTaxRateBasisPoints(taxRateBasisPoints);
     final cleanedTaxRateName = _cleanTaxRateName(taxRateName);
-    await _firestore.collection('tenants/${scope.tenantId}/products').add({
-      'venueId': scope.venueId,
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'product',
+      operation: 'save',
+      values: {
       'name': cleanedName,
       'priceMinor': priceMinor,
       'sectionIds': sectionIds,
       'productionArea': productionArea.name,
       'trackStock': trackStock,
       'stockOnHand': trackStock ? (stockOnHand ?? 0) : null,
-      'stockUnit': 'each',
       'stockPerSale': stockPerSale,
-      'isAvailable': true,
       'showOnOrderFlow': showOnOrderFlow,
       'taxRateBasisPoints': taxRateBasisPoints,
       'taxRateId': taxRateId,
       'taxRateName': cleanedTaxRateName,
       'variants': _variantsToMap(variants),
       'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
+      },
+    );
   }
 
   Future<void> setProductAvailability({
     required VenueScope scope,
     required String productId,
     required bool isAvailable,
-  }) {
-    return _firestore
-        .doc('tenants/${scope.tenantId}/products/$productId')
-        .update({
-          'isAvailable': isAvailable,
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
+  }) async {
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'product',
+      operation: 'availability',
+      documentId: productId,
+      values: {'isAvailable': isAvailable},
+    );
   }
 
   Future<void> updateProduct({
@@ -739,9 +753,12 @@ class FirestorePosRepository {
     }
     _validateTaxRateBasisPoints(taxRateBasisPoints);
     final cleanedTaxRateName = _cleanTaxRateName(taxRateName);
-    await _firestore
-        .doc('tenants/${scope.tenantId}/products/$productId')
-        .update({
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'product',
+      operation: 'save',
+      documentId: productId,
+      values: {
           'name': cleanedName,
           'priceMinor': priceMinor,
           'sectionIds': sectionIds,
@@ -755,8 +772,8 @@ class FirestorePosRepository {
           'taxRateName': cleanedTaxRateName,
           'variants': _variantsToMap(variants),
           'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
+      },
+    );
   }
 
   List<Map<String, Object?>> _variantsToMap(List<MenuProductVariant> variants) {
@@ -853,15 +870,14 @@ class FirestorePosRepository {
       maximumSelections: maximumSelections,
       options: options,
     );
-    await _firestore
-        .collection('tenants/${scope.tenantId}/modifierGroups')
-        .add({
-          'venueId': scope.venueId,
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'modifierGroup',
+      operation: 'save',
+      values: {
           ...data,
-          'isAvailable': true,
-          'createdAt': FieldValue.serverTimestamp(),
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
+      },
+    );
   }
 
   Future<void> updateModifierGroup({
@@ -878,9 +894,13 @@ class FirestorePosRepository {
       maximumSelections: maximumSelections,
       options: options,
     );
-    await _firestore
-        .doc('tenants/${scope.tenantId}/modifierGroups/$groupId')
-        .update({...data, 'updatedAt': FieldValue.serverTimestamp()});
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'modifierGroup',
+      operation: 'save',
+      documentId: groupId,
+      values: data,
+    );
   }
 
   Future<void> deleteModifierGroup({
@@ -900,9 +920,12 @@ class FirestorePosRepository {
         'Remove ${group.name} from its products before deleting it.',
       );
     }
-    await _firestore
-        .doc('tenants/${scope.tenantId}/modifierGroups/${group.id}')
-        .delete();
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'modifierGroup',
+      operation: 'delete',
+      documentId: group.id,
+    );
   }
 
   Map<String, Object?> _validatedModifierGroupData({
@@ -1018,14 +1041,12 @@ class FirestorePosRepository {
     final cleanedName = _cleanTaxRateName(name);
     _validateTaxRateBasisPoints(basisPoints);
     await _ensureUniqueTaxRateName(scope, cleanedName);
-    await _taxRates(scope.tenantId).add({
-      'venueId': scope.venueId,
-      'name': cleanedName,
-      'basisPoints': basisPoints,
-      'active': true,
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'taxRate',
+      operation: 'save',
+      values: {'name': cleanedName, 'basisPoints': basisPoints},
+    );
   }
 
   Future<void> updateTaxRate({
@@ -1037,26 +1058,12 @@ class FirestorePosRepository {
     final cleanedName = _cleanTaxRateName(name);
     _validateTaxRateBasisPoints(basisPoints);
     await _ensureUniqueTaxRateName(scope, cleanedName, exceptId: existing.id);
-    final rateRef = _taxRates(scope.tenantId).doc(existing.id);
-    final rate = await rateRef.get();
-    if (!rate.exists || rate.data()?['venueId'] != scope.venueId) {
-      throw StateError(
-        'This tax rate no longer belongs to the selected venue.',
-      );
-    }
-    final productSnapshots = await _firestore
-        .collection('tenants/${scope.tenantId}/products')
-        .where('taxRateId', isEqualTo: existing.id)
-        .get();
-    final references = productSnapshots.docs
-        .where((product) => product.data()['venueId'] == scope.venueId)
-        .map((product) => product.reference)
-        .toList(growable: false);
-    await _commitTaxRateAndProductUpdates(
-      rateRef: rateRef,
-      productReferences: references,
-      name: cleanedName,
-      basisPoints: basisPoints,
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'taxRate',
+      operation: 'save',
+      documentId: existing.id,
+      values: {'name': cleanedName, 'basisPoints': basisPoints},
     );
   }
 
@@ -1076,14 +1083,12 @@ class FirestorePosRepository {
         'Assign another tax rate to its products before deleting this rate.',
       );
     }
-    final reference = _taxRates(scope.tenantId).doc(rate.id);
-    final current = await reference.get();
-    if (!current.exists || current.data()?['venueId'] != scope.venueId) {
-      throw StateError(
-        'This tax rate no longer belongs to the selected venue.',
-      );
-    }
-    await reference.delete();
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'taxRate',
+      operation: 'delete',
+      documentId: rate.id,
+    );
   }
 
   Future<void> _ensureUniqueTaxRateName(
@@ -1104,41 +1109,6 @@ class FirestorePosRepository {
         'A tax rate with this name already exists at this venue.',
       );
     }
-  }
-
-  Future<void> _commitTaxRateAndProductUpdates({
-    required DocumentReference<Map<String, dynamic>> rateRef,
-    required List<DocumentReference<Map<String, dynamic>>> productReferences,
-    required String name,
-    required int basisPoints,
-  }) async {
-    // Keep below Firestore's 500-write limit. Selected product rate snapshots
-    // are updated too, so future orders reflect a manager's amended rate.
-    const maximumProductsPerBatch = 450;
-    var offset = 0;
-    do {
-      final end = (offset + maximumProductsPerBatch).clamp(
-        0,
-        productReferences.length,
-      );
-      final batch = _firestore.batch();
-      if (offset == 0) {
-        batch.update(rateRef, {
-          'name': name,
-          'basisPoints': basisPoints,
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
-      }
-      for (final product in productReferences.sublist(offset, end)) {
-        batch.update(product, {
-          'taxRateName': name,
-          'taxRateBasisPoints': basisPoints,
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
-      }
-      await batch.commit();
-      offset = end;
-    } while (offset < productReferences.length);
   }
 
   /// Streams production-safe order summaries for the kitchen/bar/manager

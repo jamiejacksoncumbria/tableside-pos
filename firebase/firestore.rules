@@ -85,8 +85,7 @@ service cloud.firestore {
       // Currency is selected only when the restaurant is created and remains
       // permanent. Client profile edits may never bypass that historical-money
       // safeguard.
-      allow update: if (isPlatformAdmin() || managesTenant(tenantId))
-        && changesOnlyTenantProfile();
+      allow update: if false;
       allow delete: if false;
 
       match /members/{userId} {
@@ -110,12 +109,12 @@ service cloud.firestore {
 
       match /menuSections/{sectionId} {
         allow read: if isPlatformAdmin() || isMember(tenantId);
-        allow write: if isPlatformAdmin() || managesTenant(tenantId);
+        allow write: if false;
       }
 
       match /products/{productId} {
         allow read: if isPlatformAdmin() || isMember(tenantId);
-        allow write: if isPlatformAdmin() || managesTenant(tenantId);
+        allow write: if false;
       }
 
       // Reusable cooking, spice, drink and similar option groups. Products
@@ -123,7 +122,7 @@ service cloud.firestore {
       // performed by the server function when a line is added or released.
       match /modifierGroups/{groupId} {
         allow read: if isPlatformAdmin() || isMember(tenantId);
-        allow write: if isPlatformAdmin() || managesTenant(tenantId);
+        allow write: if false;
       }
 
       // Venue tax-rate setup is manager-owned. Product selections copy the
@@ -131,7 +130,7 @@ service cloud.firestore {
       // that value again when a sale is made.
       match /taxRates/{taxRateId} {
         allow read: if isPlatformAdmin() || isMember(tenantId);
-        allow write: if isPlatformAdmin() || managesTenant(tenantId);
+        allow write: if false;
       }
 
       // Stock movements are immutable and server-created alongside a verified
@@ -181,12 +180,7 @@ service cloud.firestore {
         allow read: if isPlatformAdmin() || isMember(tenantId);
         // A server function validates the bill amount, creates the provider
         // payment intent, and is the only actor allowed to change its status.
-        allow create: if (isPlatformAdmin() || isMember(tenantId))
-          && request.resource.data.keys().hasAll([
-            'venueId', 'billId', 'amountMinor', 'currencyCode', 'method', 'status', 'idempotencyKey', 'requestedAt'
-          ])
-          && request.resource.data.currencyCode == tenantCurrencyCode(tenantId)
-          && isActiveVenue(tenantId, request.resource.data.venueId);
+        allow create: if false;
         allow update, delete: if false;
       }
 
@@ -196,12 +190,9 @@ service cloud.firestore {
         // offline, while only managers may register, route, or alter a device.
         allow get: if isPlatformAdmin() || managesTenant(tenantId) || isMember(tenantId);
         allow list: if isPlatformAdmin() || isMember(tenantId);
-        allow create: if (isPlatformAdmin() || managesTenant(tenantId))
-          && isActiveVenue(tenantId, request.resource.data.venueId);
-        allow delete: if isPlatformAdmin() || managesTenant(tenantId);
-        allow update: if ((isPlatformAdmin() || managesTenant(tenantId))
-            && isActiveVenue(tenantId, request.resource.data.venueId))
-          || ((signedIn() && resource.data.assignedUserId == request.auth.uid)
+        allow create: if false;
+        allow delete: if false;
+        allow update: if ((signedIn() && resource.data.assignedUserId == request.auth.uid)
             && isActiveVenue(tenantId, resource.data.venueId)
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastHeartbeatAt']));
       }
@@ -211,9 +202,7 @@ service cloud.firestore {
       // device belongs to this venue before creating the job.
       match /printerRoutes/{routeId} {
         allow read: if isPlatformAdmin() || isMember(tenantId);
-        allow create, update: if (isPlatformAdmin() || managesTenant(tenantId))
-          && isActiveVenue(tenantId, request.resource.data.venueId);
-        allow delete: if isPlatformAdmin() || managesTenant(tenantId);
+        allow create, update, delete: if false;
       }
 
       match /printJobs/{jobId} {
