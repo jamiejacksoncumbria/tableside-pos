@@ -268,16 +268,19 @@ class _VenuePrinterRoutingPageState
     _ => 'Kitchen',
   };
 
-  Stream<List<_VenueMember>> _watchActiveMembers(VenueScope scope) {
-    return FirebaseFirestore.instance
-        .collection('tenants/${scope.tenantId}/members')
-        .snapshots()
-        .map(
-          (snapshot) => snapshot.docs
-              .map(_VenueMember.fromDocument)
-              .where((member) => member.active)
-              .toList(growable: false),
-        );
+  Stream<List<_VenueMember>> _watchActiveMembers() {
+    final user = FirebaseAuth.instance.currentUser;
+    return Stream.value(
+      user == null
+          ? const <_VenueMember>[]
+          : <_VenueMember>[
+              _VenueMember(
+                userId: user.uid,
+                email: user.email ?? '',
+                active: true,
+              ),
+            ],
+    );
   }
 
   @override
@@ -310,7 +313,7 @@ class _VenuePrinterRoutingPageState
                   child: Padding(
                     padding: const EdgeInsets.all(16),
                     child: StreamBuilder<List<_VenueMember>>(
-                      stream: _watchActiveMembers(scope),
+                      stream: _watchActiveMembers(),
                       builder: (context, memberSnapshot) {
                         final members =
                             memberSnapshot.data ?? const <_VenueMember>[];
@@ -348,9 +351,9 @@ class _VenuePrinterRoutingPageState
                               key: ValueKey('assigned-user-$selectedUserId'),
                               initialValue: selectedUserId,
                               decoration: const InputDecoration(
-                                labelText: 'Printer-device sign-in account',
+                                labelText: 'Firebase device account',
                                 helperText:
-                                    'The selected user is the only account that can process this device’s queued tickets.',
+                                    'This is the signed-in account used by this physical device to claim queued tickets.',
                               ),
                               items: [
                                 const DropdownMenuItem<String?>(
@@ -363,10 +366,7 @@ class _VenuePrinterRoutingPageState
                                     child: Text(member.label),
                                   ),
                               ],
-                              onChanged: memberSnapshot.hasError
-                                  ? null
-                                  : (value) =>
-                                        setState(() => _assignedUserId = value),
+                              onChanged: null,
                             ),
                             if (memberSnapshot.hasError) ...[
                               const SizedBox(height: 8),
@@ -523,17 +523,6 @@ class _VenueMember {
     required this.email,
     required this.active,
   });
-
-  factory _VenueMember.fromDocument(
-    QueryDocumentSnapshot<Map<String, dynamic>> document,
-  ) {
-    final data = document.data();
-    return _VenueMember(
-      userId: data['userId'] as String? ?? document.id,
-      email: data['email'] as String? ?? '',
-      active: data['active'] as bool? ?? true,
-    );
-  }
 
   final String userId;
   final String email;
