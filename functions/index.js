@@ -3646,7 +3646,7 @@ async function updateProductionTicketFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  const ticketId = requiredText(data, "ticketId", 300);
+  const ticketId = requiredDocumentId(data, "ticketId");
   const flowStatus = requiredText(data, "flowStatus", 32);
   if (!Object.hasOwn(permittedOrderFlowTransitions, flowStatus)) {
     throw new HttpsError("invalid-argument", "The production status is not recognised.");
@@ -3685,7 +3685,7 @@ async function updateProductionTicketFor(caller, rawData) {
       flowUpdatedAt: FieldValue.serverTimestamp(),
       flowUpdatedByActor: actor,
     });
-    transaction.create(db.doc(`tenants/${tenantId}/auditEvents/${ticketId}_${Date.now()}`), {
+    transaction.create(db.collection(`tenants/${tenantId}/auditEvents`).doc(), {
       action: "updateProductionTicket",
       venueId,
       ticketId,
