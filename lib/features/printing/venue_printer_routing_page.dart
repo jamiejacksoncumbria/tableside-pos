@@ -8,6 +8,7 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/printer_device_repository.dart';
 import '../../data/printer_route_repository.dart';
+import '../auth/staff_pin_gate.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
 import 'local_printer_device_identity.dart';
@@ -117,6 +118,12 @@ class _VenuePrinterRoutingPageState
       _error = null;
     });
     try {
+      final hasSession = ref
+          .read(activeStaffPinSessionProvider.notifier)
+          .restoreCredentials();
+      if (!hasSession) {
+        throw StateError('Your staff PIN session expired. Enter your PIN again.');
+      }
       await _devices.register(
         PrinterDevice(
           id: deviceId,
@@ -235,6 +242,14 @@ class _VenuePrinterRoutingPageState
             FilledButton(
               onPressed: () async {
                 try {
+                  final hasSession = ref
+                      .read(activeStaffPinSessionProvider.notifier)
+                      .restoreCredentials();
+                  if (!hasSession) {
+                    throw StateError(
+                      'Your staff PIN session expired. Enter your PIN again.',
+                    );
+                  }
                   await _routes.saveRoute(
                     scope: scope,
                     productionArea: area,
@@ -291,6 +306,16 @@ class _VenuePrinterRoutingPageState
         body: Center(
           child: Text('Choose a venue before configuring printers.'),
         ),
+      );
+    }
+    final staffSession = ref.watch(activeStaffPinSessionProvider);
+    if (staffSession == null ||
+        !staffSession.expiresAt.isAfter(DateTime.now())) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) Navigator.of(context).maybePop();
+      });
+      return const Scaffold(
+        body: Center(child: Text('Staff PIN expired. Returning to sign-in…')),
       );
     }
     return Scaffold(

@@ -31,6 +31,22 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
     StaffPinSessionStore.current = null;
     state = null;
   }
+
+  /// Re-synchronises the process-memory credentials after hot reload or a
+  /// protected child route rebuild. It can never create or extend a session;
+  /// only the still-valid server verification held in state may be restored.
+  bool restoreCredentials() {
+    final session = state;
+    if (session == null || !session.expiresAt.isAfter(DateTime.now())) {
+      lock();
+      return false;
+    }
+    StaffPinSessionStore.current = StaffPinSessionCredentials(
+      sessionId: session.sessionId,
+      sessionToken: session.sessionToken,
+    );
+    return true;
+  }
 }
 
 class StaffPinGate extends ConsumerStatefulWidget {
