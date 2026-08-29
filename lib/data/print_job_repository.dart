@@ -24,7 +24,6 @@ class PrintJobRepository {
   }) {
     return _jobs(tenantId)
         .where('venueId', isEqualTo: venueId)
-        .where('status', whereIn: const ['queued', 'claimed', 'failed'])
         .where('status', isEqualTo: 'queued')
         .snapshots()
         .map((snapshot) => snapshot.size)
