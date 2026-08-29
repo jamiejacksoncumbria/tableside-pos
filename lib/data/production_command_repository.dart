@@ -303,6 +303,19 @@ class ProductionCommandRepository {
     });
   }
 
+  /// Creates a new, audited REPRINT job from a successfully printed ticket.
+  /// The original completed job is preserved unchanged.
+  Future<void> reprintPrintedJob({
+    required VenueScope scope,
+    required String jobId,
+  }) {
+    return _call('reprintPrintedJob', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'jobId': jobId,
+    });
+  }
+
   /// Removes a queued/failed ticket from active printing without deleting its
   /// record. The server also clears any safe linked fallback copy and audits
   /// the manager-provided reason.

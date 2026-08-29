@@ -413,6 +413,18 @@ class _PrintQueueRecoveryPageState
                             ? 'Reprints use the original route and say REPRINT. You can also clear only jobs that have not started printing.'
                             : 'Managers and owners can reprint or clear unprinted tickets. You can still see the live printer status here.',
                       ),
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => _PrintedTicketHistoryPage(
+                              canReprint: canManagePrintQueue,
+                            ),
+                          ),
+                        ),
+                        icon: const Icon(Icons.history_rounded),
+                        label: const Text('Printed ticket history'),
+                      ),
                       if (canManagePrintQueue && eligible.isNotEmpty) ...[
                         const SizedBox(height: 12),
                         FilledButton.icon(
@@ -524,6 +536,139 @@ class _PrintQueueRecoveryPageState
     return reference?.trim().isNotEmpty == true
         ? 'Order ${reference!.trim()} for $location'
         : location;
+  }
+}
+
+class _PrintedTicketHistoryPage extends ConsumerStatefulWidget {
+  const _PrintedTicketHistoryPage({required this.canReprint});
+
+  final bool canReprint;
+
+  @override
+  ConsumerState<_PrintedTicketHistoryPage> createState() =>
+      _PrintedTicketHistoryPageState();
+}
+
+class _PrintedTicketHistoryPageState
+    extends ConsumerState<_PrintedTicketHistoryPage> {
+  final ProductionCommandRepository _commands = ProductionCommandRepository();
+  final Set<String> _reprinting = <String>{};
+
+  Future<void> _reprint(PrintJob job) async {
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reprint this ticket?'),
+        content: Text(
+          '${_jobLocation(job)} will print again on its original printer and will clearly say REPRINT.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.print_rounded),
+            label: const Text('Reprint'),
+          ),
+        ],
+      ),
+    );
+    if (accepted != true || !mounted) return;
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) return;
+    setState(() => _reprinting.add(job.id));
+    try {
+      await _commands.reprintPrintedJob(scope: scope, jobId: job.id);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Reprint queued',
+        message: '${_jobLocation(job)} was sent to its original printer.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Reprint printed ticket', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not reprint ticket',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _reprinting.remove(job.id));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = ref.watch(activeVenueScopeProvider);
+    if (scope == null) {
+      return const Scaffold(body: Center(child: Text('Choose a venue first.')));
+    }
+    final jobs = ref.watch(venuePrintJobsProvider(scope));
+    final cutoff = DateTime.now().subtract(const Duration(days: 5));
+    return Scaffold(
+      appBar: AppBar(title: const Text('Printed ticket history')),
+      body: jobs.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, stackTrace) {
+          AppLogger.error('Load printed ticket history', error, stackTrace);
+          return _QueueError(error: error);
+        },
+        data: (allJobs) {
+          final printed = allJobs.where((job) {
+            final printedAt = job.completedAt;
+            return job.status == PrintJobStatus.printed &&
+                printedAt != null &&
+                !printedAt.isBefore(cutoff);
+          }).toList(growable: false)
+            ..sort((a, b) => b.completedAt!.compareTo(a.completedAt!));
+          if (printed.isEmpty) {
+            return const Center(
+              child: Text('No successfully printed tickets in the last five days.'),
+            );
+          }
+          return ListView.builder(
+            padding: const EdgeInsets.all(16),
+            itemCount: printed.length,
+            itemBuilder: (context, index) {
+              final job = printed[index];
+              final busy = _reprinting.contains(job.id);
+              return Card(
+                child: ListTile(
+                  leading: const Icon(Icons.receipt_long_rounded),
+                  title: Text(
+                    '${_areaLabel(job)} ${job.payload['type'] == 'receipt' ? 'receipt' : 'ticket'}',
+                  ),
+                  subtitle: Text(
+                    '${_jobLocation(job)}\nPrinted ${_dateTime(job.completedAt!)}',
+                  ),
+                  isThreeLine: true,
+                  trailing: widget.canReprint
+                      ? FilledButton.icon(
+                          onPressed: busy ? null : () => _reprint(job),
+                          icon: busy
+                              ? const SizedBox(
+                                  height: 18,
+                                  width: 18,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : const Icon(Icons.print_rounded),
+                          label: Text(busy ? 'Queueing…' : 'Reprint'),
+                        )
+                      : const Text('Manager only'),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
   }
 }
 
