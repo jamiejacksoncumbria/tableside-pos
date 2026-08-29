@@ -7,6 +7,7 @@ import 'package:tableside_pos/core/tenant_scope.dart';
 
 import '../core/app_logger.dart';
 import '../core/firebase_bootstrap.dart';
+import '../core/staff_pin_session_store.dart';
 import '../firebase_options.dart';
 import '../features/pos/domain.dart';
 
@@ -20,6 +21,38 @@ class ProductionDispatchResult {
   final List<String> queuedPrintJobIds;
   final List<String> queuedProductionAreas;
   final List<String> unroutedProductionAreas;
+}
+
+class VenuePinStaff {
+  const VenuePinStaff({
+    required this.userId,
+    required this.displayName,
+    required this.roles,
+    required this.hasPin,
+    required this.pinLocked,
+  });
+
+  final String userId;
+  final String displayName;
+  final List<String> roles;
+  final bool hasPin;
+  final bool pinLocked;
+}
+
+class StaffPinVerification {
+  const StaffPinVerification({
+    required this.sessionId,
+    required this.sessionToken,
+    required this.expiresAt,
+    required this.userId,
+    required this.displayName,
+  });
+
+  final String sessionId;
+  final String sessionToken;
+  final DateTime expiresAt;
+  final String userId;
+  final String displayName;
 }
 
 /// The server-calculated receipt result. The client never supplies the order
@@ -136,6 +169,69 @@ final productionCommandRepositoryProvider =
 /// Cloud Function verifies the signed-in membership, loads the canonical menu
 /// product, creates production tickets, and records stock movement atomically.
 class ProductionCommandRepository {
+  Future<List<VenuePinStaff>> listVenuePinStaff(VenueScope scope) async {
+    final response = await _call('listVenuePinStaff', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+    });
+    final values = response['staff'];
+    if (values is! List) {
+      throw StateError('The server returned an invalid staff list.');
+    }
+    return values.map((value) {
+      final data = Map<String, Object?>.from(value as Map);
+      return VenuePinStaff(
+        userId: data['userId'] as String,
+        displayName: data['displayName'] as String,
+        roles: List<String>.from(data['roles'] as List? ?? const []),
+        hasPin: data['hasPin'] == true,
+        pinLocked: data['pinLocked'] == true,
+      );
+    }).toList(growable: false);
+  }
+
+  Future<void> setOwnStaffPin({
+    required VenueScope scope,
+    required String pin,
+  }) {
+    return _call('setOwnStaffPin', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'pin': pin,
+    });
+  }
+
+  Future<StaffPinVerification> verifyStaffPin({
+    required VenueScope scope,
+    required String userId,
+    required String pin,
+  }) async {
+    final response = await _call('verifyStaffPin', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'userId': userId,
+      'pin': pin,
+    });
+    return StaffPinVerification(
+      sessionId: response['sessionId'] as String,
+      sessionToken: response['sessionToken'] as String,
+      expiresAt: DateTime.parse(response['expiresAt'] as String),
+      userId: response['userId'] as String,
+      displayName: response['displayName'] as String,
+    );
+  }
+
+  Future<void> unlockStaffPin({
+    required VenueScope scope,
+    required String userId,
+  }) {
+    return _call('unlockStaffPin', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'userId': userId,
+    });
+  }
+
   Future<void> createTable({
     required VenueScope scope,
     required String label,
@@ -476,6 +572,12 @@ class ProductionCommandRepository {
       'posApi',
     );
     AppLogger.info('POS API $action: sending request.');
+    final staffSession = StaffPinSessionStore.current;
+    final requestData = <String, Object?>{
+      ...data,
+      if (staffSession != null) 'staffPinSessionId': staffSession.sessionId,
+      if (staffSession != null) 'staffPinSessionToken': staffSession.sessionToken,
+    };
     final response = await http.post(
       endpoint,
       headers: {
@@ -483,7 +585,7 @@ class ProductionCommandRepository {
         'Content-Type': 'application/json',
         'X-Firebase-AppCheck': ?appCheckToken,
       },
-      body: jsonEncode({'action': action, 'data': data}),
+      body: jsonEncode({'action': action, 'data': requestData}),
     );
     AppLogger.info('POS API $action: HTTP ${response.statusCode}.');
 

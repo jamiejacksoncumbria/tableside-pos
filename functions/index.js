@@ -1,4 +1,4 @@
-import {randomBytes} from "node:crypto";
+import {createHash, randomBytes, scryptSync, timingSafeEqual} from "node:crypto";
 import {getApps, initializeApp} from "firebase-admin/app";
 import {getAppCheck} from "firebase-admin/app-check";
 import {getAuth} from "firebase-admin/auth";
@@ -417,6 +417,223 @@ function validCurrencyCode(data) {
     );
   }
   return currencyCode;
+}
+
+function requiredSixDigitPin(data) {
+  const pin = requiredText(data, "pin", 6);
+  if (!/^\d{6}$/.test(pin)) {
+    throw new HttpsError("invalid-argument", "PIN must contain exactly six digits.");
+  }
+  return pin;
+}
+
+function staffPinDocumentId(venueId, userId) {
+  return `${venueId}_${userId}`;
+}
+
+function hashStaffPin(pin, salt) {
+  return scryptSync(pin, salt, 32).toString("base64");
+}
+
+async function listVenuePinStaffFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  await requireTenantOperationalMember(caller, tenantId);
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const members = await db.collection(`tenants/${tenantId}/members`)
+    .where("active", "!=", false)
+    .get();
+  const staff = await Promise.all(members.docs.map(async (member) => {
+    const userId = member.id;
+    const [user, pin] = await Promise.all([
+      auth.getUser(userId),
+      db.doc(`tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, userId)}`).get(),
+    ]);
+    const pinData = pin.exists ? pin.data() : {};
+    return {
+      userId,
+      displayName: user.displayName || user.email || "Staff member",
+      roles: Array.isArray(member.data().roles) ? member.data().roles : [],
+      hasPin: pin.exists,
+      pinLocked: pinData.locked === true,
+    };
+  }));
+  staff.sort((a, b) => a.displayName.localeCompare(b.displayName));
+  return {staff};
+}
+
+async function setOwnStaffPinFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const pin = requiredSixDigitPin(data);
+  await requireTenantOperationalMember(caller, tenantId);
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const salt = randomBytes(16).toString("base64url");
+  const pinRef = db.doc(
+    `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`,
+  );
+  await pinRef.set({
+    userId: caller.uid,
+    venueId,
+    salt,
+    pinHash: hashStaffPin(pin, salt),
+    failedAttempts: 0,
+    locked: false,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedBy: caller.uid,
+  });
+  await writeAudit(caller.uid, "setOwnStaffPin", caller.uid, {tenantId, venueId});
+  return {configured: true};
+}
+
+async function unlockStaffPinFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const userId = requiredText(data, "userId", 128);
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager can unlock a staff PIN.");
+  }
+  const pinRef = db.doc(
+    `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, userId)}`,
+  );
+  const pin = await pinRef.get();
+  if (!pin.exists || pin.data().venueId !== venueId) {
+    throw new HttpsError("not-found", "This staff PIN was not found for the selected venue.");
+  }
+  await pinRef.update({
+    locked: false,
+    failedAttempts: 0,
+    unlockedAt: FieldValue.serverTimestamp(),
+    unlockedBy: caller.uid,
+  });
+  await writeAudit(caller.uid, "unlockStaffPin", userId, {tenantId, venueId});
+  return {unlocked: true};
+}
+
+async function verifyStaffPinFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const userId = requiredText(data, "userId", 128);
+  const pin = requiredSixDigitPin(data);
+  await requireTenantOperationalMember(caller, tenantId);
+  const memberRef = db.doc(`tenants/${tenantId}/members/${userId}`);
+  const pinRef = db.doc(
+    `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, userId)}`,
+  );
+  const verification = await db.runTransaction(async (transaction) => {
+    const [member, pinDocument] = await Promise.all([
+      transaction.get(memberRef),
+      transaction.get(pinRef),
+    ]);
+    if (!member.exists || member.data().active === false) {
+      throw new HttpsError("permission-denied", "This staff account is not active.");
+    }
+    if (!pinDocument.exists) {
+      throw new HttpsError("failed-precondition", "This staff member has not configured a PIN.");
+    }
+    const pinData = pinDocument.data();
+    if (pinData.locked === true) {
+      throw new HttpsError("resource-exhausted", "This staff PIN is locked. Ask a manager to unlock it.");
+    }
+    const expected = Buffer.from(pinData.pinHash, "base64");
+    const supplied = Buffer.from(hashStaffPin(pin, pinData.salt), "base64");
+    const valid = expected.length === supplied.length && timingSafeEqual(expected, supplied);
+    if (!valid) {
+      const failedAttempts = (Number.isInteger(pinData.failedAttempts)
+        ? pinData.failedAttempts
+        : 0) + 1;
+      transaction.update(pinRef, {
+        failedAttempts,
+        locked: failedAttempts >= 3,
+        lastFailedAt: FieldValue.serverTimestamp(),
+      });
+      return {valid: false, failedAttempts};
+    }
+    transaction.update(pinRef, {
+      failedAttempts: 0,
+      lastVerifiedAt: FieldValue.serverTimestamp(),
+    });
+    return {valid: true, failedAttempts: 0};
+  });
+  if (!verification.valid) {
+    throw new HttpsError(
+      verification.failedAttempts >= 3 ? "resource-exhausted" : "permission-denied",
+      verification.failedAttempts >= 3
+        ? "This staff PIN is now locked after three failed attempts."
+        : `Incorrect PIN. ${3 - verification.failedAttempts} attempt(s) remain.`,
+    );
+  }
+  const token = randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+  const sessionRef = db.collection(`tenants/${tenantId}/staffPinSessions`).doc();
+  await sessionRef.set({
+    userId,
+    venueId,
+    hostUserId: caller.uid,
+    tokenHash: createHash("sha256").update(token).digest("base64"),
+    expiresAt,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  const user = await auth.getUser(userId);
+  await writeAudit(caller.uid, "verifyStaffPin", userId, {tenantId, venueId});
+  return {
+    sessionId: sessionRef.id,
+    sessionToken: token,
+    expiresAt: expiresAt.toISOString(),
+    userId,
+    displayName: user.displayName || user.email || "Staff member",
+  };
+}
+
+async function actingCallerFromStaffSession(hostCaller, data) {
+  const sessionId = optionalText(data, "staffPinSessionId", 128);
+  const sessionToken = optionalText(data, "staffPinSessionToken", 128);
+  if (!sessionId && !sessionToken) return hostCaller;
+  if (!sessionId || !sessionToken) {
+    throw new HttpsError("unauthenticated", "The shared-device staff session is incomplete.");
+  }
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const session = await db.doc(
+    `tenants/${tenantId}/staffPinSessions/${sessionId}`,
+  ).get();
+  if (!session.exists) {
+    throw new HttpsError("unauthenticated", "The staff PIN session no longer exists.");
+  }
+  const sessionData = session.data();
+  const suppliedHash = createHash("sha256").update(sessionToken).digest("base64");
+  const expectedHash = typeof sessionData.tokenHash === "string"
+    ? sessionData.tokenHash
+    : "";
+  const hashesMatch = expectedHash.length === suppliedHash.length &&
+    timingSafeEqual(Buffer.from(expectedHash), Buffer.from(suppliedHash));
+  const expiresAt = sessionData.expiresAt?.toDate?.() ?? null;
+  if (!hashesMatch ||
+      sessionData.hostUserId !== hostCaller.uid ||
+      sessionData.venueId !== venueId ||
+      expiresAt == null ||
+      expiresAt.getTime() <= Date.now()) {
+    throw new HttpsError("unauthenticated", "The staff PIN session has expired. Select your name and enter your PIN again.");
+  }
+  const actingUserId = typeof sessionData.userId === "string"
+    ? sessionData.userId
+    : "";
+  const membership = await db.doc(`tenants/${tenantId}/members/${actingUserId}`).get();
+  if (!membership.exists || membership.data().active === false) {
+    throw new HttpsError("permission-denied", "The selected staff account is no longer active.");
+  }
+  return {...hostCaller, uid: actingUserId, hostUid: hostCaller.uid};
 }
 
 function xmlElementText(xml, tagName) {
@@ -3522,37 +3739,51 @@ async function invokePlatformAction(action, caller, data) {
 }
 
 async function invokePosAction(action, caller, data) {
+  const sessionBootstrapActions = new Set([
+    "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin", "unlockStaffPin",
+  ]);
+  const actingCaller = sessionBootstrapActions.has(action)
+    ? caller
+    : await actingCallerFromStaffSession(caller, data);
   switch (action) {
+    case "listVenuePinStaff":
+      return listVenuePinStaffFor(caller, data);
+    case "setOwnStaffPin":
+      return setOwnStaffPinFor(caller, data);
+    case "verifyStaffPin":
+      return verifyStaffPinFor(caller, data);
+    case "unlockStaffPin":
+      return unlockStaffPinFor(caller, data);
     case "openNamedTab":
-      return openNamedTabFor(caller, data);
+      return openNamedTabFor(actingCaller, data);
     case "addOrderDraftLine":
-      return addOrderDraftLineFor(caller, data);
+      return addOrderDraftLineFor(actingCaller, data);
     case "updateOrderDraftLine":
-      return updateOrderDraftLineFor(caller, data);
+      return updateOrderDraftLineFor(actingCaller, data);
     case "createTable":
-      return createTableFor(caller, data);
+      return createTableFor(actingCaller, data);
     case "updateTable":
-      return updateTableFor(caller, data);
+      return updateTableFor(actingCaller, data);
     case "deleteTable":
-      return deleteTableFor(caller, data);
+      return deleteTableFor(actingCaller, data);
     case "updateVenueNotificationSettings":
-      return updateVenueNotificationSettingsFor(caller, data);
+      return updateVenueNotificationSettingsFor(actingCaller, data);
     case "lookupExchangeRate":
-      return lookupExchangeRateFor(caller, data);
+      return lookupExchangeRateFor(actingCaller, data);
     case "sendOrderToProduction":
-      return sendOrderToProductionFor(caller, data);
+      return sendOrderToProductionFor(actingCaller, data);
     case "closeOrder":
-      return closeOrderFor(caller, data);
+      return closeOrderFor(actingCaller, data);
     case "splitOrder":
-      return splitOrderFor(caller, data);
+      return splitOrderFor(actingCaller, data);
     case "updateProductionTicket":
-      return updateProductionTicketFor(caller, data);
+      return updateProductionTicketFor(actingCaller, data);
     case "retryFailedPrintJob":
-      return retryFailedPrintJobFor(caller, data);
+      return retryFailedPrintJobFor(actingCaller, data);
     case "reprintPrintedJob":
-      return reprintPrintedJobFor(caller, data);
+      return reprintPrintedJobFor(actingCaller, data);
     case "cancelPrintJob":
-      return cancelPrintJobFor(caller, data);
+      return cancelPrintJobFor(actingCaller, data);
     default:
       throw new HttpsError("not-found", "That POS action does not exist.");
   }
@@ -3715,6 +3946,14 @@ export const createVenue = onCall((request) =>
   createVenueFor(callerFromCall(request), request.data));
 export const updateVenue = onCall((request) =>
   updateVenueFor(callerFromCall(request), request.data));
+export const listVenuePinStaff = onCall((request) =>
+  listVenuePinStaffFor(callerFromCall(request), request.data));
+export const setOwnStaffPin = onCall((request) =>
+  setOwnStaffPinFor(callerFromCall(request), request.data));
+export const verifyStaffPin = onCall((request) =>
+  verifyStaffPinFor(callerFromCall(request), request.data));
+export const unlockStaffPin = onCall((request) =>
+  unlockStaffPinFor(callerFromCall(request), request.data));
 export const deleteVenue = onCall((request) =>
   deleteVenueFor(callerFromCall(request), request.data));
 export const createStaffUser = onCall((request) =>

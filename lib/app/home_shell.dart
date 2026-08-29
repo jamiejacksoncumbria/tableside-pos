@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../features/order_flow/order_flow_page.dart';
+import '../features/auth/staff_pin_gate.dart';
 import '../features/menu/menu_management_page.dart';
 import '../features/notifications/notification_centre.dart';
 import '../features/pos/domain.dart';
@@ -54,6 +55,7 @@ class HomeShell extends ConsumerWidget {
     final unreadNotifications = ref.watch(
       appNotificationsProvider.select(unreadNotificationCount),
     );
+    final staffSession = ref.watch(activeStaffPinSessionProvider);
     final TenantProfile profile =
         profileOverride ?? ref.watch(tenantProfileProvider);
     final wide = MediaQuery.sizeOf(context).width >= 840;
@@ -130,6 +132,14 @@ class HomeShell extends ConsumerWidget {
           ],
         ),
         actions: [
+          if (staffSession != null)
+            TextButton.icon(
+              onPressed: () => ref
+                  .read(activeStaffPinSessionProvider.notifier)
+                  .lock(),
+              icon: const Icon(Icons.switch_account_rounded),
+              label: Text(wide ? staffSession.displayName : 'Switch'),
+            ),
           if (isPlatformAdmin && !wide)
             IconButton(
               tooltip: 'Platform administration',

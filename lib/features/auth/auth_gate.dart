@@ -9,6 +9,7 @@ import '../../data/platform_admin_repository.dart';
 import '../platform_admin/platform_admin_page.dart';
 import '../pos/domain.dart';
 import 'session_providers.dart';
+import 'staff_pin_gate.dart';
 
 class FirebaseAuthGate extends ConsumerWidget {
   const FirebaseAuthGate({super.key});
@@ -392,15 +393,19 @@ class _TenantWorkspace extends ConsumerWidget {
       );
     }
     AppLogger.info('Venue workspace ready: ${venue.name}.');
-    return HomeShell(
-      profileOverride: profile.requireValue,
-      venueOverride: venue,
-      persistCompanyProfile: true,
-      isPlatformAdmin: isPlatformAdmin,
-      onSignOut: () {
-        ref.read(activeVenueScopeProvider.notifier).clear();
-        ref.read(authRepositoryProvider).signOut();
-      },
+    return StaffPinGate(
+      scope: scope,
+      child: HomeShell(
+        profileOverride: profile.requireValue,
+        venueOverride: venue,
+        persistCompanyProfile: true,
+        isPlatformAdmin: isPlatformAdmin,
+        onSignOut: () {
+          ref.read(activeStaffPinSessionProvider.notifier).lock();
+          ref.read(activeVenueScopeProvider.notifier).clear();
+          ref.read(authRepositoryProvider).signOut();
+        },
+      ),
     );
   }
 }
