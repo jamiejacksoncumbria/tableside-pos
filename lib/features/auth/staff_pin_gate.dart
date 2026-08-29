@@ -421,6 +421,14 @@ class _PinPadDialogState extends State<_PinPadDialog> {
   final FocusNode _keyboardFocus = FocusNode(debugLabel: 'Staff PIN keypad');
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _keyboardFocus.requestFocus();
+    });
+  }
+
+  @override
   void dispose() {
     _keyboardFocus.dispose();
     super.dispose();
@@ -429,18 +437,37 @@ class _PinPadDialogState extends State<_PinPadDialog> {
   void _digit(String digit) {
     if (_pin.length >= 6) return;
     setState(() => _pin += digit);
+    _keyboardFocus.requestFocus();
   }
 
   void _backspace() {
     if (_pin.isEmpty) return;
     setState(() => _pin = _pin.substring(0, _pin.length - 1));
+    _keyboardFocus.requestFocus();
   }
 
   void _handleKeyEvent(KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return;
-    final label = event.logicalKey.keyLabel;
-    if (RegExp(r'^\d$').hasMatch(label)) {
-      _digit(label);
+    final character = event.character;
+    if (character != null && RegExp(r'^\d$').hasMatch(character)) {
+      _digit(character);
+      return;
+    }
+    const numpadDigits = <LogicalKeyboardKey, String>{
+      LogicalKeyboardKey.numpad0: '0',
+      LogicalKeyboardKey.numpad1: '1',
+      LogicalKeyboardKey.numpad2: '2',
+      LogicalKeyboardKey.numpad3: '3',
+      LogicalKeyboardKey.numpad4: '4',
+      LogicalKeyboardKey.numpad5: '5',
+      LogicalKeyboardKey.numpad6: '6',
+      LogicalKeyboardKey.numpad7: '7',
+      LogicalKeyboardKey.numpad8: '8',
+      LogicalKeyboardKey.numpad9: '9',
+    };
+    final numpadDigit = numpadDigits[event.logicalKey];
+    if (numpadDigit != null) {
+      _digit(numpadDigit);
       return;
     }
     if (event.logicalKey == LogicalKeyboardKey.backspace ||
@@ -518,10 +545,13 @@ class _PinPadDialogState extends State<_PinPadDialog> {
                       style: Theme.of(context).textTheme.headlineSmall,
                     ),
                   ),
-                OutlinedButton(
+              OutlinedButton(
                   onPressed: _pin.isEmpty
                       ? null
-                      : () => setState(() => _pin = ''),
+                      : () {
+                          setState(() => _pin = '');
+                          _keyboardFocus.requestFocus();
+                        },
                   child: const Text('Clear'),
                 ),
                 FilledButton.tonal(
