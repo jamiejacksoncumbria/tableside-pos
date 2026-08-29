@@ -32,4 +32,9 @@ class LocalPrinterDeviceIdentity {
 
   Future<void> clearCredential() =>
       _preferences.remove(_credentialPreferenceKey);
+
+  Future<void> reset() async {
+    await _preferences.remove(_preferenceKey);
+    await _preferences.remove(_credentialPreferenceKey);
+  }
 }

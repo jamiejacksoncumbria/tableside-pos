@@ -221,9 +221,23 @@ class ProductionCommandRepository {
     });
     final credential = response['deviceCredential'];
     if (credential is! String || credential.isEmpty) {
-      throw StateError('The server did not return a printer enrollment credential.');
+      throw StateError(
+        'The server did not return a printer enrollment credential.',
+      );
     }
     return credential;
+  }
+
+  Future<void> removePrinterDevice({
+    required VenueScope scope,
+    required String deviceId,
+  }) {
+    return _call('manageVenueConfiguration', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'resource': 'printerDeviceRemoval',
+      'values': {'deviceId': deviceId},
+    });
   }
 
   Future<void> heartbeatPrinterDevice({
@@ -302,16 +316,18 @@ class ProductionCommandRepository {
     if (values is! List) {
       throw StateError('The server returned an invalid staff list.');
     }
-    return values.map((value) {
-      final data = Map<String, Object?>.from(value as Map);
-      return VenuePinStaff(
-        userId: data['userId'] as String,
-        displayName: data['displayName'] as String,
-        roles: List<String>.from(data['roles'] as List? ?? const []),
-        hasPin: data['hasPin'] == true,
-        pinLocked: data['pinLocked'] == true,
-      );
-    }).toList(growable: false);
+    return values
+        .map((value) {
+          final data = Map<String, Object?>.from(value as Map);
+          return VenuePinStaff(
+            userId: data['userId'] as String,
+            displayName: data['displayName'] as String,
+            roles: List<String>.from(data['roles'] as List? ?? const []),
+            hasPin: data['hasPin'] == true,
+            pinLocked: data['pinLocked'] == true,
+          );
+        })
+        .toList(growable: false);
   }
 
   Future<void> setOwnStaffPin({
@@ -702,7 +718,8 @@ class ProductionCommandRepository {
     final requestData = <String, Object?>{
       ...data,
       if (staffSession != null) 'staffPinSessionId': staffSession.sessionId,
-      if (staffSession != null) 'staffPinSessionToken': staffSession.sessionToken,
+      if (staffSession != null)
+        'staffPinSessionToken': staffSession.sessionToken,
     };
     final response = await http.post(
       endpoint,

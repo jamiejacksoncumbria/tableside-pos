@@ -44,6 +44,7 @@ class _VenuePrinterRoutingPageState
   WindowsPrintQueueDevice? _selectedWindowsPrinter;
   bool _loading = true;
   bool _registering = false;
+  final Set<String> _removingDeviceIds = <String>{};
   String? _error;
 
   @override
@@ -156,6 +157,74 @@ class _VenuePrinterRoutingPageState
     TargetPlatform.linux => 'linux',
     TargetPlatform.fuchsia => 'fuchsia',
   };
+
+  Future<void> _removeDevice({
+    required VenueScope scope,
+    required PrinterDevice device,
+  }) async {
+    final remove = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Remove ${device.name}?'),
+        content: Text(
+          device.id == _deviceId
+              ? 'This registration and its local credential will be reset. Any routes using it will be repaired. Queued or printing tickets must be cleared first.'
+              : 'This stale registration will be archived. Any routes using it will be repaired. Queued or printing tickets must be cleared first.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.tonalIcon(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            icon: const Icon(Icons.delete_outline_rounded),
+            label: const Text('Remove device'),
+          ),
+        ],
+      ),
+    );
+    if (remove != true || !mounted) return;
+    setState(() {
+      _removingDeviceIds.add(device.id);
+      _error = null;
+    });
+    try {
+      final hasSession = ref
+          .read(activeStaffPinSessionProvider.notifier)
+          .restoreCredentials();
+      if (!hasSession) {
+        throw StateError(
+          'Your staff PIN session expired. Enter your PIN again.',
+        );
+      }
+      await _devices.remove(scope: scope, deviceId: device.id);
+      if (device.id == _deviceId) {
+        await _identity.reset();
+        await _bluetooth.clearSelectedDevice();
+        await _windowsPrinter.clearSelectedPrinter();
+        final replacementId = await _identity.getOrCreate();
+        if (mounted) {
+          setState(() {
+            _deviceId = replacementId;
+            _selectedBluetoothPrinter = null;
+            _selectedWindowsPrinter = null;
+            _deviceName.clear();
+          });
+        }
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${device.name} was removed safely.')),
+        );
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Remove printer device', error, stackTrace);
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _removingDeviceIds.remove(device.id));
+    }
+  }
 
   Future<void> _editRoute({
     required VenueScope scope,
@@ -425,6 +494,58 @@ class _VenuePrinterRoutingPageState
                         }
                         return Column(
                           children: [
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                'Registered devices',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            for (final device in devices)
+                              Card(
+                                child: ListTile(
+                                  leading: Icon(
+                                    device.id == _deviceId
+                                        ? Icons.devices_rounded
+                                        : Icons.print_outlined,
+                                  ),
+                                  title: Text(device.name),
+                                  subtitle: Text(
+                                    '${device.platform}${device.id == _deviceId ? ' · This device' : ''}',
+                                  ),
+                                  trailing: IconButton(
+                                    tooltip: 'Remove printer device',
+                                    onPressed:
+                                        _removingDeviceIds.contains(device.id)
+                                        ? null
+                                        : () => _removeDevice(
+                                            scope: scope,
+                                            device: device,
+                                          ),
+                                    icon: _removingDeviceIds.contains(device.id)
+                                        ? const SizedBox(
+                                            width: 20,
+                                            height: 20,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(
+                                            Icons.delete_outline_rounded,
+                                          ),
+                                  ),
+                                ),
+                              ),
+                            const SizedBox(height: 16),
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                'Routes',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
                             for (final area in productionRouteAreas)
                               Card(
                                 child: ListTile(

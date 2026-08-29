@@ -50,6 +50,9 @@ class PrinterDeviceRepository {
     );
   }
 
+  Future<void> remove({required VenueScope scope, required String deviceId}) =>
+      _commands.removePrinterDevice(scope: scope, deviceId: deviceId);
+
   Future<void> heartbeat({
     required VenueScope scope,
     required String deviceId,

@@ -739,6 +739,7 @@ async function manageVenueConfigurationFor(caller, rawData) {
     }, {merge: true});
   } else if (resource === "printerDevice") {
     const deviceId = requiredDocumentId(values, "deviceId");
+    const deviceName = requiredText(values, "name", 120);
     const productionAreas = requiredStringArray(
       values.productionAreas, "productionAreas", 4, 32,
     );
@@ -749,10 +750,18 @@ async function manageVenueConfigurationFor(caller, rawData) {
           !["bluetooth", "windowsPrintQueue", "builtIn"].includes(transport))) {
       throw new HttpsError("invalid-argument", "The printer capabilities are invalid.");
     }
+    const venueDevices = await db.collection(`tenants/${tenantId}/devices`)
+      .where("venueId", "==", venueId)
+      .get();
+    if (venueDevices.docs.some((item) => item.id !== deviceId &&
+        item.data().active === true &&
+        String(item.data().name ?? "").trim().toLowerCase() === deviceName.toLowerCase())) {
+      throw new HttpsError("already-exists", "An active printer device already uses this name.");
+    }
     const deviceCredential = randomBytes(32).toString("base64url");
     await db.doc(`tenants/${tenantId}/devices/${deviceId}`).set({
       venueId,
-      name: requiredText(values, "name", 120),
+      name: deviceName,
       platform: requiredText(values, "platform", 32),
       productionAreas,
       transports,
@@ -764,6 +773,66 @@ async function manageVenueConfigurationFor(caller, rawData) {
       registeredByActor: actor,
     }, {merge: true});
     result = {saved: true, deviceCredential};
+  } else if (resource === "printerDeviceRemoval") {
+    const deviceId = requiredDocumentId(values, "deviceId");
+    const tenantRef = db.doc(`tenants/${tenantId}`);
+    const deviceRef = tenantRef.collection("devices").doc(deviceId);
+    const [device, jobs, routes] = await Promise.all([
+      deviceRef.get(),
+      tenantRef.collection("printJobs")
+        .where("venueId", "==", venueId)
+        .where("targetDeviceId", "==", deviceId)
+        .where("status", "in", ["queued", "claimed"])
+        .limit(1)
+        .get(),
+      tenantRef.collection("printerRoutes").where("venueId", "==", venueId).get(),
+    ]);
+    if (!device.exists || device.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "This printer device was not found at the selected venue.");
+    }
+    if (!jobs.empty) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Clear or finish this printer's queued jobs before removing the device.",
+      );
+    }
+    const batch = db.batch();
+    batch.update(deviceRef, {
+      active: false,
+      credentialHash: FieldValue.delete(),
+      removedAt: FieldValue.serverTimestamp(),
+      removedByActor: actor,
+    });
+    for (const route of routes.docs) {
+      const routeData = route.data();
+      if (routeData.primaryDeviceId === deviceId) {
+        const promotedFallback = typeof routeData.fallbackDeviceId === "string"
+          ? routeData.fallbackDeviceId
+          : null;
+        batch.update(route.ref, {
+          primaryDeviceId: promotedFallback,
+          fallbackDeviceId: null,
+          updatedAt: FieldValue.serverTimestamp(),
+          updatedByActor: actor,
+        });
+      } else if (routeData.fallbackDeviceId === deviceId) {
+        batch.update(route.ref, {
+          fallbackDeviceId: null,
+          updatedAt: FieldValue.serverTimestamp(),
+          updatedByActor: actor,
+        });
+      }
+    }
+    batch.create(tenantRef.collection("auditEvents").doc(), {
+      action: "removePrinterDevice",
+      venueId,
+      deviceId,
+      deviceName: device.data().name ?? null,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+    result = {saved: true, removed: true};
   } else if (resource === "printerRoute") {
     const productionArea = requiredText(values, "productionArea", 32);
     if (!["bar", "kitchen", "dessert", "receipt"].includes(productionArea)) {
