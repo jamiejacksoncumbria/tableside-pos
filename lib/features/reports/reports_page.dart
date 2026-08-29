@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -10,7 +9,7 @@ import '../../core/app_logger.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/firestore_pos_repository.dart';
-import '../auth/session_providers.dart';
+import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 
@@ -51,23 +50,13 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
   @override
   Widget build(BuildContext context) {
     final scope = ref.watch(activeVenueScopeProvider);
-    final userId = FirebaseAuth.instance.currentUser?.uid;
-    if (scope == null || userId == null) {
+    final staffSession = ref.watch(activeStaffPinSessionProvider);
+    if (scope == null || staffSession == null) {
       return const Center(child: Text('Select a venue to view reports.'));
     }
-    final memberships = ref.watch(membershipsProvider(userId));
-    if (memberships.isLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    final canView =
-        memberships.value?.any(
-          (membership) =>
-              membership.tenantId == scope.tenantId &&
-              membership.roles.any(
-                (role) => role == 'owner' || role == 'manager',
-              ),
-        ) ??
-        false;
+    final canView = staffSession.roles.any(
+      (role) => role == 'owner' || role == 'manager',
+    );
     if (!canView) {
       return const Center(
         child: Padding(
