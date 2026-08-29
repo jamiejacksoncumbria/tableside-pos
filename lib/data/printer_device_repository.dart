@@ -11,7 +11,6 @@ class PrinterDevice {
     required this.platform,
     required this.productionAreas,
     required this.transports,
-    required this.assignedUserId,
     required this.active,
     this.lastHeartbeatAt,
   });
@@ -22,14 +21,12 @@ class PrinterDevice {
   final String platform;
   final List<String> productionAreas;
   final List<String> transports;
-  final String assignedUserId;
   final bool active;
   final DateTime? lastHeartbeatAt;
 }
 
-/// Devices are registered to a venue and explicitly assigned to the account
-/// currently configuring them. This prevents an arbitrary signed-in device
-/// from claiming a printer's queued jobs.
+/// Devices are enrolled once to a venue. Queue mutations require the random
+/// device credential issued during registration, independently of staff PINs.
 class PrinterDeviceRepository {
   PrinterDeviceRepository(
     this._firestore, {
@@ -100,7 +97,6 @@ class PrinterDeviceRepository {
         data['productionAreas'] as List? ?? const [],
       ),
       transports: List<String>.from(data['transports'] as List? ?? const []),
-      assignedUserId: data['assignedUserId'] as String? ?? '',
       active: data['active'] as bool? ?? true,
       lastHeartbeatAt: (data['lastHeartbeatAt'] as Timestamp?)?.toDate(),
     );

@@ -40,7 +40,6 @@ class _VenuePrinterRoutingPageState
   final TextEditingController _deviceName = TextEditingController();
 
   String? _deviceId;
-  String? _assignedUserId;
   BluetoothReceiptPrinterDevice? _selectedBluetoothPrinter;
   WindowsPrintQueueDevice? _selectedWindowsPrinter;
   bool _loading = true;
@@ -71,7 +70,6 @@ class _VenuePrinterRoutingPageState
       if (!mounted) return;
       setState(() {
         _deviceId = deviceId;
-        _assignedUserId = FirebaseAuth.instance.currentUser?.uid;
         _selectedBluetoothPrinter = selectedPrinter;
         _selectedWindowsPrinter = selectedWindowsPrinter;
         if (_deviceName.text.trim().isEmpty) {
@@ -87,10 +85,7 @@ class _VenuePrinterRoutingPageState
     }
   }
 
-  Future<void> _registerThisDevice({
-    required VenueScope scope,
-    required String assignedUserId,
-  }) async {
+  Future<void> _registerThisDevice({required VenueScope scope}) async {
     final user = FirebaseAuth.instance.currentUser;
     final deviceId = _deviceId;
     if (user == null || deviceId == null) {
@@ -122,7 +117,9 @@ class _VenuePrinterRoutingPageState
           .read(activeStaffPinSessionProvider.notifier)
           .restoreCredentials();
       if (!hasSession) {
-        throw StateError('Your staff PIN session expired. Enter your PIN again.');
+        throw StateError(
+          'Your staff PIN session expired. Enter your PIN again.',
+        );
       }
       final deviceCredential = await _devices.register(
         PrinterDevice(
@@ -132,7 +129,6 @@ class _VenuePrinterRoutingPageState
           platform: _platformName(),
           productionAreas: productionRouteAreas,
           transports: transports,
-          assignedUserId: assignedUserId,
           active: true,
         ),
         tenantId: scope.tenantId,
@@ -284,21 +280,6 @@ class _VenuePrinterRoutingPageState
     _ => 'Kitchen',
   };
 
-  Stream<List<_VenueMember>> _watchActiveMembers() {
-    final user = FirebaseAuth.instance.currentUser;
-    return Stream.value(
-      user == null
-          ? const <_VenueMember>[]
-          : <_VenueMember>[
-              _VenueMember(
-                userId: user.uid,
-                email: user.email ?? '',
-                active: true,
-              ),
-            ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final scope = ref.watch(activeVenueScopeProvider);
@@ -338,96 +319,49 @@ class _VenuePrinterRoutingPageState
                 Card(
                   child: Padding(
                     padding: const EdgeInsets.all(16),
-                    child: StreamBuilder<List<_VenueMember>>(
-                      stream: _watchActiveMembers(),
-                      builder: (context, memberSnapshot) {
-                        final members =
-                            memberSnapshot.data ?? const <_VenueMember>[];
-                        final selectedUserId =
-                            members.any(
-                              (member) => member.userId == _assignedUserId,
-                            )
-                            ? _assignedUserId
-                            : null;
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            TextField(
-                              controller: _deviceName,
-                              decoration: const InputDecoration(
-                                labelText: 'Device name',
-                                hintText: 'Kitchen printer terminal',
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            if (_selectedWindowsPrinter != null)
-                              Text(
-                                'Windows print queue: ${_selectedWindowsPrinter!.name}',
-                              )
-                            else if (_selectedBluetoothPrinter != null)
-                              Text(
-                                'Bluetooth printer: ${_selectedBluetoothPrinter!.name}',
-                              )
-                            else
-                              const Text(
-                                'No printer selected on this device. Configure Bluetooth on Android or a Windows print queue before registering.',
-                              ),
-                            const SizedBox(height: 12),
-                            DropdownButtonFormField<String?>(
-                              key: ValueKey('assigned-user-$selectedUserId'),
-                              initialValue: selectedUserId,
-                              decoration: const InputDecoration(
-                                labelText: 'Enrollment account',
-                                helperText:
-                                    'This account authorises setup only. Printing remains enrolled to this physical device when staff change.',
-                              ),
-                              items: [
-                                const DropdownMenuItem<String?>(
-                                  value: null,
-                                  child: Text('Select a venue user'),
-                                ),
-                                for (final member in members)
-                                  DropdownMenuItem<String?>(
-                                    value: member.userId,
-                                    child: Text(member.label),
-                                  ),
-                              ],
-                              onChanged: null,
-                            ),
-                            if (memberSnapshot.hasError) ...[
-                              const SizedBox(height: 8),
-                              Text(
-                                'Could not load venue users: ${memberSnapshot.error}',
-                                style: TextStyle(
-                                  color: Theme.of(context).colorScheme.error,
-                                ),
-                              ),
-                            ],
-                            const SizedBox(height: 12),
-                            FilledButton.icon(
-                              onPressed: _registering || selectedUserId == null
-                                  ? null
-                                  : () => _registerThisDevice(
-                                      scope: scope,
-                                      assignedUserId: selectedUserId,
-                                    ),
-                              icon: const Icon(Icons.devices_rounded),
-                              label: Text(
-                                _registering
-                                    ? 'Registering…'
-                                    : 'Register this shared printer device',
-                              ),
-                            ),
-                            if (_deviceId != null) ...[
-                              const SizedBox(height: 8),
-                              Text(
-                                'Device ID: ${_deviceId!.substring(0, 15)}…',
-                                style: Theme.of(context).textTheme.labelSmall,
-                              ),
-                            ],
-                          ],
-                        );
-                      },
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        TextField(
+                          controller: _deviceName,
+                          decoration: const InputDecoration(
+                            labelText: 'Device name',
+                            hintText: 'Kitchen printer terminal',
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        if (_selectedWindowsPrinter != null)
+                          Text(
+                            'Windows print queue: ${_selectedWindowsPrinter!.name}',
+                          )
+                        else if (_selectedBluetoothPrinter != null)
+                          Text(
+                            'Bluetooth printer: ${_selectedBluetoothPrinter!.name}',
+                          )
+                        else
+                          const Text(
+                            'No printer selected on this device. Configure Bluetooth on Android or a Windows print queue before registering.',
+                          ),
+                        const SizedBox(height: 12),
+                        FilledButton.icon(
+                          onPressed: _registering
+                              ? null
+                              : () => _registerThisDevice(scope: scope),
+                          icon: const Icon(Icons.devices_rounded),
+                          label: Text(
+                            _registering
+                                ? 'Registering…'
+                                : 'Register this shared printer device',
+                          ),
+                        ),
+                        if (_deviceId != null) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            'Device ID: ${_deviceId!.substring(0, 15)}…',
+                            style: Theme.of(context).textTheme.labelSmall,
+                          ),
+                        ],
+                      ],
                     ),
                   ),
                 ),
@@ -541,18 +475,4 @@ class _VenuePrinterRoutingPageState
         ? 'Primary: ${primary ?? 'Unavailable device'}'
         : 'Primary: ${primary ?? 'Unavailable device'} · Fallback: $fallback';
   }
-}
-
-class _VenueMember {
-  const _VenueMember({
-    required this.userId,
-    required this.email,
-    required this.active,
-  });
-
-  final String userId;
-  final String email;
-  final bool active;
-
-  String get label => email.isEmpty ? userId : email;
 }
