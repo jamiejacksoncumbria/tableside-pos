@@ -55,6 +55,8 @@ class QueuedNativePrintWorker {
       final requiredTransport = _requiredTransport;
       if (user == null || requiredTransport == null) return;
       final deviceId = await _identity.getOrCreate();
+      final deviceCredential = await _identity.credential();
+      if (deviceCredential == null || deviceCredential.isEmpty) return;
       final device = await _devices.getDevice(
         tenantId: scope.tenantId,
         deviceId: deviceId,
@@ -62,11 +64,14 @@ class QueuedNativePrintWorker {
       if (device == null ||
           !device.active ||
           device.venueId != scope.venueId ||
-          device.assignedUserId != user.uid ||
           !device.transports.contains(requiredTransport)) {
         return;
       }
-      await _devices.heartbeat(tenantId: scope.tenantId, deviceId: deviceId);
+      await _devices.heartbeat(
+        scope: scope,
+        deviceId: deviceId,
+        deviceCredential: deviceCredential,
+      );
       _lastHeartbeatAt = now;
     } on Object catch (error, stackTrace) {
       AppLogger.error('Maintain printer device heartbeat', error, stackTrace);
@@ -80,6 +85,10 @@ class QueuedNativePrintWorker {
       return PrintWorkerResult.noWork;
     }
     final deviceId = await _identity.getOrCreate();
+    final deviceCredential = await _identity.credential();
+    if (deviceCredential == null || deviceCredential.isEmpty) {
+      return PrintWorkerResult.noWork;
+    }
     final device = await _devices.getDevice(
       tenantId: scope.tenantId,
       deviceId: deviceId,
@@ -87,7 +96,6 @@ class QueuedNativePrintWorker {
     if (device == null ||
         !device.active ||
         device.venueId != scope.venueId ||
-        device.assignedUserId != user.uid ||
         !device.transports.contains(requiredTransport)) {
       return PrintWorkerResult.noWork;
     }
@@ -95,7 +103,11 @@ class QueuedNativePrintWorker {
     final now = DateTime.now();
     if (_lastHeartbeatAt == null ||
         now.difference(_lastHeartbeatAt!) >= const Duration(seconds: 30)) {
-      await _devices.heartbeat(tenantId: scope.tenantId, deviceId: deviceId);
+      await _devices.heartbeat(
+        scope: scope,
+        deviceId: deviceId,
+        deviceCredential: deviceCredential,
+      );
       _lastHeartbeatAt = now;
     }
     final worker = NativePrintWorker(
@@ -106,6 +118,7 @@ class QueuedNativePrintWorker {
       tenantId: scope.tenantId,
       venueId: scope.venueId,
       deviceId: deviceId,
+      deviceCredential: deviceCredential,
     );
     try {
       return await worker.processNext();

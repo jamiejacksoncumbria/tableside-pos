@@ -3,10 +3,11 @@ import 'dart:math';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// A locally persisted, random physical-device identity. It is not an
-/// authentication credential; Firestore additionally checks the account the
-/// manager assigned to this device.
+/// authentication credential. The separately persisted enrollment credential
+/// is issued by the server after a manager authorises this physical device.
 class LocalPrinterDeviceIdentity {
   static const _preferenceKey = 'tableside.printDeviceId';
+  static const _credentialPreferenceKey = 'tableside.printDeviceCredential';
 
   final SharedPreferencesAsync _preferences = SharedPreferencesAsync();
 
@@ -22,4 +23,13 @@ class LocalPrinterDeviceIdentity {
     await _preferences.setString(_preferenceKey, id);
     return id;
   }
+
+  Future<String?> credential() =>
+      _preferences.getString(_credentialPreferenceKey);
+
+  Future<void> saveCredential(String credential) =>
+      _preferences.setString(_credentialPreferenceKey, credential);
+
+  Future<void> clearCredential() =>
+      _preferences.remove(_credentialPreferenceKey);
 }

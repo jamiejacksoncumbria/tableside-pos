@@ -20,6 +20,7 @@ class NativePrintWorker {
     required this.tenantId,
     required this.venueId,
     required this.deviceId,
+    required this.deviceCredential,
   });
 
   final PrintJobRepository queue;
@@ -27,6 +28,7 @@ class NativePrintWorker {
   final String tenantId;
   final String venueId;
   final String deviceId;
+  final String deviceCredential;
 
   /// Call this from a native foreground/background service on a short timer,
   /// and also when the Firestore queue stream reports new work.
@@ -35,6 +37,7 @@ class NativePrintWorker {
       tenantId: tenantId,
       venueId: venueId,
       deviceId: deviceId,
+      deviceCredential: deviceCredential,
     );
     if (job == null) return PrintWorkerResult.noWork;
 
@@ -43,12 +46,17 @@ class NativePrintWorker {
         payload: job.payload,
         idempotencyKey: job.idempotencyKey,
       );
-      await queue.complete(job: job, printed: true);
+      await queue.complete(
+        job: job,
+        deviceCredential: deviceCredential,
+        printed: true,
+      );
       return PrintWorkerResult.printed;
     } on Object catch (error, stackTrace) {
       AppLogger.error('Print ticket ${job.idempotencyKey}', error, stackTrace);
       await queue.complete(
         job: job,
+        deviceCredential: deviceCredential,
         printed: false,
         failureReason: error.toString(),
       );

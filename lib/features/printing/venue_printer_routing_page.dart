@@ -124,7 +124,7 @@ class _VenuePrinterRoutingPageState
       if (!hasSession) {
         throw StateError('Your staff PIN session expired. Enter your PIN again.');
       }
-      await _devices.register(
+      final deviceCredential = await _devices.register(
         PrinterDevice(
           id: deviceId,
           venueId: scope.venueId,
@@ -137,6 +137,7 @@ class _VenuePrinterRoutingPageState
         ),
         tenantId: scope.tenantId,
       );
+      await _identity.saveCredential(deviceCredential);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -376,9 +377,9 @@ class _VenuePrinterRoutingPageState
                               key: ValueKey('assigned-user-$selectedUserId'),
                               initialValue: selectedUserId,
                               decoration: const InputDecoration(
-                                labelText: 'Firebase device account',
+                                labelText: 'Enrollment account',
                                 helperText:
-                                    'This is the signed-in account used by this physical device to claim queued tickets.',
+                                    'This account authorises setup only. Printing remains enrolled to this physical device when staff change.',
                               ),
                               items: [
                                 const DropdownMenuItem<String?>(

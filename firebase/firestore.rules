@@ -66,26 +66,6 @@ service cloud.firestore {
       ]);
     }
 
-    function isAssignedPrintDevice(tenantId) {
-      let devicePath = /databases/$(database)/documents/tenants/$(tenantId)/devices/$(resource.data.targetDeviceId);
-      return signedIn()
-        && exists(devicePath)
-        && get(devicePath).data.active == true
-        && get(devicePath).data.assignedUserId == request.auth.uid;
-    }
-
-    // The worker may only claim the job that targets its registered physical
-    // device. Later updates must come from that original claim; a user who is
-    // assigned to several devices cannot move a job between them.
-    function validPrintJobStateTransition() {
-      return (resource.data.status == 'queued'
-          && request.resource.data.status == 'claimed'
-          && request.resource.data.claimedByDeviceId == resource.data.targetDeviceId)
-        || (resource.data.status == 'claimed'
-          && resource.data.claimedByDeviceId == resource.data.targetDeviceId
-          && request.resource.data.status in ['queued', 'printed', 'failed']);
-    }
-
     match /tenants/{tenantId} {
       // Tenant provisioning and membership assignment are server-only. This
       // prevents a signed-in client from creating a tenant or granting itself
@@ -210,9 +190,9 @@ service cloud.firestore {
         allow list: if isPlatformAdmin() || isMember(tenantId);
         allow create: if false;
         allow delete: if false;
-        allow update: if ((signedIn() && resource.data.assignedUserId == request.auth.uid)
-            && isActiveVenue(tenantId, resource.data.venueId)
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastHeartbeatAt']));
+        // Enrollment and heartbeats use the server API with a rotating device
+        // credential. No staff account receives direct device-write access.
+        allow update: if false;
       }
 
       // Only a manager can choose where a venue's kitchen, bar, dessert and
@@ -229,11 +209,9 @@ service cloud.firestore {
         // physical printer device below.
         allow read: if isPlatformAdmin() || isMember(tenantId);
         allow create, delete: if false;
-        allow update: if isAssignedPrintDevice(tenantId)
-          && validPrintJobStateTransition()
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'status', 'claimedByDeviceId', 'claimedAt', 'completedAt', 'failureReason', 'attempts', 'nextAttemptAt'
-          ]);
+        // Claim/retry/completion are atomic server commands authenticated with
+        // the physical device credential, never the currently selected user.
+        allow update: if false;
       }
     }
 

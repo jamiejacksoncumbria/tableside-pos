@@ -39,10 +39,9 @@ class PrinterDeviceRepository {
   final FirebaseFirestore _firestore;
   final ProductionCommandRepository _commands;
 
-  Future<void> register(PrinterDevice device, {required String tenantId}) {
-    return _commands.manageVenueConfiguration(
+  Future<String> register(PrinterDevice device, {required String tenantId}) {
+    return _commands.registerPrinterDevice(
       scope: VenueScope(tenantId: tenantId, venueId: device.venueId),
-      resource: 'printerDevice',
       values: {
         'deviceId': device.id,
         'name': device.name,
@@ -54,10 +53,16 @@ class PrinterDeviceRepository {
     );
   }
 
-  Future<void> heartbeat({required String tenantId, required String deviceId}) {
-    return _firestore.doc('tenants/$tenantId/devices/$deviceId').update({
-      'lastHeartbeatAt': FieldValue.serverTimestamp(),
-    });
+  Future<void> heartbeat({
+    required VenueScope scope,
+    required String deviceId,
+    required String deviceCredential,
+  }) {
+    return _commands.heartbeatPrinterDevice(
+      scope: scope,
+      deviceId: deviceId,
+      deviceCredential: deviceCredential,
+    );
   }
 
   Future<PrinterDevice?> getDevice({

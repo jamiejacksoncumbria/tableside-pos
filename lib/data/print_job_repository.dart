@@ -1,15 +1,21 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../features/pos/domain.dart';
+import '../core/tenant_scope.dart';
+import 'production_command_repository.dart';
 
 /// Native Android and Windows workers use this repository only after a
 /// manager has explicitly registered the physical device to the venue.
 /// Web clients never need Bluetooth or USB permission; they only create
 /// approved order events.
 class PrintJobRepository {
-  PrintJobRepository(this._firestore);
+  PrintJobRepository(
+    this._firestore, {
+    ProductionCommandRepository? commands,
+  }) : _commands = commands ?? ProductionCommandRepository();
 
   final FirebaseFirestore _firestore;
+  final ProductionCommandRepository _commands;
 
   CollectionReference<Map<String, dynamic>> _jobs(String tenantId) =>
       _firestore.collection('tenants/$tenantId/printJobs');
@@ -54,44 +60,23 @@ class PrintJobRepository {
     required String tenantId,
     required String venueId,
     required String deviceId,
+    required String deviceCredential,
   }) async {
-    final candidates = await _jobs(tenantId)
-        .where('venueId', isEqualTo: venueId)
-        .where('targetDeviceId', isEqualTo: deviceId)
-        .where('status', isEqualTo: 'queued')
-        .orderBy('createdAt')
-        .limit(25)
-        .get();
-    final now = DateTime.now();
-    final candidate = candidates.docs.where((document) {
-      final nextAttemptAt = document.data()['nextAttemptAt'];
-      return nextAttemptAt is! Timestamp ||
-          !nextAttemptAt.toDate().isAfter(now);
-    }).firstOrNull;
-    if (candidate == null) return null;
-
-    final reference = candidate.reference;
-    return _firestore.runTransaction((transaction) async {
-      final snapshot = await transaction.get(reference);
-      final data = snapshot.data();
-      if (data == null || data['status'] != 'queued') return null;
-
-      transaction.update(reference, {
-        'status': 'claimed',
-        'claimedByDeviceId': deviceId,
-        'claimedAt': FieldValue.serverTimestamp(),
-        'attempts': FieldValue.increment(1),
-      });
-      return PrintJob(
-        id: snapshot.id,
+    final data = await _commands.claimDevicePrintJob(
+      scope: VenueScope(tenantId: tenantId, venueId: venueId),
+      deviceId: deviceId,
+      deviceCredential: deviceCredential,
+    );
+    if (data == null) return null;
+    return PrintJob(
+        id: data['id'] as String,
         tenantId: tenantId,
-        venueId: data['venueId'] as String,
-        targetDeviceId: data['targetDeviceId'] as String,
-        orderId: data['orderId'] as String,
+        venueId: data['venueId'] as String? ?? venueId,
+        targetDeviceId: data['targetDeviceId'] as String? ?? deviceId,
+        orderId: data['orderId'] as String? ?? '',
         status: PrintJobStatus.claimed,
-        idempotencyKey: data['idempotencyKey'] as String,
-        createdAt:
-            (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+        idempotencyKey: data['idempotencyKey'] as String? ?? data['id'] as String,
+        createdAt: DateTime.tryParse(data['createdAt'] as String? ?? '') ?? DateTime.now(),
         ticketId: data['ticketId'] as String?,
         productionArea: data['productionArea'] as String?,
         claimedByDeviceId: deviceId,
@@ -101,44 +86,25 @@ class PrintJobRepository {
         failureReason: data['failureReason'] as String?,
         claimedAt: (data['claimedAt'] as Timestamp?)?.toDate(),
         completedAt: (data['completedAt'] as Timestamp?)?.toDate(),
-        attempts: (data['attempts'] as int? ?? 0) + 1,
+        attempts: data['attempts'] as int? ?? 1,
         payload: Map<String, Object?>.from(data['payload'] as Map? ?? const {}),
       );
-    });
   }
 
   Future<void> complete({
     required PrintJob job,
+    required String deviceCredential,
     required bool printed,
     String? failureReason,
   }) {
-    if (printed) {
-      return _jobs(job.tenantId).doc(job.id).update({
-        'status': 'printed',
-        'completedAt': FieldValue.serverTimestamp(),
-        'failureReason': FieldValue.delete(),
-        'nextAttemptAt': FieldValue.delete(),
-      });
-    }
-    if (job.attempts < 3) {
-      return _jobs(job.tenantId).doc(job.id).update({
-        'status': 'queued',
-        'failureReason':
-            failureReason ?? 'The printer did not accept the ticket.',
-        'nextAttemptAt': Timestamp.fromDate(
-          DateTime.now().add(const Duration(seconds: 10)),
-        ),
-        'claimedByDeviceId': FieldValue.delete(),
-        'claimedAt': FieldValue.delete(),
-      });
-    }
-    return _jobs(job.tenantId).doc(job.id).update({
-      'status': 'failed',
-      'completedAt': FieldValue.serverTimestamp(),
-      'failureReason':
-          failureReason ?? 'The printer failed after three attempts.',
-      'nextAttemptAt': FieldValue.delete(),
-    });
+    return _commands.completeDevicePrintJob(
+      scope: VenueScope(tenantId: job.tenantId, venueId: job.venueId),
+      deviceId: job.targetDeviceId,
+      deviceCredential: deviceCredential,
+      jobId: job.id,
+      printed: printed,
+      failureReason: failureReason,
+    );
   }
 
   PrintJob _fromDocument(

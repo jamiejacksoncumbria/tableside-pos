@@ -720,6 +720,7 @@ async function manageVenueConfigurationFor(caller, rawData) {
   }
   const actor = actorSnapshot(await auth.getUser(caller.uid));
 
+  let result = {saved: true};
   if (resource === "tenantProfile") {
     const phoneNumbers = requiredStringArray(
       values.phoneNumbers ?? [], "phoneNumbers", 3, 40,
@@ -748,18 +749,21 @@ async function manageVenueConfigurationFor(caller, rawData) {
           !["bluetooth", "windowsPrintQueue", "builtIn"].includes(transport))) {
       throw new HttpsError("invalid-argument", "The printer capabilities are invalid.");
     }
+    const deviceCredential = randomBytes(32).toString("base64url");
     await db.doc(`tenants/${tenantId}/devices/${deviceId}`).set({
       venueId,
       name: requiredText(values, "name", 120),
       platform: requiredText(values, "platform", 32),
       productionAreas,
       transports,
-      assignedUserId: caller.hostUid ?? caller.uid,
+      credentialHash: createHash("sha256").update(deviceCredential).digest("base64"),
+      credentialVersion: FieldValue.increment(1),
       active: values.active !== false,
       registeredAt: FieldValue.serverTimestamp(),
       lastHeartbeatAt: FieldValue.serverTimestamp(),
       registeredByActor: actor,
     }, {merge: true});
+    result = {saved: true, deviceCredential};
   } else if (resource === "printerRoute") {
     const productionArea = requiredText(values, "productionArea", 32);
     if (!["bar", "kitchen", "dessert", "receipt"].includes(productionArea)) {
@@ -806,7 +810,123 @@ async function manageVenueConfigurationFor(caller, rawData) {
   await writeAudit(caller.uid, "manageVenueConfiguration", resource, {
     tenantId, venueId, resource, actor,
   });
-  return {saved: true};
+  return result;
+}
+
+async function authenticatedPrinterDevice(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const deviceId = requiredDocumentId(data, "deviceId");
+  const deviceCredential = requiredText(data, "deviceCredential", 128);
+  const membership = await db.doc(`tenants/${tenantId}/members/${caller.uid}`).get();
+  if (!membership.exists || membership.data().active === false) {
+    throw new HttpsError("permission-denied", "This Firebase account cannot operate a printer for this restaurant.");
+  }
+  const deviceRef = db.doc(`tenants/${tenantId}/devices/${deviceId}`);
+  const device = await deviceRef.get();
+  const deviceData = device.data();
+  const suppliedHash = createHash("sha256").update(deviceCredential).digest("base64");
+  const expectedHash = typeof deviceData?.credentialHash === "string"
+    ? deviceData.credentialHash
+    : "";
+  const validCredential = expectedHash.length === suppliedHash.length &&
+    timingSafeEqual(Buffer.from(expectedHash), Buffer.from(suppliedHash));
+  if (!device.exists || deviceData.active !== true || deviceData.venueId !== venueId ||
+      !validCredential) {
+    throw new HttpsError("permission-denied", "This printer device is not enrolled for the selected venue.");
+  }
+  return {data, tenantId, venueId, deviceId, deviceRef, deviceData};
+}
+
+async function heartbeatPrinterDeviceFor(caller, rawData) {
+  const device = await authenticatedPrinterDevice(caller, rawData);
+  await device.deviceRef.update({lastHeartbeatAt: FieldValue.serverTimestamp()});
+  return {online: true};
+}
+
+async function claimDevicePrintJobFor(caller, rawData) {
+  const device = await authenticatedPrinterDevice(caller, rawData);
+  const jobs = db.collection(`tenants/${device.tenantId}/printJobs`);
+  const candidates = await jobs
+    .where("venueId", "==", device.venueId)
+    .where("targetDeviceId", "==", device.deviceId)
+    .where("status", "==", "queued")
+    .orderBy("createdAt")
+    .limit(25)
+    .get();
+  const now = Date.now();
+  const candidate = candidates.docs.find((document) => {
+    const nextAttemptAt = document.data().nextAttemptAt?.toDate?.();
+    return nextAttemptAt == null || nextAttemptAt.getTime() <= now;
+  });
+  if (candidate == null) return {job: null};
+  return db.runTransaction(async (transaction) => {
+    const current = await transaction.get(candidate.ref);
+    if (!current.exists || current.data().status !== "queued" ||
+        current.data().targetDeviceId !== device.deviceId) return {job: null};
+    transaction.update(candidate.ref, {
+      status: "claimed",
+      claimedByDeviceId: device.deviceId,
+      claimedAt: FieldValue.serverTimestamp(),
+      attempts: FieldValue.increment(1),
+    });
+    const value = current.data();
+    return {job: {
+      id: current.id,
+      venueId: value.venueId,
+      targetDeviceId: value.targetDeviceId,
+      orderId: value.orderId,
+      ticketId: value.ticketId ?? null,
+      productionArea: value.productionArea ?? null,
+      idempotencyKey: value.idempotencyKey,
+      createdAt: value.createdAt?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
+      attempts: (Number.isInteger(value.attempts) ? value.attempts : 0) + 1,
+      payload: value.payload ?? {},
+    }};
+  });
+}
+
+async function completeDevicePrintJobFor(caller, rawData) {
+  const device = await authenticatedPrinterDevice(caller, rawData);
+  const jobId = requiredDocumentId(device.data, "jobId");
+  const printed = device.data.printed === true;
+  const failureReason = optionalText(device.data, "failureReason", 500);
+  const jobRef = db.doc(`tenants/${device.tenantId}/printJobs/${jobId}`);
+  await db.runTransaction(async (transaction) => {
+    const job = await transaction.get(jobRef);
+    const value = job.data();
+    if (!job.exists || value.venueId !== device.venueId ||
+        value.targetDeviceId !== device.deviceId || value.status !== "claimed" ||
+        value.claimedByDeviceId !== device.deviceId) {
+      throw new HttpsError("failed-precondition", "This printer no longer owns the queued ticket.");
+    }
+    const attempts = Number.isInteger(value.attempts) ? value.attempts : 1;
+    if (printed) {
+      transaction.update(jobRef, {
+        status: "printed",
+        completedAt: FieldValue.serverTimestamp(),
+        failureReason: FieldValue.delete(),
+        nextAttemptAt: FieldValue.delete(),
+      });
+    } else if (attempts < 3) {
+      transaction.update(jobRef, {
+        status: "queued",
+        failureReason: failureReason || "The printer did not accept the ticket.",
+        nextAttemptAt: new Date(Date.now() + 10000),
+        claimedByDeviceId: FieldValue.delete(),
+        claimedAt: FieldValue.delete(),
+      });
+    } else {
+      transaction.update(jobRef, {
+        status: "failed",
+        completedAt: FieldValue.serverTimestamp(),
+        failureReason: failureReason || "The printer failed after three attempts.",
+        nextAttemptAt: FieldValue.delete(),
+      });
+    }
+  });
+  return {completed: true, printed};
 }
 
 async function uploadTenantLogoFor(caller, rawData) {
@@ -4227,6 +4347,7 @@ async function invokePlatformAction(action, caller, data) {
 async function invokePosAction(action, caller, data) {
   const sessionBootstrapActions = new Set([
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
+    "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
   ]);
   const actingCaller = sessionBootstrapActions.has(action)
     ? caller
@@ -4238,6 +4359,12 @@ async function invokePosAction(action, caller, data) {
       return setOwnStaffPinFor(caller, data);
     case "verifyStaffPin":
       return verifyStaffPinFor(caller, data);
+    case "heartbeatPrinterDevice":
+      return heartbeatPrinterDeviceFor(caller, data);
+    case "claimDevicePrintJob":
+      return claimDevicePrintJobFor(caller, data);
+    case "completeDevicePrintJob":
+      return completeDevicePrintJobFor(caller, data);
     case "unlockStaffPin":
       return unlockStaffPinFor(caller, data);
     case "openNamedTab":

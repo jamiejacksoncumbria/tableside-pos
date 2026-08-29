@@ -209,6 +209,70 @@ class ProductionCommandRepository {
     });
   }
 
+  Future<String> registerPrinterDevice({
+    required VenueScope scope,
+    required Map<String, Object?> values,
+  }) async {
+    final response = await _call('manageVenueConfiguration', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'resource': 'printerDevice',
+      'values': values,
+    });
+    final credential = response['deviceCredential'];
+    if (credential is! String || credential.isEmpty) {
+      throw StateError('The server did not return a printer enrollment credential.');
+    }
+    return credential;
+  }
+
+  Future<void> heartbeatPrinterDevice({
+    required VenueScope scope,
+    required String deviceId,
+    required String deviceCredential,
+  }) {
+    return _call('heartbeatPrinterDevice', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'deviceId': deviceId,
+      'deviceCredential': deviceCredential,
+    });
+  }
+
+  Future<Map<String, Object?>?> claimDevicePrintJob({
+    required VenueScope scope,
+    required String deviceId,
+    required String deviceCredential,
+  }) async {
+    final response = await _call('claimDevicePrintJob', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'deviceId': deviceId,
+      'deviceCredential': deviceCredential,
+    });
+    final job = response['job'];
+    return job is Map ? Map<String, Object?>.from(job) : null;
+  }
+
+  Future<void> completeDevicePrintJob({
+    required VenueScope scope,
+    required String deviceId,
+    required String deviceCredential,
+    required String jobId,
+    required bool printed,
+    String? failureReason,
+  }) {
+    return _call('completeDevicePrintJob', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'deviceId': deviceId,
+      'deviceCredential': deviceCredential,
+      'jobId': jobId,
+      'printed': printed,
+      if (failureReason != null) 'failureReason': failureReason,
+    });
+  }
+
   Future<String> uploadTenantLogo({
     required VenueScope scope,
     required Uint8List bytes,
