@@ -421,7 +421,7 @@ class _PinPadDialogState extends State<_PinPadDialog> {
       _digit(character);
       return;
     }
-    const numpadDigits = <LogicalKeyboardKey, String>{
+    final numpadDigits = <LogicalKeyboardKey, String>{
       LogicalKeyboardKey.numpad0: '0',
       LogicalKeyboardKey.numpad1: '1',
       LogicalKeyboardKey.numpad2: '2',
