@@ -2827,6 +2827,19 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
   if (orderFlowRedMinutes <= orderFlowAmberMinutes) {
     throw new HttpsError("invalid-argument", "The red warning must be later than the amber warning.");
   }
+  const requestedBookingDurationMinutes = data.defaultBookingDurationMinutes == null
+    ? null
+    : requiredPositiveInteger(
+        data.defaultBookingDurationMinutes,
+        "defaultBookingDurationMinutes",
+        1440,
+      );
+  if (requestedBookingDurationMinutes != null && requestedBookingDurationMinutes < 15) {
+    throw new HttpsError(
+        "invalid-argument",
+        "The default booking duration must be at least 15 minutes.",
+    );
+  }
   const businessDayCutoffMinutes = data.businessDayCutoffMinutes == null
     ? null
     : requiredNonNegativeInteger(
@@ -2838,12 +2851,24 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
   const actor = actorSnapshot(await auth.getUser(caller.uid));
+  let savedBookingDurationMinutes = requestedBookingDurationMinutes;
   await db.runTransaction(async (transaction) => {
     const venue = await transaction.get(venueRef);
     if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
     }
     const venueData = venue.data();
+    const storedBookingDurationMinutes = Number(
+      venueData.defaultBookingDurationMinutes ?? 120,
+    );
+    const safeStoredBookingDurationMinutes =
+      Number.isInteger(storedBookingDurationMinutes) &&
+      storedBookingDurationMinutes >= 15 && storedBookingDurationMinutes <= 1440
+        ? storedBookingDurationMinutes
+        : 120;
+    const defaultBookingDurationMinutes =
+      requestedBookingDurationMinutes ?? safeStoredBookingDurationMinutes;
+    savedBookingDurationMinutes = defaultBookingDurationMinutes;
     const currentCutoff = Number(venueData.businessDayCutoffMinutes ?? 240);
     const safeCurrentCutoff = Number.isInteger(currentCutoff) &&
         currentCutoff >= 0 && currentCutoff < 1440
@@ -2885,6 +2910,7 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
       backgroundLockSeconds,
       orderFlowAmberMinutes,
       orderFlowRedMinutes,
+      defaultBookingDurationMinutes,
       ...cutoffUpdate,
       updatedAt: FieldValue.serverTimestamp(),
       updatedByActor: actor,
@@ -2896,6 +2922,7 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
       backgroundLockSeconds,
       orderFlowAmberMinutes,
       orderFlowRedMinutes,
+      defaultBookingDurationMinutes,
       previousBusinessDayCutoffMinutes: safeCurrentCutoff,
       pendingBusinessDayCutoffMinutes: businessDayCutoffMinutes,
       pendingBusinessDayCutoffEffectiveDate: cutoffEffectiveDate,
@@ -2909,6 +2936,7 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
     backgroundLockSeconds,
     orderFlowAmberMinutes,
     orderFlowRedMinutes,
+    defaultBookingDurationMinutes: savedBookingDurationMinutes,
     requestedBusinessDayCutoffMinutes: businessDayCutoffMinutes,
   };
 }

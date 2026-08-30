@@ -736,6 +736,7 @@ class ProductionCommandRepository {
     required int backgroundLockSeconds,
     required int orderFlowAmberMinutes,
     required int orderFlowRedMinutes,
+    required int defaultBookingDurationMinutes,
     required int businessDayCutoffMinutes,
   }) {
     return _call('updateVenueNotificationSettings', {
@@ -745,6 +746,7 @@ class ProductionCommandRepository {
       'backgroundLockSeconds': backgroundLockSeconds,
       'orderFlowAmberMinutes': orderFlowAmberMinutes,
       'orderFlowRedMinutes': orderFlowRedMinutes,
+      'defaultBookingDurationMinutes': defaultBookingDurationMinutes,
       'businessDayCutoffMinutes': businessDayCutoffMinutes,
     });
   }

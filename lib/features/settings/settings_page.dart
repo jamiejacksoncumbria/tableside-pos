@@ -43,6 +43,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final TextEditingController _backgroundLockSeconds;
   late final TextEditingController _orderFlowAmberMinutes;
   late final TextEditingController _orderFlowRedMinutes;
+  late final TextEditingController _defaultBookingDurationMinutes;
   late int _businessDayCutoffMinutes;
   Uint8List? _logoBytes;
   String? _logoName;
@@ -79,6 +80,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _orderFlowRedMinutes = TextEditingController(
       text: '${widget.venueOverride?.orderFlowRedMinutes ?? 25}',
     );
+    _defaultBookingDurationMinutes = TextEditingController(
+      text: '${widget.venueOverride?.defaultBookingDurationMinutes ?? 120}',
+    );
     _businessDayCutoffMinutes =
         widget.venueOverride?.pendingBusinessDayCutoffMinutes ??
         widget.venueOverride?.businessDayCutoffMinutes ??
@@ -98,6 +102,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _backgroundLockSeconds.dispose();
     _orderFlowAmberMinutes.dispose();
     _orderFlowRedMinutes.dispose();
+    _defaultBookingDurationMinutes.dispose();
     super.dispose();
   }
 
@@ -181,9 +186,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   Future<void> _saveVenueNotificationRetention(VenueScope scope) async {
     if (_savingNotificationRetention) return;
     final seconds = int.tryParse(_notificationRetentionSeconds.text.trim());
-    final backgroundLockSeconds = int.tryParse(_backgroundLockSeconds.text.trim());
+    final backgroundLockSeconds = int.tryParse(
+      _backgroundLockSeconds.text.trim(),
+    );
     final amberMinutes = int.tryParse(_orderFlowAmberMinutes.text.trim());
     final redMinutes = int.tryParse(_orderFlowRedMinutes.text.trim());
+    final bookingDurationMinutes = int.tryParse(
+      _defaultBookingDurationMinutes.text.trim(),
+    );
     if (seconds == null || seconds < 1 || seconds > 60) {
       showAppNotification(
         context,
@@ -222,6 +232,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       );
       return;
     }
+    if (bookingDurationMinutes == null ||
+        bookingDurationMinutes < 15 ||
+        bookingDurationMinutes > 1440) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Enter a valid booking duration',
+        message: 'Choose a default duration from 15 minutes to 24 hours.',
+        level: AppNotificationLevel.warning,
+      );
+      return;
+    }
     setState(() => _savingNotificationRetention = true);
     try {
       await ref
@@ -232,6 +254,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             backgroundLockSeconds: backgroundLockSeconds,
             orderFlowAmberMinutes: amberMinutes,
             orderFlowRedMinutes: redMinutes,
+            defaultBookingDurationMinutes: bookingDurationMinutes,
             businessDayCutoffMinutes: _businessDayCutoffMinutes,
           );
       if (!mounted) return;
@@ -240,7 +263,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         ref: ref,
         title: 'Venue notification timing saved',
         message:
-            'Notifications dismiss after $seconds seconds; the device locks after $backgroundLockSeconds seconds in the background; orders warn at $amberMinutes/$redMinutes minutes.',
+            'Notifications dismiss after $seconds seconds; the device locks after $backgroundLockSeconds seconds in the background; orders warn at $amberMinutes/$redMinutes minutes; bookings default to $bookingDurationMinutes minutes.',
         level: AppNotificationLevel.success,
       );
     } on Object catch (error, stackTrace) {
@@ -543,7 +566,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   enabled: !_savingNotificationRetention,
                   decoration: const InputDecoration(
                     labelText: 'Background lock time',
-                    helperText: '15 seconds to 60 minutes; default is 2 minutes.',
+                    helperText:
+                        '15 seconds to 60 minutes; default is 2 minutes.',
                     suffixText: 'seconds',
                   ),
                 ),
@@ -587,6 +611,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       ],
                     );
                   },
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _defaultBookingDurationMinutes,
+                  keyboardType: TextInputType.number,
+                  enabled: !_savingNotificationRetention,
+                  decoration: const InputDecoration(
+                    labelText: 'Default table booking duration',
+                    helperText:
+                        'Used for new bookings; staff can adjust it per booking.',
+                    suffixText: 'minutes',
+                  ),
                 ),
                 const SizedBox(height: 14),
                 ListTile(

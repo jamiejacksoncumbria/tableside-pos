@@ -17,7 +17,9 @@ final venueBookingsProvider = StreamProvider<List<VenueBooking>>((ref) {
 });
 
 class BookingCalendarPage extends ConsumerStatefulWidget {
-  const BookingCalendarPage({super.key});
+  const BookingCalendarPage({super.key, this.defaultDurationMinutes = 120});
+
+  final int defaultDurationMinutes;
 
   @override
   ConsumerState<BookingCalendarPage> createState() =>
@@ -203,11 +205,12 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
     final phone = TextEditingController(text: existing?.phone ?? '');
     final guests = TextEditingController(text: '${existing?.guestCount ?? 2}');
     final duration = TextEditingController(
-      text: '${existing?.durationMinutes ?? 120}',
+      text:
+          '${existing?.durationMinutes ?? widget.defaultDurationMinutes.clamp(15, 1440)}',
     );
     final notes = TextEditingController(text: existing?.notes ?? '');
     var tableId = existing?.tableId ?? tables.first.id;
-    var autoAssignTable = false;
+    var autoAssignTable = existing == null;
     var startsAt =
         existing?.startsAt.toLocal() ??
         DateTime(_day.year, _day.month, _day.day, 19);
@@ -426,13 +429,6 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
                               saving = false;
                               saveError = _bookingErrorMessage(error);
                             });
-                            showAppNotification(
-                              dialogContext,
-                              ref: ref,
-                              title: 'Could not save booking',
-                              message: _bookingErrorMessage(error),
-                              level: AppNotificationLevel.error,
-                            );
                           }
                         }
                       },

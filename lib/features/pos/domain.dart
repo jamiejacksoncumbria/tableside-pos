@@ -168,11 +168,13 @@ class Venue {
     this.backgroundLockSeconds = 120,
     int orderFlowAmberMinutes = 15,
     int orderFlowRedMinutes = 25,
+    int defaultBookingDurationMinutes = 120,
     int businessDayCutoffMinutes = 240,
     this.pendingBusinessDayCutoffMinutes,
     this.pendingBusinessDayCutoffEffectiveDate,
   }) : _orderFlowAmberMinutes = orderFlowAmberMinutes,
        _orderFlowRedMinutes = orderFlowRedMinutes,
+       _defaultBookingDurationMinutes = defaultBookingDurationMinutes,
        _businessDayCutoffMinutes = businessDayCutoffMinutes;
 
   final String id;
@@ -187,12 +189,15 @@ class Venue {
   // Firestore venue documents are also mapped to the same safe defaults.
   final int? _orderFlowAmberMinutes;
   final int? _orderFlowRedMinutes;
+  final int? _defaultBookingDurationMinutes;
   final int? _businessDayCutoffMinutes;
   final int? pendingBusinessDayCutoffMinutes;
   final String? pendingBusinessDayCutoffEffectiveDate;
 
   int get orderFlowAmberMinutes => _orderFlowAmberMinutes ?? 15;
   int get orderFlowRedMinutes => _orderFlowRedMinutes ?? 25;
+  int get defaultBookingDurationMinutes =>
+      _defaultBookingDurationMinutes ?? 120;
   int get businessDayCutoffMinutes => _businessDayCutoffMinutes ?? 240;
 }
 

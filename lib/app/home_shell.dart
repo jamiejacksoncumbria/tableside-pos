@@ -313,7 +313,10 @@ class HomeShell extends ConsumerWidget {
     TenantProfile profile,
   ) => switch (section) {
     HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
-    HomeSection.bookings => const BookingCalendarPage(),
+    HomeSection.bookings => BookingCalendarPage(
+      defaultDurationMinutes:
+          venueOverride?.defaultBookingDurationMinutes ?? 120,
+    ),
     HomeSection.orderFlow => OrderFlowPage(
       amberMinutes: venueOverride?.orderFlowAmberMinutes ?? 15,
       redMinutes: venueOverride?.orderFlowRedMinutes ?? 25,

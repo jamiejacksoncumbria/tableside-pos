@@ -101,6 +101,9 @@ class FirestorePosRepository {
                     data['orderFlowRedMinutes'],
                     25,
                   ),
+                  defaultBookingDurationMinutes: _bookingDurationMinutes(
+                    data['defaultBookingDurationMinutes'],
+                  ),
                   businessDayCutoffMinutes: _businessDayCutoffMinutes(
                     data['businessDayCutoffMinutes'],
                   ),
@@ -129,6 +132,11 @@ class FirestorePosRepository {
   int _orderFlowMinutes(Object? value, int fallback) {
     final minutes = value is int ? value : fallback;
     return minutes.clamp(1, 480).toInt();
+  }
+
+  int _bookingDurationMinutes(Object? value) {
+    final minutes = value is num ? value.toInt() : 120;
+    return minutes.clamp(15, 1440).toInt();
   }
 
   int _businessDayCutoffMinutes(Object? value) {
