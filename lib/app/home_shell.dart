@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -255,7 +256,10 @@ class HomeShell extends ConsumerWidget {
               fit: StackFit.expand,
               children: [
                 Positioned.fill(child: _buildBody(visibleSection, profile)),
-                const _QueuedPrintWorkerHost(),
+                // A browser is an order-entry client, never a printer agent.
+                // Jobs created here are delivered by an enrolled Android or
+                // Windows device through the shared Firebase queue.
+                if (!kIsWeb) const _QueuedPrintWorkerHost(),
                 const PrintDeliveryMonitorHost(),
                 const OrderFlowNotificationHost(),
               ],

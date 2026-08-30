@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
@@ -31,11 +32,17 @@ class QueuedNativePrintWorker {
   DateTime? _lastHeartbeatAt;
   VenueScope? _heartbeatScope;
 
-  String? get _requiredTransport => Platform.isWindows
-      ? 'windowsPrintQueue'
-      : Platform.isAndroid
-      ? 'bluetooth'
-      : null;
+  String? get _requiredTransport {
+    // `Platform` from dart:io throws at runtime in a browser. Web is a POS
+    // client only: it queues jobs for registered Android/Windows agents and
+    // must never try to heartbeat or claim a native print job itself.
+    if (kIsWeb) return null;
+    return Platform.isWindows
+        ? 'windowsPrintQueue'
+        : Platform.isAndroid
+        ? 'bluetooth'
+        : null;
+  }
 
   /// Signals that a venue has queued work. The host listens to this stream and
   /// claims jobs immediately; it does not wait for a periodic scan.
