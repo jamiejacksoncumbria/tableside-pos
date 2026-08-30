@@ -83,6 +83,16 @@ Do **not** let a web client directly write a completed print job, and do not mak
 
 `NativePrintWorker` is now the platform-neutral worker loop. Implement `NativeReceiptPrinter` separately for the printer protocol you deploy; the app deliberately does not pretend USB and Bluetooth APIs are portable across Android and Windows. Register each device through `PrinterDeviceRepository`, issue a device-specific custom claim from a trusted server, and only then start the worker for that device.
 
+### Windows USB and network printers
+
+The Windows desktop app prints through installed Windows print queues. This supports a USB receipt printer such as the SAM4S GIANT100 and a network printer added through a Windows TCP/IP port using exactly the same flow:
+
+1. Install the manufacturer driver and confirm Windows can print a test page. Set the queue's 58 mm/80 mm paper and cutter preferences in Windows first.
+2. In TableSide, open **Settings → Windows USB/network printer setup**, select the installed queue, select the matching TableSide receipt width (58 mm or 80 mm), and print a test ticket.
+3. Open **Settings → Shared printer routes**, register the Windows PC as a venue printer device, then assign the kitchen, bar, dessert and/or paid-receipt routes to it.
+
+Jobs are rendered through the driver, not sent directly to USB. The printer-driver setting controls the physical paper, while TableSide's per-queue width selection controls receipt layout and must match it. Paid receipts combine identical products into compact lines such as `Efes x3`; kitchen/bar tickets remain uncombined.
+
 ## Payments
 
 The app now creates a `paymentRequests` document rather than changing a bill from the client. A Cloud Function must load and validate the bill, enforce the remaining balance, use the request's idempotency key with the selected payment provider, and only then write the payment and close the bill.
@@ -137,6 +147,38 @@ The platform role is deliberately **not** Firebase-project Owner access. It has 
 Cloud Functions deployment requires the Firebase project to be on the Blaze plan. The functions are configured for Node.js 22 and `europe-west2` (London), alongside the existing Firestore and Storage location.
 
 The deployed rules prevent staff from changing their own roles, and restrict profile/image changes to owners and managers. Production order updates must still be limited to safe state transitions, while payment and stock mutations remain server-only.
+
+### App Check rollout
+
+App Check is activated during Firebase startup before the app uses Authentication, Firestore, or Storage:
+
+- Android debug/profile builds use Firebase's debug provider, which works on the Android 7.1 pilot device.
+- Android release builds use Play Integrity. For an APK distributed outside Google Play, configure the Play Integrity App Check registration as an outside-Google-Play app and do not require the `PLAY_RECOGNIZED` or `LICENSED` verdicts.
+- iOS debug builds use the debug provider; release builds use App Attest with DeviceCheck fallback. Register the iOS bundle in App Check before testing a signed iPhone build.
+- Windows has only Firebase's debug provider. It is supported for development/monitoring, but is not suitable as a production attestation secret because a shipped desktop app can be inspected. Windows remains protected by sign-in, membership checks, Firestore/Storage rules, and server-side validation; do **not** enable Firebase service enforcement until a production desktop approach is agreed.
+- Web debug builds use the debug provider. Supply a registered `TABLESIDE_WEB_APP_CHECK_DEBUG_TOKEN` to keep one development browser token stable; otherwise Firebase generates one per browser origin. Production web builds use reCAPTCHA v3 when supplied a registered site key through `TABLESIDE_WEB_APP_CHECK_RECAPTCHA_SITE_KEY`.
+
+Set up Android App Check in this order:
+
+1. In Firebase Console, open **Security → App Check**, register the Android app (`com.tableside.tableside_pos`) with Play Integrity, and follow the Firebase/Google Play Console linking steps. Add the SHA-256 certificate used to sign the APK.
+2. Run a debug build on the test terminal. The Android debug provider writes an App Check debug token to the Android log. Add that token in **App Check → Apps → Manage debug tokens**. Never place a debug token in Git or a release build.
+3. For web production, register a reCAPTCHA v3 provider in App Check and build with `--dart-define=TABLESIDE_WEB_APP_CHECK_RECAPTCHA_SITE_KEY=YOUR_PUBLIC_SITE_KEY`. For iOS, register the iOS app and select App Attest with DeviceCheck fallback.
+4. In Google Cloud Console **IAM**, grant the Cloud Functions service account `33541448236-compute@developer.gserviceaccount.com` the **Firebase App Check Token Verifier** role. Without this role the monitor-mode APIs stay available, but their token verification will log a permission error instead of useful results.
+5. Keep Firestore, Storage, Authentication, and Functions in their App Check **monitor** state. Use their metrics to confirm valid requests are arriving.
+6. The custom `posApi` and `platformAdminApi` endpoints also receive and verify `X-Firebase-AppCheck` tokens, but remain monitor-only by default. After every live client is registered, set `REQUIRE_APP_CHECK=true` in `functions/.env.table-pos` and redeploy functions.
+7. Only then consider enabling Firebase Console enforcement for supported services. This action rejects clients without valid attestation, so it must be tested on the real Android 7.1 hardware first.
+
+For Windows development monitoring, create a registered debug token and run:
+
+```powershell
+flutter run -d windows --dart-define=TABLESIDE_USE_FIREBASE=true --dart-define=TABLESIDE_WINDOWS_APP_CHECK_DEBUG_TOKEN=YOUR_REGISTERED_TOKEN
+```
+
+For a stable Chrome development token, register a different debug token and run:
+
+```powershell
+flutter run -d chrome --web-port=5000 --dart-define=TABLESIDE_USE_FIREBASE=true --dart-define=TABLESIDE_WEB_APP_CHECK_DEBUG_TOKEN=YOUR_REGISTERED_TOKEN
+```
 
 ## Run locally
 

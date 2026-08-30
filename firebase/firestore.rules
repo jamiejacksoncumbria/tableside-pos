@@ -29,6 +29,45 @@ service cloud.firestore {
       return isMember(tenantId) && membership(tenantId).data.roles.hasAny(['owner', 'manager']);
     }
 
+    // A printer-only Firebase account is the recommended host identity for a
+    // shared till. It can discover venues before PIN entry and operate its
+    // assigned printer, but it cannot read operational data until a real
+    // staff member has selected their name and passed PIN verification.
+    function isPrinterOnlyHost(tenantId) {
+      return isMember(tenantId)
+        && membership(tenantId).data.roles.hasAny(['printer'])
+        && !membership(tenantId).data.roles.hasAny(['owner', 'manager', 'waiter', 'cashier', 'kitchen']);
+    }
+
+    function hasActivePinAuthorization(tenantId) {
+      let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
+      return exists(authorizationPath)
+        && get(authorizationPath).data.expiresAt > request.time;
+    }
+
+    function canReadOperationalData(tenantId) {
+      return isMember(tenantId)
+        && (!isPrinterOnlyHost(tenantId) || hasActivePinAuthorization(tenantId));
+    }
+
+    function managesTenantWithActivePin(tenantId) {
+      let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
+      return isMember(tenantId)
+        && exists(authorizationPath)
+        && get(authorizationPath).data.expiresAt > request.time
+        && (
+          get(authorizationPath).data.roles.hasAny(['owner', 'manager'])
+          || get(authorizationPath).data.get('platformAdmin', false) == true
+        );
+    }
+
+    function managesVenueWithActivePin(tenantId, venueId) {
+      let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
+      return managesTenantWithActivePin(tenantId)
+        && venueId is string
+        && get(authorizationPath).data.venueId == venueId;
+    }
+
     // Venue records are server-managed. A venue marked as `deleting` rejects
     // new client writes while the trusted delete function checks whether any
     // operational or historical documents still reference it.
@@ -51,17 +90,9 @@ service cloud.firestore {
         'logoUrl',
         'address',
         'phone',
+        'phoneNumbers',
         'receiptFooter'
       ]);
-    }
-
-    function isAssignedPrintDevice() {
-      return signedIn()
-        && request.auth.token.deviceId == resource.data.targetDeviceId;
-    }
-
-    function isNamedDevice(deviceId) {
-      return signedIn() && request.auth.token.deviceId == deviceId;
     }
 
     match /tenants/{tenantId} {
@@ -69,12 +100,13 @@ service cloud.firestore {
       // prevents a signed-in client from creating a tenant or granting itself
       // an owner role.
       allow create: if false;
-      allow get: if isPlatformAdmin() || isMember(tenantId);
+      // Platform support access must go through an audited server action;
+      // a global admin claim is not a blanket Firestore data-export token.
+      allow get: if isMember(tenantId);
       // Currency is selected only when the restaurant is created and remains
       // permanent. Client profile edits may never bypass that historical-money
       // safeguard.
-      allow update: if (isPlatformAdmin() || managesTenant(tenantId))
-        && changesOnlyTenantProfile();
+      allow update: if false;
       allow delete: if false;
 
       match /members/{userId} {
@@ -82,14 +114,13 @@ service cloud.firestore {
         // provably safe: a signed-in user can stream only their own
         // membership records. Managers can still inspect their tenant's
         // members, while membership changes remain server-only.
-        allow read: if isPlatformAdmin()
-          || (signedIn() && resource.data.userId == request.auth.uid)
-          || managesTenant(tenantId);
+        allow read: if (signedIn() && resource.data.userId == request.auth.uid)
+          || managesTenantWithActivePin(tenantId);
         allow write: if false;
       }
 
       match /venues/{venueId} {
-        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow read: if isMember(tenantId);
         // Creation, editing, and deletion use trusted server functions so
         // time zones, unique venue names, and deletion safeguards cannot be
         // bypassed by a client.
@@ -97,70 +128,140 @@ service cloud.firestore {
       }
 
       match /menuSections/{sectionId} {
-        allow read: if isPlatformAdmin() || isMember(tenantId);
-        allow write: if isPlatformAdmin() || managesTenant(tenantId);
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
       }
 
       match /products/{productId} {
-        allow read: if isPlatformAdmin() || isMember(tenantId);
-        allow write: if isPlatformAdmin() || managesTenant(tenantId);
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
+      }
+
+      // Reusable cooking, spice, drink and similar option groups. Products
+      // store only the group ids; authoritative order pricing/validation is
+      // performed by the server function when a line is added or released.
+      match /modifierGroups/{groupId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
+      }
+
+      // Venue tax-rate setup is manager-owned. Product selections copy the
+      // named rate and fixed basis-point value; the order function snapshots
+      // that value again when a sale is made.
+      match /taxRates/{taxRateId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
+      }
+
+      // Stock movements are immutable and server-created alongside a verified
+      // release-to-production command. A client must never decrement stock by
+      // writing a movement or product value directly.
+      match /stockMovements/{movementId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
       }
 
       match /tables/{tableId} {
-        allow read, delete: if isPlatformAdmin() || isMember(tenantId);
-        allow create, update: if (isPlatformAdmin() || isMember(tenantId))
-          && isActiveVenue(tenantId, request.resource.data.venueId);
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
+      }
+
+      // Booking customer details are operational venue data. Clients may
+      // stream them after staff-PIN authorization, but all mutations go
+      // through the audited POS API for conflict checks.
+      match /bookings/{bookingId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
+      }
+
+      // Server-only table-label registry makes table names unique per venue.
+      match /tableLabels/{labelId} {
+        allow read, write: if false;
+      }
+
+      // Open named tabs are server-managed, venue-local unique-name records.
+      match /openTabNames/{tabId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
       }
 
       match /orders/{orderId} {
-        allow read, delete: if isPlatformAdmin() || isMember(tenantId);
-        allow create, update: if (isPlatformAdmin() || isMember(tenantId))
-          && isActiveVenue(tenantId, request.resource.data.venueId);
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
+      }
+
+      // Production tickets contain kitchen/bar-safe order summaries only. New
+      // tickets and state changes come from trusted, auditable commands.
+      match /productionTickets/{ticketId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
       }
 
       match /bills/{billId} {
-        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow read: if managesVenueWithActivePin(
+          tenantId,
+          resource.data.venueId
+        );
         // Payment, tax, stock, and close-of-day writes must be made by a
         // trusted Cloud Function using the Admin SDK, not by a client.
         allow write: if false;
       }
 
+      // Short-lived report-read leases are issued only by the trusted PIN
+      // verification function. Clients cannot inspect, extend or replace one.
+      match /staffPinAuthorizations/{hostUserId} {
+        allow read, write: if false;
+      }
+
+      // Authentication warnings are written only by trusted server code.
+      // Managers may inspect their venue's alerts while ordinary members
+      // cannot enumerate PIN failures or lock events.
+      match /securityAlerts/{alertId} {
+        allow read: if managesVenueWithActivePin(
+          tenantId,
+          resource.data.venueId
+        );
+        allow write: if false;
+      }
+
       match /paymentRequests/{requestId} {
-        allow read: if isPlatformAdmin() || isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         // A server function validates the bill amount, creates the provider
         // payment intent, and is the only actor allowed to change its status.
-        allow create: if (isPlatformAdmin() || isMember(tenantId))
-          && request.resource.data.keys().hasAll([
-            'venueId', 'billId', 'amountMinor', 'currencyCode', 'method', 'status', 'idempotencyKey', 'requestedAt'
-          ])
-          && request.resource.data.currencyCode == tenantCurrencyCode(tenantId)
-          && isActiveVenue(tenantId, request.resource.data.venueId);
+        allow create: if false;
         allow update, delete: if false;
       }
 
       match /devices/{deviceId} {
-        allow read: if isPlatformAdmin()
-          || managesTenant(tenantId)
-          || isNamedDevice(deviceId);
-        allow create: if (isPlatformAdmin() || managesTenant(tenantId))
-          && isActiveVenue(tenantId, request.resource.data.venueId);
-        allow delete: if isPlatformAdmin() || managesTenant(tenantId);
-        allow update: if ((isPlatformAdmin() || managesTenant(tenantId))
-            && isActiveVenue(tenantId, request.resource.data.venueId))
-          || (isNamedDevice(deviceId)
-            && isActiveVenue(tenantId, resource.data.venueId)
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastHeartbeatAt']));
+        // Every active venue member may see printer device health. This lets a
+        // waiter who sent an order be alerted when its kitchen/bar printer is
+        // offline, while only managers may register, route, or alter a device.
+        allow get: if isMember(tenantId);
+        allow list: if isMember(tenantId);
+        allow create: if false;
+        allow delete: if false;
+        // Enrollment and heartbeats use the server API with a rotating device
+        // credential. No staff account receives direct device-write access.
+        allow update: if false;
+      }
+
+      // Only a manager can choose where a venue's kitchen, bar, dessert and
+      // paid-receipt tickets go. The trusted command verifies a configured
+      // device belongs to this venue before creating the job.
+      match /printerRoutes/{routeId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow create, update, delete: if false;
       }
 
       match /printJobs/{jobId} {
-        allow read: if isPlatformAdmin()
-          || managesTenant(tenantId)
-          || isAssignedPrintDevice();
+        // The content is kitchen/bar-safe and all venue staff need real-time
+        // delivery warnings. Claiming remains restricted to the assigned
+        // physical printer device below.
+        allow read: if isMember(tenantId);
         allow create, delete: if false;
-        allow update: if isAssignedPrintDevice()
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'status', 'claimedByDeviceId', 'claimedAt', 'completedAt', 'failureReason', 'attempts'
-          ]);
+        // Claim/retry/completion are atomic server commands authenticated with
+        // the physical device credential, never the currently selected user.
+        allow update: if false;
       }
     }
 
@@ -174,13 +275,14 @@ service cloud.firestore {
     // Staff identities are server-managed and retained as historical
     // attribution when an account is retired.
     match /staffProfiles/{userId} {
-      allow get: if isPlatformAdmin()
-        || (signedIn() && request.auth.uid == userId);
+      allow get: if signedIn() && request.auth.uid == userId;
       allow list, create, update, delete: if false;
     }
 
     match /platformAdminAudit/{auditId} {
-      allow read: if isPlatformAdmin();
+      // Audit history is exposed only through a PIN-authorized, paginated
+      // platform API so a stolen ID token cannot dump the complete log.
+      allow read: if false;
       allow write: if false;
     }
 
@@ -188,8 +290,7 @@ service cloud.firestore {
     // person's restaurant memberships. Collection-group queries require a
     // version-2 recursive match, and the same userId condition as the query.
     match /{path=**}/members/{userId} {
-      allow read: if isPlatformAdmin()
-        || (signedIn() && resource.data.userId == request.auth.uid);
+      allow read: if signedIn() && resource.data.userId == request.auth.uid;
       allow write: if false;
     }
   }

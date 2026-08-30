@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,13 +9,28 @@ import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
 import '../platform_admin/platform_admin_page.dart';
 import '../pos/domain.dart';
+import '../pos/pos_controller.dart';
 import 'session_providers.dart';
+import 'staff_pin_gate.dart';
 
 class FirebaseAuthGate extends ConsumerWidget {
   const FirebaseAuthGate({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.listen<AsyncValue<User?>>(authStateProvider, (previous, next) {
+      final previousUid = previous?.asData?.value?.uid;
+      final currentUid = next.asData?.value?.uid;
+      if (currentUid == null ||
+          (previousUid != null && previousUid != currentUid)) {
+        AppLogger.info(
+          'Firebase authentication changed; clearing local venue and staff sessions.',
+        );
+        ref.read(activeStaffPinSessionProvider.notifier).lock();
+        ref.read(activeVenueScopeProvider.notifier).clear();
+        ref.read(homeSectionProvider.notifier).select(HomeSection.pos);
+      }
+    });
     final authState = ref.watch(authStateProvider);
     return authState.when(
       loading: () => const _LoadingScreen(label: 'Checking your session…'),
@@ -198,6 +214,7 @@ class AuthenticatedWorkspace extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    AppLogger.info('Authenticated workspace: checking restaurant memberships.');
     final platformAdmin = ref.watch(platformAdminProvider);
     if (platformAdmin.isLoading) {
       return const _LoadingScreen(label: 'Checking your access…');
@@ -216,6 +233,9 @@ class AuthenticatedWorkspace extends ConsumerWidget {
       error: (error, _) =>
           _ErrorScreen(message: 'Could not load restaurant access: $error'),
       data: (items) {
+        AppLogger.info(
+          'Restaurant access loaded: ${items.length} membership(s).',
+        );
         if (items.isEmpty) {
           return isPlatformAdmin
               ? _PlatformAdminScaffold(
@@ -226,7 +246,7 @@ class AuthenticatedWorkspace extends ConsumerWidget {
         final scope = ref.watch(activeVenueScopeProvider);
         return scope == null
             ? VenuePicker(memberships: items)
-            : _TenantWorkspace(scope: scope, isPlatformAdmin: isPlatformAdmin);
+            : _TenantWorkspace(scope: scope);
       },
     );
   }
@@ -248,6 +268,16 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
   Widget build(BuildContext context) {
     final tenantId = _tenantId ?? widget.memberships.first.tenantId;
     final venues = ref.watch(venuesProvider(tenantId));
+    final companyNames = <String, String>{
+      for (final membership in widget.memberships)
+        membership.tenantId: ref
+            .watch(liveTenantProfileProvider(membership.tenantId))
+            .when(
+              data: (profile) => profile.displayName,
+              loading: () => 'Loading restaurant…',
+              error: (_, _) => 'Restaurant company',
+            ),
+    };
     return Scaffold(
       body: Center(
         child: ConstrainedBox(
@@ -278,7 +308,10 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
                       for (final membership in widget.memberships)
                         DropdownMenuItem(
                           value: membership.tenantId,
-                          child: Text(membership.tenantId),
+                          child: Text(
+                            companyNames[membership.tenantId] ??
+                                'Restaurant company',
+                          ),
                         ),
                     ],
                     onChanged: (value) => setState(() => _tenantId = value),
@@ -311,14 +344,32 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
                                 trailing: const Icon(
                                   Icons.chevron_right_rounded,
                                 ),
-                                onTap: () => ref
-                                    .read(activeVenueScopeProvider.notifier)
-                                    .select(
-                                      VenueScope(
-                                        tenantId: tenantId,
-                                        venueId: venue.id,
-                                      ),
-                                    ),
+                                onTap: () {
+                                  AppLogger.info(
+                                    'Venue selected: tenant=$tenantId, venue=${venue.id}.',
+                                  );
+                                  // A scope change must never leave a local
+                                  // order pointing at a table from the venue
+                                  // just left, even before the POS controller
+                                  // rebuilds its live stream.
+                                  ref
+                                      .read(activeStaffPinSessionProvider.notifier)
+                                      .lock();
+                                  ref
+                                      .read(activePersistedOrderIdProvider.notifier)
+                                      .select(null);
+                                  ref
+                                      .read(selectedTableProvider.notifier)
+                                      .select('');
+                                  ref
+                                      .read(activeVenueScopeProvider.notifier)
+                                      .select(
+                                        VenueScope(
+                                          tenantId: tenantId,
+                                          venueId: venue.id,
+                                        ),
+                                      );
+                                },
                               ),
                             ),
                       ],
@@ -335,13 +386,15 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
 }
 
 class _TenantWorkspace extends ConsumerWidget {
-  const _TenantWorkspace({required this.scope, required this.isPlatformAdmin});
+  const _TenantWorkspace({required this.scope});
 
   final VenueScope scope;
-  final bool isPlatformAdmin;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    AppLogger.info(
+      'Opening venue workspace: tenant=${scope.tenantId}, venue=${scope.venueId}.',
+    );
     final profile = ref.watch(liveTenantProfileProvider(scope.tenantId));
     final venues = ref.watch(venuesProvider(scope.tenantId));
     if (profile.isLoading || venues.isLoading) {
@@ -355,19 +408,37 @@ class _TenantWorkspace extends ConsumerWidget {
     );
     final venue = matchingVenues.isEmpty ? null : matchingVenues.first;
     if (venue == null) {
+      AppLogger.error(
+        'Open venue workspace',
+        StateError(
+          'The selected venue is not in the current venue list for this membership.',
+        ),
+        StackTrace.current,
+      );
       return const _ErrorScreen(
         message: 'That venue is no longer available to you.',
       );
     }
-    return HomeShell(
-      profileOverride: profile.requireValue,
-      venueOverride: venue,
-      persistCompanyProfile: true,
-      isPlatformAdmin: isPlatformAdmin,
-      onSignOut: () {
-        ref.read(activeVenueScopeProvider.notifier).clear();
-        ref.read(authRepositoryProvider).signOut();
-      },
+    AppLogger.info('Venue workspace ready: ${venue.name}.');
+    return StaffPinGate(
+      scope: scope,
+      backgroundLockSeconds: venue.backgroundLockSeconds,
+      child: HomeShell(
+        profileOverride: profile.requireValue,
+        venueOverride: venue,
+        persistCompanyProfile: true,
+        onSwitchVenue: () {
+          AppLogger.info('Returning to the company and venue picker.');
+          ref.read(activeStaffPinSessionProvider.notifier).lock();
+          ref.read(homeSectionProvider.notifier).select(HomeSection.pos);
+          ref.read(activeVenueScopeProvider.notifier).clear();
+        },
+        onSignOut: () {
+          ref.read(activeStaffPinSessionProvider.notifier).lock();
+          ref.read(activeVenueScopeProvider.notifier).clear();
+          ref.read(authRepositoryProvider).signOut();
+        },
+      ),
     );
   }
 }
