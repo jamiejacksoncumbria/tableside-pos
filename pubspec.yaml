@@ -31,6 +31,9 @@ dependencies:
   permission_handler: ^12.0.1
   print_bluetooth_thermal: ^1.2.2
   shared_preferences: ^2.5.5
+  # Bundled alert tones provide the same kitchen-order audio on Android,
+  # Windows and web. SystemSound is not implemented consistently by Android.
+  audioplayers: ^6.5.1
 
 dev_dependencies:
   flutter_test:
@@ -41,6 +44,10 @@ dev_dependencies:
 flutter:
 
   uses-material-design: true
+
+  assets:
+    - assets/sounds/order_new.wav
+    - assets/sounds/order_alert.wav
 
 
   # assets:

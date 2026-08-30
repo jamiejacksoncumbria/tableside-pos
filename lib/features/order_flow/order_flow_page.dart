@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter/services.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
@@ -10,6 +9,7 @@ import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
+import 'order_flow_sound.dart';
 
 final orderFlowProvider = StreamProvider<List<OrderFlowOrder>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
@@ -42,11 +42,13 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   final Set<String> _seenTicketIds = <String>{};
   final Set<String> _redAlertedTicketIds = <String>{};
   final Set<String> _activeAllergyTicketIds = <String>{};
+  late final OrderFlowSound _sound;
   bool _receivedInitialOrders = false;
 
   @override
   void initState() {
     super.initState();
+    _sound = OrderFlowSound();
     _clock = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
@@ -56,6 +58,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   void dispose() {
     _clock?.cancel();
     _allergyAlarm?.cancel();
+    unawaited(_sound.dispose());
     super.dispose();
   }
 
@@ -206,7 +209,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       _startAllergyAlarm();
       if (mounted) setState(() {});
     } else if (newOrders.isNotEmpty) {
-      unawaited(SystemSound.play(SystemSoundType.alert));
+      unawaited(_sound.playNewOrder());
     }
     final newlyRed = orders
         .where(
@@ -219,17 +222,17 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
         .toSet();
     if (newlyRed.isNotEmpty) {
       _redAlertedTicketIds.addAll(newlyRed);
-      unawaited(SystemSound.play(SystemSoundType.alert));
+      unawaited(_sound.playLateOrder());
     }
   }
 
   void _startAllergyAlarm() {
     _allergyAlarm ??= Timer.periodic(const Duration(seconds: 4), (_) {
       if (_activeAllergyTicketIds.isNotEmpty) {
-        unawaited(SystemSound.play(SystemSoundType.alert));
+        unawaited(_sound.playAllergyAlert());
       }
     });
-    unawaited(SystemSound.play(SystemSoundType.alert));
+    unawaited(_sound.playAllergyAlert());
   }
 
   void _silenceAllergyAlarm() {
