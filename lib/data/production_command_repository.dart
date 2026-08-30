@@ -178,6 +178,17 @@ final productionCommandRepositoryProvider =
 /// Cloud Function verifies the signed-in membership, loads the canonical menu
 /// product, creates production tickets, and records stock movement atomically.
 class ProductionCommandRepository {
+  Future<void> changeOwnStaffPin({
+    required VenueScope scope,
+    required String pin,
+  }) {
+    return _call('changeOwnStaffPin', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'pin': pin,
+    });
+  }
+
   Future<String> manageMenuConfiguration({
     required VenueScope scope,
     required String resource,

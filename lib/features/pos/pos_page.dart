@@ -401,7 +401,6 @@ class _NamedTabButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final scheme = Theme.of(context).colorScheme;
     final totalMinor = scope == null
         ? null
         : ref.watch(tableOpenOrderProvider(tab.orderId)).when(
@@ -409,9 +408,11 @@ class _NamedTabButton extends ConsumerWidget {
             loading: () => null,
             error: (_, _) => null,
           );
-    final background = selected
-        ? scheme.primaryContainer
-        : scheme.surfaceContainerHighest;
+    // Every item here represents a live named tab. Make that operational
+    // state as obvious as an open table, not merely the currently selected
+    // tab.
+    final background = Colors.green.shade600;
+    final foreground = Colors.white;
     return Semantics(
       button: true,
       selected: selected,
@@ -430,7 +431,7 @@ class _NamedTabButton extends ConsumerWidget {
               Icon(
                 Icons.person_outline_rounded,
                 size: 18,
-                color: selected ? scheme.primary : scheme.onSurfaceVariant,
+                color: foreground,
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -442,18 +443,21 @@ class _NamedTabButton extends ConsumerWidget {
                       tab.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w700),
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        color: foreground,
+                      ),
                     ),
                     if (totalMinor != null)
                       Text(
                         formatMoney(totalMinor, currencyCode: currencyCode),
-                        style: Theme.of(context).textTheme.labelMedium,
+                        style: Theme.of(context).textTheme.labelMedium
+                            ?.copyWith(color: foreground.withValues(alpha: .88)),
                       ),
                   ],
                 ),
               ),
-              if (selected)
-                Icon(Icons.check_circle_rounded, color: scheme.primary),
+              if (selected) const Icon(Icons.check_circle_rounded, color: Colors.white),
             ],
           ),
         ),

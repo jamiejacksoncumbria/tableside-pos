@@ -1177,6 +1177,35 @@ async function setOwnStaffPinFor(caller, rawData) {
   return {configured: true};
 }
 
+/// Uses the selected, PIN-verified caller. This is deliberately separate from
+/// the first-PIN bootstrap action above, whose caller is the Firebase host
+/// account. It lets staff safely change their own PIN on a shared terminal.
+async function changeOwnStaffPinFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const pin = requiredSixDigitPin(data);
+  await requireTenantOperationalMember(caller, tenantId);
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const salt = randomBytes(16).toString("base64url");
+  await db.doc(`tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`).set({
+    userId: caller.uid,
+    venueId,
+    salt,
+    pinHash: hashStaffPin(pin, salt),
+    pinVersion: FieldValue.increment(1),
+    failedAttempts: 0,
+    locked: false,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedBy: caller.uid,
+  }, {merge: true});
+  await writeAudit(caller.uid, "changeOwnStaffPin", caller.uid, {tenantId, venueId});
+  return {changed: true};
+}
+
 async function unlockStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -4562,6 +4591,8 @@ async function invokePosAction(action, caller, data) {
       return listVenuePinStaffFor(caller, data);
     case "setOwnStaffPin":
       return setOwnStaffPinFor(caller, data);
+    case "changeOwnStaffPin":
+      return changeOwnStaffPinFor(actingCaller, data);
     case "verifyStaffPin":
       return verifyStaffPinFor(caller, data);
     case "heartbeatPrinterDevice":

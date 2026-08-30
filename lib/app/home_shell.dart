@@ -187,6 +187,16 @@ class HomeShell extends ConsumerWidget {
                         .lock(),
                     icon: const Icon(Icons.switch_account_rounded),
                   ),
+          if (staffSession != null && ref.watch(activeVenueScopeProvider) != null)
+            IconButton(
+              tooltip: 'Change my PIN',
+              onPressed: () => changeCurrentStaffPin(
+                context: context,
+                ref: ref,
+                scope: ref.read(activeVenueScopeProvider)!,
+              ),
+              icon: const Icon(Icons.pin_outlined),
+            ),
           if (canOpenPlatformTools && !wide)
             IconButton(
               tooltip: 'Platform administration',

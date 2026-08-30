@@ -53,6 +53,59 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
   }
 }
 
+/// Called from the unlocked app shell so any staff member can rotate their
+/// own PIN without access to manager-only settings. Rotating a PIN invalidates
+/// all prior sessions, including this one, before returning to the PIN gate.
+Future<void> changeCurrentStaffPin({
+  required BuildContext context,
+  required WidgetRef ref,
+  required VenueScope scope,
+}) async {
+  final firstPin = await showDialog<String>(
+    context: context,
+    builder: (context) => const _PinPadDialog(
+      title: Text('Change your staff PIN'),
+      message: 'Choose a new six-digit PIN. Do not share it.',
+      confirmLabel: 'Continue',
+    ),
+  );
+  if (firstPin == null || !context.mounted) return;
+  final confirmedPin = await showDialog<String>(
+    context: context,
+    builder: (context) => const _PinPadDialog(
+      title: Text('Confirm new PIN'),
+      message: 'Enter the same new PIN again.',
+      confirmLabel: 'Change PIN',
+    ),
+  );
+  if (confirmedPin == null || !context.mounted) return;
+  if (firstPin != confirmedPin) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('The two PIN entries did not match.')),
+    );
+    return;
+  }
+  try {
+    await ProductionCommandRepository().changeOwnStaffPin(
+      scope: scope,
+      pin: firstPin,
+    );
+    ref.read(activeStaffPinSessionProvider.notifier).lock();
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('PIN changed. Please unlock with your new PIN.')),
+      );
+    }
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('Change own staff PIN', error, stackTrace);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not change PIN: $error')),
+      );
+    }
+  }
+}
+
 class StaffPinGate extends ConsumerStatefulWidget {
   const StaffPinGate({
     super.key,
@@ -337,6 +390,10 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
                             onPressed: _submitting ? null : _setOwnPin,
                             icon: const Icon(Icons.pin_rounded),
                             label: const Text('Create my PIN'),
+                          )
+                        else if (selected != null)
+                          const Text(
+                            'This staff member has not created a PIN yet. For safety, they must first sign in with their own email account and create it; a shared device account cannot create someone else’s PIN.',
                           )
                         else
                           const Text(

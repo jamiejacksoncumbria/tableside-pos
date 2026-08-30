@@ -9,6 +9,7 @@ import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
 import '../platform_admin/platform_admin_page.dart';
 import '../pos/domain.dart';
+import '../pos/pos_controller.dart';
 import 'session_providers.dart';
 import 'staff_pin_gate.dart';
 
@@ -347,6 +348,19 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
                                   AppLogger.info(
                                     'Venue selected: tenant=$tenantId, venue=${venue.id}.',
                                   );
+                                  // A scope change must never leave a local
+                                  // order pointing at a table from the venue
+                                  // just left, even before the POS controller
+                                  // rebuilds its live stream.
+                                  ref
+                                      .read(activeStaffPinSessionProvider.notifier)
+                                      .lock();
+                                  ref
+                                      .read(activePersistedOrderIdProvider.notifier)
+                                      .select(null);
+                                  ref
+                                      .read(selectedTableProvider.notifier)
+                                      .select('');
                                   ref
                                       .read(activeVenueScopeProvider.notifier)
                                       .select(

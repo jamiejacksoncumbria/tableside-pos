@@ -29,6 +29,7 @@ class QueuedNativePrintWorker {
   final PrinterDeviceRepository _devices;
   final LocalPrinterDeviceIdentity _identity;
   DateTime? _lastHeartbeatAt;
+  VenueScope? _heartbeatScope;
 
   String? get _requiredTransport => Platform.isWindows
       ? 'windowsPrintQueue'
@@ -46,7 +47,8 @@ class QueuedNativePrintWorker {
   /// heartbeat write, so this is safe to call on the shared app shell timer.
   Future<void> maintainHeartbeat(VenueScope scope) async {
     final now = DateTime.now();
-    if (_lastHeartbeatAt != null &&
+    if (_heartbeatScope == scope &&
+        _lastHeartbeatAt != null &&
         now.difference(_lastHeartbeatAt!) < const Duration(seconds: 30)) {
       return;
     }
@@ -80,6 +82,7 @@ class QueuedNativePrintWorker {
         deviceCredential: deviceCredential,
       );
       _lastHeartbeatAt = now;
+      _heartbeatScope = scope;
     } on Object catch (error, stackTrace) {
       AppLogger.error('Maintain printer device heartbeat', error, stackTrace);
     }
@@ -115,7 +118,8 @@ class QueuedNativePrintWorker {
     }
 
     final now = DateTime.now();
-    if (_lastHeartbeatAt == null ||
+    if (_heartbeatScope != scope ||
+        _lastHeartbeatAt == null ||
         now.difference(_lastHeartbeatAt!) >= const Duration(seconds: 30)) {
       await _devices.heartbeat(
         scope: scope,
@@ -123,6 +127,7 @@ class QueuedNativePrintWorker {
         deviceCredential: deviceCredential,
       );
       _lastHeartbeatAt = now;
+      _heartbeatScope = scope;
     }
     final worker = NativePrintWorker(
       queue: _queue,
