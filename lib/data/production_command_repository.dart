@@ -431,6 +431,38 @@ class ProductionCommandRepository {
     });
   }
 
+  Future<String> saveBooking({
+    required VenueScope scope,
+    String? bookingId,
+    required String tableId,
+    required String customerName,
+    required String phone,
+    required String notes,
+    required int guestCount,
+    required DateTime startsAt,
+    required int durationMinutes,
+    required String status,
+  }) async {
+    final response = await _call('saveBooking', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'bookingId': bookingId,
+      'tableId': tableId,
+      'customerName': customerName,
+      'phone': phone,
+      'notes': notes,
+      'guestCount': guestCount,
+      'startsAtMillis': startsAt.millisecondsSinceEpoch,
+      'durationMinutes': durationMinutes,
+      'status': status,
+    });
+    final id = response['id'];
+    if (id is! String || id.isEmpty) {
+      throw StateError('The server did not return the booking ID.');
+    }
+    return id;
+  }
+
   Future<String> openNamedTab({
     required VenueScope scope,
     required String tabName,

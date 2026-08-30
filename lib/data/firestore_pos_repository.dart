@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
+import '../features/bookings/booking.dart';
 import '../features/pos/domain.dart';
 import 'production_command_repository.dart';
 
@@ -343,6 +344,42 @@ class FirestorePosRepository {
               })
               .toList(growable: false),
         );
+  }
+
+  Stream<List<VenueBooking>> watchBookings(VenueScope scope) {
+    return _firestore
+        .collection('tenants/${scope.tenantId}/bookings')
+        .where('venueId', isEqualTo: scope.venueId)
+        .orderBy('startsAtMillis')
+        .snapshots()
+        .map((snapshot) {
+          final bookings = snapshot.docs
+              .map((document) {
+                final data = document.data();
+                final startsAtMillis =
+                    (data['startsAtMillis'] as num?)?.toInt() ?? 0;
+                final endsAtMillis =
+                    (data['endsAtMillis'] as num?)?.toInt() ?? startsAtMillis;
+                return VenueBooking(
+                  id: document.id,
+                  venueId: data['venueId'] as String? ?? scope.venueId,
+                  tableId: data['tableId'] as String? ?? '',
+                  customerName:
+                      data['customerName'] as String? ?? 'Unnamed booking',
+                  phone: data['phone'] as String? ?? '',
+                  notes: data['notes'] as String? ?? '',
+                  guestCount: (data['guestCount'] as num?)?.toInt() ?? 1,
+                  startsAt: DateTime.fromMillisecondsSinceEpoch(startsAtMillis),
+                  endsAt: DateTime.fromMillisecondsSinceEpoch(endsAtMillis),
+                  durationMinutes:
+                      (data['durationMinutes'] as num?)?.toInt() ?? 120,
+                  status: bookingStatusFromName(data['status']),
+                );
+              })
+              .toList(growable: false);
+          bookings.sort((a, b) => a.startsAt.compareTo(b.startsAt));
+          return bookings;
+        });
   }
 
   /// Watches the server-owned name reservations for live, no-table tabs.

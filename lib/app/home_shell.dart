@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
+import '../features/bookings/booking_calendar_page.dart';
 import '../features/order_flow/order_flow_page.dart';
 import '../features/auth/staff_pin_gate.dart';
 import '../features/menu/menu_management_page.dart';
@@ -20,7 +22,15 @@ import '../features/printing/print_delivery_monitor.dart';
 import '../features/reports/reports_page.dart';
 import '../features/settings/settings_page.dart';
 
-enum HomeSection { pos, orderFlow, menu, reports, settings, platformAdmin }
+enum HomeSection {
+  pos,
+  bookings,
+  orderFlow,
+  menu,
+  reports,
+  settings,
+  platformAdmin,
+}
 
 final homeSectionProvider =
     NotifierProvider<HomeSectionController, HomeSection>(
@@ -80,6 +90,11 @@ class HomeShell extends ConsumerWidget {
     final wide = MediaQuery.sizeOf(context).width >= 840;
     final destinations = [
       const _Destination(HomeSection.pos, Icons.point_of_sale_rounded, 'POS'),
+      const _Destination(
+        HomeSection.bookings,
+        Icons.event_note_rounded,
+        'Bookings',
+      ),
       const _Destination(
         HomeSection.orderFlow,
         Icons.monitor_heart_outlined,
@@ -175,20 +190,19 @@ class HomeShell extends ConsumerWidget {
           if (staffSession != null)
             wide
                 ? TextButton.icon(
-                    onPressed: () => ref
-                        .read(activeStaffPinSessionProvider.notifier)
-                        .lock(),
+                    onPressed: () =>
+                        ref.read(activeStaffPinSessionProvider.notifier).lock(),
                     icon: const Icon(Icons.switch_account_rounded),
                     label: Text(staffSession.displayName),
                   )
                 : IconButton(
                     tooltip: 'Switch staff: ${staffSession.displayName}',
-                    onPressed: () => ref
-                        .read(activeStaffPinSessionProvider.notifier)
-                        .lock(),
+                    onPressed: () =>
+                        ref.read(activeStaffPinSessionProvider.notifier).lock(),
                     icon: const Icon(Icons.switch_account_rounded),
                   ),
-          if (staffSession != null && ref.watch(activeVenueScopeProvider) != null)
+          if (staffSession != null &&
+              ref.watch(activeVenueScopeProvider) != null)
             IconButton(
               tooltip: 'Change my PIN',
               onPressed: () => changeCurrentStaffPin(
@@ -259,9 +273,10 @@ class HomeShell extends ConsumerWidget {
                 // A browser is an order-entry client, never a printer agent.
                 // Jobs created here are delivered by an enrolled Android or
                 // Windows device through the shared Firebase queue.
-                if (!kIsWeb) const _QueuedPrintWorkerHost(),
-                const PrintDeliveryMonitorHost(),
-                const OrderFlowNotificationHost(),
+                if (Firebase.apps.isNotEmpty && !kIsWeb)
+                  const _QueuedPrintWorkerHost(),
+                if (Firebase.apps.isNotEmpty) const PrintDeliveryMonitorHost(),
+                if (Firebase.apps.isNotEmpty) const OrderFlowNotificationHost(),
               ],
             ),
           ),
@@ -298,6 +313,7 @@ class HomeShell extends ConsumerWidget {
     TenantProfile profile,
   ) => switch (section) {
     HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
+    HomeSection.bookings => const BookingCalendarPage(),
     HomeSection.orderFlow => OrderFlowPage(
       amberMinutes: venueOverride?.orderFlowAmberMinutes ?? 15,
       redMinutes: venueOverride?.orderFlowRedMinutes ?? 25,
@@ -464,7 +480,7 @@ class _QueuedPrintWorkerHost extends ConsumerStatefulWidget {
 
 class _QueuedPrintWorkerHostState
     extends ConsumerState<_QueuedPrintWorkerHost> {
-  final QueuedNativePrintWorker _worker = QueuedNativePrintWorker();
+  QueuedNativePrintWorker? _worker;
   Timer? _retryTimer;
   StreamSubscription<int>? _queuedJobsSubscription;
   VenueScope? _scope;
@@ -493,8 +509,9 @@ class _QueuedPrintWorkerHostState
     _queuedJobsSubscription?.cancel();
     _scope = scope;
     _queuedJobCount = 0;
-    if (scope == null) return;
-    _queuedJobsSubscription = _worker
+    if (scope == null || Firebase.apps.isEmpty) return;
+    final worker = _worker ??= QueuedNativePrintWorker();
+    _queuedJobsSubscription = worker
         .watchQueuedJobCount(scope)
         .listen(
           (queuedCount) {
@@ -524,19 +541,21 @@ class _QueuedPrintWorkerHostState
       // A registered printer reports its health even while idle. Other tills
       // use the heartbeat to distinguish a short queue hand-off from an
       // actually offline kitchen/bar printer.
-      unawaited(_worker.maintainHeartbeat(scope));
+      unawaited(worker.maintainHeartbeat(scope));
       if (_queuedJobCount > 0) unawaited(_processAvailable(scope));
     });
-    unawaited(_worker.maintainHeartbeat(scope));
+    unawaited(worker.maintainHeartbeat(scope));
     unawaited(_processAvailable(scope));
   }
 
   Future<void> _processAvailable(VenueScope scope) async {
     if (_processing || !mounted || _scope != scope) return;
+    final worker = _worker;
+    if (worker == null) return;
     _processing = true;
     try {
       while (mounted && _scope == scope) {
-        final result = await _worker.processNext(scope);
+        final result = await worker.processNext(scope);
         if (!mounted || _scope != scope) return;
         if (result == PrintWorkerResult.noWork) return;
         if (result == PrintWorkerResult.printed) {

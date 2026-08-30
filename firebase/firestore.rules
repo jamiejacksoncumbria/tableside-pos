@@ -166,6 +166,14 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // Booking customer details are operational venue data. Clients may
+      // stream them after staff-PIN authorization, but all mutations go
+      // through the audited POS API for conflict checks.
+      match /bookings/{bookingId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
+      }
+
       // Server-only table-label registry makes table names unique per venue.
       match /tableLabels/{labelId} {
         allow read, write: if false;

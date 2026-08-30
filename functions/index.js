@@ -2589,6 +2589,94 @@ async function createTableFor(caller, rawData) {
   return {id: tableRef.id, label, seats};
 }
 
+const bookingStatuses = new Set([
+  "requested", "confirmed", "arrived", "cancelled", "noShow",
+]);
+
+function requiredBookingTime(value, name) {
+  if (!Number.isSafeInteger(value) || value < 946684800000 || value > 4102444800000) {
+    throw new HttpsError("invalid-argument", `${name} is invalid.`);
+  }
+  return value;
+}
+
+async function saveBookingFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const bookingId = data.bookingId == null || data.bookingId === ""
+    ? null : requiredDocumentId(data, "bookingId");
+  const tableId = requiredDocumentId(data, "tableId");
+  const customerName = requiredText(data, "customerName", 120).trim();
+  const phone = optionalText(data, "phone", 40) || "";
+  const notes = optionalText(data, "notes", 1000) || "";
+  const guestCount = requiredPositiveInteger(data.guestCount, "guestCount", 1000);
+  const startsAtMillis = requiredBookingTime(data.startsAtMillis, "startsAtMillis");
+  const durationMinutes = requiredPositiveInteger(data.durationMinutes, "durationMinutes", 1440);
+  const endsAtMillis = startsAtMillis + durationMinutes * 60000;
+  const status = optionalText(data, "status", 32) || "requested";
+  if (!bookingStatuses.has(status)) {
+    throw new HttpsError("invalid-argument", "That booking status is not supported.");
+  }
+  await requireTenantOperationalMember(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const tableRef = tenantRef.collection("tables").doc(tableId);
+  const bookingRef = bookingId == null
+    ? tenantRef.collection("bookings").doc()
+    : tenantRef.collection("bookings").doc(bookingId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  await db.runTransaction(async (transaction) => {
+    const [venue, table, existing, tableBookings] = await Promise.all([
+      transaction.get(venueRef),
+      transaction.get(tableRef),
+      transaction.get(bookingRef),
+      transaction.get(
+          tenantRef.collection("bookings")
+              .where("venueId", "==", venueId)
+              .where("tableId", "==", tableId)
+              .where("startsAtMillis", "<", endsAtMillis),
+      ),
+    ]);
+    if (!venue.exists || venue.data().status === "deleting" ||
+        !table.exists || table.data().venueId !== venueId) {
+      throw new HttpsError("failed-precondition", "The selected table is not active at this venue.");
+    }
+    if (bookingId != null && (!existing.exists || existing.data().venueId !== venueId)) {
+      throw new HttpsError("not-found", "The booking was not found at this venue.");
+    }
+    const activeStatus = status !== "cancelled" && status !== "noShow";
+    const conflict = activeStatus && tableBookings.docs.some((document) => {
+      if (document.id === bookingRef.id) return false;
+      const other = document.data();
+      if (other.venueId !== venueId || other.status === "cancelled" || other.status === "noShow") return false;
+      return startsAtMillis < other.endsAtMillis && endsAtMillis > other.startsAtMillis;
+    });
+    if (conflict) {
+      throw new HttpsError("already-exists", "That table already has a booking during this time.");
+    }
+    const values = {
+      venueId, tableId, customerName, phone, notes, guestCount,
+      startsAtMillis, endsAtMillis, durationMinutes, status,
+      updatedAt: FieldValue.serverTimestamp(), updatedByActor: actor,
+    };
+    if (existing.exists) {
+      transaction.set(bookingRef, values, {merge: true});
+    } else {
+      transaction.create(bookingRef, {
+        ...values, createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
+      });
+    }
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: existing.exists ? "updateBooking" : "createBooking",
+      venueId, bookingId: bookingRef.id, tableId, customerName,
+      startsAtMillis, endsAtMillis, status, actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  });
+  return {id: bookingRef.id, startsAtMillis, endsAtMillis, status};
+}
+
 async function updateTableFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -4611,6 +4699,8 @@ async function invokePosAction(action, caller, data) {
       return updateOrderDraftLineFor(actingCaller, data);
     case "createTable":
       return createTableFor(actingCaller, data);
+    case "saveBooking":
+      return saveBookingFor(actingCaller, data);
     case "updateTable":
       return updateTableFor(actingCaller, data);
     case "deleteTable":
