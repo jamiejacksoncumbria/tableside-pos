@@ -434,7 +434,8 @@ class ProductionCommandRepository {
   Future<String> saveBooking({
     required VenueScope scope,
     String? bookingId,
-    required String tableId,
+    String? tableId,
+    bool autoAssignTable = false,
     required String customerName,
     required String phone,
     required String notes,
@@ -448,6 +449,7 @@ class ProductionCommandRepository {
       'venueId': scope.venueId,
       'bookingId': bookingId,
       'tableId': tableId,
+      'autoAssignTable': autoAssignTable,
       'customerName': customerName,
       'phone': phone,
       'notes': notes,

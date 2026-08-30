@@ -33,11 +33,21 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
     final bookingValue = ref.watch(venueBookingsProvider);
     final tables =
         ref.watch(diningTablesProvider).value ?? const <DiningTable>[];
-    final bookings = (bookingValue.value ?? const <VenueBooking>[])
-        .where(
-          (booking) => DateUtils.isSameDay(booking.startsAt.toLocal(), _day),
-        )
-        .toList(growable: false);
+    final bookings =
+        (bookingValue.value ?? const <VenueBooking>[])
+            .where(
+              (booking) =>
+                  DateUtils.isSameDay(booking.startsAt.toLocal(), _day),
+            )
+            .toList(growable: false)
+          ..sort((left, right) {
+            final byTime = left.startsAt.compareTo(right.startsAt);
+            if (byTime != 0) return byTime;
+            return _tableLabel(
+              tables,
+              left.tableId,
+            ).compareTo(_tableLabel(tables, right.tableId));
+          });
     return Scaffold(
       floatingActionButton: scope == null
           ? null
@@ -197,10 +207,13 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
     );
     final notes = TextEditingController(text: existing?.notes ?? '');
     var tableId = existing?.tableId ?? tables.first.id;
+    var autoAssignTable = false;
     var startsAt =
         existing?.startsAt.toLocal() ??
         DateTime(_day.year, _day.month, _day.day, 19);
     var status = existing?.status ?? BookingStatus.requested;
+    String? saveError;
+    var saving = false;
     final formKey = GlobalKey<FormState>();
     try {
       await showDialog<void>(
@@ -234,16 +247,35 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
                       const SizedBox(height: 10),
                       DropdownButtonFormField<String>(
                         initialValue: tableId,
-                        decoration: const InputDecoration(labelText: 'Table'),
+                        decoration: const InputDecoration(
+                          labelText: 'Specific table',
+                        ),
                         items: [
                           for (final table in tables)
                             DropdownMenuItem(
                               value: table.id,
-                              child: Text(table.label),
+                              child: Text(
+                                '${table.label} · ${table.seats} cover${table.seats == 1 ? '' : 's'}',
+                              ),
                             ),
                         ],
-                        onChanged: (value) =>
-                            setDialogState(() => tableId = value ?? tableId),
+                        onChanged: autoAssignTable
+                            ? null
+                            : (value) => setDialogState(
+                                () => tableId = value ?? tableId,
+                              ),
+                      ),
+                      SwitchListTile.adaptive(
+                        contentPadding: EdgeInsets.zero,
+                        value: autoAssignTable,
+                        title: const Text('Automatically choose a table'),
+                        subtitle: const Text(
+                          'Assigns the smallest free table that can seat this booking.',
+                        ),
+                        onChanged: (value) => setDialogState(() {
+                          autoAssignTable = value;
+                          saveError = null;
+                        }),
                       ),
                       const SizedBox(height: 10),
                       ListTile(
@@ -329,6 +361,24 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
                           labelText: 'Notes (optional)',
                         ),
                       ),
+                      if (saveError != null) ...[
+                        const SizedBox(height: 12),
+                        Material(
+                          color: Theme.of(context).colorScheme.errorContainer,
+                          borderRadius: BorderRadius.circular(10),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Icon(Icons.event_busy_outlined),
+                                const SizedBox(width: 10),
+                                Expanded(child: Text(saveError!)),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -340,38 +390,53 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
                 child: const Text('Cancel'),
               ),
               FilledButton(
-                onPressed: () async {
-                  if (!(formKey.currentState?.validate() ?? false)) return;
-                  try {
-                    await ref
-                        .read(productionCommandRepositoryProvider)
-                        .saveBooking(
-                          scope: scope,
-                          bookingId: existing?.id,
-                          tableId: tableId,
-                          customerName: name.text.trim(),
-                          phone: phone.text.trim(),
-                          notes: notes.text.trim(),
-                          guestCount: int.parse(guests.text),
-                          startsAt: startsAt,
-                          durationMinutes: int.parse(duration.text),
-                          status: status.name,
-                        );
-                    if (dialogContext.mounted) Navigator.pop(dialogContext);
-                  } on Object catch (error, stackTrace) {
-                    AppLogger.error('Save booking', error, stackTrace);
-                    if (dialogContext.mounted) {
-                      showAppNotification(
-                        dialogContext,
-                        ref: ref,
-                        title: 'Could not save booking',
-                        message: '$error',
-                        level: AppNotificationLevel.error,
-                      );
-                    }
-                  }
-                },
-                child: const Text('Save booking'),
+                onPressed: saving
+                    ? null
+                    : () async {
+                        if (!(formKey.currentState?.validate() ?? false)) {
+                          return;
+                        }
+                        setDialogState(() {
+                          saving = true;
+                          saveError = null;
+                        });
+                        try {
+                          await ref
+                              .read(productionCommandRepositoryProvider)
+                              .saveBooking(
+                                scope: scope,
+                                bookingId: existing?.id,
+                                tableId: autoAssignTable ? null : tableId,
+                                autoAssignTable: autoAssignTable,
+                                customerName: name.text.trim(),
+                                phone: phone.text.trim(),
+                                notes: notes.text.trim(),
+                                guestCount: int.parse(guests.text),
+                                startsAt: startsAt,
+                                durationMinutes: int.parse(duration.text),
+                                status: status.name,
+                              );
+                          if (dialogContext.mounted) {
+                            Navigator.pop(dialogContext);
+                          }
+                        } on Object catch (error, stackTrace) {
+                          AppLogger.error('Save booking', error, stackTrace);
+                          if (dialogContext.mounted) {
+                            setDialogState(() {
+                              saving = false;
+                              saveError = _bookingErrorMessage(error);
+                            });
+                            showAppNotification(
+                              dialogContext,
+                              ref: ref,
+                              title: 'Could not save booking',
+                              message: _bookingErrorMessage(error),
+                              level: AppNotificationLevel.error,
+                            );
+                          }
+                        }
+                      },
+                child: Text(saving ? 'Saving…' : 'Save booking'),
               ),
             ],
           ),
@@ -400,26 +465,78 @@ class _BookingCard extends StatelessWidget {
   final ValueChanged<BookingStatus>? onStatus;
   @override
   Widget build(BuildContext context) => Card(
-    child: ListTile(
-      leading: CircleAvatar(child: Text(_timeLabel(booking.startsAt))),
-      title: Text(booking.customerName),
-      subtitle: Text(
-        '$tableLabel · ${booking.guestCount} guest${booking.guestCount == 1 ? '' : 's'} · ${booking.durationMinutes} min\n${booking.status.label}${booking.phone.isEmpty ? '' : ' · ${booking.phone}'}',
-      ),
-      isThreeLine: true,
-      trailing: PopupMenuButton<Object>(
-        onSelected: (value) {
-          if (value == 'edit') onEdit?.call();
-          if (value is BookingStatus) onStatus?.call(value);
-        },
-        itemBuilder: (_) => [
-          const PopupMenuItem(value: 'edit', child: Text('Edit details')),
-          for (final status in BookingStatus.values)
-            if (status != booking.status)
-              PopupMenuItem(
-                value: status,
-                child: Text('Mark ${status.label.toLowerCase()}'),
-              ),
+    child: Padding(
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            constraints: const BoxConstraints(minWidth: 88),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.primaryContainer,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  tableLabel,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _timeLabel(booking.startsAt),
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  booking.customerName,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${booking.guestCount} guest${booking.guestCount == 1 ? '' : 's'} · ${booking.durationMinutes} min · ${booking.status.label}',
+                ),
+                if (booking.phone.isNotEmpty) Text(booking.phone),
+                if (booking.notes.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    booking.notes,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ],
+            ),
+          ),
+          PopupMenuButton<Object>(
+            onSelected: (value) {
+              if (value == 'edit') onEdit?.call();
+              if (value is BookingStatus) onStatus?.call(value);
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(value: 'edit', child: Text('Edit details')),
+              for (final status in BookingStatus.values)
+                if (status != booking.status)
+                  PopupMenuItem(
+                    value: status,
+                    child: Text('Mark ${status.label.toLowerCase()}'),
+                  ),
+            ],
+          ),
         ],
       ),
     ),
@@ -458,6 +575,15 @@ String _timeLabel(DateTime value) =>
     '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
 String? _required(String? value) =>
     value == null || value.trim().isEmpty ? 'Required' : null;
+String _bookingErrorMessage(Object error) {
+  final message = '$error';
+  const marker = 'Bad state: ';
+  final markerIndex = message.lastIndexOf(marker);
+  return markerIndex >= 0
+      ? message.substring(markerIndex + marker.length).trim()
+      : message;
+}
+
 String? _positiveInt(String? value) {
   final parsed = int.tryParse(value ?? '');
   return parsed == null || parsed <= 0 ? 'Enter a positive whole number' : null;

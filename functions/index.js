@@ -2606,7 +2606,8 @@ async function saveBookingFor(caller, rawData) {
   const venueId = requiredText(data, "venueId", 128);
   const bookingId = data.bookingId == null || data.bookingId === ""
     ? null : requiredDocumentId(data, "bookingId");
-  const tableId = requiredDocumentId(data, "tableId");
+  const autoAssignTable = data.autoAssignTable === true;
+  const requestedTableId = autoAssignTable ? null : requiredDocumentId(data, "tableId");
   const customerName = requiredText(data, "customerName", 120).trim();
   const phone = optionalText(data, "phone", 40) || "";
   const notes = optionalText(data, "notes", 1000) || "";
@@ -2621,40 +2622,66 @@ async function saveBookingFor(caller, rawData) {
   await requireTenantOperationalMember(caller, tenantId);
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
-  const tableRef = tenantRef.collection("tables").doc(tableId);
   const bookingRef = bookingId == null
     ? tenantRef.collection("bookings").doc()
     : tenantRef.collection("bookings").doc(bookingId);
   const actor = actorSnapshot(await auth.getUser(caller.uid));
+  let assignedTableId = requestedTableId;
   await db.runTransaction(async (transaction) => {
-    const [venue, table, existing, tableBookings] = await Promise.all([
+    const [venue, existing, venueTables, possibleConflicts] = await Promise.all([
       transaction.get(venueRef),
-      transaction.get(tableRef),
       transaction.get(bookingRef),
+      transaction.get(
+          tenantRef.collection("tables").where("venueId", "==", venueId),
+      ),
       transaction.get(
           tenantRef.collection("bookings")
               .where("venueId", "==", venueId)
-              .where("tableId", "==", tableId)
               .where("startsAtMillis", "<", endsAtMillis),
       ),
     ]);
-    if (!venue.exists || venue.data().status === "deleting" ||
-        !table.exists || table.data().venueId !== venueId) {
-      throw new HttpsError("failed-precondition", "The selected table is not active at this venue.");
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
     }
     if (bookingId != null && (!existing.exists || existing.data().venueId !== venueId)) {
       throw new HttpsError("not-found", "The booking was not found at this venue.");
     }
     const activeStatus = status !== "cancelled" && status !== "noShow";
-    const conflict = activeStatus && tableBookings.docs.some((document) => {
+    const conflictingTableIds = new Set(possibleConflicts.docs.filter((document) => {
       if (document.id === bookingRef.id) return false;
       const other = document.data();
       if (other.venueId !== venueId || other.status === "cancelled" || other.status === "noShow") return false;
       return startsAtMillis < other.endsAtMillis && endsAtMillis > other.startsAtMillis;
-    });
-    if (conflict) {
-      throw new HttpsError("already-exists", "That table already has a booking during this time.");
+    }).map((document) => document.data().tableId));
+    let tableId = requestedTableId;
+    if (autoAssignTable) {
+      const availableTables = venueTables.docs
+          .map((document) => ({id: document.id, ...document.data()}))
+          .filter((table) => Number.isInteger(table.seats) && table.seats >= guestCount)
+          .filter((table) => !activeStatus || !conflictingTableIds.has(table.id))
+          .sort((left, right) => left.seats - right.seats ||
+            String(left.label ?? left.id).localeCompare(String(right.label ?? right.id)));
+      if (availableTables.length === 0) {
+        throw new HttpsError(
+            "already-exists",
+            `No table for ${guestCount} guests is available at that date and time.`,
+        );
+      }
+      tableId = availableTables[0].id;
+    } else {
+      const selectedTable = venueTables.docs.find((document) => document.id === tableId);
+      if (selectedTable == null) {
+        throw new HttpsError("failed-precondition", "The selected table is not active at this venue.");
+      }
+      if (activeStatus && conflictingTableIds.has(tableId)) {
+        const tableName = String(selectedTable.data().label ?? "Selected table");
+        throw new HttpsError(
+            "already-exists",
+            `${tableName} is already booked during this time. Choose another table or use automatic assignment.`,
+        );
+      }
     }
+    assignedTableId = tableId;
     const values = {
       venueId, tableId, customerName, phone, notes, guestCount,
       startsAtMillis, endsAtMillis, durationMinutes, status,
@@ -2670,11 +2697,17 @@ async function saveBookingFor(caller, rawData) {
     transaction.create(tenantRef.collection("auditEvents").doc(), {
       action: existing.exists ? "updateBooking" : "createBooking",
       venueId, bookingId: bookingRef.id, tableId, customerName,
-      startsAtMillis, endsAtMillis, status, actor,
+      startsAtMillis, endsAtMillis, status, autoAssignTable, actor,
       createdAt: FieldValue.serverTimestamp(),
     });
   });
-  return {id: bookingRef.id, startsAtMillis, endsAtMillis, status};
+  return {
+    id: bookingRef.id,
+    tableId: assignedTableId,
+    startsAtMillis,
+    endsAtMillis,
+    status,
+  };
 }
 
 async function updateTableFor(caller, rawData) {
