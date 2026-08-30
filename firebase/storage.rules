@@ -5,13 +5,6 @@ service firebase.storage {
       return request.auth != null;
     }
 
-    function isPlatformAdmin() {
-      return signedIn() && (
-        request.auth.token.platformAdmin == true
-        || firestore.exists(/databases/(default)/documents/platformAdmins/$(request.auth.uid))
-      );
-    }
-
     function isMember(tenantId) {
       return signedIn()
         && firestore.exists(/databases/(default)/documents/tenants/$(tenantId)/members/$(request.auth.uid))
@@ -24,12 +17,12 @@ service firebase.storage {
     }
 
     match /tenants/{tenantId}/branding/{fileName} {
-      allow read: if isPlatformAdmin() || isMember(tenantId);
+      allow read: if isMember(tenantId);
       allow write: if false;
     }
 
     match /tenants/{tenantId}/products/{fileName} {
-      allow read: if isPlatformAdmin() || isMember(tenantId);
+      allow read: if isMember(tenantId);
       allow write: if false;
     }
   }

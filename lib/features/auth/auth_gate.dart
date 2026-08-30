@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -16,6 +17,19 @@ class FirebaseAuthGate extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    ref.listen<AsyncValue<User?>>(authStateProvider, (previous, next) {
+      final previousUid = previous?.asData?.value?.uid;
+      final currentUid = next.asData?.value?.uid;
+      if (currentUid == null ||
+          (previousUid != null && previousUid != currentUid)) {
+        AppLogger.info(
+          'Firebase authentication changed; clearing local venue and staff sessions.',
+        );
+        ref.read(activeStaffPinSessionProvider.notifier).lock();
+        ref.read(activeVenueScopeProvider.notifier).clear();
+        ref.read(homeSectionProvider.notifier).select(HomeSection.pos);
+      }
+    });
     final authState = ref.watch(authStateProvider);
     return authState.when(
       loading: () => const _LoadingScreen(label: 'Checking your session…'),
@@ -231,7 +245,7 @@ class AuthenticatedWorkspace extends ConsumerWidget {
         final scope = ref.watch(activeVenueScopeProvider);
         return scope == null
             ? VenuePicker(memberships: items)
-            : _TenantWorkspace(scope: scope, isPlatformAdmin: isPlatformAdmin);
+            : _TenantWorkspace(scope: scope);
       },
     );
   }
@@ -358,10 +372,9 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
 }
 
 class _TenantWorkspace extends ConsumerWidget {
-  const _TenantWorkspace({required this.scope, required this.isPlatformAdmin});
+  const _TenantWorkspace({required this.scope});
 
   final VenueScope scope;
-  final bool isPlatformAdmin;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -399,7 +412,6 @@ class _TenantWorkspace extends ConsumerWidget {
         profileOverride: profile.requireValue,
         venueOverride: venue,
         persistCompanyProfile: true,
-        isPlatformAdmin: isPlatformAdmin,
         onSwitchVenue: () {
           AppLogger.info('Returning to the company and venue picker.');
           ref.read(activeStaffPinSessionProvider.notifier).lock();

@@ -553,6 +553,37 @@ class _MenuPanel extends ConsumerWidget {
         ? null
         : topLevelSections.firstWhere((item) => item.id == effectiveSection);
 
+    Future<void> addSelectedProduct(
+      MenuProduct product, {
+      required bool forceConfiguration,
+    }) async {
+      try {
+        if (!await _ensureOrderLocation(context, ref)) return;
+        final selection = forceConfiguration || product.requiresConfiguration
+            ? await showProductConfigurationSheet(
+                context: context,
+                product: product,
+                availableGroups: modifierGroups,
+                currencyCode: currencyCode,
+              )
+            : const ProductConfigurationSelection();
+        if (selection == null) return;
+        await ref
+            .read(activeOrderProvider.notifier)
+            .addProduct(product, selection: selection);
+      } on Object catch (error, stackTrace) {
+        AppLogger.error('Add item to shared draft order', error, stackTrace);
+        if (!context.mounted) return;
+        showAppNotification(
+          context,
+          ref: ref,
+          title: 'Item was not added',
+          message: '$error',
+          level: AppNotificationLevel.error,
+        );
+      }
+    }
+
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Padding(
@@ -684,67 +715,14 @@ class _MenuPanel extends ConsumerWidget {
                             product: products[index],
                             currencyCode: currencyCode,
                             canAdd: activeOrder.canAddProduct(products[index]),
-                            onTap: () async {
-                              try {
-                                final product = products[index];
-                                final selection = product.requiresConfiguration
-                                    ? await showProductConfigurationSheet(
-                                        context: context,
-                                        product: product,
-                                        availableGroups: modifierGroups,
-                                        currencyCode: currencyCode,
-                                      )
-                                    : const ProductConfigurationSelection();
-                                if (selection == null) return;
-                                await ref
-                                    .read(activeOrderProvider.notifier)
-                                    .addProduct(product, selection: selection);
-                              } on Object catch (error, stackTrace) {
-                                AppLogger.error(
-                                  'Add item to shared draft order',
-                                  error,
-                                  stackTrace,
-                                );
-                                if (!context.mounted) return;
-                                showAppNotification(
-                                  context,
-                                  ref: ref,
-                                  title: 'Item was not added',
-                                  message: '$error',
-                                  level: AppNotificationLevel.error,
-                                );
-                              }
-                            },
-                            onLongPress: () async {
-                              try {
-                                final product = products[index];
-                                final selection =
-                                    await showProductConfigurationSheet(
-                                      context: context,
-                                      product: product,
-                                      availableGroups: modifierGroups,
-                                      currencyCode: currencyCode,
-                                    );
-                                if (selection == null) return;
-                                await ref
-                                    .read(activeOrderProvider.notifier)
-                                    .addProduct(product, selection: selection);
-                              } on Object catch (error, stackTrace) {
-                                AppLogger.error(
-                                  'Configure item for shared draft order',
-                                  error,
-                                  stackTrace,
-                                );
-                                if (!context.mounted) return;
-                                showAppNotification(
-                                  context,
-                                  ref: ref,
-                                  title: 'Item was not added',
-                                  message: '$error',
-                                  level: AppNotificationLevel.error,
-                                );
-                              }
-                            },
+                            onTap: () => addSelectedProduct(
+                              products[index],
+                              forceConfiguration: false,
+                            ),
+                            onLongPress: () => addSelectedProduct(
+                              products[index],
+                              forceConfiguration: true,
+                            ),
                           ),
                         );
                       },
@@ -1987,9 +1965,159 @@ class _StatusChip extends StatelessWidget {
   }
 }
 
-void _showNamedTabDialog(BuildContext context, WidgetRef ref) {
+Future<bool> _ensureOrderLocation(BuildContext context, WidgetRef ref) async {
+  // Demo mode has no venue-backed table or named-tab registry.
+  if (ref.read(activeVenueScopeProvider) == null) return true;
+  final order = ref.read(activeOrderProvider);
+  if (order.tableId != null || order.tabName?.trim().isNotEmpty == true) {
+    return true;
+  }
+  return await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const _OrderLocationDialog(),
+      ) ??
+      false;
+}
+
+class _OrderLocationDialog extends ConsumerStatefulWidget {
+  const _OrderLocationDialog();
+
+  @override
+  ConsumerState<_OrderLocationDialog> createState() =>
+      _OrderLocationDialogState();
+}
+
+class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
+  final _tabName = TextEditingController();
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _tabName.dispose();
+    super.dispose();
+  }
+
+  Future<void> _selectTable(DiningTable table) async {
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await ref.read(activeOrderProvider.notifier).openTable(table.id);
+      ref.read(selectedTableProvider.notifier).select(table.id);
+      if (mounted) Navigator.of(context).pop(true);
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Choose table for new order', error, stackTrace);
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _openNamedTab() async {
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await ref.read(activeOrderProvider.notifier).openNamedTab(_tabName.text);
+      ref.read(selectedTableProvider.notifier).select('');
+      if (mounted) Navigator.of(context).pop(true);
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Open named tab for new order', error, stackTrace);
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tables = ref.watch(diningTablesProvider).when(
+          data: (items) => items,
+          loading: () => const <DiningTable>[],
+          error: (error, stackTrace) {
+            AppLogger.error('Load tables for new order', error, stackTrace);
+            return const <DiningTable>[];
+          },
+        );
+    final tablesLoading = ref.watch(diningTablesProvider).isLoading;
+    return AlertDialog(
+      icon: const Icon(Icons.receipt_long_outlined),
+      title: const Text('Start this order'),
+      content: SizedBox(
+        width: 520,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('Choose the table, or open a named customer tab first.'),
+            const SizedBox(height: 12),
+            if (_error != null) ...[
+              Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+              const SizedBox(height: 8),
+            ],
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 230),
+              child: tablesLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: tables.length,
+                      separatorBuilder: (_, _) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final table = tables[index];
+                        return ListTile(
+                          enabled: !_saving,
+                          leading: const Icon(Icons.table_restaurant_rounded),
+                          title: Text(table.label),
+                          subtitle: Text('${table.seats} seats'),
+                          trailing: const Icon(Icons.chevron_right_rounded),
+                          onTap: () => _selectTable(table),
+                        );
+                      },
+                    ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _tabName,
+              enabled: !_saving,
+              maxLength: 80,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(
+                labelText: 'Or open a named tab',
+                hintText: 'For example, John N',
+              ),
+              onSubmitted: (_) {
+                if (!_saving) _openNamedTab();
+              },
+            ),
+            FilledButton.icon(
+              onPressed: _saving ? null : _openNamedTab,
+              icon: const Icon(Icons.person_add_alt_1_rounded),
+              label: const Text('Open named tab'),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _saving ? null : () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+      ],
+    );
+  }
+}
+
+Future<void> _showNamedTabDialog(BuildContext context, WidgetRef ref) async {
   final nameController = TextEditingController();
-  showDialog<void>(
+  await showDialog<void>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       icon: const Icon(Icons.person_outline_rounded),

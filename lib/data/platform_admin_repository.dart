@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import '../core/app_logger.dart';
 import '../core/firebase_bootstrap.dart';
+import '../core/staff_pin_session_store.dart';
 import '../firebase_options.dart';
 
 final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
@@ -242,6 +243,17 @@ class PlatformAdminRepository {
       'platformAdminApi',
     );
     AppLogger.info('Platform API $name: sending request.');
+    final staffSession = StaffPinSessionStore.current;
+    final requestData = <String, Object?>{
+      ...data,
+      if (staffSession != null)
+        'staffPinSessionTenantId': staffSession.tenantId,
+      if (staffSession != null)
+        'staffPinSessionVenueId': staffSession.venueId,
+      if (staffSession != null) 'staffPinSessionId': staffSession.sessionId,
+      if (staffSession != null)
+        'staffPinSessionToken': staffSession.sessionToken,
+    };
     final response = await http.post(
       endpoint,
       headers: {
@@ -249,7 +261,7 @@ class PlatformAdminRepository {
         'Content-Type': 'application/json',
         'X-Firebase-AppCheck': ?appCheckToken,
       },
-      body: jsonEncode({'action': name, 'data': data}),
+      body: jsonEncode({'action': name, 'data': requestData}),
     );
     AppLogger.info('Platform API $name: HTTP ${response.statusCode}.');
     final decoded = jsonDecode(response.body);

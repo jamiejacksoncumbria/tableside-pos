@@ -5,7 +5,8 @@ import {getAuth} from "firebase-admin/auth";
 import {getStorage} from "firebase-admin/storage";
 import {FieldValue, getFirestore} from "firebase-admin/firestore";
 import {onDocumentUpdated} from "firebase-functions/v2/firestore";
-import {HttpsError, onCall, onRequest} from "firebase-functions/v2/https";
+import {HttpsError, onRequest} from "firebase-functions/v2/https";
+import {onSchedule} from "firebase-functions/v2/scheduler";
 import {defineBoolean, defineString} from "firebase-functions/params";
 import {setGlobalOptions} from "firebase-functions/v2";
 
@@ -34,13 +35,6 @@ const cbrtRateCacheTtlMs = 15 * 60 * 1000;
 let cbrtRateCache = null;
 
 setGlobalOptions({region, maxInstances: 10});
-
-function callerFromCall(request) {
-  if (request.auth == null) {
-    throw new HttpsError("unauthenticated", "Sign in before calling this action.");
-  }
-  return request.auth;
-}
 
 async function isPlatformAdmin(caller) {
   if (caller.token.platformAdmin === true) return true;
@@ -570,7 +564,7 @@ async function manageMenuConfigurationFor(caller, rawData) {
     const parentSectionId = rawParentSectionId
       ? requiredDocumentId({parentSectionId: rawParentSectionId}, "parentSectionId")
       : null;
-    if (parentSectionId === documentId) {
+    if (documentId != null && parentSectionId === documentId) {
       throw new HttpsError("invalid-argument", "A section cannot be its own parent.");
     }
     if (parentSectionId != null) {
@@ -1130,11 +1124,12 @@ async function setOwnStaffPinFor(caller, rawData) {
     venueId,
     salt,
     pinHash: hashStaffPin(pin, salt),
+    pinVersion: FieldValue.increment(1),
     failedAttempts: 0,
     locked: false,
     updatedAt: FieldValue.serverTimestamp(),
     updatedBy: caller.uid,
-  });
+  }, {merge: true});
   await writeAudit(caller.uid, "setOwnStaffPin", caller.uid, {tenantId, venueId});
   return {configured: true};
 }
@@ -1151,13 +1146,24 @@ async function unlockStaffPinFor(caller, rawData) {
   const pinRef = db.doc(
     `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, userId)}`,
   );
-  const pin = await pinRef.get();
+  const [venue, staffMembership, pin] = await Promise.all([
+    db.doc(`tenants/${tenantId}/venues/${venueId}`).get(),
+    db.doc(`tenants/${tenantId}/members/${userId}`).get(),
+    pinRef.get(),
+  ]);
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  if (!staffMembership.exists || staffMembership.data().active === false) {
+    throw new HttpsError("failed-precondition", "This staff account is not active.");
+  }
   if (!pin.exists || pin.data().venueId !== venueId) {
     throw new HttpsError("not-found", "This staff PIN was not found for the selected venue.");
   }
   await pinRef.update({
     locked: false,
     failedAttempts: 0,
+    pinVersion: FieldValue.increment(1),
     unlockedAt: FieldValue.serverTimestamp(),
     unlockedBy: caller.uid,
   });
@@ -1172,15 +1178,20 @@ async function verifyStaffPinFor(caller, rawData) {
   const userId = requiredText(data, "userId", 128);
   const pin = requiredSixDigitPin(data);
   await requireTenantOperationalMember(caller, tenantId);
+  const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
   const memberRef = db.doc(`tenants/${tenantId}/members/${userId}`);
   const pinRef = db.doc(
     `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, userId)}`,
   );
   const verification = await db.runTransaction(async (transaction) => {
-    const [member, pinDocument] = await Promise.all([
+    const [venue, member, pinDocument] = await Promise.all([
+      transaction.get(venueRef),
       transaction.get(memberRef),
       transaction.get(pinRef),
     ]);
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
     if (!member.exists || member.data().active === false) {
       throw new HttpsError("permission-denied", "This staff account is not active.");
     }
@@ -1209,9 +1220,22 @@ async function verifyStaffPinFor(caller, rawData) {
       failedAttempts: 0,
       lastVerifiedAt: FieldValue.serverTimestamp(),
     });
-    return {valid: true, failedAttempts: 0};
+    return {
+      valid: true,
+      failedAttempts: 0,
+      pinVersion: Number.isInteger(pinData.pinVersion) ? pinData.pinVersion : 0,
+    };
   });
   if (!verification.valid) {
+    await db.collection(`tenants/${tenantId}/securityAlerts`).add({
+      type: verification.failedAttempts >= 3 ? "staffPinLocked" : "staffPinFailed",
+      venueId,
+      userId,
+      hostUserId: caller.uid,
+      failedAttempts: verification.failedAttempts,
+      requiresManagerAttention: verification.failedAttempts >= 3,
+      createdAt: FieldValue.serverTimestamp(),
+    });
     throw new HttpsError(
       verification.failedAttempts >= 3 ? "resource-exhausted" : "permission-denied",
       verification.failedAttempts >= 3
@@ -1238,6 +1262,7 @@ async function verifyStaffPinFor(caller, rawData) {
     userId,
     venueId,
     hostUserId: caller.uid,
+    pinVersion: verification.pinVersion,
     tokenHash: createHash("sha256").update(token).digest("base64"),
     expiresAt,
     createdAt: FieldValue.serverTimestamp(),
@@ -1249,6 +1274,7 @@ async function verifyStaffPinFor(caller, rawData) {
     userId,
     venueId,
     roles: verifiedRoles,
+    platformAdmin: platformAdmin.exists || user.customClaims?.platformAdmin === true,
     sessionId: sessionRef.id,
     expiresAt,
     updatedAt: FieldValue.serverTimestamp(),
@@ -1278,8 +1304,10 @@ async function actingCallerFromStaffSession(hostCaller, data) {
   if (!sessionId || !sessionToken) {
     throw new HttpsError("unauthenticated", "The shared-device staff session is incomplete.");
   }
-  const tenantId = requiredText(data, "tenantId", 128);
-  const venueId = requiredText(data, "venueId", 128);
+  const tenantId = optionalText(data, "staffPinSessionTenantId", 128) ||
+    requiredText(data, "tenantId", 128);
+  const venueId = optionalText(data, "staffPinSessionVenueId", 128) ||
+    requiredText(data, "venueId", 128);
   const session = await db.doc(
     `tenants/${tenantId}/staffPinSessions/${sessionId}`,
   ).get();
@@ -1304,9 +1332,23 @@ async function actingCallerFromStaffSession(hostCaller, data) {
   const actingUserId = typeof sessionData.userId === "string"
     ? sessionData.userId
     : "";
-  const membership = await db.doc(`tenants/${tenantId}/members/${actingUserId}`).get();
+  const [membership, hostMembership, currentPin] = await Promise.all([
+    db.doc(`tenants/${tenantId}/members/${actingUserId}`).get(),
+    db.doc(`tenants/${tenantId}/members/${hostCaller.uid}`).get(),
+    db.doc(`tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, actingUserId)}`).get(),
+  ]);
+  const currentPinVersion = Number.isInteger(currentPin.data()?.pinVersion)
+    ? currentPin.data().pinVersion
+    : 0;
+  if (!hostMembership.exists || hostMembership.data().active === false) {
+    throw new HttpsError("permission-denied", "This device's Firebase account no longer has restaurant access.");
+  }
   if (!membership.exists || membership.data().active === false) {
     throw new HttpsError("permission-denied", "The selected staff account is no longer active.");
+  }
+  if (!currentPin.exists || currentPin.data().locked === true ||
+      currentPinVersion !== sessionData.pinVersion) {
+    throw new HttpsError("unauthenticated", "The staff PIN changed or was locked. Enter the current PIN again.");
   }
   return {...hostCaller, uid: actingUserId, hostUid: hostCaller.uid};
 }
@@ -4375,39 +4417,74 @@ async function updateProductionTicketFor(caller, rawData) {
 }
 
 async function invokePlatformAction(action, caller, data) {
+  let actingCaller = caller;
+  if (action !== "bootstrapPlatformAdmin") {
+    const hasPinSession = typeof data.staffPinSessionId === "string" ||
+      typeof data.staffPinSessionToken === "string";
+    if (hasPinSession) {
+      actingCaller = await actingCallerFromStaffSession(caller, data);
+    } else {
+      // A brand-new platform administrator has no restaurant in which to set
+      // a PIN. Permit only the minimum onboarding surface until its first
+      // active membership exists; all later platform work requires a PIN.
+      const memberships = await db.collectionGroup("members")
+        .where("userId", "==", caller.uid)
+        .limit(1)
+        .get();
+      const onboardingActions = new Set([
+        "listAuthUsers", "listTenants", "listSupportedTimeZones",
+        "listSupportedCurrencies", "createTenant",
+      ]);
+      const configuredInitialEmail = initialPlatformAdminEmail.value().trim().toLowerCase();
+      const callerEmail = typeof caller.token.email === "string"
+        ? caller.token.email.trim().toLowerCase()
+        : "";
+      if (
+        !memberships.empty ||
+        !onboardingActions.has(action) ||
+        configuredInitialEmail.length === 0 ||
+        callerEmail !== configuredInitialEmail
+      ) {
+        throw new HttpsError(
+          "unauthenticated",
+          "Enter your platform administrator PIN before using platform tools.",
+        );
+      }
+    }
+  }
   switch (action) {
     case "bootstrapPlatformAdmin":
       return bootstrapPlatformAdminFor(caller);
     case "listAuthUsers":
-      return listAuthUsersFor(caller, data);
+      return listAuthUsersFor(actingCaller, data);
     case "listTenants":
-      return listTenantsFor(caller);
+      return listTenantsFor(actingCaller);
     case "listSupportedTimeZones":
-      return listSupportedTimeZonesFor(caller);
+      return listSupportedTimeZonesFor(actingCaller);
     case "listSupportedCurrencies":
-      return listSupportedCurrenciesFor(caller);
+      return listSupportedCurrenciesFor(actingCaller);
     case "listTenantVenues":
-      return listTenantVenuesFor(caller, data);
+      return listTenantVenuesFor(actingCaller, data);
     case "listUserMemberships":
-      return listUserMembershipsFor(caller, data);
+      return listUserMembershipsFor(actingCaller, data);
     case "createTenant":
-      return createTenantFor(caller, data);
+      return createTenantFor(actingCaller, data);
     case "updateTenant":
-      return updateTenantFor(caller, data);
+      return updateTenantFor(actingCaller, data);
     case "createVenue":
-      return createVenueFor(caller, data);
+      return createVenueFor(actingCaller, data);
     case "updateVenue":
-      return updateVenueFor(caller, data);
+      return updateVenueFor(actingCaller, data);
     case "deleteVenue":
-      return deleteVenueFor(caller, data);
+      return deleteVenueFor(actingCaller, data);
     case "createStaffUser":
-      return createStaffUserFor(caller, data);
+      return createStaffUserFor(actingCaller, data);
     case "assignUserToTenant":
-      return assignUserToTenantFor(caller, data);
+      return assignUserToTenantFor(actingCaller, data);
     case "retireStaffUser":
-      return retireStaffUserFor(caller, data);
+      return retireStaffUserFor(actingCaller, data);
     case "setPlatformAdmin":
-      return setPlatformAdminFor(caller, data);
+      return setPlatformAdminFor(actingCaller, data);
     default:
       throw new HttpsError("not-found", "That platform action does not exist.");
   }
@@ -4435,7 +4512,7 @@ async function invokePosAction(action, caller, data) {
     case "completeDevicePrintJob":
       return completeDevicePrintJobFor(caller, data);
     case "unlockStaffPin":
-      return unlockStaffPinFor(caller, data);
+      return unlockStaffPinFor(actingCaller, data);
     case "openNamedTab":
       return openNamedTabFor(actingCaller, data);
     case "addOrderDraftLine":
@@ -4483,7 +4560,7 @@ async function callerFromHttpRequest(request) {
     throw new HttpsError("unauthenticated", "A Firebase ID token is required.");
   }
   try {
-    const token = await auth.verifyIdToken(header.substring(7));
+    const token = await auth.verifyIdToken(header.substring(7), true);
     return {uid: token.uid, token};
   } catch (_) {
     throw new HttpsError("unauthenticated", "The Firebase ID token is invalid or expired.");
@@ -4611,48 +4688,29 @@ export const posApi = onRequest({cors: true}, async (request, response) => {
   }
 });
 
-// Callable variants remain available for non-Windows clients and tests.
-export const bootstrapPlatformAdmin = onCall((request) =>
-  bootstrapPlatformAdminFor(callerFromCall(request)));
-export const listAuthUsers = onCall((request) =>
-  listAuthUsersFor(callerFromCall(request), request.data));
-export const listTenants = onCall((request) =>
-  listTenantsFor(callerFromCall(request)));
-export const listSupportedTimeZones = onCall((request) =>
-  listSupportedTimeZonesFor(callerFromCall(request)));
-export const listSupportedCurrencies = onCall((request) =>
-  listSupportedCurrenciesFor(callerFromCall(request)));
-export const listTenantVenues = onCall((request) =>
-  listTenantVenuesFor(callerFromCall(request), request.data));
-export const listUserMemberships = onCall((request) =>
-  listUserMembershipsFor(callerFromCall(request), request.data));
-export const createTenant = onCall((request) =>
-  createTenantFor(callerFromCall(request), request.data));
-export const updateTenant = onCall((request) =>
-  updateTenantFor(callerFromCall(request), request.data));
-export const createVenue = onCall((request) =>
-  createVenueFor(callerFromCall(request), request.data));
-export const updateVenue = onCall((request) =>
-  updateVenueFor(callerFromCall(request), request.data));
-export const listVenuePinStaff = onCall((request) =>
-  listVenuePinStaffFor(callerFromCall(request), request.data));
-export const setOwnStaffPin = onCall((request) =>
-  setOwnStaffPinFor(callerFromCall(request), request.data));
-export const verifyStaffPin = onCall((request) =>
-  verifyStaffPinFor(callerFromCall(request), request.data));
-export const deleteVenue = onCall((request) =>
-  deleteVenueFor(callerFromCall(request), request.data));
-export const createStaffUser = onCall((request) =>
-  createStaffUserFor(callerFromCall(request), request.data));
-export const assignUserToTenant = onCall((request) =>
-  assignUserToTenantFor(callerFromCall(request), request.data));
-export const retireStaffUser = onCall((request) =>
-  retireStaffUserFor(callerFromCall(request), request.data));
-export const setPlatformAdmin = onCall((request) =>
-  setPlatformAdminFor(callerFromCall(request), request.data));
-export const createTable = onCall((request) =>
-  createTableFor(callerFromCall(request), request.data));
-export const updateTable = onCall((request) =>
-  updateTableFor(callerFromCall(request), request.data));
-export const deleteTable = onCall((request) =>
-  deleteTableFor(callerFromCall(request), request.data));
+async function deleteExpiredSecurityDocuments(collectionId) {
+  let removed = 0;
+  while (true) {
+    const expired = await db.collectionGroup(collectionId)
+      .where("expiresAt", "<=", new Date())
+      .limit(400)
+      .get();
+    if (expired.empty) return removed;
+    const batch = db.batch();
+    for (const document of expired.docs) batch.delete(document.ref);
+    await batch.commit();
+    removed += expired.size;
+    if (expired.size < 400) return removed;
+  }
+}
+
+export const cleanupExpiredSecuritySessions = onSchedule(
+  {schedule: "every 24 hours", timeZone: "Etc/UTC"},
+  async () => {
+    const [sessions, authorizations] = await Promise.all([
+      deleteExpiredSecurityDocuments("staffPinSessions"),
+      deleteExpiredSecurityDocuments("staffPinAuthorizations"),
+    ]);
+    console.info("Expired security records removed.", {sessions, authorizations});
+  },
+);

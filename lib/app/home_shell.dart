@@ -39,7 +39,6 @@ class HomeShell extends ConsumerWidget {
     this.profileOverride,
     this.venueOverride,
     this.persistCompanyProfile = false,
-    this.isPlatformAdmin = false,
     this.onSwitchVenue,
     this.onSignOut,
   });
@@ -47,7 +46,6 @@ class HomeShell extends ConsumerWidget {
   final TenantProfile? profileOverride;
   final Venue? venueOverride;
   final bool persistCompanyProfile;
-  final bool isPlatformAdmin;
   final VoidCallback? onSwitchVenue;
   final VoidCallback? onSignOut;
 
@@ -58,8 +56,10 @@ class HomeShell extends ConsumerWidget {
       appNotificationsProvider.select(unreadNotificationCount),
     );
     final staffSession = ref.watch(activeStaffPinSessionProvider);
-    final canOpenPlatformTools =
-        isPlatformAdmin && staffSession?.isPlatformAdmin == true;
+    // Shared terminals use the verified PIN identity for authority. The
+    // Firebase email account only keeps the device online; it must never grant
+    // platform tools to a different selected member.
+    final canOpenPlatformTools = staffSession?.isPlatformAdmin == true;
     final canManageVenue =
         staffSession?.roles.any(
           (role) => role == 'owner' || role == 'manager',

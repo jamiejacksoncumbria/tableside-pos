@@ -45,6 +45,8 @@ class StaffPinVerification {
     required this.sessionId,
     required this.sessionToken,
     required this.expiresAt,
+    required this.tenantId,
+    required this.venueId,
     required this.userId,
     required this.displayName,
     required this.isPlatformAdmin,
@@ -54,6 +56,8 @@ class StaffPinVerification {
   final String sessionId;
   final String sessionToken;
   final DateTime expiresAt;
+  final String tenantId;
+  final String venueId;
   final String userId;
   final String displayName;
   final bool isPlatformAdmin;
@@ -186,7 +190,8 @@ class ProductionCommandRepository {
       'venueId': scope.venueId,
       'resource': resource,
       'operation': operation,
-      'documentId': documentId,
+      if (documentId != null && documentId.trim().isNotEmpty)
+        'documentId': documentId,
       'values': values,
     });
     final returnedId = response['documentId'];
@@ -356,6 +361,8 @@ class ProductionCommandRepository {
       sessionId: response['sessionId'] as String,
       sessionToken: response['sessionToken'] as String,
       expiresAt: DateTime.parse(response['expiresAt'] as String),
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
       userId: response['userId'] as String,
       displayName: response['displayName'] as String,
       isPlatformAdmin: response['isPlatformAdmin'] == true,

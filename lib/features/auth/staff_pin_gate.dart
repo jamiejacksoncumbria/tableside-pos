@@ -19,10 +19,12 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
   @override
   StaffPinVerification? build() => null;
 
-  void unlock(StaffPinVerification session) {
+  void unlock(StaffPinVerification session, VenueScope scope) {
     StaffPinSessionStore.current = StaffPinSessionCredentials(
       sessionId: session.sessionId,
       sessionToken: session.sessionToken,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
     );
     state = session;
   }
@@ -44,6 +46,8 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
     StaffPinSessionStore.current = StaffPinSessionCredentials(
       sessionId: session.sessionId,
       sessionToken: session.sessionToken,
+      tenantId: session.tenantId,
+      venueId: session.venueId,
     );
     return true;
   }
@@ -59,7 +63,8 @@ class StaffPinGate extends ConsumerStatefulWidget {
   ConsumerState<StaffPinGate> createState() => _StaffPinGateState();
 }
 
-class _StaffPinGateState extends ConsumerState<StaffPinGate> {
+class _StaffPinGateState extends ConsumerState<StaffPinGate>
+    with WidgetsBindingObserver {
   final ProductionCommandRepository _repository = ProductionCommandRepository();
   List<VenuePinStaff>? _staff;
   String? _selectedUserId;
@@ -67,11 +72,41 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
   bool _submitting = false;
   String? _error;
   Timer? _expiryTimer;
+  DateTime? _backgroundedAt;
+
+  static const _backgroundLockAfter = Duration(minutes: 2);
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadStaff();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+        _backgroundedAt ??= DateTime.now();
+        break;
+      case AppLifecycleState.resumed:
+        final backgroundedAt = _backgroundedAt;
+        _backgroundedAt = null;
+        if (backgroundedAt != null &&
+            DateTime.now().difference(backgroundedAt) >=
+                _backgroundLockAfter) {
+          AppLogger.info(
+            'Shared device locked after being backgrounded for two minutes.',
+          );
+          ref.read(activeStaffPinSessionProvider.notifier).lock();
+        }
+        break;
+      case AppLifecycleState.detached:
+        ref.read(activeStaffPinSessionProvider.notifier).lock();
+        break;
+    }
   }
 
   @override
@@ -85,6 +120,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _expiryTimer?.cancel();
     super.dispose();
   }
@@ -132,7 +168,9 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate> {
         userId: staff.userId,
         pin: pin,
       );
-      ref.read(activeStaffPinSessionProvider.notifier).unlock(session);
+      ref
+          .read(activeStaffPinSessionProvider.notifier)
+          .unlock(session, widget.scope);
       _expiryTimer?.cancel();
       _expiryTimer = Timer(session.expiresAt.difference(DateTime.now()), () {
         ref.read(activeStaffPinSessionProvider.notifier).lock();

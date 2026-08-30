@@ -727,7 +727,12 @@ Future<void> _showSectionDialog({
 }) async {
   final name = TextEditingController(text: existing?.name ?? '');
   final formKey = GlobalKey<FormState>();
-  String? parentId = existing?.parentSectionId;
+  // Older records may contain a historical self-parent value. It is never a
+  // valid hierarchy, so editing that section should repair it rather than
+  // making the editor impossible to save.
+  String? parentId = existing?.parentSectionId == existing?.id
+      ? null
+      : existing?.parentSectionId;
   var selectedIcon = existing?.icon ?? '🍽️';
   final iconOptions = [
     if (!_sectionIconOptions.any((item) => item.symbol == selectedIcon))

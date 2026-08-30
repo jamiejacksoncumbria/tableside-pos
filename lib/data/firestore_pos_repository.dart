@@ -592,10 +592,11 @@ class FirestorePosRepository {
       resource: 'section',
       operation: 'save',
       values: {
-      'name': cleanedName,
-      'icon': icon.trim().isEmpty ? '🍽️' : icon.trim(),
-      'sortOrder': sortOrder,
-      'parentSectionId': parentSectionId,
+        'name': cleanedName,
+        'icon': icon.trim().isEmpty ? '🍽️' : icon.trim(),
+        'sortOrder': sortOrder,
+        if (parentSectionId != null && parentSectionId.trim().isNotEmpty)
+          'parentSectionId': parentSectionId,
       },
     );
   }
@@ -618,9 +619,14 @@ class FirestorePosRepository {
       operation: 'save',
       documentId: sectionId,
       values: {
-          'name': cleanedName,
-          'icon': icon.trim().isEmpty ? '🍽️' : icon.trim(),
+        'name': cleanedName,
+        'icon': icon.trim().isEmpty ? '🍽️' : icon.trim(),
+        if (parentSectionId != null &&
+            parentSectionId.trim().isNotEmpty &&
+            parentSectionId != sectionId)
           'parentSectionId': parentSectionId,
+        if (parentSectionId == null || parentSectionId == sectionId)
+          'parentSectionId': null,
       },
     );
   }
