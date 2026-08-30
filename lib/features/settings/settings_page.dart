@@ -344,17 +344,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   controller: _displayName,
                   decoration: const InputDecoration(labelText: 'Trading name'),
                 ),
-                const SizedBox(height: 14),
-                TextField(
-                  controller: _backgroundLockSeconds,
-                  keyboardType: TextInputType.number,
-                  enabled: !_savingNotificationRetention,
-                  decoration: const InputDecoration(
-                    labelText: 'Background lock time',
-                    helperText: '15 seconds to 60 minutes; default is 2 minutes.',
-                    suffixText: 'seconds',
-                  ),
-                ),
                 TextField(
                   controller: _legalName,
                   decoration: const InputDecoration(
@@ -544,6 +533,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   decoration: const InputDecoration(
                     labelText: 'Notification display time (seconds)',
                     helperText: '1 to 60 seconds; the default is 5 seconds.',
+                    suffixText: 'seconds',
+                  ),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _backgroundLockSeconds,
+                  keyboardType: TextInputType.number,
+                  enabled: !_savingNotificationRetention,
+                  decoration: const InputDecoration(
+                    labelText: 'Background lock time',
+                    helperText: '15 seconds to 60 minutes; default is 2 minutes.',
                     suffixText: 'seconds',
                   ),
                 ),
