@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
@@ -34,9 +35,14 @@ class OrderFlowPage extends ConsumerStatefulWidget {
 
 class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   Timer? _clock;
+  Timer? _allergyAlarm;
   ProductionArea? _area;
   _FlowFilter _filter = _FlowFilter.all;
   final Map<String, OrderFlowOrder> _demoOverrides = {};
+  final Set<String> _seenTicketIds = <String>{};
+  final Set<String> _redAlertedTicketIds = <String>{};
+  final Set<String> _activeAllergyTicketIds = <String>{};
+  bool _receivedInitialOrders = false;
 
   @override
   void initState() {
@@ -49,6 +55,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   @override
   void dispose() {
     _clock?.cancel();
+    _allergyAlarm?.cancel();
     super.dispose();
   }
 
@@ -75,6 +82,11 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
           (order) => scope == null ? _demoOverrides[order.id] ?? order : order,
         )
         .toList(growable: false);
+    if (scope != null && flowValue.hasValue) {
+      scheduleMicrotask(() {
+        if (mounted) _observeOrderAlerts(allOrders);
+      });
+    }
     final scheme = Theme.of(context).colorScheme;
 
     return SafeArea(
@@ -110,6 +122,32 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
             ],
           ),
           const SizedBox(height: 20),
+          if (_activeAllergyTicketIds.isNotEmpty) ...[
+            Card(
+              color: Colors.red.shade700,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.warning_amber_rounded, color: Colors.white),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'Allergy alert: silence only after the kitchen has acknowledged it.',
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: _silenceAllergyAlarm,
+                      style: TextButton.styleFrom(foregroundColor: Colors.white),
+                      child: const Text('Silence'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
           _FilterBar(
             area: _area,
             filter: _filter,
@@ -144,6 +182,61 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
         ],
       ),
     );
+  }
+
+  void _observeOrderAlerts(List<OrderFlowOrder> orders) {
+    final activeIds = orders.map((order) => order.id).toSet();
+    if (!_receivedInitialOrders) {
+      _receivedInitialOrders = true;
+      _seenTicketIds.addAll(activeIds);
+      return;
+    }
+    final newOrders = orders
+        .where((order) => !_seenTicketIds.contains(order.id))
+        .toList(growable: false);
+    _seenTicketIds
+      ..clear()
+      ..addAll(activeIds);
+    final newAllergyIds = newOrders
+        .where((order) => order.hasAllergyAlert)
+        .map((order) => order.id)
+        .toSet();
+    if (newAllergyIds.isNotEmpty) {
+      _activeAllergyTicketIds.addAll(newAllergyIds);
+      _startAllergyAlarm();
+      if (mounted) setState(() {});
+    } else if (newOrders.isNotEmpty) {
+      unawaited(SystemSound.play(SystemSoundType.alert));
+    }
+    final newlyRed = orders
+        .where(
+          (order) =>
+              _lateState(order, DateTime.now(), widget.amberMinutes, widget.redMinutes) ==
+                  _LateState.red &&
+              !_redAlertedTicketIds.contains(order.id),
+        )
+        .map((order) => order.id)
+        .toSet();
+    if (newlyRed.isNotEmpty) {
+      _redAlertedTicketIds.addAll(newlyRed);
+      unawaited(SystemSound.play(SystemSoundType.alert));
+    }
+  }
+
+  void _startAllergyAlarm() {
+    _allergyAlarm ??= Timer.periodic(const Duration(seconds: 4), (_) {
+      if (_activeAllergyTicketIds.isNotEmpty) {
+        unawaited(SystemSound.play(SystemSoundType.alert));
+      }
+    });
+    unawaited(SystemSound.play(SystemSoundType.alert));
+  }
+
+  void _silenceAllergyAlarm() {
+    _activeAllergyTicketIds.clear();
+    _allergyAlarm?.cancel();
+    _allergyAlarm = null;
+    setState(() {});
   }
 
   bool _matchesFilters(OrderFlowOrder order) {

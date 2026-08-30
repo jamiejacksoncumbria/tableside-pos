@@ -54,8 +54,15 @@ class QueuedNativePrintWorker {
       final user = FirebaseAuth.instance.currentUser;
       final requiredTransport = _requiredTransport;
       if (user == null || requiredTransport == null) return;
-      final deviceId = await _identity.getOrCreate();
-      final deviceCredential = await _identity.credential();
+      var deviceId = await _identity.deviceIdForScope(scope);
+      var deviceCredential = await _identity.credential(scope);
+      if (deviceCredential == null || deviceCredential.isEmpty) {
+        final legacyCredential = await _identity.legacyCredential();
+        if (legacyCredential != null && legacyCredential.isNotEmpty) {
+          deviceId = await _identity.getOrCreate();
+          deviceCredential = legacyCredential;
+        }
+      }
       if (deviceCredential == null || deviceCredential.isEmpty) return;
       final device = await _devices.getDevice(
         tenantId: scope.tenantId,
@@ -84,8 +91,15 @@ class QueuedNativePrintWorker {
     if (user == null || requiredTransport == null) {
       return PrintWorkerResult.noWork;
     }
-    final deviceId = await _identity.getOrCreate();
-    final deviceCredential = await _identity.credential();
+    var deviceId = await _identity.deviceIdForScope(scope);
+    var deviceCredential = await _identity.credential(scope);
+    if (deviceCredential == null || deviceCredential.isEmpty) {
+      final legacyCredential = await _identity.legacyCredential();
+      if (legacyCredential != null && legacyCredential.isNotEmpty) {
+        deviceId = await _identity.getOrCreate();
+        deviceCredential = legacyCredential;
+      }
+    }
     if (deviceCredential == null || deviceCredential.isEmpty) {
       return PrintWorkerResult.noWork;
     }

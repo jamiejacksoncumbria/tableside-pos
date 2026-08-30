@@ -136,6 +136,20 @@ class SelectedTableController extends Notifier<String> {
   void select(String tableId) => state = tableId;
 }
 
+/// The compact POS has three full-screen workspaces: tables, menu and order.
+/// After a successful send we deliberately return it to tables, rather than
+/// leaving a phone looking like it is still taking the last guest's order.
+final posCompactTabProvider = NotifierProvider<PosCompactTabController, int>(
+  PosCompactTabController.new,
+);
+
+class PosCompactTabController extends Notifier<int> {
+  @override
+  int build() => 1;
+
+  void select(int index) => state = index.clamp(0, 2) as int;
+}
+
 final activeOrderProvider = NotifierProvider<ActiveOrderController, PosOrder>(
   ActiveOrderController.new,
 );
@@ -148,6 +162,13 @@ class ActiveOrderController extends Notifier<PosOrder> {
 
   @override
   PosOrder build() {
+    final scope = ref.watch(activeVenueScopeProvider);
+    ref.listen<VenueScope?>(activeVenueScopeProvider, (previous, next) {
+      if (previous == next) return;
+      AppLogger.info('Venue changed; clearing the active table/tab selection.');
+      ref.read(activePersistedOrderIdProvider.notifier).select(null);
+      ref.read(selectedTableProvider.notifier).select('');
+    });
     ref.listen<AsyncValue<PosOrder?>>(activeOrderStreamProvider, (_, next) {
       next.when(
         data: _applyLiveOrder,
@@ -158,7 +179,6 @@ class ActiveOrderController extends Notifier<PosOrder> {
     });
     // A venue deliberately opens with no selected table. Picking the first
     // table automatically can attach a waiter to the wrong guest's bill.
-    final scope = ref.read(activeVenueScopeProvider);
     final tableId = ref.read(selectedTableProvider);
     final now = DateTime.now();
     return PosOrder(
@@ -488,6 +508,27 @@ class ActiveOrderController extends Notifier<PosOrder> {
           .toList(growable: false),
     );
     return printResult;
+  }
+
+  /// A sent ticket is safely owned by the venue and remains visible on the
+  /// floor/order-flow screens. Clear only this device's selection so the next
+  /// product cannot accidentally be added to the previous guest.
+  void clearSelectionAfterSend() {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) return;
+    _pendingDraftQuantities.clear();
+    _selectPersistedOrder(null);
+    ref.read(selectedTableProvider.notifier).select('');
+    final now = DateTime.now();
+    state = PosOrder(
+      id: 'order-${now.microsecondsSinceEpoch}',
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      businessDate: DateTime(now.year, now.month, now.day),
+      openedAt: now,
+      status: OrderStatus.open,
+      lines: const [],
+    );
   }
 
   /// Records verified payment allocations after the server atomically creates

@@ -17,6 +17,7 @@ class PosPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final compactTab = ref.watch(posCompactTabProvider);
     return LayoutBuilder(
       builder: (context, constraints) {
         // Three simultaneously visible panels need both a genuinely wide and
@@ -51,11 +52,15 @@ class PosPage extends ConsumerWidget {
         return Padding(
           padding: const EdgeInsets.all(12),
           child: DefaultTabController(
+            key: ValueKey(compactTab),
             length: 3,
-            initialIndex: 1,
+            initialIndex: compactTab,
             child: Column(
               children: [
-                const TabBar(
+                TabBar(
+                  onTap: (index) => ref
+                      .read(posCompactTabProvider.notifier)
+                      .select(index),
                   tabs: [
                     Tab(
                       icon: Icon(Icons.table_restaurant_rounded),
@@ -217,6 +222,8 @@ class _TablesPanel extends ConsumerWidget {
                               padding: const EdgeInsets.only(bottom: 6),
                               child: _NamedTabButton(
                                 tab: tab,
+                                scope: scope,
+                                currencyCode: currencyCode,
                                 selected: tab.orderId == activeOrder.id,
                                 onTap: () async {
                                   try {
@@ -377,27 +384,38 @@ class _TableButton extends ConsumerWidget {
   }
 }
 
-class _NamedTabButton extends StatelessWidget {
+class _NamedTabButton extends ConsumerWidget {
   const _NamedTabButton({
     required this.tab,
+    required this.scope,
+    required this.currencyCode,
     required this.selected,
     required this.onTap,
   });
 
   final OpenNamedTab tab;
+  final VenueScope? scope;
+  final String currencyCode;
   final bool selected;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    final totalMinor = scope == null
+        ? null
+        : ref.watch(tableOpenOrderProvider(tab.orderId)).when(
+            data: (order) => order?.totalMinor,
+            loading: () => null,
+            error: (_, _) => null,
+          );
     final background = selected
         ? scheme.primaryContainer
         : scheme.surfaceContainerHighest;
     return Semantics(
       button: true,
       selected: selected,
-      label: 'Open tab for ${tab.name}',
+      label: 'Open tab for ${tab.name}${totalMinor == null ? '' : ', ${formatMoney(totalMinor, currencyCode: currencyCode)} owed'}',
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(12),
@@ -416,11 +434,22 @@ class _NamedTabButton extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               Expanded(
-                child: Text(
-                  tab.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w700),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      tab.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    if (totalMinor != null)
+                      Text(
+                        formatMoney(totalMinor, currencyCode: currencyCode),
+                        style: Theme.of(context).textTheme.labelMedium,
+                      ),
+                  ],
                 ),
               ),
               if (selected)
@@ -1226,6 +1255,10 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                             message: message,
                             level: AppNotificationLevel.success,
                           );
+                          ref
+                              .read(activeOrderProvider.notifier)
+                              .clearSelectionAfterSend();
+                          ref.read(posCompactTabProvider.notifier).select(0);
                         } on Object catch (error, stackTrace) {
                           AppLogger.error(
                             'Send order to production',

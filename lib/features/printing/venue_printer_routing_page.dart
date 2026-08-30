@@ -61,7 +61,7 @@ class _VenuePrinterRoutingPageState
 
   Future<void> _loadLocalDevice() async {
     try {
-      final deviceId = await _identity.getOrCreate();
+      final physicalDeviceId = await _identity.getOrCreate();
       final selectedPrinter = _bluetooth.isSupported
           ? await _bluetooth.selectedDevice()
           : null;
@@ -70,7 +70,7 @@ class _VenuePrinterRoutingPageState
           : null;
       if (!mounted) return;
       setState(() {
-        _deviceId = deviceId;
+        _deviceId = physicalDeviceId;
         _selectedBluetoothPrinter = selectedPrinter;
         _selectedWindowsPrinter = selectedWindowsPrinter;
         if (_deviceName.text.trim().isEmpty) {
@@ -88,8 +88,8 @@ class _VenuePrinterRoutingPageState
 
   Future<void> _registerThisDevice({required VenueScope scope}) async {
     final user = FirebaseAuth.instance.currentUser;
-    final deviceId = _deviceId;
-    if (user == null || deviceId == null) {
+    final physicalDeviceId = _deviceId;
+    if (user == null || physicalDeviceId == null) {
       setState(() => _error = 'Sign in and wait for device setup to finish.');
       return;
     }
@@ -114,6 +114,7 @@ class _VenuePrinterRoutingPageState
       _error = null;
     });
     try {
+      final deviceId = await _identity.deviceIdForScope(scope);
       final hasSession = ref
           .read(activeStaffPinSessionProvider.notifier)
           .restoreCredentials();
@@ -134,7 +135,7 @@ class _VenuePrinterRoutingPageState
         ),
         tenantId: scope.tenantId,
       );
-      await _identity.saveCredential(deviceCredential);
+      await _identity.saveCredential(scope, deviceCredential);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -162,12 +163,13 @@ class _VenuePrinterRoutingPageState
     required VenueScope scope,
     required PrinterDevice device,
   }) async {
+    final localDeviceId = await _identity.deviceIdForScope(scope);
     final remove = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text('Remove ${device.name}?'),
         content: Text(
-          device.id == _deviceId
+          device.id == localDeviceId
               ? 'This registration and its local credential will be reset. Any routes using it will be repaired. Queued or printing tickets must be cleared first.'
               : 'This stale registration will be archived. Any routes using it will be repaired. Queued or printing tickets must be cleared first.',
         ),
@@ -199,16 +201,13 @@ class _VenuePrinterRoutingPageState
         );
       }
       await _devices.remove(scope: scope, deviceId: device.id);
-      if (device.id == _deviceId) {
-        await _identity.reset();
-        await _bluetooth.clearSelectedDevice();
-        await _windowsPrinter.clearSelectedPrinter();
-        final replacementId = await _identity.getOrCreate();
+      if (device.id == localDeviceId) {
+        await _identity.clearCredential(scope);
         if (mounted) {
           setState(() {
-            _deviceId = replacementId;
-            _selectedBluetoothPrinter = null;
-            _selectedWindowsPrinter = null;
+            // Keep the local Bluetooth/Windows selection intact. It belongs
+            // to this physical device and can be reused if the manager later
+            // registers it again for this venue or another venue.
             _deviceName.clear();
           });
         }
