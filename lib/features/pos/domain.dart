@@ -165,6 +165,7 @@ class Venue {
     required this.name,
     required this.timeZone,
     this.notificationRetentionSeconds = 5,
+    this.backgroundLockSeconds = 120,
     int orderFlowAmberMinutes = 15,
     int orderFlowRedMinutes = 25,
     int businessDayCutoffMinutes = 240,
@@ -179,6 +180,7 @@ class Venue {
   final String name;
   final String timeZone;
   final int notificationRetentionSeconds;
+  final int backgroundLockSeconds;
 
   // Nullable backing fields deliberately protect a running debug session
   // whose Venue instances pre-date these fields after a hot reload. Existing

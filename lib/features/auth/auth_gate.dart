@@ -408,6 +408,7 @@ class _TenantWorkspace extends ConsumerWidget {
     AppLogger.info('Venue workspace ready: ${venue.name}.');
     return StaffPinGate(
       scope: scope,
+      backgroundLockSeconds: venue.backgroundLockSeconds,
       child: HomeShell(
         profileOverride: profile.requireValue,
         venueOverride: venue,

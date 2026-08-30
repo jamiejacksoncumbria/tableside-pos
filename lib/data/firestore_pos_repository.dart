@@ -89,6 +89,9 @@ class FirestorePosRepository {
                   notificationRetentionSeconds: _notificationRetentionSeconds(
                     data['notificationRetentionSeconds'],
                   ),
+                  backgroundLockSeconds: _backgroundLockSeconds(
+                    data['backgroundLockSeconds'],
+                  ),
                   orderFlowAmberMinutes: _orderFlowMinutes(
                     data['orderFlowAmberMinutes'],
                     15,
@@ -115,6 +118,11 @@ class FirestorePosRepository {
   int _notificationRetentionSeconds(Object? value) {
     final seconds = value is int ? value : 5;
     return seconds.clamp(1, 60).toInt();
+  }
+
+  int _backgroundLockSeconds(Object? value) {
+    final seconds = value is int ? value : 120;
+    return seconds.clamp(15, 3600).toInt();
   }
 
   int _orderFlowMinutes(Object? value, int fallback) {

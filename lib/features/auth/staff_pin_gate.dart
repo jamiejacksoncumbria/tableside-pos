@@ -54,10 +54,16 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
 }
 
 class StaffPinGate extends ConsumerStatefulWidget {
-  const StaffPinGate({super.key, required this.scope, required this.child});
+  const StaffPinGate({
+    super.key,
+    required this.scope,
+    required this.child,
+    this.backgroundLockSeconds = 120,
+  });
 
   final VenueScope scope;
   final Widget child;
+  final int backgroundLockSeconds;
 
   @override
   ConsumerState<StaffPinGate> createState() => _StaffPinGateState();
@@ -74,7 +80,9 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   Timer? _expiryTimer;
   DateTime? _backgroundedAt;
 
-  static const _backgroundLockAfter = Duration(minutes: 2);
+  Duration get _backgroundLockAfter => Duration(
+    seconds: widget.backgroundLockSeconds.clamp(15, 3600) as int,
+  );
 
   @override
   void initState() {
@@ -98,7 +106,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             DateTime.now().difference(backgroundedAt) >=
                 _backgroundLockAfter) {
           AppLogger.info(
-            'Shared device locked after being backgrounded for two minutes.',
+            'Shared device locked after its configured background timeout.',
           );
           ref.read(activeStaffPinSessionProvider.notifier).lock();
         }

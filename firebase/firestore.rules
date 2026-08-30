@@ -29,6 +29,27 @@ service cloud.firestore {
       return isMember(tenantId) && membership(tenantId).data.roles.hasAny(['owner', 'manager']);
     }
 
+    // A printer-only Firebase account is the recommended host identity for a
+    // shared till. It can discover venues before PIN entry and operate its
+    // assigned printer, but it cannot read operational data until a real
+    // staff member has selected their name and passed PIN verification.
+    function isPrinterOnlyHost(tenantId) {
+      return isMember(tenantId)
+        && membership(tenantId).data.roles.hasAny(['printer'])
+        && !membership(tenantId).data.roles.hasAny(['owner', 'manager', 'waiter', 'cashier', 'kitchen']);
+    }
+
+    function hasActivePinAuthorization(tenantId) {
+      let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
+      return exists(authorizationPath)
+        && get(authorizationPath).data.expiresAt > request.time;
+    }
+
+    function canReadOperationalData(tenantId) {
+      return isMember(tenantId)
+        && (!isPrinterOnlyHost(tenantId) || hasActivePinAuthorization(tenantId));
+    }
+
     function managesTenantWithActivePin(tenantId) {
       let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
       return isMember(tenantId)
@@ -107,12 +128,12 @@ service cloud.firestore {
       }
 
       match /menuSections/{sectionId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         allow write: if false;
       }
 
       match /products/{productId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         allow write: if false;
       }
 
@@ -120,7 +141,7 @@ service cloud.firestore {
       // store only the group ids; authoritative order pricing/validation is
       // performed by the server function when a line is added or released.
       match /modifierGroups/{groupId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         allow write: if false;
       }
 
@@ -128,7 +149,7 @@ service cloud.firestore {
       // named rate and fixed basis-point value; the order function snapshots
       // that value again when a sale is made.
       match /taxRates/{taxRateId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         allow write: if false;
       }
 
@@ -136,12 +157,12 @@ service cloud.firestore {
       // release-to-production command. A client must never decrement stock by
       // writing a movement or product value directly.
       match /stockMovements/{movementId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         allow write: if false;
       }
 
       match /tables/{tableId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         allow write: if false;
       }
 
@@ -152,19 +173,19 @@ service cloud.firestore {
 
       // Open named tabs are server-managed, venue-local unique-name records.
       match /openTabNames/{tabId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         allow write: if false;
       }
 
       match /orders/{orderId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         allow write: if false;
       }
 
       // Production tickets contain kitchen/bar-safe order summaries only. New
       // tickets and state changes come from trusted, auditable commands.
       match /productionTickets/{ticketId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         allow write: if false;
       }
 
@@ -196,7 +217,7 @@ service cloud.firestore {
       }
 
       match /paymentRequests/{requestId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         // A server function validates the bill amount, creates the provider
         // payment intent, and is the only actor allowed to change its status.
         allow create: if false;
@@ -220,7 +241,7 @@ service cloud.firestore {
       // paid-receipt tickets go. The trusted command verifies a configured
       // device belongs to this venue before creating the job.
       match /printerRoutes/{routeId} {
-        allow read: if isMember(tenantId);
+        allow read: if canReadOperationalData(tenantId);
         allow create, update, delete: if false;
       }
 

@@ -40,6 +40,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final List<TextEditingController> _phoneNumbers;
   late final TextEditingController _footer;
   late final TextEditingController _notificationRetentionSeconds;
+  late final TextEditingController _backgroundLockSeconds;
   late final TextEditingController _orderFlowAmberMinutes;
   late final TextEditingController _orderFlowRedMinutes;
   late int _businessDayCutoffMinutes;
@@ -69,6 +70,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _notificationRetentionSeconds = TextEditingController(
       text: '${widget.venueOverride?.notificationRetentionSeconds ?? 5}',
     );
+    _backgroundLockSeconds = TextEditingController(
+      text: '${widget.venueOverride?.backgroundLockSeconds ?? 120}',
+    );
     _orderFlowAmberMinutes = TextEditingController(
       text: '${widget.venueOverride?.orderFlowAmberMinutes ?? 15}',
     );
@@ -91,6 +95,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     }
     _footer.dispose();
     _notificationRetentionSeconds.dispose();
+    _backgroundLockSeconds.dispose();
     _orderFlowAmberMinutes.dispose();
     _orderFlowRedMinutes.dispose();
     super.dispose();
@@ -176,6 +181,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   Future<void> _saveVenueNotificationRetention(VenueScope scope) async {
     if (_savingNotificationRetention) return;
     final seconds = int.tryParse(_notificationRetentionSeconds.text.trim());
+    final backgroundLockSeconds = int.tryParse(_backgroundLockSeconds.text.trim());
     final amberMinutes = int.tryParse(_orderFlowAmberMinutes.text.trim());
     final redMinutes = int.tryParse(_orderFlowRedMinutes.text.trim());
     if (seconds == null || seconds < 1 || seconds > 60) {
@@ -184,6 +190,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         ref: ref,
         title: 'Enter a valid notification time',
         message: 'Choose a whole number from 1 to 60 seconds.',
+        level: AppNotificationLevel.warning,
+      );
+      return;
+    }
+    if (backgroundLockSeconds == null ||
+        backgroundLockSeconds < 15 ||
+        backgroundLockSeconds > 3600) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Enter a valid lock time',
+        message: 'Choose a background lock time from 15 seconds to 60 minutes.',
         level: AppNotificationLevel.warning,
       );
       return;
@@ -211,6 +229,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           .updateVenueOperationalSettings(
             scope: scope,
             seconds: seconds,
+            backgroundLockSeconds: backgroundLockSeconds,
             orderFlowAmberMinutes: amberMinutes,
             orderFlowRedMinutes: redMinutes,
             businessDayCutoffMinutes: _businessDayCutoffMinutes,
@@ -221,7 +240,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         ref: ref,
         title: 'Venue notification timing saved',
         message:
-            'Notifications dismiss after $seconds seconds; orders warn at $amberMinutes/$redMinutes minutes. The day-end setting was saved safely.',
+            'Notifications dismiss after $seconds seconds; the device locks after $backgroundLockSeconds seconds in the background; orders warn at $amberMinutes/$redMinutes minutes.',
         level: AppNotificationLevel.success,
       );
     } on Object catch (error, stackTrace) {
@@ -324,6 +343,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 TextField(
                   controller: _displayName,
                   decoration: const InputDecoration(labelText: 'Trading name'),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _backgroundLockSeconds,
+                  keyboardType: TextInputType.number,
+                  enabled: !_savingNotificationRetention,
+                  decoration: const InputDecoration(
+                    labelText: 'Background lock time',
+                    helperText: '15 seconds to 60 minutes; default is 2 minutes.',
+                    suffixText: 'seconds',
+                  ),
                 ),
                 TextField(
                   controller: _legalName,

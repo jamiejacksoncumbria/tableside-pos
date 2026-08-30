@@ -688,6 +688,7 @@ class ProductionCommandRepository {
   Future<void> updateVenueOperationalSettings({
     required VenueScope scope,
     required int seconds,
+    required int backgroundLockSeconds,
     required int orderFlowAmberMinutes,
     required int orderFlowRedMinutes,
     required int businessDayCutoffMinutes,
@@ -696,6 +697,7 @@ class ProductionCommandRepository {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'notificationRetentionSeconds': seconds,
+      'backgroundLockSeconds': backgroundLockSeconds,
       'orderFlowAmberMinutes': orderFlowAmberMinutes,
       'orderFlowRedMinutes': orderFlowRedMinutes,
       'businessDayCutoffMinutes': businessDayCutoffMinutes,

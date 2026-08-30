@@ -73,6 +73,21 @@ async function requireTenantOperationalMember(caller, tenantId) {
   return {membership: membership.data(), roles};
 }
 
+/// A printer-only Firebase account may host the PIN gate, but never gains an
+/// acting staff identity. Every mutation still calls [requireTenantOperationalMember]
+/// after the selected PIN session has replaced the caller.
+async function requireTenantHostMember(caller, tenantId) {
+  const membership = await db.doc(`tenants/${tenantId}/members/${caller.uid}`).get();
+  if (!membership.exists || membership.data().active === false) {
+    throw new HttpsError("permission-denied", "You do not have active access to this restaurant.");
+  }
+  const roles = Array.isArray(membership.data().roles) ? membership.data().roles : [];
+  if (!roles.some((role) => ["owner", "manager", "waiter", "cashier", "printer"].includes(role))) {
+    throw new HttpsError("permission-denied", "This account cannot host a shared POS device.");
+  }
+  return {membership: membership.data(), roles};
+}
+
 function requireObject(value) {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
     throw new HttpsError("invalid-argument", "A data object is required.");
@@ -1070,6 +1085,34 @@ function staffPinDocumentId(venueId, userId) {
   return `${venueId}_${userId}`;
 }
 
+async function queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId}) {
+  const managers = await db.collection(`tenants/${tenantId}/members`).get();
+  const recipientIds = managers.docs
+    .filter((member) => member.data().active !== false &&
+      Array.isArray(member.data().roles) &&
+      member.data().roles.some((role) => role === "owner" || role === "manager"))
+    .map((member) => member.id);
+  const users = await Promise.all(recipientIds.map((id) => auth.getUser(id).catch(() => null)));
+  const emails = users
+    .map((user) => user?.email?.trim().toLowerCase())
+    .filter((email) => typeof email === "string" && email.length > 0);
+  if (emails.length === 0) return;
+  const staff = await auth.getUser(userId).catch(() => null);
+  const subject = "TableSide security alert: staff PIN locked";
+  const text = `A staff PIN was locked after three failed attempts. Venue: ${venueId}. ` +
+    `Staff: ${staff?.displayName || staff?.email || userId}. Device account: ${hostUserId}. ` +
+    "Open TableSide and use a manager PIN to review and unlock it if appropriate.";
+  // The official Firebase Trigger Email extension watches this collection.
+  // Without its one-time installation, the alert remains safely recorded in
+  // Firestore but cannot be delivered by Firebase Admin itself.
+  await db.collection("mail").add({
+    to: emails,
+    message: {subject, text},
+    metadata: {kind: "tablesideSecurityAlert", tenantId, venueId, userId},
+    createdAt: FieldValue.serverTimestamp(),
+  });
+}
+
 function hashStaffPin(pin, salt) {
   return scryptSync(pin, salt, 32).toString("base64");
 }
@@ -1078,7 +1121,7 @@ async function listVenuePinStaffFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  await requireTenantOperationalMember(caller, tenantId);
+  await requireTenantHostMember(caller, tenantId);
   const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
   if (!venue.exists || venue.data().status === "deleting") {
     throw new HttpsError("failed-precondition", "The selected venue is not active.");
@@ -1110,7 +1153,7 @@ async function setOwnStaffPinFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const pin = requiredSixDigitPin(data);
-  await requireTenantOperationalMember(caller, tenantId);
+  await requireTenantHostMember(caller, tenantId);
   const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
   if (!venue.exists || venue.data().status === "deleting") {
     throw new HttpsError("failed-precondition", "The selected venue is not active.");
@@ -1177,7 +1220,7 @@ async function verifyStaffPinFor(caller, rawData) {
   const venueId = requiredText(data, "venueId", 128);
   const userId = requiredText(data, "userId", 128);
   const pin = requiredSixDigitPin(data);
-  await requireTenantOperationalMember(caller, tenantId);
+  await requireTenantHostMember(caller, tenantId);
   const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
   const memberRef = db.doc(`tenants/${tenantId}/members/${userId}`);
   const pinRef = db.doc(
@@ -1236,6 +1279,9 @@ async function verifyStaffPinFor(caller, rawData) {
       requiresManagerAttention: verification.failedAttempts >= 3,
       createdAt: FieldValue.serverTimestamp(),
     });
+    if (verification.failedAttempts >= 3) {
+      await queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId: caller.uid});
+    }
     throw new HttpsError(
       verification.failedAttempts >= 3 ? "resource-exhausted" : "permission-denied",
       verification.failedAttempts >= 3
@@ -1750,6 +1796,7 @@ async function createTenantFor(caller, rawData) {
       nameKey: venueNameKey(venueName),
       timeZone,
       notificationRetentionSeconds: 5,
+      backgroundLockSeconds: 120,
       orderFlowAmberMinutes: 15,
       orderFlowRedMinutes: 25,
       businessDayCutoffMinutes: 240,
@@ -1831,6 +1878,7 @@ async function createVenueFor(caller, rawData) {
       nameKey,
       timeZone,
       notificationRetentionSeconds: 5,
+      backgroundLockSeconds: 120,
       orderFlowAmberMinutes: 15,
       orderFlowRedMinutes: 25,
       businessDayCutoffMinutes: 240,
@@ -2608,6 +2656,14 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
     "notificationRetentionSeconds",
     60,
   );
+  const backgroundLockSeconds = requiredPositiveInteger(
+    data.backgroundLockSeconds,
+    "backgroundLockSeconds",
+    3600,
+  );
+  if (backgroundLockSeconds < 15) {
+    throw new HttpsError("invalid-argument", "Background lock must be at least 15 seconds.");
+  }
   const orderFlowAmberMinutes = requiredPositiveInteger(
     data.orderFlowAmberMinutes,
     "orderFlowAmberMinutes",
@@ -2676,6 +2732,7 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
         };
     transaction.update(venueRef, {
       notificationRetentionSeconds,
+      backgroundLockSeconds,
       orderFlowAmberMinutes,
       orderFlowRedMinutes,
       ...cutoffUpdate,
@@ -2686,6 +2743,7 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
       action: "updateVenueNotificationSettings",
       venueId,
       notificationRetentionSeconds,
+      backgroundLockSeconds,
       orderFlowAmberMinutes,
       orderFlowRedMinutes,
       previousBusinessDayCutoffMinutes: safeCurrentCutoff,
@@ -2698,6 +2756,7 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
   });
   return {
     notificationRetentionSeconds,
+    backgroundLockSeconds,
     orderFlowAmberMinutes,
     orderFlowRedMinutes,
     requestedBusinessDayCutoffMinutes: businessDayCutoffMinutes,
