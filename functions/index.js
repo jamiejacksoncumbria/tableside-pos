@@ -3214,6 +3214,53 @@ async function printPreReceiptFor(caller, rawData) {
   });
 }
 
+async function refreshStaffPinSessionFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const sessionId = requiredText(data, "staffPinSessionId", 128);
+  const sessionRef = db.doc(`tenants/${tenantId}/staffPinSessions/${sessionId}`);
+  const authorizationRef = db.doc(
+    `tenants/${tenantId}/staffPinAuthorizations/${caller.hostUid ?? caller.uid}`,
+  );
+  const session = await sessionRef.get();
+  if (!session.exists || session.data().venueId !== venueId ||
+      session.data().userId !== caller.uid) {
+    throw new HttpsError("unauthenticated", "The staff PIN session cannot be extended.");
+  }
+  const createdAt = session.data().createdAt?.toDate?.() ?? null;
+  const maximumKdsSessionAt = createdAt == null
+    ? null
+    : new Date(createdAt.getTime() + 12 * 60 * 60 * 1000);
+  if (maximumKdsSessionAt == null || maximumKdsSessionAt.getTime() <= Date.now()) {
+    throw new HttpsError(
+      "unauthenticated",
+      "This Order Flow shift has reached 12 hours. Enter the staff PIN again.",
+    );
+  }
+  const expiresAt = new Date(Math.min(
+    Date.now() + 30 * 60 * 1000,
+    maximumKdsSessionAt.getTime(),
+  ));
+  const membership = await db.doc(`tenants/${tenantId}/members/${caller.uid}`).get();
+  const roles = Array.isArray(membership.data()?.roles) ? membership.data().roles : [];
+  const batch = db.batch();
+  batch.update(sessionRef, {
+    expiresAt,
+    lastKdsKeepAliveAt: FieldValue.serverTimestamp(),
+  });
+  batch.set(authorizationRef, {
+    userId: caller.uid,
+    venueId,
+    roles,
+    sessionId,
+    expiresAt,
+    updatedAt: FieldValue.serverTimestamp(),
+  }, {merge: true});
+  await batch.commit();
+  return {expiresAt: expiresAt.toISOString()};
+}
+
 async function closeOrderFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -4816,6 +4863,8 @@ async function invokePosAction(action, caller, data) {
       return changeOwnStaffPinFor(actingCaller, data);
     case "verifyStaffPin":
       return verifyStaffPinFor(caller, data);
+    case "refreshStaffPinSession":
+      return refreshStaffPinSessionFor(actingCaller, data);
     case "heartbeatPrinterDevice":
       return heartbeatPrinterDeviceFor(caller, data);
     case "claimDevicePrintJob":

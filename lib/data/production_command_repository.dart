@@ -62,6 +62,18 @@ class StaffPinVerification {
   final String displayName;
   final bool isPlatformAdmin;
   final List<String> roles;
+
+  StaffPinVerification copyWith({DateTime? expiresAt}) => StaffPinVerification(
+    sessionId: sessionId,
+    sessionToken: sessionToken,
+    expiresAt: expiresAt ?? this.expiresAt,
+    tenantId: tenantId,
+    venueId: venueId,
+    userId: userId,
+    displayName: displayName,
+    isPlatformAdmin: isPlatformAdmin,
+    roles: roles,
+  );
 }
 
 /// The server-calculated receipt result. The client never supplies the order
@@ -379,6 +391,18 @@ class ProductionCommandRepository {
       isPlatformAdmin: response['isPlatformAdmin'] == true,
       roles: List<String>.from(response['roles'] as List? ?? const []),
     );
+  }
+
+  Future<DateTime> refreshStaffPinSession({required VenueScope scope}) async {
+    final response = await _call('refreshStaffPinSession', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+    });
+    final expiresAt = response['expiresAt'];
+    if (expiresAt is! String) {
+      throw StateError('The server returned an invalid PIN-session expiry.');
+    }
+    return DateTime.parse(expiresAt);
   }
 
   Future<void> unlockStaffPin({
