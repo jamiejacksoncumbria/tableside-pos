@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/date_formats.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
@@ -213,7 +214,7 @@ class _TablesPanel extends ConsumerWidget {
                           Padding(
                             padding: const EdgeInsets.only(top: 6, bottom: 6),
                             child: Text(
-                              _namedTabDateLabel(context, group.openedDate),
+                              _namedTabDateLabel(group.openedDate),
                               style: Theme.of(context).textTheme.labelMedium,
                             ),
                           ),
@@ -494,22 +495,54 @@ List<_NamedTabDateGroup> _groupOpenNamedTabs(List<OpenNamedTab> tabs) {
   ];
 }
 
-String _namedTabDateLabel(BuildContext context, DateTime? date) {
+String _namedTabDateLabel(DateTime? date) {
   if (date == null) return 'Earlier tabs';
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
   if (date == today) return 'Today';
   if (date == today.subtract(const Duration(days: 1))) return 'Yesterday';
-  return MaterialLocalizations.of(context).formatMediumDate(date);
+  return formatAppDate(date);
 }
 
-class _MenuPanel extends ConsumerWidget {
+class _MenuPanel extends ConsumerStatefulWidget {
   const _MenuPanel({required this.currencyCode});
 
   final String currencyCode;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_MenuPanel> createState() => _MenuPanelState();
+}
+
+class _MenuPanelState extends ConsumerState<_MenuPanel> {
+  final TextEditingController _searchController = TextEditingController();
+  final ScrollController _productScrollController = ScrollController();
+
+  String get currencyCode => widget.currencyCode;
+
+  @override
+  void initState() {
+    super.initState();
+    _searchController.addListener(_searchChanged);
+  }
+
+  @override
+  void dispose() {
+    _searchController
+      ..removeListener(_searchChanged)
+      ..dispose();
+    _productScrollController.dispose();
+    super.dispose();
+  }
+
+  void _searchChanged() {
+    setState(() {});
+    if (_productScrollController.hasClients) {
+      _productScrollController.jumpTo(0);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final selectedSection = ref.watch(activeSectionProvider);
     final selectedSubsection = ref.watch(activeSubsectionProvider);
     final activeOrder = ref.watch(activeOrderProvider);
@@ -573,8 +606,12 @@ class _MenuPanel extends ConsumerWidget {
             effectiveSection,
             ...subsections.map((section) => section.id),
           };
+    final searchQuery = _searchController.text.trim().toLowerCase();
     final products = catalog
         .where((product) {
+          if (searchQuery.isNotEmpty) {
+            return productNameStartsWith(product, searchQuery);
+          }
           if (effectiveSubsection != null) {
             return product.sectionIds.contains(effectiveSubsection);
           }
@@ -626,16 +663,32 @@ class _MenuPanel extends ConsumerWidget {
           children: [
             Row(
               children: [
-                Expanded(
+                Flexible(
                   child: Text(
                     'New order',
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                 ),
-                IconButton.filledTonal(
-                  tooltip: 'Search menu',
-                  onPressed: () {},
-                  icon: const Icon(Icons.search_rounded),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: TextField(
+                    controller: _searchController,
+                    textInputAction: TextInputAction.search,
+                    decoration: InputDecoration(
+                      isDense: true,
+                      labelText: 'Quick product search',
+                      hintText: 'Type the start of a product name',
+                      prefixIcon: const Icon(Icons.search_rounded),
+                      suffixIcon: searchQuery.isEmpty
+                          ? null
+                          : IconButton(
+                              tooltip: 'Clear search',
+                              onPressed: _searchController.clear,
+                              icon: const Icon(Icons.close_rounded),
+                            ),
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -709,7 +762,9 @@ class _MenuPanel extends ConsumerWidget {
             ],
             const SizedBox(height: 14),
             Text(
-              effectiveSubsection == null
+              searchQuery.isNotEmpty
+                  ? 'Search results for “${_searchController.text.trim()}”'
+                  : effectiveSubsection == null
                   ? section?.name ?? 'All menu items'
                   : subsections
                         .firstWhere((item) => item.id == effectiveSubsection)
@@ -735,26 +790,34 @@ class _MenuPanel extends ConsumerWidget {
                     )
                   : LayoutBuilder(
                       builder: (context, _) {
-                        return GridView.builder(
-                          itemCount: products.length,
-                          gridDelegate:
-                              const SliverGridDelegateWithMaxCrossAxisExtent(
-                                maxCrossAxisExtent: 180,
-                                crossAxisSpacing: 12,
-                                mainAxisSpacing: 12,
-                                mainAxisExtent: 126,
+                        return Scrollbar(
+                          controller: _productScrollController,
+                          thumbVisibility: true,
+                          child: GridView.builder(
+                            controller: _productScrollController,
+                            primary: false,
+                            itemCount: products.length,
+                            gridDelegate:
+                                const SliverGridDelegateWithMaxCrossAxisExtent(
+                                  maxCrossAxisExtent: 180,
+                                  crossAxisSpacing: 12,
+                                  mainAxisSpacing: 12,
+                                  mainAxisExtent: 126,
+                                ),
+                            itemBuilder: (context, index) => _ProductTile(
+                              product: products[index],
+                              currencyCode: currencyCode,
+                              canAdd: activeOrder.canAddProduct(
+                                products[index],
                               ),
-                          itemBuilder: (context, index) => _ProductTile(
-                            product: products[index],
-                            currencyCode: currencyCode,
-                            canAdd: activeOrder.canAddProduct(products[index]),
-                            onTap: () => addSelectedProduct(
-                              products[index],
-                              forceConfiguration: false,
-                            ),
-                            onLongPress: () => addSelectedProduct(
-                              products[index],
-                              forceConfiguration: true,
+                              onTap: () => addSelectedProduct(
+                                products[index],
+                                forceConfiguration: false,
+                              ),
+                              onLongPress: () => addSelectedProduct(
+                                products[index],
+                                forceConfiguration: true,
+                              ),
                             ),
                           ),
                         );

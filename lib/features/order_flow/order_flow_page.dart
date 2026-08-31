@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
@@ -36,19 +37,26 @@ class OrderFlowPage extends ConsumerStatefulWidget {
 class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   Timer? _clock;
   Timer? _allergyAlarm;
+  Timer? _lateAlarm;
   ProductionArea? _area;
   _FlowFilter _filter = _FlowFilter.all;
   final Map<String, OrderFlowOrder> _demoOverrides = {};
   final Set<String> _seenTicketIds = <String>{};
   final Set<String> _redAlertedTicketIds = <String>{};
   final Set<String> _activeAllergyTicketIds = <String>{};
+  final Set<String> _activeLateTicketIds = <String>{};
+  final Set<String> _expandedTicketIds = <String>{};
   late final OrderFlowSound _sound;
   bool _receivedInitialOrders = false;
+  bool _audioMuted = false;
+  bool _audioPreferenceLoaded = false;
+  static const _audioMutedPreferenceKey = 'tableside.orderFlow.audioMuted';
 
   @override
   void initState() {
     super.initState();
     _sound = OrderFlowSound();
+    unawaited(_loadAudioPreference());
     _clock = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
@@ -58,6 +66,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   void dispose() {
     _clock?.cancel();
     _allergyAlarm?.cancel();
+    _lateAlarm?.cancel();
     unawaited(_sound.dispose());
     super.dispose();
   }
@@ -117,10 +126,27 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                   ),
                 ],
               ),
-              _BoardHealth(
-                allOrders: allOrders,
-                amberMinutes: widget.amberMinutes,
-                redMinutes: widget.redMinutes,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton.filledTonal(
+                    tooltip: _audioMuted
+                        ? 'Enable order-flow audio on this device'
+                        : 'Mute order-flow audio on this device',
+                    onPressed: _toggleAudioMuted,
+                    icon: Icon(
+                      _audioMuted
+                          ? Icons.volume_off_rounded
+                          : Icons.volume_up_rounded,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _BoardHealth(
+                    allOrders: allOrders,
+                    amberMinutes: widget.amberMinutes,
+                    redMinutes: widget.redMinutes,
+                  ),
+                ],
               ),
             ],
           ),
@@ -142,6 +168,35 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                     ),
                     TextButton(
                       onPressed: _silenceAllergyAlarm,
+                      style: TextButton.styleFrom(foregroundColor: Colors.white),
+                      child: const Text('Silence'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (_activeLateTicketIds.isNotEmpty) ...[
+            Card(
+              color: Colors.red.shade900,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.timer_off_outlined, color: Colors.white),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'Late-order alarm: investigate the red tickets, then silence this device.',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: _silenceLateAlarm,
                       style: TextButton.styleFrom(foregroundColor: Colors.white),
                       child: const Text('Silence'),
                     ),
@@ -177,6 +232,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                     amberMinutes: widget.amberMinutes,
                     redMinutes: widget.redMinutes,
                     onAction: (action) => _applyAction(order, action),
+                    itemsExpanded: _expandedTicketIds.contains(order.id),
+                    onToggleItems: () => setState(() {
+                      if (!_expandedTicketIds.add(order.id)) {
+                        _expandedTicketIds.remove(order.id);
+                      }
+                    }),
                   ),
                   const SizedBox(height: 12),
                 ],
@@ -188,19 +249,23 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   }
 
   void _observeOrderAlerts(List<OrderFlowOrder> orders) {
+    if (!_audioPreferenceLoaded) return;
     final activeIds = orders.map((order) => order.id).toSet();
+    final initialObservation = !_receivedInitialOrders;
+    var newOrders = const <OrderFlowOrder>[];
     if (!_receivedInitialOrders) {
       _receivedInitialOrders = true;
       _seenTicketIds.addAll(activeIds);
-      return;
+    } else {
+      newOrders = orders
+          .where((order) => !_seenTicketIds.contains(order.id))
+          .toList(growable: false);
+      _seenTicketIds
+        ..clear()
+        ..addAll(activeIds);
     }
-    final newOrders = orders
-        .where((order) => !_seenTicketIds.contains(order.id))
-        .toList(growable: false);
-    _seenTicketIds
-      ..clear()
-      ..addAll(activeIds);
-    final newAllergyIds = newOrders
+    final alertCandidates = initialObservation ? orders : newOrders;
+    final newAllergyIds = alertCandidates
         .where((order) => order.hasAllergyAlert)
         .map((order) => order.id)
         .toSet();
@@ -209,30 +274,87 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       _startAllergyAlarm();
       if (mounted) setState(() {});
     } else if (newOrders.isNotEmpty) {
-      unawaited(_sound.playNewOrder());
+      if (!_audioMuted) unawaited(_sound.playNewOrder());
     }
-    final newlyRed = orders
+    final currentRedIds = orders
         .where(
           (order) =>
               _lateState(order, DateTime.now(), widget.amberMinutes, widget.redMinutes) ==
-                  _LateState.red &&
-              !_redAlertedTicketIds.contains(order.id),
+              _LateState.red,
         )
         .map((order) => order.id)
         .toSet();
+    final newlyRed = currentRedIds.difference(_redAlertedTicketIds);
     if (newlyRed.isNotEmpty) {
       _redAlertedTicketIds.addAll(newlyRed);
-      unawaited(_sound.playLateOrder());
+      _activeLateTicketIds.addAll(newlyRed);
+      _startLateAlarm();
+      if (mounted) setState(() {});
+    }
+    final activeLateCount = _activeLateTicketIds.length;
+    _activeLateTicketIds.retainAll(currentRedIds);
+    if (_activeLateTicketIds.isEmpty) {
+      _lateAlarm?.cancel();
+      _lateAlarm = null;
+    }
+    if (activeLateCount != _activeLateTicketIds.length && mounted) {
+      setState(() {});
     }
   }
 
   void _startAllergyAlarm() {
     _allergyAlarm ??= Timer.periodic(const Duration(seconds: 4), (_) {
       if (_activeAllergyTicketIds.isNotEmpty) {
-        unawaited(_sound.playAllergyAlert());
+        if (!_audioMuted) unawaited(_sound.playAllergyAlert());
       }
     });
-    unawaited(_sound.playAllergyAlert());
+    if (!_audioMuted) unawaited(_sound.playAllergyAlert());
+  }
+
+  void _startLateAlarm() {
+    _lateAlarm ??= Timer.periodic(const Duration(seconds: 4), (_) {
+      if (_activeLateTicketIds.isNotEmpty && !_audioMuted) {
+        unawaited(_sound.playLateOrder());
+      }
+    });
+    if (!_audioMuted) unawaited(_sound.playLateOrder());
+  }
+
+  void _silenceLateAlarm() {
+    _activeLateTicketIds.clear();
+    _lateAlarm?.cancel();
+    _lateAlarm = null;
+    setState(() {});
+  }
+
+  Future<void> _loadAudioPreference() async {
+    try {
+      final preferences = SharedPreferencesAsync();
+      final muted = await preferences.getBool(_audioMutedPreferenceKey) ?? false;
+      if (mounted) {
+        setState(() {
+          _audioMuted = muted;
+          _audioPreferenceLoaded = true;
+        });
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Load local order-flow audio preference', error, stackTrace);
+      if (mounted) setState(() => _audioPreferenceLoaded = true);
+    }
+  }
+
+  Future<void> _toggleAudioMuted() async {
+    final muted = !_audioMuted;
+    setState(() => _audioMuted = muted);
+    try {
+      await SharedPreferencesAsync().setBool(_audioMutedPreferenceKey, muted);
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Save local order-flow audio preference', error, stackTrace);
+    }
+    if (!muted) {
+      if (_activeAllergyTicketIds.isNotEmpty) _startAllergyAlarm();
+      if (_activeLateTicketIds.isNotEmpty) _startLateAlarm();
+    }
   }
 
   void _silenceAllergyAlarm() {
@@ -481,6 +603,8 @@ class _OrderFlowCard extends StatelessWidget {
     required this.amberMinutes,
     required this.redMinutes,
     required this.onAction,
+    required this.itemsExpanded,
+    required this.onToggleItems,
   });
 
   final OrderFlowOrder order;
@@ -488,6 +612,8 @@ class _OrderFlowCard extends StatelessWidget {
   final int amberMinutes;
   final int redMinutes;
   final ValueChanged<_OrderFlowAction> onAction;
+  final bool itemsExpanded;
+  final VoidCallback onToggleItems;
 
   @override
   Widget build(BuildContext context) {
@@ -522,7 +648,7 @@ class _OrderFlowCard extends StatelessWidget {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        '${order.productionArea.label} · #${order.reference}',
+                        location,
                         style: Theme.of(context).textTheme.titleSmall?.copyWith(
                           color: Colors.white,
                           fontWeight: FontWeight.w800,
@@ -541,42 +667,59 @@ class _OrderFlowCard extends StatelessWidget {
                       color: Colors.white,
                     ),
                     const SizedBox(width: 5),
-                    Expanded(child: Text(location)),
+                    Expanded(child: Text(order.productionArea.label)),
                     _StatusPill(status: order.status),
                   ],
                 ),
-                const SizedBox(height: 10),
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    final maximumItemWidth = constraints.maxWidth < 360
-                        ? constraints.maxWidth
-                        : 320.0;
-                    return Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        for (final item in order.itemSummary)
-                          ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxWidth: maximumItemWidth,
-                            ),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 7,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.white12,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: Colors.white24),
-                              ),
-                              child: Text(item),
-                            ),
-                          ),
-                      ],
-                    );
-                  },
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    onPressed: onToggleItems,
+                    style: TextButton.styleFrom(foregroundColor: Colors.white),
+                    icon: Icon(
+                      itemsExpanded
+                          ? Icons.expand_less_rounded
+                          : Icons.expand_more_rounded,
+                    ),
+                    label: Text(
+                      itemsExpanded
+                          ? 'Hide items'
+                          : 'Show items (${order.itemSummary.length})',
+                    ),
+                  ),
                 ),
+                if (itemsExpanded)
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final maximumItemWidth = constraints.maxWidth < 360
+                          ? constraints.maxWidth
+                          : 320.0;
+                      return Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final item in order.itemSummary)
+                            ConstrainedBox(
+                              constraints: BoxConstraints(
+                                maxWidth: maximumItemWidth,
+                              ),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 7,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.white12,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: Colors.white24),
+                                ),
+                                child: Text(item),
+                              ),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
                 if (order.hasAllergyAlert) ...[
                   const SizedBox(height: 8),
                   _AlertRow(
@@ -692,7 +835,7 @@ class _OrderFlowNotificationHostState
           ref: ref,
           deduplicationKey: 'order-ready-${order.id}',
           title: '${order.productionArea.label} order ready',
-          message: '$location · Order #${order.reference}',
+          message: location,
           level: AppNotificationLevel.success,
         );
       }

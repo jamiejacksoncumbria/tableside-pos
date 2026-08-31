@@ -743,6 +743,11 @@ class PrintJob {
 
 enum PaymentMethod { cash, cardTerminal, online }
 
+bool productNameStartsWith(MenuProduct product, String rawQuery) {
+  final query = rawQuery.trim().toLowerCase();
+  return query.isEmpty || product.name.toLowerCase().startsWith(query);
+}
+
 /// Checkout policy kept outside the widget so a merge cannot silently remove
 /// the supported foreign cash tenders without breaking a regression test.
 List<String> checkoutTenderCurrencies(String baseCurrencyCode) => <String>{

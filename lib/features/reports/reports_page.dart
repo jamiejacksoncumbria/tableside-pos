@@ -6,12 +6,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/date_formats.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../auth/staff_pin_gate.dart';
+import '../bookings/booking.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
+import '../pos/pos_controller.dart';
 
 final salesReportBillsProvider = StreamProvider<List<SalesReportBill>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
@@ -23,6 +26,12 @@ final openVenueOrdersReportProvider = StreamProvider<List<PosOrder>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <PosOrder>[]);
   return ref.watch(firestorePosRepositoryProvider).watchVenueOpenOrders(scope);
+});
+
+final reportBookingsProvider = StreamProvider<List<VenueBooking>>((ref) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  if (scope == null) return Stream.value(const <VenueBooking>[]);
+  return ref.watch(firestorePosRepositoryProvider).watchBookings(scope);
 });
 
 enum _ReportPeriod { day, week, month, custom }
@@ -45,6 +54,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
   _ReportPeriod _period = _ReportPeriod.day;
   DateTimeRange? _customRange;
   DateTime? _anchorDate;
+  DateTimeRange? _bookingRange;
   bool _exporting = false;
 
   @override
@@ -67,6 +77,15 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
     }
     final report = ref.watch(salesReportBillsProvider);
     final openOrders = ref.watch(openVenueOrdersReportProvider);
+    final bookingValue = ref.watch(reportBookingsProvider);
+    final tables = ref.watch(diningTablesProvider).value ?? const <DiningTable>[];
+    if (bookingValue.hasError) {
+      AppLogger.error(
+        'Display upcoming-booking report',
+        bookingValue.error!,
+        bookingValue.stackTrace ?? StackTrace.current,
+      );
+    }
     if (openOrders.isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -88,11 +107,21 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
           ),
         );
       },
-      data: (bills) => _buildReport(bills, openOrders.value?.length ?? 0),
+      data: (bills) => _buildReport(
+        bills,
+        openOrders.value?.length ?? 0,
+        bookingValue.value ?? const <VenueBooking>[],
+        tables,
+      ),
     );
   }
 
-  Widget _buildReport(List<SalesReportBill> allBills, int openOrderCount) {
+  Widget _buildReport(
+    List<SalesReportBill> allBills,
+    int openOrderCount,
+    List<VenueBooking> allBookings,
+    List<DiningTable> tables,
+  ) {
     final latestAnchor = allBills.isEmpty
         ? DateTime.now()
         : allBills
@@ -150,6 +179,20 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
     }
     final products = productTotals.values.toList()
       ..sort((left, right) => right.$3.compareTo(left.$3));
+    final today = DateUtils.dateOnly(DateTime.now());
+    final bookingRange = _bookingRange ??
+        DateTimeRange(start: today, end: today.add(const Duration(days: 30)));
+    final upcomingBookings = allBookings
+        .where(
+          (booking) =>
+              booking.status.blocksTable &&
+              !booking.startsAt.toLocal().isBefore(bookingRange.start) &&
+              booking.startsAt.toLocal().isBefore(
+                bookingRange.end.add(const Duration(days: 1)),
+              ),
+        )
+        .toList(growable: false)
+      ..sort((left, right) => left.startsAt.compareTo(right.startsAt));
 
     return ListView(
       padding: const EdgeInsets.all(20),
@@ -234,6 +277,13 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
           ],
         ),
         const SizedBox(height: 18),
+        _UpcomingBookingsCard(
+          bookings: upcomingBookings,
+          tables: tables,
+          range: bookingRange,
+          onSelectRange: () => _selectBookingRange(bookingRange),
+        ),
+        const SizedBox(height: 18),
         Wrap(
           spacing: 12,
           runSpacing: 12,
@@ -309,6 +359,21 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
         ),
       ],
     );
+  }
+
+  Future<void> _selectBookingRange(DateTimeRange current) async {
+    final today = DateUtils.dateOnly(DateTime.now());
+    final selected = await showDateRangePicker(
+      context: context,
+      firstDate: today,
+      lastDate: DateTime(today.year + 7, today.month, today.day),
+      initialDateRange: current,
+      helpText: 'Upcoming booking dates',
+      saveText: 'Show bookings',
+    );
+    if (selected != null && mounted) {
+      setState(() => _bookingRange = selected);
+    }
   }
 
   Future<void> _selectCustomRange(
@@ -579,8 +644,7 @@ DateTime _weekStart(DateTime value) {
   return day.subtract(Duration(days: day.weekday - 1));
 }
 
-String _dateLabel(DateTime value) =>
-    '${value.year}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+String _dateLabel(DateTime value) => formatAppDate(value);
 
 String _clockLabel(int minutes) {
   final safe = minutes.clamp(0, 1439);
@@ -628,19 +692,83 @@ String _periodLabel(
   DateTimeRange? customRange,
 ) => switch (period) {
   _ReportPeriod.day =>
-    '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}',
+    formatAppDate(date),
   _ReportPeriod.week =>
-    'week containing ${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}',
+    'week containing ${formatAppDate(date)}',
   _ReportPeriod.month =>
-    '${date.year}-${date.month.toString().padLeft(2, '0')}',
+    formatAppDate(DateTime(date.year, date.month)),
   _ReportPeriod.custom => _customRangeLabel(customRange),
 };
 
 String _customRangeLabel(DateTimeRange? range) {
   if (range == null) return 'Custom dates';
-  String date(DateTime value) =>
-      '${value.year}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
-  return '${date(range.start)} to ${date(range.end)}';
+  return '${formatAppDate(range.start)} to ${formatAppDate(range.end)}';
+}
+
+class _UpcomingBookingsCard extends StatelessWidget {
+  const _UpcomingBookingsCard({
+    required this.bookings,
+    required this.tables,
+    required this.range,
+    required this.onSelectRange,
+  });
+
+  final List<VenueBooking> bookings;
+  final List<DiningTable> tables;
+  final DateTimeRange range;
+  final VoidCallback onSelectRange;
+
+  String _tableLabel(String tableId) {
+    for (final table in tables) {
+      if (table.id == tableId) return table.label;
+    }
+    return 'Table unavailable';
+  }
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                'Upcoming bookings',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              OutlinedButton.icon(
+                onPressed: onSelectRange,
+                icon: const Icon(Icons.date_range_rounded),
+                label: Text(
+                  '${formatAppDate(range.start)} to ${formatAppDate(range.end)}',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (bookings.isEmpty)
+            const Text('No active bookings in this date range.')
+          else
+            for (final booking in bookings)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event_seat_outlined),
+                title: Text(
+                  '${formatAppDateTime(booking.startsAt)} · ${_tableLabel(booking.tableId)}',
+                ),
+                subtitle: Text(
+                  '${booking.customerName} · ${booking.guestCount} guest${booking.guestCount == 1 ? '' : 's'} · ${booking.status.label}',
+                ),
+              ),
+        ],
+      ),
+    ),
+  );
 }
 
 class _Metric extends StatelessWidget {

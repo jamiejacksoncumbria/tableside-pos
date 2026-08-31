@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/date_formats.dart';
 import '../../core/tenant_scope.dart';
 
 enum AppNotificationLevel { success, information, warning, error }
@@ -326,7 +327,7 @@ class NotificationCentrePage extends ConsumerWidget {
                     ),
                     title: Text(notification.title),
                     subtitle: Text(
-                      '${notification.message}\n${_dateTimeLabel(context, notification.createdAt)}${notification.requiresAttention ? ' · Requires attention' : ''}',
+                      '${notification.message}\n${_dateTimeLabel(notification.createdAt)}${notification.requiresAttention ? ' · Requires attention' : ''}',
                     ),
                     isThreeLine: true,
                     onTap: () => controller.markRead(notification.id),
@@ -358,7 +359,6 @@ IconData _iconFor(AppNotificationLevel level) => switch (level) {
   AppNotificationLevel.error => Icons.error_outline_rounded,
 };
 
-String _dateTimeLabel(BuildContext context, DateTime value) {
-  final localizations = MaterialLocalizations.of(context);
-  return '${localizations.formatMediumDate(value)} · ${localizations.formatTimeOfDay(TimeOfDay.fromDateTime(value))}';
+String _dateTimeLabel(DateTime value) {
+  return formatAppDateTime(value);
 }

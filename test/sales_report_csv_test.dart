@@ -43,8 +43,8 @@ void main() {
 
     final csv = buildSalesReportCsv([bill], 'TRY');
 
-    expect(csv, contains('BILL,2026-08-29,R-001,"Jamie\nManager"'));
-    expect(csv, contains('PAYMENT,2026-08-29'));
+    expect(csv, contains('BILL,29-08-2026,R-001,"Jamie\nManager"'));
+    expect(csv, contains('PAYMENT,29-08-2026'));
     expect(csv, contains('EUR,3.00,125.50'));
     expect(csv, contains('"Fish, ""chips"""'));
     expect(csv, contains('Food VAT,10.00,125.50,114.09,11.41'));
