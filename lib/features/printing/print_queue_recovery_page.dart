@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/date_formats.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/print_job_repository.dart';
 import '../../data/production_command_repository.dart';
@@ -854,6 +855,4 @@ String _jobLocation(PrintJob job) {
       : 'Order: ${job.orderId}';
 }
 
-String _dateTime(DateTime value) =>
-    '${value.year.toString().padLeft(4, '0')}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')} '
-    '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
+String _dateTime(DateTime value) => formatAppDateTime(value);

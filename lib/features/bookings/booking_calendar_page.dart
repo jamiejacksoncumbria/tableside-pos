@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/date_formats.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
+import '../reports/booking_report_page.dart';
 import 'booking.dart';
 
 final venueBookingsProvider = StreamProvider<List<VenueBooking>>((ref) {
@@ -80,15 +82,29 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   IconButton(
+                    tooltip: 'Print bookings for ${formatAppDate(_day)}',
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => BookingReportPage(
+                          initialRange: DateTimeRange(start: _day, end: _day),
+                        ),
+                      ),
+                    ),
+                    icon: const Icon(Icons.print_outlined),
+                  ),
+                  IconButton(
                     onPressed: () => setState(
                       () => _day = _day.subtract(const Duration(days: 1)),
                     ),
                     icon: const Icon(Icons.chevron_left),
                   ),
-                  TextButton.icon(
-                    onPressed: _pickDay,
-                    icon: const Icon(Icons.calendar_month_outlined),
-                    label: Text(_dateLabel(_day)),
+                  Tooltip(
+                    message: 'Jump to another booking date',
+                    child: TextButton.icon(
+                      onPressed: _pickDay,
+                      icon: const Icon(Icons.calendar_month_outlined),
+                      label: Text(formatAppDate(_day)),
+                    ),
                   ),
                   IconButton(
                     onPressed: () => setState(
@@ -148,6 +164,7 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
       initialDate: _day,
       firstDate: DateTime.now().subtract(const Duration(days: 365 * 7)),
       lastDate: DateTime.now().add(const Duration(days: 365 * 7)),
+      helpText: 'Jump to booking date',
     );
     if (selected != null) setState(() => _day = selected);
   }
@@ -285,21 +302,14 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
                         contentPadding: EdgeInsets.zero,
                         leading: const Icon(Icons.schedule),
                         title: Text(
-                          '${_dateLabel(startsAt)} · ${_timeLabel(startsAt)}',
+                          '${formatAppDate(startsAt)} · ${formatAppTime(startsAt)}',
                         ),
-                        subtitle: const Text('Booking date and time'),
+                        subtitle: Text(
+                          existing == null
+                              ? 'Select the time for the displayed booking date'
+                              : 'Select the booking time',
+                        ),
                         onTap: () async {
-                          final date = await showDatePicker(
-                            context: dialogContext,
-                            initialDate: startsAt,
-                            firstDate: DateTime.now().subtract(
-                              const Duration(days: 365 * 7),
-                            ),
-                            lastDate: DateTime.now().add(
-                              const Duration(days: 365 * 7),
-                            ),
-                          );
-                          if (date == null || !dialogContext.mounted) return;
                           final time = await showTimePicker(
                             context: dialogContext,
                             initialTime: TimeOfDay.fromDateTime(startsAt),
@@ -307,9 +317,9 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
                           if (time != null) {
                             setDialogState(
                               () => startsAt = DateTime(
-                                date.year,
-                                date.month,
-                                date.day,
+                                startsAt.year,
+                                startsAt.month,
+                                startsAt.day,
                                 time.hour,
                                 time.minute,
                               ),
@@ -485,7 +495,7 @@ class _BookingCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  _timeLabel(booking.startsAt),
+                  formatAppTime(booking.startsAt),
                   style: Theme.of(context).textTheme.titleSmall,
                 ),
               ],
@@ -565,10 +575,6 @@ String _tableLabel(List<DiningTable> tables, String id) {
   return 'Unknown table';
 }
 
-String _dateLabel(DateTime value) =>
-    '${value.day.toString().padLeft(2, '0')}/${value.month.toString().padLeft(2, '0')}/${value.year}';
-String _timeLabel(DateTime value) =>
-    '${value.hour.toString().padLeft(2, '0')}:${value.minute.toString().padLeft(2, '0')}';
 String? _required(String? value) =>
     value == null || value.trim().isEmpty ? 'Required' : null;
 String _bookingErrorMessage(Object error) {

@@ -104,6 +104,15 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
                       payment['tenderedCurrencyCode'] as String? ??
                       payload['currencyCode'] as String? ??
                       'GBP',
+                  baseAmountMinor: (payment['baseAmountMinor'] as num?)
+                      ?.toInt(),
+                  baseCurrencyCode: payload['currencyCode'] as String?,
+                  exchangeRateToBase:
+                      payment['exchangeRateToBase'] as String? ?? '1',
+                  changeBaseMinor:
+                      (payment['cashChangeBaseMinor'] as num?)?.toInt() ?? 0,
+                  terminalLabel: payment['terminalLabel'] as String?,
+                  exchangeRateSource: payment['exchangeRateSource'] as String?,
                 ),
               )
               .toList(growable: false)
@@ -152,6 +161,7 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
         businessPhoneNumbers: phoneNumbers,
         receiptFooter: business['receiptFooter'] as String? ?? '',
         isReprint: payload['isReprint'] as bool? ?? false,
+        isPreReceipt: payload['isPreReceipt'] as bool? ?? false,
       ),
     );
   }

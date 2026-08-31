@@ -93,6 +93,7 @@ class BluetoothBillReceipt {
     this.businessPhoneNumbers = const <String>[],
     this.receiptFooter = '',
     this.isReprint = false,
+    this.isPreReceipt = false,
     this.payments = const <BluetoothReceiptPayment>[],
     this.taxBreakdown = const <BluetoothReceiptTaxBreakdown>[],
   });
@@ -111,6 +112,7 @@ class BluetoothBillReceipt {
   final List<String> businessPhoneNumbers;
   final String receiptFooter;
   final bool isReprint;
+  final bool isPreReceipt;
   final List<BluetoothReceiptPayment> payments;
   final List<BluetoothReceiptTaxBreakdown> taxBreakdown;
 }
@@ -132,11 +134,23 @@ class BluetoothReceiptPayment {
     required this.method,
     required this.amountMinor,
     required this.currencyCode,
+    this.baseAmountMinor,
+    this.baseCurrencyCode,
+    this.exchangeRateToBase = '1',
+    this.changeBaseMinor = 0,
+    this.terminalLabel,
+    this.exchangeRateSource,
   });
 
   final String method;
   final int amountMinor;
   final String currencyCode;
+  final int? baseAmountMinor;
+  final String? baseCurrencyCode;
+  final String exchangeRateToBase;
+  final int changeBaseMinor;
+  final String? terminalLabel;
+  final String? exchangeRateSource;
 }
 
 class BluetoothReceiptTaxBreakdown {
@@ -202,5 +216,13 @@ abstract interface class BluetoothReceiptPrinter {
   Future<void> printBillReceipt({
     required BluetoothReceiptPrinterDevice device,
     required BluetoothBillReceipt receipt,
+  });
+
+  /// Prints a locally selected operational text report (for example today's
+  /// bookings). It is never used for financial mutations or print-queue jobs.
+  Future<void> printTextReport({
+    required BluetoothReceiptPrinterDevice device,
+    required String title,
+    required List<String> lines,
   });
 }

@@ -1,13 +1,17 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
+import '../../core/order_flow_display_mode.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
 import '../notifications/notification_centre.dart';
+import '../auth/staff_pin_gate.dart';
 import '../pos/domain.dart';
 import 'order_flow_sound.dart';
 
@@ -36,19 +40,40 @@ class OrderFlowPage extends ConsumerStatefulWidget {
 class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   Timer? _clock;
   Timer? _allergyAlarm;
+  Timer? _lateAlarm;
+  Timer? _sessionKeepAlive;
   ProductionArea? _area;
   _FlowFilter _filter = _FlowFilter.all;
   final Map<String, OrderFlowOrder> _demoOverrides = {};
   final Set<String> _seenTicketIds = <String>{};
   final Set<String> _redAlertedTicketIds = <String>{};
   final Set<String> _activeAllergyTicketIds = <String>{};
+  final Set<String> _currentLateTicketIds = <String>{};
+  final Set<String> _dismissedLateTicketIds = <String>{};
+  final Set<String> _expandedTicketIds = <String>{};
   late final OrderFlowSound _sound;
   bool _receivedInitialOrders = false;
+  bool _audioMuted = false;
+  bool _audioPreferenceLoaded = false;
+  bool _refreshingPinSession = false;
+  bool _compactFiltersExpanded = false;
+  static const _audioMutedPreferenceKey = 'tableside.orderFlow.audioMuted';
 
   @override
   void initState() {
     super.initState();
     _sound = OrderFlowSound();
+    scheduleMicrotask(() {
+      if (mounted) {
+        ref.read(orderFlowDisplayActiveProvider.notifier).setActive(true);
+        unawaited(_refreshKdsPinSession());
+      }
+    });
+    _sessionKeepAlive = Timer.periodic(
+      const Duration(minutes: 10),
+      (_) => unawaited(_refreshKdsPinSession()),
+    );
+    unawaited(_loadAudioPreference());
     _clock = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
@@ -58,6 +83,9 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   void dispose() {
     _clock?.cancel();
     _allergyAlarm?.cancel();
+    _lateAlarm?.cancel();
+    _sessionKeepAlive?.cancel();
+    ref.read(orderFlowDisplayActiveProvider.notifier).setActive(false);
     unawaited(_sound.dispose());
     super.dispose();
   }
@@ -117,10 +145,27 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                   ),
                 ],
               ),
-              _BoardHealth(
-                allOrders: allOrders,
-                amberMinutes: widget.amberMinutes,
-                redMinutes: widget.redMinutes,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton.filledTonal(
+                    tooltip: _audioMuted
+                        ? 'Enable new-order and allergy audio on this device'
+                        : 'Mute new-order and allergy audio; late alarms are dismissed on each ticket',
+                    onPressed: _toggleAudioMuted,
+                    icon: Icon(
+                      _audioMuted
+                          ? Icons.volume_off_rounded
+                          : Icons.volume_up_rounded,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _BoardHealth(
+                    allOrders: allOrders,
+                    amberMinutes: widget.amberMinutes,
+                    redMinutes: widget.redMinutes,
+                  ),
+                ],
               ),
             ],
           ),
@@ -132,17 +177,25 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                 padding: const EdgeInsets.all(12),
                 child: Row(
                   children: [
-                    const Icon(Icons.warning_amber_rounded, color: Colors.white),
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Colors.white,
+                    ),
                     const SizedBox(width: 10),
                     const Expanded(
                       child: Text(
                         'Allergy alert: silence only after the kitchen has acknowledged it.',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                     ),
                     TextButton(
                       onPressed: _silenceAllergyAlarm,
-                      style: TextButton.styleFrom(foregroundColor: Colors.white),
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.white,
+                      ),
                       child: const Text('Silence'),
                     ),
                   ],
@@ -151,11 +204,44 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
             ),
             const SizedBox(height: 12),
           ],
-          _FilterBar(
-            area: _area,
-            filter: _filter,
-            onAreaChanged: (area) => setState(() => _area = area),
-            onFilterChanged: (filter) => setState(() => _filter = filter),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 700;
+              final showFilters = !compact || _compactFiltersExpanded;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (compact)
+                    TextButton.icon(
+                      onPressed: () => setState(
+                        () =>
+                            _compactFiltersExpanded = !_compactFiltersExpanded,
+                      ),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      icon: Icon(
+                        showFilters
+                            ? Icons.expand_less_rounded
+                            : Icons.filter_list_rounded,
+                        size: 19,
+                      ),
+                      label: Text(
+                        showFilters ? 'Hide filters' : 'Show filters',
+                      ),
+                    ),
+                  if (showFilters)
+                    _FilterBar(
+                      area: _area,
+                      filter: _filter,
+                      onAreaChanged: (area) => setState(() => _area = area),
+                      onFilterChanged: (filter) =>
+                          setState(() => _filter = filter),
+                    ),
+                ],
+              );
+            },
           ),
           const SizedBox(height: 18),
           if (flowValue.isLoading && scope != null && rawOrders.isEmpty)
@@ -177,6 +263,16 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                     amberMinutes: widget.amberMinutes,
                     redMinutes: widget.redMinutes,
                     onAction: (action) => _applyAction(order, action),
+                    lateAlarmDismissed: _dismissedLateTicketIds.contains(
+                      order.id,
+                    ),
+                    onDismissLateAlarm: () => _dismissTicketLateAlarm(order.id),
+                    itemsExpanded: _expandedTicketIds.contains(order.id),
+                    onToggleItems: () => setState(() {
+                      if (!_expandedTicketIds.add(order.id)) {
+                        _expandedTicketIds.remove(order.id);
+                      }
+                    }),
                   ),
                   const SizedBox(height: 12),
                 ],
@@ -188,19 +284,23 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   }
 
   void _observeOrderAlerts(List<OrderFlowOrder> orders) {
+    if (!_audioPreferenceLoaded) return;
     final activeIds = orders.map((order) => order.id).toSet();
+    final initialObservation = !_receivedInitialOrders;
+    var newOrders = const <OrderFlowOrder>[];
     if (!_receivedInitialOrders) {
       _receivedInitialOrders = true;
       _seenTicketIds.addAll(activeIds);
-      return;
+    } else {
+      newOrders = orders
+          .where((order) => !_seenTicketIds.contains(order.id))
+          .toList(growable: false);
+      _seenTicketIds
+        ..clear()
+        ..addAll(activeIds);
     }
-    final newOrders = orders
-        .where((order) => !_seenTicketIds.contains(order.id))
-        .toList(growable: false);
-    _seenTicketIds
-      ..clear()
-      ..addAll(activeIds);
-    final newAllergyIds = newOrders
+    final alertCandidates = initialObservation ? orders : newOrders;
+    final newAllergyIds = alertCandidates
         .where((order) => order.hasAllergyAlert)
         .map((order) => order.id)
         .toSet();
@@ -209,30 +309,111 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       _startAllergyAlarm();
       if (mounted) setState(() {});
     } else if (newOrders.isNotEmpty) {
-      unawaited(_sound.playNewOrder());
+      if (!_audioMuted) unawaited(_sound.playNewOrder());
     }
-    final newlyRed = orders
+    final currentRedIds = orders
         .where(
           (order) =>
-              _lateState(order, DateTime.now(), widget.amberMinutes, widget.redMinutes) ==
-                  _LateState.red &&
-              !_redAlertedTicketIds.contains(order.id),
+              _lateState(
+                order,
+                DateTime.now(),
+                widget.amberMinutes,
+                widget.redMinutes,
+              ) ==
+              _LateState.red,
         )
         .map((order) => order.id)
         .toSet();
+    final newlyRed = currentRedIds.difference(_redAlertedTicketIds);
     if (newlyRed.isNotEmpty) {
       _redAlertedTicketIds.addAll(newlyRed);
-      unawaited(_sound.playLateOrder());
+    }
+    final priorLateIds = Set<String>.of(_currentLateTicketIds);
+    _currentLateTicketIds
+      ..clear()
+      ..addAll(currentRedIds);
+    _dismissedLateTicketIds.retainAll(currentRedIds);
+    final unsilenced = currentRedIds.difference(_dismissedLateTicketIds);
+    if (unsilenced.isEmpty) {
+      _lateAlarm?.cancel();
+      _lateAlarm = null;
+    } else {
+      _startLateAlarm();
+    }
+    if ((!setEquals(priorLateIds, currentRedIds) || newlyRed.isNotEmpty) &&
+        mounted) {
+      setState(() {});
     }
   }
 
   void _startAllergyAlarm() {
     _allergyAlarm ??= Timer.periodic(const Duration(seconds: 4), (_) {
       if (_activeAllergyTicketIds.isNotEmpty) {
-        unawaited(_sound.playAllergyAlert());
+        if (!_audioMuted) unawaited(_sound.playAllergyAlert());
       }
     });
-    unawaited(_sound.playAllergyAlert());
+    if (!_audioMuted) unawaited(_sound.playAllergyAlert());
+  }
+
+  void _startLateAlarm() {
+    if (_lateAlarm != null) return;
+    _lateAlarm = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (_currentLateTicketIds
+              .difference(_dismissedLateTicketIds)
+              .isNotEmpty &&
+          mounted) {
+        unawaited(_sound.playLateOrder());
+      }
+    });
+    unawaited(_sound.playLateOrder());
+  }
+
+  void _dismissTicketLateAlarm(String ticketId) {
+    setState(() => _dismissedLateTicketIds.add(ticketId));
+    if (_currentLateTicketIds.difference(_dismissedLateTicketIds).isEmpty) {
+      _lateAlarm?.cancel();
+      _lateAlarm = null;
+    } else {
+      _startLateAlarm();
+    }
+  }
+
+  Future<void> _loadAudioPreference() async {
+    try {
+      final preferences = SharedPreferencesAsync();
+      final muted =
+          await preferences.getBool(_audioMutedPreferenceKey) ?? false;
+      if (mounted) {
+        setState(() {
+          _audioMuted = muted;
+          _audioPreferenceLoaded = true;
+        });
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error(
+        'Load local order-flow audio preference',
+        error,
+        stackTrace,
+      );
+      if (mounted) setState(() => _audioPreferenceLoaded = true);
+    }
+  }
+
+  Future<void> _toggleAudioMuted() async {
+    final muted = !_audioMuted;
+    setState(() => _audioMuted = muted);
+    try {
+      await SharedPreferencesAsync().setBool(_audioMutedPreferenceKey, muted);
+    } on Object catch (error, stackTrace) {
+      AppLogger.error(
+        'Save local order-flow audio preference',
+        error,
+        stackTrace,
+      );
+    }
+    if (!muted) {
+      if (_activeAllergyTicketIds.isNotEmpty) _startAllergyAlarm();
+    }
   }
 
   void _silenceAllergyAlarm() {
@@ -240,6 +421,29 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     _allergyAlarm?.cancel();
     _allergyAlarm = null;
     setState(() {});
+  }
+
+  Future<void> _refreshKdsPinSession() async {
+    final scope = ref.read(activeVenueScopeProvider);
+    final session = ref.read(activeStaffPinSessionProvider);
+    if (!mounted || scope == null || session == null || _refreshingPinSession) {
+      return;
+    }
+    _refreshingPinSession = true;
+    try {
+      final expiresAt = await ProductionCommandRepository()
+          .refreshStaffPinSession(scope: scope);
+      if (!mounted) return;
+      ref.read(activeStaffPinSessionProvider.notifier).extendUntil(expiresAt);
+      AppLogger.info('Order Flow display PIN session securely refreshed.');
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Refresh Order Flow PIN session', error, stackTrace);
+      if (mounted) {
+        ref.read(activeStaffPinSessionProvider.notifier).lock();
+      }
+    } finally {
+      _refreshingPinSession = false;
+    }
   }
 
   bool _matchesFilters(OrderFlowOrder order) {
@@ -481,6 +685,10 @@ class _OrderFlowCard extends StatelessWidget {
     required this.amberMinutes,
     required this.redMinutes,
     required this.onAction,
+    required this.itemsExpanded,
+    required this.onToggleItems,
+    required this.lateAlarmDismissed,
+    required this.onDismissLateAlarm,
   });
 
   final OrderFlowOrder order;
@@ -488,6 +696,10 @@ class _OrderFlowCard extends StatelessWidget {
   final int amberMinutes;
   final int redMinutes;
   final ValueChanged<_OrderFlowAction> onAction;
+  final bool itemsExpanded;
+  final VoidCallback onToggleItems;
+  final bool lateAlarmDismissed;
+  final VoidCallback onDismissLateAlarm;
 
   @override
   Widget build(BuildContext context) {
@@ -516,67 +728,114 @@ class _OrderFlowCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    _AreaIcon(area: order.productionArea),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '${order.productionArea.label} · #${order.reference}',
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w800,
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _AreaIcon(area: order.productionArea),
+                        const SizedBox(width: 7),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 180),
+                          child: Text(
+                            location,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleSmall
+                                ?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    Text(order.productionArea.label),
+                    _StatusPill(status: order.status),
+                    if (late == _LateState.red && !lateAlarmDismissed)
+                      Container(
+                        padding: const EdgeInsets.only(left: 9),
+                        decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.white54),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'LATE — NEEDS ATTENTION',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            _AnimatedAlarmBell(onPressed: onDismissLateAlarm),
+                          ],
+                        ),
+                      ),
+                    _PrimaryFlowAction(order: order, onAction: onAction),
+                    _AlertRow(
+                      icon: late == _LateState.normal
+                          ? Icons.timer_outlined
+                          : Icons.priority_high_rounded,
+                      text: '${_formatElapsed(elapsed)} since ticket release',
+                      color: Colors.white,
+                    ),
+                    SizedBox.square(
+                      dimension: 34,
+                      child: IconButton(
+                        tooltip: itemsExpanded
+                            ? 'Hide order items'
+                            : 'Show ${order.itemSummary.length} order items',
+                        padding: EdgeInsets.zero,
+                        onPressed: onToggleItems,
+                        icon: Icon(
+                          itemsExpanded
+                              ? Icons.expand_less_rounded
+                              : Icons.expand_more_rounded,
                         ),
                       ),
                     ),
                     _OrderActions(order: order, onAction: onAction),
                   ],
                 ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Icon(
-                      Icons.table_restaurant_outlined,
-                      size: 18,
-                      color: Colors.white,
-                    ),
-                    const SizedBox(width: 5),
-                    Expanded(child: Text(location)),
-                    _StatusPill(status: order.status),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                LayoutBuilder(
-                  builder: (context, constraints) {
-                    final maximumItemWidth = constraints.maxWidth < 360
-                        ? constraints.maxWidth
-                        : 320.0;
-                    return Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        for (final item in order.itemSummary)
-                          ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxWidth: maximumItemWidth,
-                            ),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 7,
+                if (itemsExpanded)
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final maximumItemWidth = constraints.maxWidth < 360
+                          ? constraints.maxWidth
+                          : 320.0;
+                      return Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final item in order.itemSummary)
+                            ConstrainedBox(
+                              constraints: BoxConstraints(
+                                maxWidth: maximumItemWidth,
                               ),
-                              decoration: BoxDecoration(
-                                color: Colors.white12,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: Colors.white24),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 7,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.white12,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: Colors.white24),
+                                ),
+                                child: Text(item),
                               ),
-                              child: Text(item),
                             ),
-                          ),
-                      ],
-                    );
-                  },
-                ),
+                        ],
+                      );
+                    },
+                  ),
                 if (order.hasAllergyAlert) ...[
                   const SizedBox(height: 8),
                   _AlertRow(
@@ -585,16 +844,6 @@ class _OrderFlowCard extends StatelessWidget {
                     color: Colors.white,
                   ),
                 ],
-                const SizedBox(height: 8),
-                _PrimaryFlowAction(order: order, onAction: onAction),
-                const SizedBox(height: 8),
-                _AlertRow(
-                  icon: late == _LateState.normal
-                      ? Icons.timer_outlined
-                      : Icons.priority_high_rounded,
-                  text: '${_formatElapsed(elapsed)} since ticket release',
-                  color: Colors.white,
-                ),
               ],
             ),
           ),
@@ -602,6 +851,55 @@ class _OrderFlowCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _AnimatedAlarmBell extends StatefulWidget {
+  const _AnimatedAlarmBell({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  State<_AnimatedAlarmBell> createState() => _AnimatedAlarmBellState();
+}
+
+class _AnimatedAlarmBellState extends State<_AnimatedAlarmBell>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 650),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SizedBox.square(
+    dimension: 28,
+    child: IconButton(
+      tooltip: 'Dismiss this ticket alarm',
+      onPressed: widget.onPressed,
+      padding: EdgeInsets.zero,
+      color: Colors.white,
+      iconSize: 17,
+      icon: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) => Transform.rotate(
+          angle: (_controller.value - .5) * .45,
+          child: child,
+        ),
+        child: const Icon(Icons.notifications_active_rounded),
+      ),
+    ),
+  );
 }
 
 class _PrimaryFlowAction extends StatelessWidget {
@@ -627,16 +925,15 @@ class _PrimaryFlowAction extends StatelessWidget {
       _OrderFlowAction.markServed => 'Mark served',
       _OrderFlowAction.toggleDelayed => '',
     };
-    return SizedBox(
-      width: double.infinity,
-      child: FilledButton.tonal(
-        onPressed: () => onAction(action),
-        style: FilledButton.styleFrom(
-          backgroundColor: Colors.white,
-          foregroundColor: Theme.of(context).colorScheme.onSurface,
-        ),
-        child: Text(label),
+    return FilledButton.tonal(
+      onPressed: () => onAction(action),
+      style: FilledButton.styleFrom(
+        backgroundColor: Colors.white,
+        foregroundColor: Theme.of(context).colorScheme.onSurface,
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       ),
+      child: Text(label),
     );
   }
 }
@@ -692,7 +989,7 @@ class _OrderFlowNotificationHostState
           ref: ref,
           deduplicationKey: 'order-ready-${order.id}',
           title: '${order.productionArea.label} order ready',
-          message: '$location · Order #${order.reference}',
+          message: location,
           level: AppNotificationLevel.success,
         );
       }
@@ -753,13 +1050,15 @@ class _AlertRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
     children: [
       Icon(icon, color: color, size: 18),
       const SizedBox(width: 5),
-      Expanded(
+      ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 280),
         child: Text(
           text,
-          maxLines: 1,
+          maxLines: 2,
           overflow: TextOverflow.ellipsis,
           style: Theme.of(
             context,

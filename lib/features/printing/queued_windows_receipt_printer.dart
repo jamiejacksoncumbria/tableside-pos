@@ -172,7 +172,9 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
             ),
           ),
       WindowsPrintLine(
-        payload['isReprint'] == true
+        payload['isPreReceipt'] == true
+            ? 'PRE RECEIPT - NOT PAID'
+            : payload['isReprint'] == true
             ? 'REPRINT - PAID RECEIPT'
             : 'PAID RECEIPT',
         alignment: WindowsPrintTextAlignment.center,
@@ -241,6 +243,36 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
             rightText: _money(amount, paymentCurrency),
           ),
         );
+        final baseAmount = (value['baseAmountMinor'] as num?)?.toInt();
+        final rate = value['exchangeRateToBase'] as String? ?? '1';
+        final terminal = value['terminalLabel'] as String?;
+        if (terminal?.trim().isNotEmpty == true) {
+          lines.add(WindowsPrintLine('Terminal', rightText: terminal!.trim()));
+        }
+        if (paymentCurrency != currency && baseAmount != null) {
+          lines.add(
+            WindowsPrintLine(
+              'Rate 1 $paymentCurrency',
+              rightText: '$rate $currency',
+            ),
+          );
+          lines.add(
+            WindowsPrintLine(
+              'Applied',
+              rightText: _money(baseAmount, currency),
+            ),
+          );
+        }
+        final change = (value['cashChangeBaseMinor'] as num?)?.toInt() ?? 0;
+        if (change > 0) {
+          lines.add(
+            WindowsPrintLine('Change', rightText: _money(change, currency)),
+          );
+        }
+        final source = value['exchangeRateSource'] as String?;
+        if (source?.trim().isNotEmpty == true) {
+          lines.add(WindowsPrintLine('Rate source: ${source!.trim()}'));
+        }
       }
     }
     final footer = business['receiptFooter'] as String? ?? '';

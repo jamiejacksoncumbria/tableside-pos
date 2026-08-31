@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/date_formats.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
@@ -58,9 +59,8 @@ class PosPage extends ConsumerWidget {
             child: Column(
               children: [
                 TabBar(
-                  onTap: (index) => ref
-                      .read(posCompactTabProvider.notifier)
-                      .select(index),
+                  onTap: (index) =>
+                      ref.read(posCompactTabProvider.notifier).select(index),
                   tabs: [
                     Tab(
                       icon: Icon(Icons.table_restaurant_rounded),
@@ -213,7 +213,7 @@ class _TablesPanel extends ConsumerWidget {
                           Padding(
                             padding: const EdgeInsets.only(top: 6, bottom: 6),
                             child: Text(
-                              _namedTabDateLabel(context, group.openedDate),
+                              _namedTabDateLabel(group.openedDate),
                               style: Theme.of(context).textTheme.labelMedium,
                             ),
                           ),
@@ -403,11 +403,13 @@ class _NamedTabButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final totalMinor = scope == null
         ? null
-        : ref.watch(tableOpenOrderProvider(tab.orderId)).when(
-            data: (order) => order?.totalMinor,
-            loading: () => null,
-            error: (_, _) => null,
-          );
+        : ref
+              .watch(tableOpenOrderProvider(tab.orderId))
+              .when(
+                data: (order) => order?.totalMinor,
+                loading: () => null,
+                error: (_, _) => null,
+              );
     // Every item here represents a live named tab. Make that operational
     // state as obvious as an open table, not merely the currently selected
     // tab.
@@ -416,7 +418,8 @@ class _NamedTabButton extends ConsumerWidget {
     return Semantics(
       button: true,
       selected: selected,
-      label: 'Open tab for ${tab.name}${totalMinor == null ? '' : ', ${formatMoney(totalMinor, currencyCode: currencyCode)} owed'}',
+      label:
+          'Open tab for ${tab.name}${totalMinor == null ? '' : ', ${formatMoney(totalMinor, currencyCode: currencyCode)} owed'}',
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(12),
@@ -428,11 +431,7 @@ class _NamedTabButton extends ConsumerWidget {
           ),
           child: Row(
             children: [
-              Icon(
-                Icons.person_outline_rounded,
-                size: 18,
-                color: foreground,
-              ),
+              Icon(Icons.person_outline_rounded, size: 18, color: foreground),
               const SizedBox(width: 8),
               Expanded(
                 child: Column(
@@ -452,12 +451,15 @@ class _NamedTabButton extends ConsumerWidget {
                       Text(
                         formatMoney(totalMinor, currencyCode: currencyCode),
                         style: Theme.of(context).textTheme.labelMedium
-                            ?.copyWith(color: foreground.withValues(alpha: .88)),
+                            ?.copyWith(
+                              color: foreground.withValues(alpha: .88),
+                            ),
                       ),
                   ],
                 ),
               ),
-              if (selected) const Icon(Icons.check_circle_rounded, color: Colors.white),
+              if (selected)
+                const Icon(Icons.check_circle_rounded, color: Colors.white),
             ],
           ),
         ),
@@ -494,22 +496,120 @@ List<_NamedTabDateGroup> _groupOpenNamedTabs(List<OpenNamedTab> tabs) {
   ];
 }
 
-String _namedTabDateLabel(BuildContext context, DateTime? date) {
+String _namedTabDateLabel(DateTime? date) {
   if (date == null) return 'Earlier tabs';
   final now = DateTime.now();
   final today = DateTime(now.year, now.month, now.day);
   if (date == today) return 'Today';
   if (date == today.subtract(const Duration(days: 1))) return 'Yesterday';
-  return MaterialLocalizations.of(context).formatMediumDate(date);
+  return formatAppDate(date);
 }
 
-class _MenuPanel extends ConsumerWidget {
+class _MenuPanel extends ConsumerStatefulWidget {
   const _MenuPanel({required this.currencyCode});
 
   final String currencyCode;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_MenuPanel> createState() => _MenuPanelState();
+}
+
+class _MenuPanelState extends ConsumerState<_MenuPanel> {
+  final TextEditingController _searchController = TextEditingController();
+  final ScrollController _productScrollController = ScrollController();
+  final ScrollController _sectionScrollController = ScrollController();
+  final ScrollController _subsectionScrollController = ScrollController();
+
+  String get currencyCode => widget.currencyCode;
+
+  @override
+  void initState() {
+    super.initState();
+    _searchController.addListener(_searchChanged);
+  }
+
+  @override
+  void dispose() {
+    _searchController
+      ..removeListener(_searchChanged)
+      ..dispose();
+    _productScrollController.dispose();
+    _sectionScrollController.dispose();
+    _subsectionScrollController.dispose();
+    super.dispose();
+  }
+
+  void _searchChanged() {
+    setState(() {});
+    if (_productScrollController.hasClients) {
+      _productScrollController.jumpTo(0);
+    }
+  }
+
+  Future<void> _showSearchTouchKeyboard() async {
+    const rows = <String>['QWERTYUIOP', 'ASDFGHJKL', 'ZXCVBNM'];
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Product search keyboard'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 620),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final row in rows)
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 4,
+                  runSpacing: 4,
+                  children: [
+                    for (final key in row.split(''))
+                      SizedBox(
+                        width: 48,
+                        child: FilledButton.tonal(
+                          onPressed: () => _searchController.text += key,
+                          child: Text(key),
+                        ),
+                      ),
+                  ],
+                ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      final value = _searchController.text;
+                      if (value.isNotEmpty) {
+                        _searchController.text = value.substring(
+                          0,
+                          value.length - 1,
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.backspace_outlined),
+                    label: const Text('Delete'),
+                  ),
+                  OutlinedButton(
+                    onPressed: _searchController.clear,
+                    child: const Text('Clear'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    child: const Text('Done'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final selectedSection = ref.watch(activeSectionProvider);
     final selectedSubsection = ref.watch(activeSubsectionProvider);
     final activeOrder = ref.watch(activeOrderProvider);
@@ -573,8 +673,12 @@ class _MenuPanel extends ConsumerWidget {
             effectiveSection,
             ...subsections.map((section) => section.id),
           };
+    final searchQuery = _searchController.text.trim().toLowerCase();
     final products = catalog
         .where((product) {
+          if (searchQuery.isNotEmpty) {
+            return productNameStartsWith(product, searchQuery);
+          }
           if (effectiveSubsection != null) {
             return product.sectionIds.contains(effectiveSubsection);
           }
@@ -626,22 +730,47 @@ class _MenuPanel extends ConsumerWidget {
           children: [
             Row(
               children: [
-                Expanded(
+                Flexible(
                   child: Text(
                     'New order',
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                 ),
-                IconButton.filledTonal(
-                  tooltip: 'Search menu',
-                  onPressed: () {},
-                  icon: const Icon(Icons.search_rounded),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: TextField(
+                    controller: _searchController,
+                    textInputAction: TextInputAction.search,
+                    decoration: InputDecoration(
+                      isDense: true,
+                      labelText: 'Quick product search',
+                      hintText: 'Type the start of a product name',
+                      prefixIcon: const Icon(Icons.search_rounded),
+                      suffixIcon: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: 'Open touch keyboard',
+                            onPressed: _showSearchTouchKeyboard,
+                            icon: const Icon(Icons.keyboard_alt_outlined),
+                          ),
+                          if (searchQuery.isNotEmpty)
+                            IconButton(
+                              tooltip: 'Clear search',
+                              onPressed: _searchController.clear,
+                              icon: const Icon(Icons.close_rounded),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               ],
             ),
             const SizedBox(height: 14),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
+            _HorizontalMenuScroller(
+              controller: _sectionScrollController,
               child: Row(
                 children: [
                   Padding(
@@ -678,8 +807,8 @@ class _MenuPanel extends ConsumerWidget {
             ),
             if (subsections.isNotEmpty) ...[
               const SizedBox(height: 10),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
+              _HorizontalMenuScroller(
+                controller: _subsectionScrollController,
                 child: Row(
                   children: [
                     Padding(
@@ -709,7 +838,9 @@ class _MenuPanel extends ConsumerWidget {
             ],
             const SizedBox(height: 14),
             Text(
-              effectiveSubsection == null
+              searchQuery.isNotEmpty
+                  ? 'Search results for “${_searchController.text.trim()}”'
+                  : effectiveSubsection == null
                   ? section?.name ?? 'All menu items'
                   : subsections
                         .firstWhere((item) => item.id == effectiveSubsection)
@@ -735,26 +866,34 @@ class _MenuPanel extends ConsumerWidget {
                     )
                   : LayoutBuilder(
                       builder: (context, _) {
-                        return GridView.builder(
-                          itemCount: products.length,
-                          gridDelegate:
-                              const SliverGridDelegateWithMaxCrossAxisExtent(
-                                maxCrossAxisExtent: 180,
-                                crossAxisSpacing: 12,
-                                mainAxisSpacing: 12,
-                                mainAxisExtent: 126,
+                        return Scrollbar(
+                          controller: _productScrollController,
+                          thumbVisibility: true,
+                          child: GridView.builder(
+                            controller: _productScrollController,
+                            primary: false,
+                            itemCount: products.length,
+                            gridDelegate:
+                                const SliverGridDelegateWithMaxCrossAxisExtent(
+                                  maxCrossAxisExtent: 180,
+                                  crossAxisSpacing: 12,
+                                  mainAxisSpacing: 12,
+                                  mainAxisExtent: 126,
+                                ),
+                            itemBuilder: (context, index) => _ProductTile(
+                              product: products[index],
+                              currencyCode: currencyCode,
+                              canAdd: activeOrder.canAddProduct(
+                                products[index],
                               ),
-                          itemBuilder: (context, index) => _ProductTile(
-                            product: products[index],
-                            currencyCode: currencyCode,
-                            canAdd: activeOrder.canAddProduct(products[index]),
-                            onTap: () => addSelectedProduct(
-                              products[index],
-                              forceConfiguration: false,
-                            ),
-                            onLongPress: () => addSelectedProduct(
-                              products[index],
-                              forceConfiguration: true,
+                              onTap: () => addSelectedProduct(
+                                products[index],
+                                forceConfiguration: false,
+                              ),
+                              onLongPress: () => addSelectedProduct(
+                                products[index],
+                                forceConfiguration: true,
+                              ),
                             ),
                           ),
                         );
@@ -766,6 +905,58 @@ class _MenuPanel extends ConsumerWidget {
       ),
     );
   }
+}
+
+class _HorizontalMenuScroller extends StatelessWidget {
+  const _HorizontalMenuScroller({
+    required this.controller,
+    required this.child,
+  });
+
+  final ScrollController controller;
+  final Widget child;
+
+  void _move(double delta) {
+    if (!controller.hasClients) return;
+    controller.animateTo(
+      (controller.offset + delta).clamp(
+        controller.position.minScrollExtent,
+        controller.position.maxScrollExtent,
+      ),
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      IconButton(
+        tooltip: 'Earlier categories',
+        visualDensity: VisualDensity.compact,
+        onPressed: () => _move(-260),
+        icon: const Icon(Icons.chevron_left_rounded),
+      ),
+      Expanded(
+        child: Scrollbar(
+          controller: controller,
+          thumbVisibility: true,
+          child: SingleChildScrollView(
+            controller: controller,
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.only(bottom: 8),
+            child: child,
+          ),
+        ),
+      ),
+      IconButton(
+        tooltip: 'More categories',
+        visualDensity: VisualDensity.compact,
+        onPressed: () => _move(260),
+        icon: const Icon(Icons.chevron_right_rounded),
+      ),
+    ],
+  );
 }
 
 class _MenuStateMessage extends StatelessWidget {
@@ -1209,6 +1400,51 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                     label: const Text('Split'),
                   ),
                 ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: order.lines.isEmpty || hasUnsentLines
+                        ? null
+                        : () async {
+                            try {
+                              final queued = await ref
+                                  .read(activeOrderProvider.notifier)
+                                  .printPreReceipt();
+                              if (!context.mounted) return;
+                              showAppNotification(
+                                context,
+                                ref: ref,
+                                title: queued
+                                    ? 'Pre receipt queued'
+                                    : 'Pre receipt not queued',
+                                message: queued
+                                    ? 'The unpaid bill has been sent to the receipt printer.'
+                                    : 'No receipt printer accepted the pre receipt.',
+                              );
+                            } on Object catch (error, stackTrace) {
+                              AppLogger.error(
+                                'Print pre receipt',
+                                error,
+                                stackTrace,
+                              );
+                              if (!context.mounted) return;
+                              showAppNotification(
+                                context,
+                                ref: ref,
+                                title: 'Pre receipt was not printed',
+                                message: '$error',
+                                level: AppNotificationLevel.error,
+                              );
+                            }
+                          },
+                    icon: const Icon(Icons.receipt_long_outlined),
+                    label: const Text('Pre receipt'),
+                  ),
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: FilledButton.icon(
@@ -1307,13 +1543,7 @@ Future<void> _showCheckoutSheet(
     text: _moneyInputFromMinor(order.totalMinor, currencyCode),
   );
   final exchangeRateController = TextEditingController(text: '1');
-  final currencyChoices = <String>{
-    baseCurrencyCode,
-    'TRY',
-    'EUR',
-    'GBP',
-    'USD',
-  }.toList(growable: false);
+  final currencyChoices = checkoutTenderCurrencies(baseCurrencyCode);
   await showModalBottomSheet<void>(
     context: pageContext,
     showDragHandle: true,
@@ -1323,7 +1553,10 @@ Future<void> _showCheckoutSheet(
       var tenderedCurrencyCode = baseCurrencyCode;
       var cardApproved = false;
       var saving = false;
-      var printReceipt = false;
+      // Paid receipts are normally required in a restaurant. Staff can still
+      // opt out for a particular payment, but the safe operational default is
+      // to queue one to the venue's dedicated receipt printer.
+      var printReceipt = defaultPrintPaidReceipt;
       var loadingOfficialRate = false;
       ExchangeRateQuote? officialRateQuote;
       final paymentEntries = <_CheckoutPaymentDraft>[];
@@ -1453,28 +1686,48 @@ Future<void> _showCheckoutSheet(
                           }),
                   ),
                   const SizedBox(height: 12),
-                  DropdownButtonFormField<String>(
-                    key: ValueKey(tenderedCurrencyCode),
-                    initialValue: tenderedCurrencyCode,
-                    decoration: const InputDecoration(
-                      labelText: 'Tender currency',
-                    ),
-                    items: [
-                      for (final code in currencyChoices)
-                        DropdownMenuItem(value: code, child: Text(code)),
-                    ],
-                    onChanged: saving || method == PaymentMethod.cardTerminal
-                        ? null
-                        : (value) => setSheetState(() {
-                            tenderedCurrencyCode = value ?? baseCurrencyCode;
-                            exchangeRateController.text =
-                                tenderedCurrencyCode == baseCurrencyCode
-                                ? '1'
-                                : '';
-                            tenderedAmountController.clear();
-                            officialRateQuote = null;
-                          }),
+                  Text(
+                    method == PaymentMethod.cash
+                        ? 'Cash currency'
+                        : 'Card currency',
+                    style: Theme.of(context).textTheme.titleSmall,
                   ),
+                  const SizedBox(height: 8),
+                  if (method == PaymentMethod.cash)
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final code in currencyChoices)
+                          ChoiceChip(
+                            label: Text(code),
+                            selected: tenderedCurrencyCode == code,
+                            onSelected: saving
+                                ? null
+                                : (selected) {
+                                    if (!selected ||
+                                        tenderedCurrencyCode == code) {
+                                      return;
+                                    }
+                                    setSheetState(() {
+                                      tenderedCurrencyCode = code;
+                                      exchangeRateController.text =
+                                          code == baseCurrencyCode ? '1' : '';
+                                      tenderedAmountController.clear();
+                                      officialRateQuote = null;
+                                    });
+                                  },
+                          ),
+                      ],
+                    )
+                  else
+                    InputDecorator(
+                      decoration: const InputDecoration(
+                        helperText:
+                            'Card terminal payments use the venue reporting currency.',
+                      ),
+                      child: Text(baseCurrencyCode),
+                    ),
                   const SizedBox(height: 12),
                   TextField(
                     controller: tenderedAmountController,
@@ -2072,7 +2325,9 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final tables = ref.watch(diningTablesProvider).when(
+    final tables = ref
+        .watch(diningTablesProvider)
+        .when(
           data: (items) => items,
           loading: () => const <DiningTable>[],
           error: (error, stackTrace) {

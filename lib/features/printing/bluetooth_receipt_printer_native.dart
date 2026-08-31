@@ -5,6 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/date_formats.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'receipt_paper_width.dart';
 
@@ -168,10 +169,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         : ticket.isAddition
         ? '$areaLabel ADDITION'
         : areaLabel;
-    final now = DateTime.now();
-    final printedAt =
-        '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} '
-        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final printedAt = formatAppDateTime(DateTime.now());
     final bytes = <int>[
       ...generator.reset(),
       ...generator.text(
@@ -232,10 +230,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         : receipt.tableLabel?.trim().isNotEmpty == true
         ? 'Table: ${receipt.tableLabel!.trim()}'
         : null;
-    final now = DateTime.now();
-    final printedAt =
-        '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')} '
-        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final printedAt = formatAppDateTime(DateTime.now());
     final businessAddressLines = _nonEmptyLines(receipt.businessAddress);
     final businessPhoneNumbers = receipt.businessPhoneNumbers
         .map((number) => number.trim())
@@ -266,7 +261,11 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           styles: const PosStyles(align: PosAlign.center, bold: true),
         ),
       ...generator.text(
-        receipt.isReprint ? 'REPRINT - PAID RECEIPT' : 'PAID RECEIPT',
+        receipt.isPreReceipt
+            ? 'PRE RECEIPT - NOT PAID'
+            : receipt.isReprint
+            ? 'REPRINT - PAID RECEIPT'
+            : 'PAID RECEIPT',
         styles: const PosStyles(align: PosAlign.center, bold: true),
       ),
       ...generator.hr(),
@@ -316,10 +315,28 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       if (receipt.payments.isNotEmpty) ...[
         ...generator.hr(),
         ...generator.text('Payments', styles: const PosStyles(bold: true)),
-        for (final payment in receipt.payments)
+        for (final payment in receipt.payments) ...[
           ...generator.text(
-            '${payment.method}: ${_money(payment.amountMinor, payment.currencyCode)}',
+            '${payment.method}${payment.terminalLabel?.trim().isNotEmpty == true ? ' (${payment.terminalLabel!.trim()})' : ''}: ${_money(payment.amountMinor, payment.currencyCode)}',
           ),
+          if (payment.currencyCode != payment.baseCurrencyCode &&
+              payment.baseAmountMinor != null) ...[
+            ...generator.text(
+              'Rate: 1 ${payment.currencyCode} = ${payment.exchangeRateToBase} ${payment.baseCurrencyCode}',
+            ),
+            ...generator.text(
+              'Applied: ${_money(payment.baseAmountMinor!, payment.baseCurrencyCode!)}',
+            ),
+          ],
+          if (payment.changeBaseMinor > 0)
+            ...generator.text(
+              'Change: ${_money(payment.changeBaseMinor, payment.baseCurrencyCode ?? receipt.currencyCode)}',
+            ),
+          if (payment.exchangeRateSource?.trim().isNotEmpty == true)
+            ...generator.text(
+              'Rate source: ${payment.exchangeRateSource!.trim()}',
+            ),
+        ],
       ],
       if (receipt.receiptFooter.trim().isNotEmpty) ...[
         ...generator.hr(),
@@ -335,6 +352,32 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       bytes,
       failureMessage:
           'The printer connection was lost before the paid receipt was accepted.',
+    );
+  }
+
+  @override
+  Future<void> printTextReport({
+    required BluetoothReceiptPrinterDevice device,
+    required String title,
+    required List<String> lines,
+  }) async {
+    final profile = await CapabilityProfile.load();
+    final generator = Generator(_paperSize(device.paperWidth), profile);
+    final bytes = <int>[
+      ...generator.reset(),
+      ...generator.text(
+        title,
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      ),
+      ...generator.hr(),
+      for (final line in lines) ...generator.text(line),
+      ...generator.feed(4),
+    ];
+    await _write(
+      device,
+      bytes,
+      failureMessage:
+          'The printer connection was lost while printing the report.',
     );
   }
 

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
+import '../../core/order_flow_display_mode.dart';
 import '../../core/staff_pin_session_store.dart';
 import '../../data/production_command_repository.dart';
 
@@ -32,6 +33,12 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
   void lock() {
     StaffPinSessionStore.current = null;
     state = null;
+  }
+
+  void extendUntil(DateTime expiresAt) {
+    final session = state;
+    if (session == null || !expiresAt.isAfter(session.expiresAt)) return;
+    state = session.copyWith(expiresAt: expiresAt);
   }
 
   /// Re-synchronises the process-memory credentials after hot reload or a
@@ -93,15 +100,17 @@ Future<void> changeCurrentStaffPin({
     ref.read(activeStaffPinSessionProvider.notifier).lock();
     if (context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('PIN changed. Please unlock with your new PIN.')),
+        const SnackBar(
+          content: Text('PIN changed. Please unlock with your new PIN.'),
+        ),
       );
     }
   } on Object catch (error, stackTrace) {
     AppLogger.error('Change own staff PIN', error, stackTrace);
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not change PIN: $error')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not change PIN: $error')));
     }
   }
 }
@@ -133,9 +142,8 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   Timer? _expiryTimer;
   DateTime? _backgroundedAt;
 
-  Duration get _backgroundLockAfter => Duration(
-    seconds: widget.backgroundLockSeconds.clamp(15, 3600) as int,
-  );
+  Duration get _backgroundLockAfter =>
+      Duration(seconds: widget.backgroundLockSeconds.clamp(15, 3600) as int);
 
   @override
   void initState() {
@@ -156,8 +164,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         final backgroundedAt = _backgroundedAt;
         _backgroundedAt = null;
         if (backgroundedAt != null &&
-            DateTime.now().difference(backgroundedAt) >=
-                _backgroundLockAfter) {
+            DateTime.now().difference(backgroundedAt) >= _backgroundLockAfter) {
           AppLogger.info(
             'Shared device locked after its configured background timeout.',
           );
@@ -232,10 +239,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       ref
           .read(activeStaffPinSessionProvider.notifier)
           .unlock(session, widget.scope);
-      _expiryTimer?.cancel();
-      _expiryTimer = Timer(session.expiresAt.difference(DateTime.now()), () {
-        ref.read(activeStaffPinSessionProvider.notifier).lock();
-      });
+      _scheduleExpiryCheck();
       AppLogger.info('Shared device unlocked for staff=${staff.userId}.');
     } on Object catch (error, stackTrace) {
       AppLogger.error('Verify staff PIN', error, stackTrace);
@@ -245,6 +249,24 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
+  }
+
+  void _scheduleExpiryCheck() {
+    _expiryTimer?.cancel();
+    final session = ref.read(activeStaffPinSessionProvider);
+    if (session == null) return;
+    final remaining = session.expiresAt.difference(DateTime.now());
+    _expiryTimer = Timer(remaining.isNegative ? Duration.zero : remaining, () {
+      final current = ref.read(activeStaffPinSessionProvider);
+      if (current == null) return;
+      if (current.expiresAt.isAfter(DateTime.now())) {
+        _scheduleExpiryCheck();
+      } else if (ref.read(orderFlowDisplayActiveProvider)) {
+        _expiryTimer = Timer(const Duration(seconds: 30), _scheduleExpiryCheck);
+      } else {
+        ref.read(activeStaffPinSessionProvider.notifier).lock();
+      }
+    });
   }
 
   Future<void> _setOwnPin() async {
@@ -268,7 +290,9 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       );
       if (confirmedPin == null || !mounted) return;
       if (confirmedPin != firstPin) {
-        setState(() => _error = 'The two PIN entries did not match. Try again.');
+        setState(
+          () => _error = 'The two PIN entries did not match. Try again.',
+        );
         return;
       }
       setState(() => _submitting = true);
@@ -301,113 +325,116 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 760),
               child: Card(
-            child: Padding(
-              padding: const EdgeInsets.all(28),
-              child: _loading
-                  ? const Center(child: CircularProgressIndicator())
-                  : Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Text(
-                          'Who is using this device?',
-                          style: Theme.of(context).textTheme.headlineSmall,
-                        ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'Tap your name, then enter your personal six-digit PIN.',
-                        ),
-                        const SizedBox(height: 20),
-                        LayoutBuilder(
-                          builder: (context, constraints) {
-                            final columns = constraints.maxWidth >= 620
-                                ? 4
-                                : constraints.maxWidth >= 420
-                                ? 3
-                                : 2;
-                            const spacing = 10.0;
-                            final tileWidth =
-                                (constraints.maxWidth -
-                                    (spacing * (columns - 1))) /
-                                columns;
-                            return Wrap(
-                              spacing: spacing,
-                              runSpacing: spacing,
-                              children: [
-                                for (final item in staff)
-                                  SizedBox(
-                                    width: tileWidth,
-                                    child: _StaffTile(
-                                      staff: item,
-                                      selected:
-                                          item.userId == _selectedUserId,
-                                      enabled: !_submitting,
-                                      onTap: () async {
-                                        setState(() {
-                                          _selectedUserId = item.userId;
-                                          _error = null;
-                                        });
-                                        if (item.pinLocked) return;
-                                        if (item.hasPin) {
-                                          await _enterPin(item);
-                                        } else if (item.userId ==
-                                            currentUserId) {
-                                          await _setOwnPin();
-                                        }
-                                      },
-                                    ),
-                                  ),
-                              ],
-                            );
-                          },
-                        ),
-                        if (_error != null) ...[
-                          const SizedBox(height: 12),
-                          Text(
-                            _error!,
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.error,
+                child: Padding(
+                  padding: const EdgeInsets.all(28),
+                  child: _loading
+                      ? const Center(child: CircularProgressIndicator())
+                      : Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Text(
+                              'Who is using this device?',
+                              style: Theme.of(context).textTheme.headlineSmall,
                             ),
-                          ),
-                        ],
-                        const SizedBox(height: 16),
-                        if (selected?.pinLocked == true) ...[
-                          const Text(
-                            'This PIN is locked after three failed attempts.',
-                          ),
-                          const Text(
-                            ' Ask a manager or owner to unlock it from staff management.',
-                          ),
-                        ]
-                        else if (selected?.hasPin == true)
-                          FilledButton.icon(
-                            onPressed: _submitting ? null : () => _enterPin(selected!),
-                            icon: const Icon(Icons.lock_open_rounded),
-                            label: Text(_submitting ? 'Checking…' : 'Enter PIN'),
-                          )
-                        else if (selected?.userId == currentUserId)
-                          FilledButton.icon(
-                            onPressed: _submitting ? null : _setOwnPin,
-                            icon: const Icon(Icons.pin_rounded),
-                            label: const Text('Create my PIN'),
-                          )
-                        else if (selected != null)
-                          const Text(
-                            'This staff member has not created a PIN yet. For safety, they must first sign in with their own email account and create it; a shared device account cannot create someone else’s PIN.',
-                          )
-                        else
-                          const Text(
-                            'This staff member must sign in with email and create their PIN first.',
-                          ),
-                        const SizedBox(height: 8),
-                        TextButton.icon(
-                          onPressed: _submitting ? null : _loadStaff,
-                          icon: const Icon(Icons.refresh_rounded),
-                          label: const Text('Refresh staff'),
+                            const SizedBox(height: 8),
+                            const Text(
+                              'Tap your name, then enter your personal six-digit PIN.',
+                            ),
+                            const SizedBox(height: 20),
+                            LayoutBuilder(
+                              builder: (context, constraints) {
+                                final columns = constraints.maxWidth >= 620
+                                    ? 4
+                                    : constraints.maxWidth >= 420
+                                    ? 3
+                                    : 2;
+                                const spacing = 10.0;
+                                final tileWidth =
+                                    (constraints.maxWidth -
+                                        (spacing * (columns - 1))) /
+                                    columns;
+                                return Wrap(
+                                  spacing: spacing,
+                                  runSpacing: spacing,
+                                  children: [
+                                    for (final item in staff)
+                                      SizedBox(
+                                        width: tileWidth,
+                                        child: _StaffTile(
+                                          staff: item,
+                                          selected:
+                                              item.userId == _selectedUserId,
+                                          enabled: !_submitting,
+                                          onTap: () async {
+                                            setState(() {
+                                              _selectedUserId = item.userId;
+                                              _error = null;
+                                            });
+                                            if (item.pinLocked) return;
+                                            if (item.hasPin) {
+                                              await _enterPin(item);
+                                            } else if (item.userId ==
+                                                currentUserId) {
+                                              await _setOwnPin();
+                                            }
+                                          },
+                                        ),
+                                      ),
+                                  ],
+                                );
+                              },
+                            ),
+                            if (_error != null) ...[
+                              const SizedBox(height: 12),
+                              Text(
+                                _error!,
+                                style: TextStyle(
+                                  color: Theme.of(context).colorScheme.error,
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 16),
+                            if (selected?.pinLocked == true) ...[
+                              const Text(
+                                'This PIN is locked after three failed attempts.',
+                              ),
+                              const Text(
+                                ' Ask a manager or owner to unlock it from staff management.',
+                              ),
+                            ] else if (selected?.hasPin == true)
+                              FilledButton.icon(
+                                onPressed: _submitting
+                                    ? null
+                                    : () => _enterPin(selected!),
+                                icon: const Icon(Icons.lock_open_rounded),
+                                label: Text(
+                                  _submitting ? 'Checking…' : 'Enter PIN',
+                                ),
+                              )
+                            else if (selected?.userId == currentUserId)
+                              FilledButton.icon(
+                                onPressed: _submitting ? null : _setOwnPin,
+                                icon: const Icon(Icons.pin_rounded),
+                                label: const Text('Create my PIN'),
+                              )
+                            else if (selected != null)
+                              const Text(
+                                'This staff member has not created a PIN yet. For safety, they must first sign in with their own email account and create it; a shared device account cannot create someone else’s PIN.',
+                              )
+                            else
+                              const Text(
+                                'This staff member must sign in with email and create their PIN first.',
+                              ),
+                            const SizedBox(height: 8),
+                            TextButton.icon(
+                              onPressed: _submitting ? null : _loadStaff,
+                              icon: const Icon(Icons.refresh_rounded),
+                              label: const Text('Refresh staff'),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
-            ),
+                ),
               ),
             ),
           ),
@@ -456,9 +483,7 @@ class _StaffTile extends StatelessWidget {
                     ? scheme.onPrimary
                     : scheme.onSecondaryContainer,
                 child: Icon(
-                  staff.pinLocked
-                      ? Icons.lock_rounded
-                      : Icons.person_rounded,
+                  staff.pinLocked ? Icons.lock_rounded : Icons.person_rounded,
                 ),
               ),
               const SizedBox(height: 8),
@@ -632,7 +657,7 @@ class _PinPadDialogState extends State<_PinPadDialog> {
                       style: Theme.of(context).textTheme.headlineSmall,
                     ),
                   ),
-              OutlinedButton(
+                OutlinedButton(
                   onPressed: _pin.isEmpty
                       ? null
                       : () {

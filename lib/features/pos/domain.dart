@@ -743,6 +743,29 @@ class PrintJob {
 
 enum PaymentMethod { cash, cardTerminal, online }
 
+bool productNameStartsWith(MenuProduct product, String rawQuery) {
+  final query = rawQuery.trim().toLowerCase();
+  if (query.isEmpty) return true;
+  return product.name
+      .toLowerCase()
+      .split(RegExp(r'[\s\-_/,().]+'))
+      .any((word) => word.startsWith(query));
+}
+
+/// Checkout policy kept outside the widget so a merge cannot silently remove
+/// the supported foreign cash tenders without breaking a regression test.
+List<String> checkoutTenderCurrencies(String baseCurrencyCode) => <String>{
+  baseCurrencyCode.trim().toUpperCase(),
+  'TRY',
+  'EUR',
+  'GBP',
+  'USD',
+}.toList(growable: false);
+
+/// Restaurants normally issue a paid receipt. A user may opt out for an
+/// individual payment, but every newly opened checkout starts selected.
+const defaultPrintPaidReceipt = true;
+
 enum PaymentRequestStatus {
   requested,
   awaitingTerminal,
