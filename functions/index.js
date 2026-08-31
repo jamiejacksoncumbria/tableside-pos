@@ -649,6 +649,30 @@ async function manageMenuConfigurationFor(caller, rawData) {
       throw new HttpsError("invalid-argument", "The product production area is invalid.");
     }
     const trackStock = values.trackStock === true;
+    const requestedStockComponents = validatedStockComponents(
+      values.stockComponents ?? [],
+    );
+    if (documentId != null && requestedStockComponents.some(
+      (item) => item.productId === documentId,
+    )) {
+      throw new HttpsError("invalid-argument", "A product cannot consume itself as an ingredient.");
+    }
+    const componentSnapshots = requestedStockComponents.length === 0
+      ? []
+      : await db.getAll(...requestedStockComponents.map((item) =>
+          db.doc(`tenants/${tenantId}/products/${item.productId}`)));
+    if (componentSnapshots.some((item) => !item.exists ||
+        item.data().venueId !== venueId || item.data().trackStock !== true)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Every ingredient must be a stock-tracked product at this venue.",
+      );
+    }
+    const stockComponents = requestedStockComponents.map((item, index) => ({
+      ...item,
+      productName: componentSnapshots[index].data().name,
+      stockUnit: componentSnapshots[index].data().stockUnit ?? "each",
+    }));
     const rawTaxRateId = optionalText(values, "taxRateId", 1500);
     const taxRateId = rawTaxRateId
       ? requiredDocumentId({taxRateId: rawTaxRateId}, "taxRateId")
@@ -676,8 +700,10 @@ async function manageMenuConfigurationFor(caller, rawData) {
       stockOnHand: trackStock
         ? requiredFiniteNumber(values.stockOnHand ?? 0, "stockOnHand", -1000000000, 1000000000)
         : null,
+      stockUnit: requiredText(values, "stockUnit", 20),
       stockPerSale: requiredFiniteNumber(values.stockPerSale, "stockPerSale", 0.000001, 1000000000),
-      ...(documentId == null ? {stockUnit: "each", isAvailable: true} : {}),
+      stockComponents,
+      ...(documentId == null ? {isAvailable: true} : {}),
       showOnOrderFlow: values.showOnOrderFlow === true,
       taxRateBasisPoints,
       taxRateId,
@@ -1961,6 +1987,9 @@ const venueDependencyCollections = Object.freeze([
   "orders",
   "productionTickets",
   "stockMovements",
+  "suppliers",
+  "supplierProducts",
+  "purchaseOrders",
   "bills",
   "paymentRequests",
   "devices",
@@ -2329,6 +2358,7 @@ async function addOrderDraftLineFor(caller, rawData) {
         "A different open tab already uses this name. Reopen it instead.",
       );
     }
+    let priorLines = [];
     if (existingOrder.exists) {
       const current = existingOrder.data();
       if (current.venueId !== venueId || current.status === "closed") {
@@ -2337,7 +2367,7 @@ async function addOrderDraftLineFor(caller, rawData) {
       if ((current.tableId ?? null) !== tableId || (current.tabName ?? null) !== tabName) {
         throw new HttpsError("failed-precondition", "This order belongs to a different table or named tab.");
       }
-      const priorLines = Array.isArray(current.lines) ? current.lines : [];
+      priorLines = Array.isArray(current.lines) ? current.lines : [];
       // A lost HTTP response must never result in the same tap being added
       // twice. Line IDs are generated once by the client and are idempotent.
       if (priorLines.some((item) => item?.id === line.id)) {
@@ -2348,6 +2378,43 @@ async function addOrderDraftLineFor(caller, rawData) {
       throw new HttpsError("not-found", "A selected menu product no longer exists at this venue.");
     }
     const productData = product.data();
+    const stockComponents = Array.isArray(productData.stockComponents)
+      ? productData.stockComponents.map((component) => ({
+          productId: requiredDocumentId(component, "productId"),
+          productName: requiredText(component, "productName", 120),
+          stockUnit: requiredText(component, "stockUnit", 20),
+          quantityPerSale: requiredFiniteNumber(
+            component.quantityPerSale, "quantityPerSale", 0.000001, 1000000000,
+          ),
+        }))
+      : [];
+    const componentSnapshots = await Promise.all(stockComponents.map((component) =>
+      transaction.get(tenantRef.collection("products").doc(component.productId))));
+    for (let index = 0; index < stockComponents.length; index += 1) {
+      const component = stockComponents[index];
+      const snapshot = componentSnapshots[index];
+      if (!snapshot.exists || snapshot.data().venueId !== venueId ||
+          snapshot.data().trackStock !== true) {
+        throw new HttpsError("failed-precondition", "A stock ingredient is no longer available.");
+      }
+      const reserved = priorLines
+        .filter((savedLine) => savedLine?.isSentToProduction !== true)
+        .reduce((total, savedLine) => {
+          const savedComponents = Array.isArray(savedLine?.stockComponents)
+            ? savedLine.stockComponents
+            : [];
+          const saved = savedComponents.find((item) => item?.productId === component.productId);
+          return total + (saved == null ? 0 :
+            Number(savedLine.quantity ?? 0) * Number(saved.quantityPerSale ?? 0));
+        }, 0);
+      const needed = line.quantity * component.quantityPerSale;
+      if (Number(snapshot.data().stockOnHand ?? 0) - reserved < needed) {
+        throw new HttpsError(
+          "failed-precondition",
+          `${component.productName} does not have enough stock for this item.`,
+        );
+      }
+    }
     const modifierGroupIds = configuredModifierGroupIds(productData);
     const modifierGroups = await Promise.all(
       modifierGroupIds.map((groupId) =>
@@ -2371,7 +2438,7 @@ async function addOrderDraftLineFor(caller, rawData) {
         || !Number.isFinite(stockPerSale) || stockPerSale <= 0) {
       throw new HttpsError("failed-precondition", "This product has invalid saved sale details.");
     }
-    if (productData.trackStock === true) {
+    if (productData.trackStock === true && stockComponents.length === 0) {
       const onHand = Number(productData.stockOnHand ?? 0);
       if (!Number.isFinite(onHand) || onHand < line.quantity * stockPerSale) {
         throw new HttpsError(
@@ -2397,6 +2464,7 @@ async function addOrderDraftLineFor(caller, rawData) {
       productionArea,
       trackStock: productData.trackStock === true,
       stockPerSale,
+      stockComponents,
       taxRateBasisPoints,
       taxRateId: typeof productData.taxRateId === "string" ? productData.taxRateId : null,
       taxRateName: typeof productData.taxRateName === "string"
@@ -2410,7 +2478,6 @@ async function addOrderDraftLineFor(caller, rawData) {
       isSentToProduction: false,
     };
     const current = existingOrder.exists ? existingOrder.data() : null;
-    const priorLines = Array.isArray(current?.lines) ? current.lines : [];
     const tableLabel = tableRef == null
       ? null
       : (typeof table.data().label === "string" ? table.data().label : tableId);
@@ -3385,6 +3452,14 @@ async function closeOrderFor(caller, rawData) {
               .map((selection) => ({...selection}))
           : [],
         itemNote: typeof line.itemNote === "string" ? line.itemNote : "",
+        stockPerSale: Number.isFinite(Number(line.stockPerSale))
+          ? Number(line.stockPerSale)
+          : 1,
+        stockComponents: Array.isArray(line.stockComponents)
+          ? line.stockComponents
+              .filter((component) => component != null && typeof component === "object")
+              .map((component) => ({...component}))
+          : [],
       };
     });
     const totalMinor = lines.reduce((total, line) => total + line.lineTotalMinor, 0);
@@ -4383,6 +4458,34 @@ async function sendOrderToProductionFor(caller, rawData) {
       }
       productById.set(snapshot.id, snapshot.data());
     }
+    const componentIds = [...new Set(
+      [...productById.values()].flatMap((product) =>
+        Array.isArray(product.stockComponents)
+          ? product.stockComponents
+              .map((component) => component?.productId)
+              .filter((productId) => typeof productId === "string")
+          : []),
+    )];
+    const componentRefs = new Map(componentIds.map((productId) => [
+      productId,
+      tenantRef.collection("products").doc(productId),
+    ]));
+    const componentSnapshots = await Promise.all(
+      [...componentRefs.values()].map((ref) => transaction.get(ref)),
+    );
+    const stockProductById = new Map(productById);
+    const stockProductRefs = new Map(productRefs);
+    for (const snapshot of componentSnapshots) {
+      if (!snapshot.exists || snapshot.data().venueId !== venueId ||
+          snapshot.data().trackStock !== true) {
+        throw new HttpsError(
+          "failed-precondition",
+          "A configured stock ingredient is no longer available at this venue.",
+        );
+      }
+      stockProductById.set(snapshot.id, snapshot.data());
+      stockProductRefs.set(snapshot.id, snapshot.ref);
+    }
 
     const configuredModifierGroupIdsForOrder = [...new Set(
       [...productById.values()].flatMap((product) =>
@@ -4438,6 +4541,14 @@ async function sendOrderToProductionFor(caller, rawData) {
         productionArea,
         trackStock: product.trackStock === true,
         stockPerSale,
+        stockComponents: Array.isArray(product.stockComponents)
+          ? product.stockComponents.map((component) => ({
+              productId: component.productId,
+              productName: component.productName,
+              stockUnit: component.stockUnit,
+              quantityPerSale: Number(component.quantityPerSale),
+            }))
+          : [],
         taxRateBasisPoints,
         taxRateId: typeof product.taxRateId === "string" ? product.taxRateId : null,
         taxRateName: typeof product.taxRateName === "string"
@@ -4514,6 +4625,7 @@ async function sendOrderToProductionFor(caller, rawData) {
       productionArea: line.productionArea,
       trackStock: line.trackStock,
       stockPerSale: line.stockPerSale,
+      stockComponents: line.stockComponents,
       taxRateBasisPoints: line.taxRateBasisPoints,
       taxRateId: line.taxRateId,
       taxRateName: line.taxRateName,
@@ -4643,22 +4755,38 @@ async function sendOrderToProductionFor(caller, rawData) {
       // stock movements: Firestore correctly rejects two `create` writes to
       // the same ticket/product movement document in one transaction.
       const ticketStockTotals = new Map();
-      for (const line of ticket.lines.filter((item) => item.trackStock)) {
-        const quantity = line.quantity * line.stockPerSale;
-        ticketStockTotals.set(
-          line.productId,
-          (ticketStockTotals.get(line.productId) ?? 0) + quantity,
-        );
+      for (const line of ticket.lines) {
+        const consumptions = Array.isArray(line.stockComponents) && line.stockComponents.length > 0
+          ? line.stockComponents.map((component) => ({
+              productId: component.productId,
+              quantity: line.quantity * Number(component.quantityPerSale),
+            }))
+          : line.trackStock
+            ? [{productId: line.productId, quantity: line.quantity * line.stockPerSale}]
+            : [];
+        for (const consumption of consumptions) {
+          if (!Number.isFinite(consumption.quantity) || consumption.quantity <= 0 ||
+              !stockProductById.has(consumption.productId)) {
+            throw new HttpsError("failed-precondition", "A stock recipe is invalid.");
+          }
+          ticketStockTotals.set(
+            consumption.productId,
+            (ticketStockTotals.get(consumption.productId) ?? 0) + consumption.quantity,
+          );
+        }
       }
       for (const [productId, quantity] of ticketStockTotals.entries()) {
         stockTotals.set(productId, (stockTotals.get(productId) ?? 0) + quantity);
         const movementRef = tenantRef.collection("stockMovements")
           .doc(`${ticket.ticketId}_${productId}`);
+        const stockProduct = stockProductById.get(productId);
         transaction.create(movementRef, {
           venueId,
           orderId,
           ticketId: ticket.ticketId,
           productId,
+          productName: stockProduct.name ?? "Stock item",
+          stockUnit: stockProduct.stockUnit ?? "each",
           quantity: -quantity,
           reason: "productionTicketReleased",
           createdByActor: actor,
@@ -4667,7 +4795,7 @@ async function sendOrderToProductionFor(caller, rawData) {
       }
     }
     for (const [productId, quantity] of stockTotals.entries()) {
-      const product = productById.get(productId);
+      const product = stockProductById.get(productId);
       const onHand = Number(product.stockOnHand ?? 0);
       if (onHand < quantity && !stockOverride) {
         throw new HttpsError(
@@ -4675,7 +4803,7 @@ async function sendOrderToProductionFor(caller, rawData) {
           "One or more tracked products are sold out. A manager may record an audited stock override.",
         );
       }
-      transaction.update(productRefs.get(productId), {
+      transaction.update(stockProductRefs.get(productId), {
         stockOnHand: FieldValue.increment(-quantity),
         lastStockMovementAt: FieldValue.serverTimestamp(),
       });
@@ -4770,6 +4898,482 @@ async function updateProductionTicketFor(caller, rawData) {
     });
     return {updated: true};
   });
+}
+
+function purchaseOrderDateKey(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function validatedStockComponents(value) {
+  if (!Array.isArray(value) || value.length > 50) {
+    throw new HttpsError("invalid-argument", "A product can use at most 50 stock ingredients.");
+  }
+  const productIds = new Set();
+  return value.map((raw) => {
+    const component = requireObject(raw);
+    const productId = requiredDocumentId(component, "productId");
+    if (productIds.has(productId)) {
+      throw new HttpsError("invalid-argument", "A stock ingredient is duplicated.");
+    }
+    productIds.add(productId);
+    return {
+      productId,
+      quantityPerSale: requiredFiniteNumber(
+        component.quantityPerSale, "quantityPerSale", 0.000001, 1000000000,
+      ),
+    };
+  });
+}
+
+function validatedReceiptLines(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 250) {
+    throw new HttpsError("invalid-argument", "Receive between one and 250 purchase-order lines.");
+  }
+  const ids = new Set();
+  return value.map((raw) => {
+    const line = requireObject(raw);
+    const lineId = requiredText(line, "lineId", 180);
+    const receivedPacks = requiredFiniteNumber(
+      line.receivedPacks, "receivedPacks", 0.000001, 1000000000,
+    );
+    if (ids.has(lineId)) {
+      throw new HttpsError("invalid-argument", "A received line was included twice.");
+    }
+    ids.add(lineId);
+    return {lineId, receivedPacks};
+  });
+}
+
+function validatedDraftOrderLines(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 250) {
+    throw new HttpsError("invalid-argument", "Update between one and 250 order lines.");
+  }
+  const ids = new Set();
+  return value.map((raw) => {
+    const line = requireObject(raw);
+    const lineId = requiredText(line, "lineId", 180);
+    const orderedPacks = requiredFiniteNumber(
+      line.orderedPacks, "orderedPacks", 0, 1000000000,
+    );
+    if (ids.has(lineId)) throw new HttpsError("invalid-argument", "An order line is duplicated.");
+    ids.add(lineId);
+    return {lineId, orderedPacks};
+  });
+}
+
+/// Manager-only stock and purchasing surface. All costs, pack conversions,
+/// product balances and recommendations are derived or reloaded server-side.
+/// Purchase receipts and stock movements are immutable audit evidence.
+async function manageInventoryFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const operation = requiredText(data, "operation", 40);
+  const values = data.values == null ? {} : requireObject(data.values);
+  const documentId = data.documentId == null || data.documentId === ""
+    ? null
+    : requiredDocumentId(data, "documentId");
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only an owner or manager can manage stock and purchasing.");
+  }
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venue = await tenantRef.collection("venues").doc(venueId).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const audit = async (target, details = {}) => writeAudit(
+    caller.uid, "manageInventory", target, {tenantId, venueId, operation, actor, ...details},
+  );
+
+  if (operation === "saveSupplier") {
+    const reference = documentId == null
+      ? tenantRef.collection("suppliers").doc()
+      : tenantRef.collection("suppliers").doc(documentId);
+    if (documentId != null) {
+      const existing = await reference.get();
+      if (!existing.exists || existing.data().venueId !== venueId) {
+        throw new HttpsError("not-found", "That supplier was not found at this venue.");
+      }
+    }
+    const name = requiredText(values, "name", 120);
+    const duplicates = await tenantRef.collection("suppliers")
+      .where("venueId", "==", venueId).get();
+    if (duplicates.docs.some((item) => item.id !== documentId &&
+        String(item.data().name ?? "").trim().toLowerCase() === name.toLowerCase())) {
+      throw new HttpsError("already-exists", "A supplier with this name already exists.");
+    }
+    await reference.set({
+      venueId,
+      name,
+      contactName: optionalText(values, "contactName", 120),
+      email: optionalText(values, "email", 200),
+      phone: optionalText(values, "phone", 60),
+      notes: optionalText(values, "notes", 1000),
+      active: values.active !== false,
+      ...(documentId == null ? {createdAt: FieldValue.serverTimestamp()} : {}),
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    }, {merge: documentId != null});
+    await audit(reference.id, {resource: "supplier"});
+    return {documentId: reference.id};
+  }
+
+  if (operation === "saveSupplierProduct") {
+    const supplierId = requiredDocumentId(values, "supplierId");
+    const productId = requiredDocumentId(values, "productId");
+    const [supplier, product] = await Promise.all([
+      tenantRef.collection("suppliers").doc(supplierId).get(),
+      tenantRef.collection("products").doc(productId).get(),
+    ]);
+    if (!supplier.exists || supplier.data().venueId !== venueId || supplier.data().active === false) {
+      throw new HttpsError("failed-precondition", "Select an active supplier at this venue.");
+    }
+    if (!product.exists || product.data().venueId !== venueId || product.data().trackStock !== true) {
+      throw new HttpsError("failed-precondition", "Only a stock-tracked venue product can be supplied.");
+    }
+    const existingLinks = await tenantRef.collection("supplierProducts")
+      .where("supplierId", "==", supplierId).get();
+    if (existingLinks.docs.some((item) => item.id !== documentId &&
+        item.data().venueId === venueId && item.data().productId === productId)) {
+      throw new HttpsError(
+        "already-exists",
+        "This product is already linked to the selected supplier.",
+      );
+    }
+    const reference = documentId == null
+      ? tenantRef.collection("supplierProducts").doc()
+      : tenantRef.collection("supplierProducts").doc(documentId);
+    if (documentId != null) {
+      const existing = await reference.get();
+      if (!existing.exists || existing.data().venueId !== venueId) {
+        throw new HttpsError("not-found", "That supplier-product link was not found.");
+      }
+    }
+    const currencyCode = requiredText(values, "currencyCode", 3).toUpperCase();
+    if (!supportedCurrencyCodeSet.has(currencyCode)) {
+      throw new HttpsError("invalid-argument", "The supplier currency is not supported.");
+    }
+    const preferred = values.preferred === true;
+    const writeLink = async () => {
+      if (preferred) {
+        const current = await tenantRef.collection("supplierProducts")
+          .where("venueId", "==", venueId).where("productId", "==", productId).get();
+        const batch = db.batch();
+        for (const item of current.docs) {
+          if (item.id !== reference.id && item.data().preferred === true) {
+            batch.update(item.ref, {preferred: false, updatedAt: FieldValue.serverTimestamp()});
+          }
+        }
+        batch.set(reference, {
+          venueId, supplierId, productId,
+          supplierName: supplier.data().name,
+          productName: product.data().name,
+          supplierSku: optionalText(values, "supplierSku", 120),
+          packName: requiredText(values, "packName", 120),
+          stockUnitsPerPack: requiredFiniteNumber(
+            values.stockUnitsPerPack, "stockUnitsPerPack", 0.000001, 1000000000,
+          ),
+          packCostMinor: requiredNonNegativeInteger(values.packCostMinor, "packCostMinor", 1000000000),
+          currencyCode, preferred, active: values.active !== false,
+          stockUnit: String(product.data().stockUnit ?? "each"),
+          ...(documentId == null ? {createdAt: FieldValue.serverTimestamp()} : {}),
+          updatedAt: FieldValue.serverTimestamp(), updatedByActor: actor,
+        }, {merge: documentId != null});
+        await batch.commit();
+      } else {
+        await reference.set({
+          venueId, supplierId, productId,
+          supplierName: supplier.data().name,
+          productName: product.data().name,
+          supplierSku: optionalText(values, "supplierSku", 120),
+          packName: requiredText(values, "packName", 120),
+          stockUnitsPerPack: requiredFiniteNumber(
+            values.stockUnitsPerPack, "stockUnitsPerPack", 0.000001, 1000000000,
+          ),
+          packCostMinor: requiredNonNegativeInteger(values.packCostMinor, "packCostMinor", 1000000000),
+          currencyCode, preferred, active: values.active !== false,
+          stockUnit: String(product.data().stockUnit ?? "each"),
+          ...(documentId == null ? {createdAt: FieldValue.serverTimestamp()} : {}),
+          updatedAt: FieldValue.serverTimestamp(), updatedByActor: actor,
+        }, {merge: documentId != null});
+      }
+    };
+    await writeLink();
+    await audit(reference.id, {resource: "supplierProduct", supplierId, productId});
+    return {documentId: reference.id};
+  }
+
+  if (operation === "createRecommendedOrder") {
+    const supplierId = requiredDocumentId(values, "supplierId");
+    const coverageDays = requiredPositiveInteger(values.coverageDays, "coverageDays", 365);
+    const supplier = await tenantRef.collection("suppliers").doc(supplierId).get();
+    if (!supplier.exists || supplier.data().venueId !== venueId || supplier.data().active === false) {
+      throw new HttpsError("failed-precondition", "Select an active supplier at this venue.");
+    }
+    const mappings = await tenantRef.collection("supplierProducts")
+      .where("venueId", "==", venueId).where("supplierId", "==", supplierId).get();
+    const activeMappings = mappings.docs.filter((item) => item.data().active !== false);
+    if (activeMappings.length === 0) {
+      throw new HttpsError("failed-precondition", "Add products to this supplier before creating an order.");
+    }
+    const productSnapshots = await db.getAll(...activeMappings.map(
+      (item) => tenantRef.collection("products").doc(item.data().productId),
+    ));
+    const today = new Date();
+    const recentStart = new Date(today); recentStart.setUTCDate(today.getUTCDate() - 30);
+    const priorEnd = new Date(today); priorEnd.setUTCFullYear(today.getUTCFullYear() - 1);
+    const priorStart = new Date(priorEnd); priorStart.setUTCDate(priorEnd.getUTCDate() - 30);
+    const recentStartKey = purchaseOrderDateKey(recentStart);
+    const todayKey = purchaseOrderDateKey(today);
+    const priorStartKey = purchaseOrderDateKey(priorStart);
+    const priorEndKey = purchaseOrderDateKey(priorEnd);
+    const [bills, venueProducts] = await Promise.all([
+      tenantRef.collection("bills")
+        .where("venueId", "==", venueId)
+        .where("businessDate", ">=", priorStartKey)
+        .get(),
+      tenantRef.collection("products").where("venueId", "==", venueId).get(),
+    ]);
+    const currentProductById = new Map(
+      venueProducts.docs.map((item) => [item.id, item.data()]),
+    );
+    const recentSales = new Map();
+    const priorSales = new Map();
+    for (const bill of bills.docs) {
+      const billData = bill.data();
+      const date = typeof billData.businessDate === "string" ? billData.businessDate : "";
+      const bucket = date >= recentStartKey && date <= todayKey
+        ? recentSales
+        : date >= priorStartKey && date <= priorEndKey ? priorSales : null;
+      if (bucket == null || !Array.isArray(billData.lines)) continue;
+      for (const line of billData.lines) {
+        const saleQuantity = Number(line?.quantity ?? 0);
+        if (!Number.isFinite(saleQuantity) || saleQuantity <= 0) continue;
+        const currentProduct = typeof line?.productId === "string"
+          ? currentProductById.get(line.productId)
+          : null;
+        // Older bills predate recipe snapshots. Using the current recipe is
+        // explicitly forecast-only; historic financial and stock records are
+        // never rewritten.
+        const components = Array.isArray(line.stockComponents) && line.stockComponents.length > 0
+          ? line.stockComponents
+          : Array.isArray(currentProduct?.stockComponents)
+            ? currentProduct.stockComponents
+            : [];
+        if (components.length > 0) {
+          for (const component of components) {
+            const componentQuantity = saleQuantity * Number(component?.quantityPerSale ?? 0);
+            if (typeof component?.productId === "string" &&
+                Number.isFinite(componentQuantity) && componentQuantity > 0) {
+              bucket.set(
+                component.productId,
+                (bucket.get(component.productId) ?? 0) + componentQuantity,
+              );
+            }
+          }
+        } else if (typeof line?.productId === "string") {
+          const directQuantity = saleQuantity * Number(
+            line.stockPerSale ?? currentProduct?.stockPerSale ?? 1,
+          );
+          if (Number.isFinite(directQuantity) && directQuantity > 0) {
+            bucket.set(line.productId, (bucket.get(line.productId) ?? 0) + directQuantity);
+          }
+        }
+      }
+    }
+    const lines = [];
+    for (let index = 0; index < activeMappings.length; index += 1) {
+      const mapping = activeMappings[index];
+      const mapData = mapping.data();
+      const product = productSnapshots[index];
+      if (!product.exists || product.data().venueId !== venueId || product.data().trackStock !== true) continue;
+      const productData = product.data();
+      const recentDailyUsage = (recentSales.get(product.id) ?? 0) / 30;
+      const priorQuantity = priorSales.get(product.id) ?? 0;
+      const priorYearDailyUsage = priorQuantity > 0 ? priorQuantity / 30 : null;
+      // Recent demand leads, with last year's same period adding seasonality
+      // only where history exists. This is a recommendation, never an order.
+      const forecastDaily = priorYearDailyUsage == null
+        ? recentDailyUsage
+        : recentDailyUsage * 0.7 + priorYearDailyUsage * 0.3;
+      const requiredUnits = Math.max(0, forecastDaily * coverageDays - Number(productData.stockOnHand ?? 0));
+      const unitsPerPack = Number(mapData.stockUnitsPerPack);
+      const recommendedPacks = unitsPerPack > 0 ? Math.ceil(requiredUnits / unitsPerPack) : 0;
+      lines.push({
+        id: randomUUID(), supplierProductId: mapping.id, productId: product.id,
+        productName: String(productData.name ?? "Product"),
+        stockUnit: String(productData.stockUnit ?? "each"),
+        packName: String(mapData.packName ?? "Pack"), stockUnitsPerPack: unitsPerPack,
+        packCostMinor: Number(mapData.packCostMinor ?? 0),
+        currencyCode: String(mapData.currencyCode ?? "GBP"),
+        recommendedPacks, orderedPacks: recommendedPacks, receivedPacks: 0,
+        recentDailyUsage, priorYearDailyUsage,
+      });
+    }
+    const reference = tenantRef.collection("purchaseOrders").doc();
+    await reference.create({
+      venueId, supplierId, supplierName: supplier.data().name,
+      status: "draft", coverageDays, lines,
+      recommendation: {
+        recentDays: 30, recentStart: recentStartKey, recentEnd: todayKey,
+        priorYearStart: priorStartKey, priorYearEnd: priorEndKey,
+        method: "70% recent demand + 30% same period last year when available",
+      },
+      createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    await audit(reference.id, {resource: "purchaseOrder", supplierId, coverageDays});
+    return {documentId: reference.id};
+  }
+
+  if (operation === "updateDraftOrder") {
+    if (documentId == null) throw new HttpsError("invalid-argument", "documentId is required.");
+    const updates = validatedDraftOrderLines(values.lines);
+    const reference = tenantRef.collection("purchaseOrders").doc(documentId);
+    await db.runTransaction(async (transaction) => {
+      const order = await transaction.get(reference);
+      if (!order.exists || order.data().venueId !== venueId) {
+        throw new HttpsError("not-found", "That purchase order was not found.");
+      }
+      if (order.data().status !== "draft") {
+        throw new HttpsError("failed-precondition", "Only a draft order can be edited.");
+      }
+      const lines = Array.isArray(order.data().lines) ? order.data().lines.map((line) => ({...line})) : [];
+      const byId = new Map(lines.map((line) => [line.id, line]));
+      for (const update of updates) {
+        const line = byId.get(update.lineId);
+        if (line == null) throw new HttpsError("invalid-argument", "An edited line is not on this order.");
+        line.orderedPacks = update.orderedPacks;
+      }
+      if (!lines.some((line) => Number(line.orderedPacks) > 0)) {
+        throw new HttpsError("failed-precondition", "Keep at least one product on the order.");
+      }
+      transaction.update(reference, {
+        lines, updatedAt: FieldValue.serverTimestamp(), updatedByActor: actor,
+      });
+    });
+    await audit(documentId, {resource: "purchaseOrderDraft"});
+    return {documentId};
+  }
+
+  if (["markOrderOrdered", "cancelOrder"].includes(operation)) {
+    if (documentId == null) throw new HttpsError("invalid-argument", "documentId is required.");
+    const reference = tenantRef.collection("purchaseOrders").doc(documentId);
+    await db.runTransaction(async (transaction) => {
+      const order = await transaction.get(reference);
+      if (!order.exists || order.data().venueId !== venueId) {
+        throw new HttpsError("not-found", "That purchase order was not found.");
+      }
+      if (order.data().status !== "draft") {
+        throw new HttpsError("failed-precondition", "Only a draft purchase order can be changed this way.");
+      }
+      transaction.update(reference, operation === "markOrderOrdered" ? {
+        status: "ordered", orderedAt: FieldValue.serverTimestamp(), orderedByActor: actor,
+        updatedAt: FieldValue.serverTimestamp(),
+      } : {
+        status: "cancelled", cancelledAt: FieldValue.serverTimestamp(), cancelledByActor: actor,
+        cancellationReason: requiredText(values, "reason", 500),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    });
+    await audit(documentId, {resource: "purchaseOrder"});
+    return {documentId};
+  }
+
+  if (operation === "receiveOrder") {
+    if (documentId == null) throw new HttpsError("invalid-argument", "documentId is required.");
+    const receipts = validatedReceiptLines(values.lines);
+    const reference = tenantRef.collection("purchaseOrders").doc(documentId);
+    await db.runTransaction(async (transaction) => {
+      const order = await transaction.get(reference);
+      if (!order.exists || order.data().venueId !== venueId) {
+        throw new HttpsError("not-found", "That purchase order was not found.");
+      }
+      if (!["ordered", "partiallyReceived"].includes(order.data().status)) {
+        throw new HttpsError("failed-precondition", "Only an ordered purchase order can be received.");
+      }
+      const lines = Array.isArray(order.data().lines) ? order.data().lines.map((line) => ({...line})) : [];
+      const lineById = new Map(lines.map((line) => [line.id, line]));
+      for (const receipt of receipts) {
+        const line = lineById.get(receipt.lineId);
+        if (line == null) throw new HttpsError("invalid-argument", "A received line is not on this order.");
+        const remaining = Number(line.orderedPacks) - Number(line.receivedPacks ?? 0);
+        if (receipt.receivedPacks > remaining + 0.000001) {
+          throw new HttpsError("failed-precondition", "A receipt cannot exceed the outstanding ordered packs.");
+        }
+      }
+      const productRefs = receipts.map((receipt) =>
+        tenantRef.collection("products").doc(lineById.get(receipt.lineId).productId));
+      const products = await Promise.all(productRefs.map((productRef) => transaction.get(productRef)));
+      for (let index = 0; index < receipts.length; index += 1) {
+        const receipt = receipts[index];
+        const line = lineById.get(receipt.lineId);
+        const product = products[index];
+        if (!product.exists || product.data().venueId !== venueId || product.data().trackStock !== true) {
+          throw new HttpsError("failed-precondition", "A received product is no longer stock tracked at this venue.");
+        }
+        const addedUnits = receipt.receivedPacks * Number(line.stockUnitsPerPack);
+        line.receivedPacks = Number(line.receivedPacks ?? 0) + receipt.receivedPacks;
+        transaction.update(product.ref, {
+          stockOnHand: FieldValue.increment(addedUnits),
+          latestUnitCostMinor: Number(line.packCostMinor) / Number(line.stockUnitsPerPack),
+          latestCostCurrencyCode: line.currencyCode,
+          latestCostReceivedAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(), updatedByActor: actor,
+        });
+        transaction.create(tenantRef.collection("stockMovements").doc(), {
+          venueId, productId: product.id, productName: product.data().name,
+          stockUnit: product.data().stockUnit ?? "each", quantity: addedUnits,
+          reason: "purchaseReceipt", purchaseOrderId: reference.id,
+          purchaseOrderLineId: line.id, receivedPacks: receipt.receivedPacks,
+          packCostMinor: line.packCostMinor, currencyCode: line.currencyCode,
+          actor, createdAt: FieldValue.serverTimestamp(),
+        });
+      }
+      const complete = lines.every((line) =>
+        Number(line.receivedPacks ?? 0) >= Number(line.orderedPacks ?? 0) - 0.000001);
+      transaction.update(reference, {
+        lines, status: complete ? "received" : "partiallyReceived",
+        ...(complete ? {receivedAt: FieldValue.serverTimestamp()} : {}),
+        lastReceivedAt: FieldValue.serverTimestamp(), lastReceivedByActor: actor,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    });
+    await audit(documentId, {resource: "purchaseReceipt"});
+    return {documentId};
+  }
+
+  if (operation === "adjustStock") {
+    const productId = requiredDocumentId(values, "productId");
+    const quantity = requiredFiniteNumber(values.quantity, "quantity", -1000000000, 1000000000);
+    if (Math.abs(quantity) < 0.000001) {
+      throw new HttpsError("invalid-argument", "Enter a non-zero stock adjustment.");
+    }
+    const reason = requiredText(values, "reason", 500);
+    const productRef = tenantRef.collection("products").doc(productId);
+    await db.runTransaction(async (transaction) => {
+      const product = await transaction.get(productRef);
+      if (!product.exists || product.data().venueId !== venueId || product.data().trackStock !== true) {
+        throw new HttpsError("not-found", "That stock-tracked product was not found at this venue.");
+      }
+      transaction.update(productRef, {
+        stockOnHand: FieldValue.increment(quantity),
+        updatedAt: FieldValue.serverTimestamp(), updatedByActor: actor,
+      });
+      transaction.create(tenantRef.collection("stockMovements").doc(), {
+        venueId, productId, productName: product.data().name,
+        stockUnit: product.data().stockUnit ?? "each", quantity,
+        reason: "manualAdjustment", adjustmentReason: reason,
+        actor, createdAt: FieldValue.serverTimestamp(),
+      });
+    });
+    await audit(productId, {resource: "stockAdjustment", quantity, reason});
+    return {documentId: productId};
+  }
+
+  throw new HttpsError("invalid-argument", "That inventory operation is not supported.");
 }
 
 async function invokePlatformAction(action, caller, data) {
@@ -4891,6 +5495,8 @@ async function invokePosAction(action, caller, data) {
       return updateVenueNotificationSettingsFor(actingCaller, data);
     case "manageMenuConfiguration":
       return manageMenuConfigurationFor(actingCaller, data);
+    case "manageInventory":
+      return manageInventoryFor(actingCaller, data);
     case "manageVenueConfiguration":
       return manageVenueConfigurationFor(actingCaller, data);
     case "uploadTenantLogo":

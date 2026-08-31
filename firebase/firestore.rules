@@ -157,7 +157,37 @@ service cloud.firestore {
       // release-to-production command. A client must never decrement stock by
       // writing a movement or product value directly.
       match /stockMovements/{movementId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if managesVenueWithActivePin(
+          tenantId,
+          resource.data.venueId
+        );
+        allow write: if false;
+      }
+
+      // Supplier costs, purchasing history and stock forecasts are financial
+      // management data. Reads require a current manager PIN lease; all
+      // writes are independently validated and audited by posApi.
+      match /suppliers/{supplierId} {
+        allow read: if managesVenueWithActivePin(
+          tenantId,
+          resource.data.venueId
+        );
+        allow write: if false;
+      }
+
+      match /supplierProducts/{mappingId} {
+        allow read: if managesVenueWithActivePin(
+          tenantId,
+          resource.data.venueId
+        );
+        allow write: if false;
+      }
+
+      match /purchaseOrders/{purchaseOrderId} {
+        allow read: if managesVenueWithActivePin(
+          tenantId,
+          resource.data.venueId
+        );
         allow write: if false;
       }
 

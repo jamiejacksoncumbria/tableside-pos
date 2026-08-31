@@ -358,6 +358,25 @@ class MenuProductVariant {
   final bool isAvailable;
 }
 
+/// A stock-tracked ingredient consumed when one sellable product is sent to
+/// production. Quantities use the component product's base unit (for example
+/// 50 ml vodka and 333 ml mixer).
+class ProductStockComponent {
+  const ProductStockComponent({
+    required this.productId,
+    required this.productName,
+    required this.quantityPerSale,
+    required this.stockUnit,
+    this.stockOnHand,
+  });
+
+  final String productId;
+  final String productName;
+  final double quantityPerSale;
+  final String stockUnit;
+  final double? stockOnHand;
+}
+
 /// One selectable option inside a venue's reusable modifier group.
 class MenuModifierOption {
   const MenuModifierOption({
@@ -451,6 +470,7 @@ class MenuProduct {
     this.taxRateName = 'Zero rate',
     this.variants = const <MenuProductVariant>[],
     this.modifierGroupIds = const <String>[],
+    this.stockComponents = const <ProductStockComponent>[],
   });
 
   final String id;
@@ -476,9 +496,16 @@ class MenuProduct {
   final String taxRateName;
   final List<MenuProductVariant> variants;
   final List<String> modifierGroupIds;
+  final List<ProductStockComponent> stockComponents;
 
   bool get requiresConfiguration =>
       variants.isNotEmpty || modifierGroupIds.isNotEmpty;
+
+  bool get hasIngredientStockAvailable => stockComponents.every(
+    (component) =>
+        component.stockOnHand != null &&
+        component.stockOnHand! >= component.quantityPerSale,
+  );
 
   String get taxRateLabel {
     final percent = taxRateBasisPoints / 100;
@@ -543,6 +570,7 @@ class OrderLine {
     this.variantPriceDeltaMinor = 0,
     this.modifiers = const <OrderModifierSelection>[],
     this.itemNote = '',
+    this.stockComponents = const <ProductStockComponent>[],
   });
 
   final String id;
@@ -562,6 +590,7 @@ class OrderLine {
   final int variantPriceDeltaMinor;
   final List<OrderModifierSelection> modifiers;
   final String itemNote;
+  final List<ProductStockComponent> stockComponents;
 
   int get totalMinor => quantity * unitPriceMinor;
 
@@ -594,6 +623,7 @@ class OrderLine {
     variantPriceDeltaMinor: variantPriceDeltaMinor,
     modifiers: modifiers,
     itemNote: itemNote,
+    stockComponents: stockComponents,
   );
 }
 
@@ -643,16 +673,23 @@ class PosOrder {
   /// local, unsent lines: once an item is sent, the product's Firestore stock
   /// stream becomes the source of truth for every device.
   double unsentStockReservedFor(String productId) => lines
-      .where(
-        (line) =>
-            line.productId == productId &&
-            line.trackStock &&
-            !line.isSentToProduction,
-      )
-      .fold<double>(
-        0,
-        (reserved, line) => reserved + (line.quantity * line.stockPerSale),
-      );
+      .where((line) => !line.isSentToProduction)
+      .fold<double>(0, (reserved, line) {
+        final componentUse = line.stockComponents
+            .where((component) => component.productId == productId)
+            .fold<double>(
+              0,
+              (total, component) =>
+                  total + line.quantity * component.quantityPerSale,
+            );
+        final directUse =
+            line.stockComponents.isEmpty &&
+                line.productId == productId &&
+                line.trackStock
+            ? line.quantity * line.stockPerSale
+            : 0;
+        return reserved + componentUse + directUse;
+      });
 
   /// Returns whether one more unit of [product] may be added locally.
   ///
@@ -661,6 +698,15 @@ class PosOrder {
   /// still protects against another device selling the final unit first.
   bool canAddProduct(MenuProduct product) {
     if (!product.isAvailable) return false;
+    if (product.stockComponents.isNotEmpty) {
+      return product.stockComponents.every(
+        (component) =>
+            component.stockOnHand != null &&
+            component.stockOnHand! -
+                    unsentStockReservedFor(component.productId) >=
+                component.quantityPerSale,
+      );
+    }
     if (!product.trackStock) return true;
     final stockOnHand = product.stockOnHand;
     if (stockOnHand == null || product.stockPerSale <= 0) return false;

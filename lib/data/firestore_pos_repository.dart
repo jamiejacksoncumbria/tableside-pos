@@ -182,6 +182,35 @@ class FirestorePosRepository {
     return variants;
   }
 
+  List<ProductStockComponent> _stockComponents(
+    Object? value,
+    Map<String, Map<String, dynamic>> productDataById,
+  ) {
+    if (value is! List) return const <ProductStockComponent>[];
+    return value
+        .whereType<Map>()
+        .map((raw) {
+          final data = Map<Object?, Object?>.from(raw);
+          final productId = data['productId'] as String? ?? '';
+          final liveProduct = productDataById[productId];
+          return ProductStockComponent(
+            productId: productId,
+            productName:
+                liveProduct?['name'] as String? ??
+                data['productName'] as String? ??
+                'Stock item',
+            quantityPerSale: (data['quantityPerSale'] as num?)?.toDouble() ?? 0,
+            stockUnit:
+                liveProduct?['stockUnit'] as String? ??
+                data['stockUnit'] as String? ??
+                'each',
+            stockOnHand: (liveProduct?['stockOnHand'] as num?)?.toDouble(),
+          );
+        })
+        .where((item) => item.productId.isNotEmpty && item.quantityPerSale > 0)
+        .toList(growable: false);
+  }
+
   List<MenuModifierOption> _modifierOptions(Object? value) {
     if (value is! List) return const <MenuModifierOption>[];
     final options = <MenuModifierOption>[];
@@ -282,6 +311,9 @@ class FirestorePosRepository {
               .collection('tenants/${scope.tenantId}/products')
               .orderBy('name')
               .snapshots()) {
+        final productDataById = <String, Map<String, dynamic>>{
+          for (final document in snapshot.docs) document.id: document.data(),
+        };
         final items = snapshot.docs
             .where(
               (document) =>
@@ -312,6 +344,10 @@ class FirestorePosRepository {
                 taxRateName: data['taxRateName'] as String? ?? 'Zero rate',
                 variants: _productVariants(data['variants']),
                 modifierGroupIds: _stringIds(data['modifierGroupIds']),
+                stockComponents: _stockComponents(
+                  data['stockComponents'],
+                  productDataById,
+                ),
               );
             })
             .toList(growable: false);
@@ -574,6 +610,10 @@ class FirestorePosRepository {
                 (line['variantPriceDeltaMinor'] as num?)?.toInt() ?? 0,
             modifiers: _orderModifierSelections(line['modifierSelections']),
             itemNote: line['itemNote'] as String? ?? '',
+            stockComponents: _stockComponents(
+              line['stockComponents'],
+              const <String, Map<String, dynamic>>{},
+            ),
           );
         })
         .where((line) => line.id.isNotEmpty && line.productId.isNotEmpty)
@@ -729,6 +769,7 @@ class FirestorePosRepository {
     required ProductionArea productionArea,
     required bool trackStock,
     required double? stockOnHand,
+    required String stockUnit,
     required double stockPerSale,
     required bool showOnOrderFlow,
     required int taxRateBasisPoints,
@@ -736,6 +777,7 @@ class FirestorePosRepository {
     required String taxRateName,
     required List<MenuProductVariant> variants,
     required List<String> modifierGroupIds,
+    required List<ProductStockComponent> stockComponents,
   }) async {
     final cleanedName = name.trim();
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
@@ -755,19 +797,21 @@ class FirestorePosRepository {
       resource: 'product',
       operation: 'save',
       values: {
-      'name': cleanedName,
-      'priceMinor': priceMinor,
-      'sectionIds': sectionIds,
-      'productionArea': productionArea.name,
-      'trackStock': trackStock,
-      'stockOnHand': trackStock ? (stockOnHand ?? 0) : null,
-      'stockPerSale': stockPerSale,
-      'showOnOrderFlow': showOnOrderFlow,
-      'taxRateBasisPoints': taxRateBasisPoints,
-      'taxRateId': taxRateId,
-      'taxRateName': cleanedTaxRateName,
-      'variants': _variantsToMap(variants),
-      'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
+        'name': cleanedName,
+        'priceMinor': priceMinor,
+        'sectionIds': sectionIds,
+        'productionArea': productionArea.name,
+        'trackStock': trackStock,
+        'stockOnHand': trackStock ? (stockOnHand ?? 0) : null,
+        'stockUnit': stockUnit,
+        'stockPerSale': stockPerSale,
+        'showOnOrderFlow': showOnOrderFlow,
+        'taxRateBasisPoints': taxRateBasisPoints,
+        'taxRateId': taxRateId,
+        'taxRateName': cleanedTaxRateName,
+        'variants': _variantsToMap(variants),
+        'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
+        'stockComponents': _stockComponentsToMap(stockComponents),
       },
     );
   }
@@ -795,6 +839,7 @@ class FirestorePosRepository {
     required ProductionArea productionArea,
     required bool trackStock,
     required double? stockOnHand,
+    required String stockUnit,
     required double stockPerSale,
     required bool showOnOrderFlow,
     required int taxRateBasisPoints,
@@ -802,6 +847,7 @@ class FirestorePosRepository {
     required String taxRateName,
     required List<MenuProductVariant> variants,
     required List<String> modifierGroupIds,
+    required List<ProductStockComponent> stockComponents,
   }) async {
     final cleanedName = name.trim();
     if (cleanedName.isEmpty || priceMinor < 0 || sectionIds.isEmpty) {
@@ -818,22 +864,35 @@ class FirestorePosRepository {
       operation: 'save',
       documentId: productId,
       values: {
-          'name': cleanedName,
-          'priceMinor': priceMinor,
-          'sectionIds': sectionIds,
-          'productionArea': productionArea.name,
-          'trackStock': trackStock,
-          'stockOnHand': trackStock ? (stockOnHand ?? 0) : null,
-          'stockPerSale': stockPerSale,
-          'showOnOrderFlow': showOnOrderFlow,
-          'taxRateBasisPoints': taxRateBasisPoints,
-          'taxRateId': taxRateId,
-          'taxRateName': cleanedTaxRateName,
-          'variants': _variantsToMap(variants),
-          'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
+        'name': cleanedName,
+        'priceMinor': priceMinor,
+        'sectionIds': sectionIds,
+        'productionArea': productionArea.name,
+        'trackStock': trackStock,
+        'stockOnHand': trackStock ? (stockOnHand ?? 0) : null,
+        'stockUnit': stockUnit,
+        'stockPerSale': stockPerSale,
+        'showOnOrderFlow': showOnOrderFlow,
+        'taxRateBasisPoints': taxRateBasisPoints,
+        'taxRateId': taxRateId,
+        'taxRateName': cleanedTaxRateName,
+        'variants': _variantsToMap(variants),
+        'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
+        'stockComponents': _stockComponentsToMap(stockComponents),
       },
     );
   }
+
+  List<Map<String, Object?>> _stockComponentsToMap(
+    List<ProductStockComponent> components,
+  ) => components
+      .map(
+        (component) => <String, Object?>{
+          'productId': component.productId,
+          'quantityPerSale': component.quantityPerSale,
+        },
+      )
+      .toList(growable: false);
 
   List<Map<String, Object?>> _variantsToMap(List<MenuProductVariant> variants) {
     final cleaned = <Map<String, Object?>>[];
@@ -933,9 +992,7 @@ class FirestorePosRepository {
       scope: scope,
       resource: 'modifierGroup',
       operation: 'save',
-      values: {
-          ...data,
-      },
+      values: {...data},
     );
   }
 
@@ -1200,11 +1257,12 @@ class FirestorePosRepository {
         .limit(5000)
         .snapshots()
         .map(
-          (snapshot) => snapshot.docs
-              .map(_salesReportBillFromDocument)
-              .whereType<SalesReportBill>()
-              .toList(growable: false)
-            ..sort((a, b) => b.businessDate.compareTo(a.businessDate)),
+          (snapshot) =>
+              snapshot.docs
+                  .map(_salesReportBillFromDocument)
+                  .whereType<SalesReportBill>()
+                  .toList(growable: false)
+                ..sort((a, b) => b.businessDate.compareTo(a.businessDate)),
         );
   }
 

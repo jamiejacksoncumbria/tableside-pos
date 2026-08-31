@@ -116,6 +116,7 @@ class MenuManagementPage extends ConsumerWidget {
                           sections: sections,
                           taxRates: [TaxRate.zero, ...taxRates],
                           modifierGroups: modifierGroups,
+                          allProducts: products,
                           currencyCode: currencyCode,
                         ),
                   icon: const Icon(Icons.add_rounded),
@@ -263,6 +264,7 @@ class MenuManagementPage extends ConsumerWidget {
                             sections: sections,
                             taxRates: [TaxRate.zero, ...taxRates],
                             modifierGroups: modifierGroups,
+                            allProducts: products,
                             currencyCode: currencyCode,
                             existing: product,
                           ),
@@ -871,6 +873,7 @@ Future<void> _showProductDialog({
   required List<MenuSection> sections,
   required List<TaxRate> taxRates,
   required List<MenuModifierGroup> modifierGroups,
+  required List<MenuProduct> allProducts,
   required String currencyCode,
   MenuProduct? existing,
 }) async {
@@ -888,8 +891,10 @@ Future<void> _showProductDialog({
   final selectedSections = <String>{...?existing?.sectionIds};
   final selectedModifierGroupIds = <String>{...?existing?.modifierGroupIds};
   var variants = <MenuProductVariant>[...?existing?.variants];
+  var stockComponents = <ProductStockComponent>[...?existing?.stockComponents];
   var productionArea = existing?.productionArea ?? ProductionArea.kitchen;
   var trackStock = existing?.trackStock ?? false;
+  var stockUnit = existing?.stockUnit ?? 'each';
   var showOnOrderFlow = existing?.showOnOrderFlow ?? true;
   var selectedTaxRateId =
       taxRates.map((rate) => rate.id).contains(existing?.taxRateId)
@@ -1075,6 +1080,55 @@ Future<void> _showProductDialog({
                           setDialogState(() => trackStock = value),
                     ),
                     if (trackStock) ...[
+                      DropdownButtonFormField<String>(
+                        initialValue:
+                            const [
+                              'each',
+                              'ml',
+                              'cl',
+                              'l',
+                              'g',
+                              'kg',
+                              'portion',
+                            ].contains(stockUnit)
+                            ? stockUnit
+                            : 'each',
+                        decoration: const InputDecoration(
+                          labelText: 'Base stock unit',
+                          helperText:
+                              'Use the smallest practical unit, such as ml for spirits.',
+                        ),
+                        items: const [
+                          DropdownMenuItem(value: 'each', child: Text('Each')),
+                          DropdownMenuItem(
+                            value: 'ml',
+                            child: Text('Millilitres (ml)'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'cl',
+                            child: Text('Centilitres (cl)'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'l',
+                            child: Text('Litres (l)'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'g',
+                            child: Text('Grams (g)'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'kg',
+                            child: Text('Kilograms (kg)'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'portion',
+                            child: Text('Portions'),
+                          ),
+                        ],
+                        onChanged: (value) =>
+                            setDialogState(() => stockUnit = value ?? 'each'),
+                      ),
+                      const SizedBox(height: 12),
                       TextFormField(
                         controller: stock,
                         keyboardType: const TextInputType.numberWithOptions(
@@ -1111,6 +1165,48 @@ Future<void> _showProductDialog({
                         },
                       ),
                     ],
+                    const SizedBox(height: 18),
+                    Text(
+                      'Ingredient stock recipe',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      stockComponents.isEmpty
+                          ? 'Optional. Consume other stock products when this item is sold.'
+                          : stockComponents
+                                .map(
+                                  (item) =>
+                                      '${item.productName}: ${item.quantityPerSale} ${item.stockUnit}',
+                                )
+                                .join(' · '),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        final available = allProducts
+                            .where(
+                              (product) =>
+                                  product.trackStock &&
+                                  product.id != existing?.id,
+                            )
+                            .toList(growable: false);
+                        final next = await _showStockComponentsDialog(
+                          context: dialogContext,
+                          products: available,
+                          initial: stockComponents,
+                        );
+                        if (next != null) {
+                          setDialogState(() => stockComponents = next);
+                        }
+                      },
+                      icon: const Icon(Icons.account_tree_outlined),
+                      label: Text(
+                        stockComponents.isEmpty
+                            ? 'Add ingredient usage'
+                            : 'Edit ingredient usage',
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -1154,6 +1250,7 @@ Future<void> _showProductDialog({
                       productionArea: productionArea,
                       trackStock: trackStock,
                       stockOnHand: currentStock,
+                      stockUnit: stockUnit,
                       stockPerSale: unitStock,
                       showOnOrderFlow: showOnOrderFlow,
                       taxRateBasisPoints: selectedTaxRate.basisPoints,
@@ -1165,6 +1262,7 @@ Future<void> _showProductDialog({
                       modifierGroupIds: selectedModifierGroupIds.toList(
                         growable: false,
                       ),
+                      stockComponents: stockComponents,
                     );
                   } else {
                     await repository.updateProduct(
@@ -1176,6 +1274,7 @@ Future<void> _showProductDialog({
                       productionArea: productionArea,
                       trackStock: trackStock,
                       stockOnHand: currentStock,
+                      stockUnit: stockUnit,
                       stockPerSale: unitStock,
                       showOnOrderFlow: showOnOrderFlow,
                       taxRateBasisPoints: selectedTaxRate.basisPoints,
@@ -1187,6 +1286,7 @@ Future<void> _showProductDialog({
                       modifierGroupIds: selectedModifierGroupIds.toList(
                         growable: false,
                       ),
+                      stockComponents: stockComponents,
                     );
                   }
                   if (dialogContext.mounted) Navigator.pop(dialogContext);
@@ -1218,6 +1318,116 @@ Future<void> _showProductDialog({
 
 String? _requiredText(String? value) =>
     value == null || value.trim().isEmpty ? 'This field is required.' : null;
+
+Future<List<ProductStockComponent>?> _showStockComponentsDialog({
+  required BuildContext context,
+  required List<MenuProduct> products,
+  required List<ProductStockComponent> initial,
+}) async {
+  if (products.isEmpty) {
+    showAppNotification(
+      context,
+      title: 'No ingredient products available',
+      message:
+          'Create or edit stock-tracked products first, then attach them as ingredients.',
+      level: AppNotificationLevel.warning,
+    );
+    return null;
+  }
+  final selected = <String>{for (final item in initial) item.productId};
+  final quantities = <String, TextEditingController>{
+    for (final product in products)
+      product.id: TextEditingController(
+        text: initial
+            .where((item) => item.productId == product.id)
+            .map((item) => '${item.quantityPerSale}')
+            .firstOrNull,
+      ),
+  };
+  try {
+    return await showDialog<List<ProductStockComponent>>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Ingredient usage per sale'),
+          content: SizedBox(
+            width: 540,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                const Text(
+                  'Quantities use each ingredient’s base stock unit. Example: 50 ml vodka and 333 ml mixer.',
+                ),
+                const SizedBox(height: 12),
+                for (final product in products)
+                  CheckboxListTile(
+                    value: selected.contains(product.id),
+                    title: Text(product.name),
+                    subtitle: selected.contains(product.id)
+                        ? TextField(
+                            controller: quantities[product.id],
+                            keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true,
+                            ),
+                            decoration: InputDecoration(
+                              labelText: '${product.stockUnit} used per sale',
+                            ),
+                          )
+                        : Text('Measured in ${product.stockUnit}'),
+                    onChanged: (value) => setState(() {
+                      value == true
+                          ? selected.add(product.id)
+                          : selected.remove(product.id);
+                    }),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final result = <ProductStockComponent>[];
+                for (final product in products.where(
+                  (item) => selected.contains(item.id),
+                )) {
+                  final quantity = _decimal(quantities[product.id]?.text);
+                  if (quantity == null || quantity <= 0) {
+                    showAppNotification(
+                      context,
+                      title: 'Enter ingredient quantities',
+                      message:
+                          'Enter a positive quantity for every selected ingredient.',
+                      level: AppNotificationLevel.warning,
+                    );
+                    return;
+                  }
+                  result.add(
+                    ProductStockComponent(
+                      productId: product.id,
+                      productName: product.name,
+                      quantityPerSale: quantity,
+                      stockUnit: product.stockUnit,
+                    ),
+                  );
+                }
+                Navigator.pop(context, result);
+              },
+              child: const Text('Apply recipe'),
+            ),
+          ],
+        ),
+      ),
+    );
+  } finally {
+    for (final controller in quantities.values) {
+      controller.dispose();
+    }
+  }
+}
 
 Future<List<MenuProductVariant>?> _showVariantsDialog({
   required BuildContext context,

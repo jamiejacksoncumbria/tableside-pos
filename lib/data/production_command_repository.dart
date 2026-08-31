@@ -224,6 +224,31 @@ class ProductionCommandRepository {
     return returnedId;
   }
 
+  /// Performs manager-only supplier, purchasing and stock mutations. The
+  /// server reloads every product and supplier record, computes recommended
+  /// quantities, and applies receipts in a transaction; client totals are
+  /// never trusted.
+  Future<String> manageInventory({
+    required VenueScope scope,
+    required String operation,
+    String? documentId,
+    Map<String, Object?> values = const {},
+  }) async {
+    final response = await _call('manageInventory', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'operation': operation,
+      if (documentId != null && documentId.trim().isNotEmpty)
+        'documentId': documentId,
+      'values': values,
+    });
+    final returnedId = response['documentId'];
+    if (returnedId is! String || returnedId.isEmpty) {
+      throw StateError('The inventory server returned an invalid document ID.');
+    }
+    return returnedId;
+  }
+
   Future<void> manageVenueConfiguration({
     required VenueScope scope,
     required String resource,

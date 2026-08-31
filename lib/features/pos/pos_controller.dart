@@ -229,6 +229,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
       variantPriceDeltaMinor: selection.variant?.priceDeltaMinor ?? 0,
       modifiers: selection.modifiers,
       itemNote: selection.itemNote.trim(),
+      stockComponents: product.stockComponents,
     );
     state = state.copyWith(
       lines: [...state.lines, line],

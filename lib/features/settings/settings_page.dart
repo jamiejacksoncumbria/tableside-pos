@@ -15,6 +15,7 @@ import '../printing/venue_printer_routing_page.dart';
 import '../printing/windows_printer_setup_page.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
+import '../stock/stock_management_page.dart';
 import '../tables/table_management_page.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
@@ -458,6 +459,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
                     builder: (_) => const TableManagementPage(),
+                  ),
+                ),
+              ),
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.inventory_2_outlined),
+                title: const Text('Stock, suppliers & purchasing'),
+                subtitle: const Text(
+                  'Manage stock, supplier packs and recommended purchase orders.',
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => StockManagementPage(
+                      baseCurrencyCode: profile.currencyCode,
+                    ),
                   ),
                 ),
               ),
