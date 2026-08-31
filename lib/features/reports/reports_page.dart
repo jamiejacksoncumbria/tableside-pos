@@ -11,9 +11,12 @@ import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../auth/staff_pin_gate.dart';
-import '../bookings/booking.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
+import '../pos/pos_controller.dart';
+import '../printing/bluetooth_receipt_printer_factory.dart';
+import '../printing/windows_print_queue.dart';
+import '../printing/windows_print_queue_factory.dart';
 import 'booking_report_page.dart';
 
 final salesReportBillsProvider = StreamProvider<List<SalesReportBill>>((ref) {
@@ -49,6 +52,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
   DateTimeRange? _customRange;
   DateTime? _anchorDate;
   bool _exporting = false;
+  bool _printing = false;
 
   @override
   Widget build(BuildContext context) {
@@ -153,6 +157,15 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
     }
     final products = productTotals.values.toList()
       ..sort((left, right) => right.$3.compareTo(left.$3));
+    final reportRange = _periodBounds(anchor, _period, _customRange);
+    final reportComplete = isSalesReportPeriodComplete(
+      reportRange,
+      widget.businessDayCutoffMinutes,
+      DateTime.now(),
+    );
+    final incompleteMessage = _period == _ReportPeriod.day
+        ? 'Day not completed yet'
+        : 'Reporting period not completed yet';
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -166,6 +179,19 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
           'Venue business day ends at ${_clockLabel(widget.businessDayCutoffMinutes)}. Each bill retains the cut-off used when it closed.',
           style: Theme.of(context).textTheme.bodySmall,
         ),
+        if (!reportComplete) ...[
+          const SizedBox(height: 12),
+          Card(
+            color: Theme.of(context).colorScheme.tertiaryContainer,
+            child: ListTile(
+              leading: const Icon(Icons.schedule_rounded),
+              title: Text(incompleteMessage),
+              subtitle: Text(
+                'Figures include closed bills so far. This business period completes after ${_clockLabel(widget.businessDayCutoffMinutes)}.',
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 16),
         Wrap(
           spacing: 10,
@@ -232,6 +258,18 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                     ),
               icon: const Icon(Icons.download_rounded),
               label: Text(_exporting ? 'Exporting…' : 'Export CSV'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _printing
+                  ? null
+                  : () => _printSalesReport(
+                      bills: bills,
+                      openOrderCount: openOrderCount,
+                      range: reportRange,
+                      reportComplete: reportComplete,
+                    ),
+              icon: const Icon(Icons.print_outlined),
+              label: Text(_printing ? 'Printing…' : 'Print report'),
             ),
           ],
         ),
@@ -442,6 +480,198 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
       if (mounted) setState(() => _exporting = false);
     }
   }
+
+  Future<void> _printSalesReport({
+    required List<SalesReportBill> bills,
+    required int openOrderCount,
+    required DateTimeRange range,
+    required bool reportComplete,
+  }) async {
+    if (_printing) return;
+    setState(() => _printing = true);
+    try {
+      final profile = ref.read(tenantProfileProvider);
+      final lines = buildSalesReportPrintLines(
+        bills: bills,
+        openOrderCount: openOrderCount,
+        range: range,
+        currencyCode: widget.currencyCode,
+        cutoffMinutes: widget.businessDayCutoffMinutes,
+        reportComplete: reportComplete,
+      );
+      final title = '${profile.displayName} SALES REPORT';
+      final windows = createWindowsPrintQueue();
+      if (windows.isSupported) {
+        final printers = await windows.installedPrinters();
+        if (!mounted) return;
+        final selected = await showDialog<WindowsPrintQueueDevice>(
+          context: context,
+          builder: (context) => SimpleDialog(
+            title: const Text('Choose report printer'),
+            children: [
+              if (printers.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text('No installed Windows printers were found.'),
+                ),
+              for (final printer in printers)
+                SimpleDialogOption(
+                  onPressed: () => Navigator.pop(context, printer),
+                  child: Text(printer.name),
+                ),
+            ],
+          ),
+        );
+        if (selected == null) return;
+        await windows.printText(
+          printer: selected,
+          title: title,
+          lines: lines.map(WindowsPrintLine.new).toList(growable: false),
+        );
+      } else {
+        final bluetooth = createBluetoothReceiptPrinter();
+        if (!bluetooth.isSupported) {
+          throw StateError(
+            'Direct report printing is available from Android and Windows. Use the browser print command on web.',
+          );
+        }
+        final printers = await bluetooth.pairedDevices();
+        if (!mounted) return;
+        final selected = await showDialog(
+          context: context,
+          builder: (context) => SimpleDialog(
+            title: const Text('Choose report printer'),
+            children: [
+              if (printers.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text('No paired Bluetooth printers were found.'),
+                ),
+              for (final printer in printers)
+                SimpleDialogOption(
+                  onPressed: () => Navigator.pop(context, printer),
+                  child: Text(printer.name),
+                ),
+            ],
+          ),
+        );
+        if (selected == null) return;
+        await bluetooth.printTextReport(
+          device: selected,
+          title: title,
+          lines: lines,
+        );
+      }
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Sales report sent to printer',
+        message: reportComplete
+            ? 'The completed report was sent to the selected printer.'
+            : 'The report was printed and clearly marked as not completed.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Print sales report', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not print sales report',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _printing = false);
+    }
+  }
+}
+
+bool isSalesReportPeriodComplete(
+  DateTimeRange range,
+  int cutoffMinutes,
+  DateTime now,
+) {
+  final safeCutoff = cutoffMinutes.clamp(0, 1439);
+  var currentBusinessDate = DateTime(now.year, now.month, now.day);
+  if ((now.hour * 60) + now.minute < safeCutoff) {
+    currentBusinessDate = currentBusinessDate.subtract(const Duration(days: 1));
+  }
+  final end = DateTime(range.end.year, range.end.month, range.end.day);
+  return end.isBefore(currentBusinessDate);
+}
+
+List<String> buildSalesReportPrintLines({
+  required List<SalesReportBill> bills,
+  required int openOrderCount,
+  required DateTimeRange range,
+  required String currencyCode,
+  required int cutoffMinutes,
+  required bool reportComplete,
+}) {
+  final gross = bills.fold<int>(0, (sum, bill) => sum + bill.grossMinor);
+  final net = bills.fold<int>(0, (sum, bill) => sum + bill.netMinor);
+  final tax = bills.fold<int>(0, (sum, bill) => sum + bill.taxMinor);
+  final payments = <String, (String, int)>{};
+  final products = <String, (String, int, int)>{};
+  final staff = <String, int>{};
+  for (final bill in bills) {
+    final staffName = bill.closedByName.trim().isEmpty
+        ? 'Unknown staff'
+        : bill.closedByName.trim();
+    staff[staffName] = (staff[staffName] ?? 0) + bill.grossMinor;
+    for (final payment in bill.payments) {
+      final label = payment.method == 'cardTerminal'
+          ? 'Card${payment.terminalLabel?.trim().isNotEmpty == true ? ' - ${payment.terminalLabel!.trim()}' : ''}'
+          : 'Cash ${payment.currencyCode}';
+      final existing = payments[label];
+      payments[label] = (
+        payment.currencyCode,
+        (existing?.$2 ?? 0) + payment.tenderedAmountMinor,
+      );
+    }
+    for (final line in bill.lines) {
+      final key = line.productId.isEmpty ? line.productName : line.productId;
+      final existing = products[key];
+      products[key] = (
+        line.productName,
+        (existing?.$2 ?? 0) + line.quantity,
+        (existing?.$3 ?? 0) + line.grossMinor,
+      );
+    }
+  }
+  final sortedProducts = products.values.toList()
+    ..sort((left, right) => right.$3.compareTo(left.$3));
+  return <String>[
+    '${formatAppDate(range.start)} to ${formatAppDate(range.end)}',
+    reportComplete ? 'PERIOD COMPLETED' : 'DAY / PERIOD NOT COMPLETED YET',
+    'Business day cut-off: ${_clockLabel(cutoffMinutes)}',
+    'Closed bills only',
+    '',
+    'Gross: ${formatMoney(gross, currencyCode: currencyCode)}',
+    'Net: ${formatMoney(net, currencyCode: currencyCode)}',
+    'Tax: ${formatMoney(tax, currencyCode: currencyCode)}',
+    'Closed bills: ${bills.length}',
+    'Open bills: $openOrderCount',
+    '',
+    'PAYMENTS',
+    if (payments.isEmpty) 'No closed payments',
+    for (final entry in payments.entries)
+      '${entry.key}: ${formatMoney(entry.value.$2, currencyCode: entry.value.$1)}',
+    '',
+    'PRODUCTS',
+    if (sortedProducts.isEmpty) 'No closed product sales',
+    for (final item in sortedProducts.take(30))
+      '${item.$1} x${item.$2}: ${formatMoney(item.$3, currencyCode: currencyCode)}',
+    '',
+    'SALES CLOSED BY STAFF',
+    if (staff.isEmpty) 'No closed staff sales',
+    for (final entry in staff.entries)
+      '${entry.key}: ${formatMoney(entry.value, currencyCode: currencyCode)}',
+    '',
+    'Printed: ${formatAppDateTime(DateTime.now())}',
+  ];
 }
 
 DateTimeRange _periodBounds(
@@ -671,72 +901,6 @@ String _periodLabel(
 String _customRangeLabel(DateTimeRange? range) {
   if (range == null) return 'Custom dates';
   return '${formatAppDate(range.start)} to ${formatAppDate(range.end)}';
-}
-
-class _UpcomingBookingsCard extends StatelessWidget {
-  const _UpcomingBookingsCard({
-    required this.bookings,
-    required this.tables,
-    required this.range,
-    required this.onSelectRange,
-  });
-
-  final List<VenueBooking> bookings;
-  final List<DiningTable> tables;
-  final DateTimeRange range;
-  final VoidCallback onSelectRange;
-
-  String _tableLabel(String tableId) {
-    for (final table in tables) {
-      if (table.id == tableId) return table.label;
-    }
-    return 'Table unavailable';
-  }
-
-  @override
-  Widget build(BuildContext context) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Wrap(
-            spacing: 12,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Text(
-                'Upcoming bookings',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              OutlinedButton.icon(
-                onPressed: onSelectRange,
-                icon: const Icon(Icons.date_range_rounded),
-                label: Text(
-                  '${formatAppDate(range.start)} to ${formatAppDate(range.end)}',
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          if (bookings.isEmpty)
-            const Text('No active bookings in this date range.')
-          else
-            for (final booking in bookings)
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.event_seat_outlined),
-                title: Text(
-                  '${formatAppDateTime(booking.startsAt)} · ${_tableLabel(booking.tableId)}',
-                ),
-                subtitle: Text(
-                  '${booking.customerName} · ${booking.guestCount} guest${booking.guestCount == 1 ? '' : 's'} · ${booking.status.label}',
-                ),
-              ),
-        ],
-      ),
-    ),
-  );
 }
 
 class _Metric extends StatelessWidget {
