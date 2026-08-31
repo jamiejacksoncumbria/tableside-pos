@@ -204,6 +204,36 @@ class ActiveOrderController extends Notifier<PosOrder> {
       );
       return;
     }
+    final componentById = <String, ProductStockComponent>{};
+    for (final component in [
+      ...product.stockComponents,
+      ...?selection.variant?.stockComponents,
+    ]) {
+      final current = componentById[component.productId];
+      componentById[component.productId] = ProductStockComponent(
+        productId: component.productId,
+        productName: component.productName,
+        quantityPerSale:
+            (current?.quantityPerSale ?? 0) + component.quantityPerSale,
+        stockUnit: component.stockUnit,
+        stockOnHand: component.stockOnHand,
+        latestUnitCostMinor: component.latestUnitCostMinor,
+      );
+    }
+    final stockComponents = componentById.values.toList(growable: false);
+    final insufficientComponent = stockComponents.any(
+      (component) =>
+          component.stockOnHand == null ||
+          component.stockOnHand! -
+                  state.unsentStockReservedFor(component.productId) <
+              component.quantityPerSale,
+    );
+    if (insufficientComponent) {
+      AppLogger.info(
+        'Variant stock prevented adding ${product.id} to active order ${state.id}.',
+      );
+      return;
+    }
     if (product.priceMinor + selection.priceDeltaMinor < 0) {
       throw StateError('The selected options produce an invalid item price.');
     }
@@ -229,7 +259,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
       variantPriceDeltaMinor: selection.variant?.priceDeltaMinor ?? 0,
       modifiers: selection.modifiers,
       itemNote: selection.itemNote.trim(),
-      stockComponents: product.stockComponents,
+      stockComponents: stockComponents,
     );
     state = state.copyWith(
       lines: [...state.lines, line],

@@ -887,6 +887,17 @@ Future<void> _showProductDialog({
   final stockPerSale = TextEditingController(
     text: '${existing?.stockPerSale ?? 1}',
   );
+  final lowStockThreshold = TextEditingController(
+    text: '${existing?.lowStockThreshold ?? 0}',
+  );
+  final storageLocation = TextEditingController(
+    text: existing?.storageLocation ?? '',
+  );
+  final targetMargin = TextEditingController(
+    text: existing == null || existing.targetMarginBasisPoints == 0
+        ? ''
+        : (existing.targetMarginBasisPoints / 100).toStringAsFixed(2),
+  );
   final formKey = GlobalKey<FormState>();
   final selectedSections = <String>{...?existing?.sectionIds};
   final selectedModifierGroupIds = <String>{...?existing?.modifierGroupIds};
@@ -978,6 +989,12 @@ Future<void> _showProductDialog({
                           context: dialogContext,
                           currencyCode: currencyCode,
                           initialVariants: variants,
+                          stockProducts: allProducts
+                              .where(
+                                (item) =>
+                                    item.trackStock && item.id != existing?.id,
+                              )
+                              .toList(growable: false),
                         );
                         if (next != null) {
                           setDialogState(() => variants = next);
@@ -1176,7 +1193,55 @@ Future<void> _showProductDialog({
                               : null;
                         },
                       ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: lowStockThreshold,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: 'Low-stock warning (${stockUnit.trim()})',
+                          helperText:
+                              'Inventory is highlighted at or below this quantity.',
+                        ),
+                        validator: (value) {
+                          final parsed = _decimal(value);
+                          return parsed == null || parsed < 0
+                              ? 'Enter zero or a positive quantity.'
+                              : null;
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: storageLocation,
+                        textCapitalization: TextCapitalization.words,
+                        decoration: const InputDecoration(
+                          labelText: 'Storage location',
+                          helperText:
+                              'For example Bar, Kitchen, Cellar or Storeroom.',
+                        ),
+                        maxLength: 80,
+                      ),
                     ],
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: targetMargin,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Target gross margin %',
+                        helperText:
+                            'Optional. Stock costing will warn when estimated margin is below this target.',
+                      ),
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) return null;
+                        final parsed = _decimal(value);
+                        return parsed == null || parsed < 0 || parsed > 100
+                            ? 'Enter a percentage from 0 to 100.'
+                            : null;
+                      },
+                    ),
                     const SizedBox(height: 18),
                     Text(
                       'Ingredient stock recipe',
@@ -1262,6 +1327,13 @@ Future<void> _showProductDialog({
                   final unitStock = trackStock
                       ? _decimal(stockPerSale.text)!
                       : 1.0;
+                  final lowStock = trackStock
+                      ? _decimal(lowStockThreshold.text)!
+                      : 0.0;
+                  final targetMarginBasisPoints =
+                      targetMargin.text.trim().isEmpty
+                      ? 0
+                      : (_decimal(targetMargin.text)! * 100).round();
                   final repository = ref.read(firestorePosRepositoryProvider);
                   if (existing == null) {
                     await repository.createProduct(
@@ -1274,6 +1346,9 @@ Future<void> _showProductDialog({
                       stockOnHand: currentStock,
                       stockUnit: stockUnit,
                       stockPerSale: unitStock,
+                      lowStockThreshold: lowStock,
+                      storageLocation: storageLocation.text,
+                      targetMarginBasisPoints: targetMarginBasisPoints,
                       showOnOrderFlow: showOnOrderFlow,
                       taxRateBasisPoints: selectedTaxRate.basisPoints,
                       taxRateId: selectedTaxRate.id == TaxRate.zero.id
@@ -1298,6 +1373,9 @@ Future<void> _showProductDialog({
                       stockOnHand: currentStock,
                       stockUnit: stockUnit,
                       stockPerSale: unitStock,
+                      lowStockThreshold: lowStock,
+                      storageLocation: storageLocation.text,
+                      targetMarginBasisPoints: targetMarginBasisPoints,
                       showOnOrderFlow: showOnOrderFlow,
                       taxRateBasisPoints: selectedTaxRate.basisPoints,
                       taxRateId: selectedTaxRate.id == TaxRate.zero.id
@@ -1335,6 +1413,9 @@ Future<void> _showProductDialog({
     price.dispose();
     stock.dispose();
     stockPerSale.dispose();
+    lowStockThreshold.dispose();
+    storageLocation.dispose();
+    targetMargin.dispose();
   }
 }
 
@@ -1455,6 +1536,7 @@ Future<List<MenuProductVariant>?> _showVariantsDialog({
   required BuildContext context,
   required String currencyCode,
   required List<MenuProductVariant> initialVariants,
+  required List<MenuProduct> stockProducts,
 }) async {
   final drafts = initialVariants
       .map(
@@ -1463,6 +1545,7 @@ Future<List<MenuProductVariant>?> _showVariantsDialog({
           name: variant.name,
           priceDelta: _priceText(variant.priceDeltaMinor),
           isAvailable: variant.isAvailable,
+          stockComponents: variant.stockComponents,
         ),
       )
       .toList(growable: true);
@@ -1494,6 +1577,18 @@ Future<List<MenuProductVariant>?> _showVariantsDialog({
                           setDialogState(() => drafts.removeAt(index)),
                       onChanged: () =>
                           setDialogState(() => validationMessage = null),
+                      onEditRecipe: () async {
+                        final recipe = await _showStockComponentsDialog(
+                          context: dialogContext,
+                          products: stockProducts,
+                          initial: drafts[index].stockComponents,
+                        );
+                        if (recipe != null) {
+                          setDialogState(
+                            () => drafts[index].stockComponents = recipe,
+                          );
+                        }
+                      },
                     ),
                     const SizedBox(height: 8),
                   ],
@@ -1552,6 +1647,7 @@ Future<List<MenuProductVariant>?> _showVariantsDialog({
                       name: variantName,
                       priceDeltaMinor: priceDelta,
                       isAvailable: draft.isAvailable,
+                      stockComponents: draft.stockComponents,
                     ),
                   );
                 }
@@ -1576,56 +1672,77 @@ class _VariantDraftRow extends StatelessWidget {
     required this.canRemove,
     required this.onRemove,
     required this.onChanged,
+    required this.onEditRecipe,
   });
 
   final _VariantDraft draft;
   final bool canRemove;
   final VoidCallback onRemove;
   final VoidCallback onChanged;
+  final VoidCallback onEditRecipe;
 
   @override
-  Widget build(BuildContext context) => Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      Expanded(
-        flex: 3,
-        child: TextField(
-          controller: draft.name,
-          textCapitalization: TextCapitalization.words,
-          decoration: const InputDecoration(labelText: 'Variant name'),
-          onChanged: (_) => onChanged(),
-        ),
-      ),
-      const SizedBox(width: 10),
-      Expanded(
-        flex: 2,
-        child: TextField(
-          controller: draft.priceDelta,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(labelText: 'Price +/-'),
-          onChanged: (_) => onChanged(),
-        ),
-      ),
-      const SizedBox(width: 4),
-      Column(
-        mainAxisSize: MainAxisSize.min,
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Tooltip(
-            message: draft.isAvailable ? 'Available' : 'Unavailable',
-            child: Switch(
-              value: draft.isAvailable,
-              onChanged: (value) {
-                draft.isAvailable = value;
-                onChanged();
-              },
+          Expanded(
+            flex: 3,
+            child: TextField(
+              controller: draft.name,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(labelText: 'Variant name'),
+              onChanged: (_) => onChanged(),
             ),
           ),
-          IconButton(
-            tooltip: 'Remove variant',
-            onPressed: canRemove ? onRemove : null,
-            icon: const Icon(Icons.delete_outline_rounded),
+          const SizedBox(width: 10),
+          Expanded(
+            flex: 2,
+            child: TextField(
+              controller: draft.priceDelta,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: const InputDecoration(labelText: 'Price +/-'),
+              onChanged: (_) => onChanged(),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Tooltip(
+                message: draft.isAvailable ? 'Available' : 'Unavailable',
+                child: Switch(
+                  value: draft.isAvailable,
+                  onChanged: (value) {
+                    draft.isAvailable = value;
+                    onChanged();
+                  },
+                ),
+              ),
+              IconButton(
+                tooltip: 'Remove variant',
+                onPressed: canRemove ? onRemove : null,
+                icon: const Icon(Icons.delete_outline_rounded),
+              ),
+            ],
           ),
         ],
+      ),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          onPressed: onEditRecipe,
+          icon: const Icon(Icons.inventory_2_outlined, size: 18),
+          label: Text(
+            draft.stockComponents.isEmpty
+                ? 'Set variant stock recipe'
+                : '${draft.stockComponents.length} stock component${draft.stockComponents.length == 1 ? '' : 's'}',
+          ),
+        ),
       ),
     ],
   );
@@ -1637,6 +1754,7 @@ class _VariantDraft {
     required String name,
     required String priceDelta,
     required this.isAvailable,
+    this.stockComponents = const <ProductStockComponent>[],
   }) : name = TextEditingController(text: name),
        priceDelta = TextEditingController(text: priceDelta);
 
@@ -1651,6 +1769,7 @@ class _VariantDraft {
   final TextEditingController name;
   final TextEditingController priceDelta;
   bool isAvailable;
+  List<ProductStockComponent> stockComponents;
 
   void dispose() {
     name.dispose();

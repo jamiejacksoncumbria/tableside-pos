@@ -350,12 +350,14 @@ class MenuProductVariant {
     required this.name,
     this.priceDeltaMinor = 0,
     this.isAvailable = true,
+    this.stockComponents = const <ProductStockComponent>[],
   });
 
   final String id;
   final String name;
   final int priceDeltaMinor;
   final bool isAvailable;
+  final List<ProductStockComponent> stockComponents;
 }
 
 /// A stock-tracked ingredient consumed when one sellable product is sent to
@@ -368,6 +370,7 @@ class ProductStockComponent {
     required this.quantityPerSale,
     required this.stockUnit,
     this.stockOnHand,
+    this.latestUnitCostMinor,
   });
 
   final String productId;
@@ -375,6 +378,7 @@ class ProductStockComponent {
   final double quantityPerSale;
   final String stockUnit;
   final double? stockOnHand;
+  final double? latestUnitCostMinor;
 }
 
 /// One selectable option inside a venue's reusable modifier group.
@@ -463,6 +467,10 @@ class MenuProduct {
     this.stockOnHand,
     this.stockUnit = 'each',
     this.stockPerSale = 1,
+    this.lowStockThreshold = 0,
+    this.storageLocation = '',
+    this.targetMarginBasisPoints = 0,
+    this.latestUnitCostMinor,
     this.isAvailable = true,
     this.showOnOrderFlow = true,
     this.taxRateBasisPoints = 0,
@@ -482,6 +490,10 @@ class MenuProduct {
   final double? stockOnHand;
   final String stockUnit;
   final double stockPerSale;
+  final double lowStockThreshold;
+  final String storageLocation;
+  final int targetMarginBasisPoints;
+  final double? latestUnitCostMinor;
   final bool isAvailable;
 
   /// Drinks can still print to the bar while being omitted from the live
@@ -497,6 +509,39 @@ class MenuProduct {
   final List<MenuProductVariant> variants;
   final List<String> modifierGroupIds;
   final List<ProductStockComponent> stockComponents;
+
+  double? get estimatedCostMinor {
+    if (stockComponents.isNotEmpty) {
+      if (stockComponents.any((item) => item.latestUnitCostMinor == null)) {
+        return null;
+      }
+      return stockComponents.fold<double>(
+        0,
+        (total, item) =>
+            total + item.quantityPerSale * item.latestUnitCostMinor!,
+      );
+    }
+    return latestUnitCostMinor == null
+        ? null
+        : latestUnitCostMinor! * stockPerSale;
+  }
+
+  double? get estimatedMarginPercent {
+    final cost = estimatedCostMinor;
+    if (cost == null || priceMinor <= 0) return null;
+    // Menu prices are tax-inclusive. Gross margin must compare ingredient cost
+    // with net sales, otherwise a higher tax rate falsely improves margin.
+    final netSellingMinor = priceMinor * 10000 / (10000 + taxRateBasisPoints);
+    if (netSellingMinor <= 0) return null;
+    return ((netSellingMinor - cost) / netSellingMinor) * 100;
+  }
+
+  bool get isBelowTargetMargin {
+    final margin = estimatedMarginPercent;
+    return targetMarginBasisPoints > 0 &&
+        margin != null &&
+        margin < targetMarginBasisPoints / 100;
+  }
 
   bool get requiresConfiguration =>
       variants.isNotEmpty || modifierGroupIds.isNotEmpty;

@@ -286,6 +286,16 @@ function configuredProductVariants(productData) {
       name,
       priceDeltaMinor,
       isAvailable: variant.isAvailable !== false,
+      stockComponents: Array.isArray(variant.stockComponents)
+        ? variant.stockComponents.map((component) => ({
+            productId: requiredDocumentId(component, "productId"),
+            productName: requiredText(component, "productName", 120),
+            stockUnit: requiredText(component, "stockUnit", 20),
+            quantityPerSale: requiredFiniteNumber(
+              component.quantityPerSale, "quantityPerSale", 0.000001, 1000000000,
+            ),
+          }))
+        : [],
     };
   });
 }
@@ -368,6 +378,7 @@ function canonicalLineConfiguration({productData, modifierGroupsById, line}) {
     variantId: variant?.id ?? null,
     variantName: variant?.name ?? null,
     variantPriceDeltaMinor: variant?.priceDeltaMinor ?? 0,
+    variantStockComponents: variant?.stockComponents ?? [],
     modifierSelections,
     itemNote: line.itemNote,
     priceDeltaMinor,
@@ -450,7 +461,13 @@ function validatedVariants(value) {
     }
     ids.add(id);
     names.add(name.toLowerCase());
-    return {id, name, priceDeltaMinor, isAvailable: variant.isAvailable !== false};
+    return {
+      id,
+      name,
+      priceDeltaMinor,
+      isAvailable: variant.isAvailable !== false,
+      stockComponents: validatedStockComponents(variant.stockComponents ?? []),
+    };
   });
 }
 
@@ -652,15 +669,21 @@ async function manageMenuConfigurationFor(caller, rawData) {
     const requestedStockComponents = validatedStockComponents(
       values.stockComponents ?? [],
     );
-    if (documentId != null && requestedStockComponents.some(
+    const requestedVariants = validatedVariants(values.variants ?? []);
+    const allRequestedComponents = [
+      ...requestedStockComponents,
+      ...requestedVariants.flatMap((variant) => variant.stockComponents),
+    ];
+    if (documentId != null && allRequestedComponents.some(
       (item) => item.productId === documentId,
     )) {
       throw new HttpsError("invalid-argument", "A product cannot consume itself as an ingredient.");
     }
-    const componentSnapshots = requestedStockComponents.length === 0
+    const componentIds = [...new Set(allRequestedComponents.map((item) => item.productId))];
+    const componentSnapshots = componentIds.length === 0
       ? []
-      : await db.getAll(...requestedStockComponents.map((item) =>
-          db.doc(`tenants/${tenantId}/products/${item.productId}`)));
+      : await db.getAll(...componentIds.map((id) =>
+          db.doc(`tenants/${tenantId}/products/${id}`)));
     if (componentSnapshots.some((item) => !item.exists ||
         item.data().venueId !== venueId || item.data().trackStock !== true)) {
       throw new HttpsError(
@@ -668,10 +691,16 @@ async function manageMenuConfigurationFor(caller, rawData) {
         "Every ingredient must be a stock-tracked product at this venue.",
       );
     }
-    const stockComponents = requestedStockComponents.map((item, index) => ({
+    const componentById = new Map(componentSnapshots.map((item) => [item.id, item.data()]));
+    const hydrateComponents = (components) => components.map((item) => ({
       ...item,
-      productName: componentSnapshots[index].data().name,
-      stockUnit: componentSnapshots[index].data().stockUnit ?? "each",
+      productName: componentById.get(item.productId).name,
+      stockUnit: componentById.get(item.productId).stockUnit ?? "each",
+    }));
+    const stockComponents = hydrateComponents(requestedStockComponents);
+    const variants = requestedVariants.map((variant) => ({
+      ...variant,
+      stockComponents: hydrateComponents(variant.stockComponents),
     }));
     const rawTaxRateId = optionalText(values, "taxRateId", 1500);
     const taxRateId = rawTaxRateId
@@ -702,13 +731,20 @@ async function manageMenuConfigurationFor(caller, rawData) {
         : null,
       stockUnit: requiredText(values, "stockUnit", 20),
       stockPerSale: requiredFiniteNumber(values.stockPerSale, "stockPerSale", 0.000001, 1000000000),
+      lowStockThreshold: requiredFiniteNumber(
+        values.lowStockThreshold ?? 0, "lowStockThreshold", 0, 1000000000,
+      ),
+      storageLocation: optionalText(values, "storageLocation", 80),
+      targetMarginBasisPoints: requiredNonNegativeInteger(
+        values.targetMarginBasisPoints ?? 0, "targetMarginBasisPoints", 10000,
+      ),
       stockComponents,
       ...(documentId == null ? {isAvailable: true} : {}),
       showOnOrderFlow: values.showOnOrderFlow === true,
       taxRateBasisPoints,
       taxRateId,
       taxRateName,
-      variants: validatedVariants(values.variants ?? []),
+      variants,
       modifierGroupIds,
     };
   }
@@ -2378,7 +2414,7 @@ async function addOrderDraftLineFor(caller, rawData) {
       throw new HttpsError("not-found", "A selected menu product no longer exists at this venue.");
     }
     const productData = product.data();
-    const stockComponents = Array.isArray(productData.stockComponents)
+    const baseStockComponents = Array.isArray(productData.stockComponents)
       ? productData.stockComponents.map((component) => ({
           productId: requiredDocumentId(component, "productId"),
           productName: requiredText(component, "productName", 120),
@@ -2388,6 +2424,21 @@ async function addOrderDraftLineFor(caller, rawData) {
           ),
         }))
       : [];
+    const selectedVariant = line.variantId == null
+      ? null
+      : configuredProductVariants(productData).find((variant) => variant.id === line.variantId) ?? null;
+    const combinedComponents = [
+      ...baseStockComponents,
+      ...(selectedVariant?.stockComponents ?? []),
+    ];
+    const componentTotals = new Map();
+    for (const component of combinedComponents) {
+      const current = componentTotals.get(component.productId);
+      componentTotals.set(component.productId, current == null
+        ? {...component}
+        : {...current, quantityPerSale: current.quantityPerSale + component.quantityPerSale});
+    }
+    const stockComponents = [...componentTotals.values()];
     const componentSnapshots = await Promise.all(stockComponents.map((component) =>
       transaction.get(tenantRef.collection("products").doc(component.productId))));
     for (let index = 0; index < stockComponents.length; index += 1) {
@@ -4460,11 +4511,14 @@ async function sendOrderToProductionFor(caller, rawData) {
     }
     const componentIds = [...new Set(
       [...productById.values()].flatMap((product) =>
-        Array.isArray(product.stockComponents)
-          ? product.stockComponents
-              .map((component) => component?.productId)
-              .filter((productId) => typeof productId === "string")
-          : []),
+        [
+          ...(Array.isArray(product.stockComponents) ? product.stockComponents : []),
+          ...(Array.isArray(product.variants)
+            ? product.variants.flatMap((variant) =>
+                Array.isArray(variant?.stockComponents) ? variant.stockComponents : [])
+            : []),
+        ].map((component) => component?.productId)
+          .filter((productId) => typeof productId === "string")),
     )];
     const componentRefs = new Map(componentIds.map((productId) => [
       productId,
@@ -4534,6 +4588,17 @@ async function sendOrderToProductionFor(caller, rawData) {
       const taxRateBasisPoints = validTaxRateBasisPoints(
         product.taxRateBasisPoints,
       );
+      const componentTotals = new Map();
+      for (const component of [
+        ...(Array.isArray(product.stockComponents) ? product.stockComponents : []),
+        ...configuration.variantStockComponents,
+      ]) {
+        const quantity = Number(component.quantityPerSale);
+        const current = componentTotals.get(component.productId);
+        componentTotals.set(component.productId, current == null
+          ? {...component, quantityPerSale: quantity}
+          : {...current, quantityPerSale: current.quantityPerSale + quantity});
+      }
       return {
         ...line,
         productName: typeof product.name === "string" ? product.name : "Menu item",
@@ -4541,14 +4606,13 @@ async function sendOrderToProductionFor(caller, rawData) {
         productionArea,
         trackStock: product.trackStock === true,
         stockPerSale,
-        stockComponents: Array.isArray(product.stockComponents)
-          ? product.stockComponents.map((component) => ({
+        stockComponents: [...componentTotals.values()]
+          .map((component) => ({
               productId: component.productId,
               productName: component.productName,
               stockUnit: component.stockUnit,
               quantityPerSale: Number(component.quantityPerSale),
-            }))
-          : [],
+            })),
         taxRateBasisPoints,
         taxRateId: typeof product.taxRateId === "string" ? product.taxRateId : null,
         taxRateName: typeof product.taxRateName === "string"

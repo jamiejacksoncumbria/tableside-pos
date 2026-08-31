@@ -159,7 +159,10 @@ class FirestorePosRepository {
     return unique.toList(growable: false);
   }
 
-  List<MenuProductVariant> _productVariants(Object? value) {
+  List<MenuProductVariant> _productVariants(
+    Object? value,
+    Map<String, Map<String, dynamic>> productDataById,
+  ) {
     if (value is! List) return const <MenuProductVariant>[];
     final variants = <MenuProductVariant>[];
     final ids = <String>{};
@@ -176,6 +179,10 @@ class FirestorePosRepository {
           name: name.trim(),
           priceDeltaMinor: (data['priceDeltaMinor'] as num?)?.toInt() ?? 0,
           isAvailable: data['isAvailable'] as bool? ?? true,
+          stockComponents: _stockComponents(
+            data['stockComponents'],
+            productDataById,
+          ),
         ),
       );
     }
@@ -205,6 +212,8 @@ class FirestorePosRepository {
                 data['stockUnit'] as String? ??
                 'each',
             stockOnHand: (liveProduct?['stockOnHand'] as num?)?.toDouble(),
+            latestUnitCostMinor: (liveProduct?['latestUnitCostMinor'] as num?)
+                ?.toDouble(),
           );
         })
         .where((item) => item.productId.isNotEmpty && item.quantityPerSale > 0)
@@ -335,6 +344,14 @@ class FirestorePosRepository {
                 stockOnHand: (data['stockOnHand'] as num?)?.toDouble(),
                 stockUnit: data['stockUnit'] as String? ?? 'each',
                 stockPerSale: (data['stockPerSale'] as num?)?.toDouble() ?? 1,
+                lowStockThreshold:
+                    (data['lowStockThreshold'] as num?)?.toDouble() ?? 0,
+                storageLocation:
+                    (data['storageLocation'] as String?)?.trim() ?? '',
+                targetMarginBasisPoints:
+                    (data['targetMarginBasisPoints'] as num?)?.toInt() ?? 0,
+                latestUnitCostMinor: (data['latestUnitCostMinor'] as num?)
+                    ?.toDouble(),
                 isAvailable: data['isAvailable'] as bool? ?? true,
                 showOnOrderFlow: data['showOnOrderFlow'] as bool? ?? true,
                 taxRateBasisPoints: _taxRateBasisPoints(
@@ -342,7 +359,7 @@ class FirestorePosRepository {
                 ),
                 taxRateId: data['taxRateId'] as String?,
                 taxRateName: data['taxRateName'] as String? ?? 'Zero rate',
-                variants: _productVariants(data['variants']),
+                variants: _productVariants(data['variants'], productDataById),
                 modifierGroupIds: _stringIds(data['modifierGroupIds']),
                 stockComponents: _stockComponents(
                   data['stockComponents'],
@@ -771,6 +788,9 @@ class FirestorePosRepository {
     required double? stockOnHand,
     required String stockUnit,
     required double stockPerSale,
+    required double lowStockThreshold,
+    required String storageLocation,
+    required int targetMarginBasisPoints,
     required bool showOnOrderFlow,
     required int taxRateBasisPoints,
     required String? taxRateId,
@@ -805,6 +825,9 @@ class FirestorePosRepository {
         'stockOnHand': trackStock ? (stockOnHand ?? 0) : null,
         'stockUnit': stockUnit,
         'stockPerSale': stockPerSale,
+        'lowStockThreshold': lowStockThreshold,
+        'storageLocation': storageLocation.trim(),
+        'targetMarginBasisPoints': targetMarginBasisPoints,
         'showOnOrderFlow': showOnOrderFlow,
         'taxRateBasisPoints': taxRateBasisPoints,
         'taxRateId': taxRateId,
@@ -841,6 +864,9 @@ class FirestorePosRepository {
     required double? stockOnHand,
     required String stockUnit,
     required double stockPerSale,
+    required double lowStockThreshold,
+    required String storageLocation,
+    required int targetMarginBasisPoints,
     required bool showOnOrderFlow,
     required int taxRateBasisPoints,
     required String? taxRateId,
@@ -872,6 +898,9 @@ class FirestorePosRepository {
         'stockOnHand': trackStock ? (stockOnHand ?? 0) : null,
         'stockUnit': stockUnit,
         'stockPerSale': stockPerSale,
+        'lowStockThreshold': lowStockThreshold,
+        'storageLocation': storageLocation.trim(),
+        'targetMarginBasisPoints': targetMarginBasisPoints,
         'showOnOrderFlow': showOnOrderFlow,
         'taxRateBasisPoints': taxRateBasisPoints,
         'taxRateId': taxRateId,
@@ -917,6 +946,7 @@ class FirestorePosRepository {
         'name': name,
         'priceDeltaMinor': variant.priceDeltaMinor,
         'isAvailable': variant.isAvailable,
+        'stockComponents': _stockComponentsToMap(variant.stockComponents),
       });
     }
     if (cleaned.length > 30) {
