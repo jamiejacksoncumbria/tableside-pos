@@ -1400,7 +1400,11 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                     label: const Text('Split'),
                   ),
                 ),
-                const SizedBox(width: 8),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: order.lines.isEmpty || hasUnsentLines
