@@ -1307,13 +1307,7 @@ Future<void> _showCheckoutSheet(
     text: _moneyInputFromMinor(order.totalMinor, currencyCode),
   );
   final exchangeRateController = TextEditingController(text: '1');
-  final currencyChoices = <String>{
-    baseCurrencyCode,
-    'TRY',
-    'EUR',
-    'GBP',
-    'USD',
-  }.toList(growable: false);
+  final currencyChoices = checkoutTenderCurrencies(baseCurrencyCode);
   await showModalBottomSheet<void>(
     context: pageContext,
     showDragHandle: true,
@@ -1323,7 +1317,10 @@ Future<void> _showCheckoutSheet(
       var tenderedCurrencyCode = baseCurrencyCode;
       var cardApproved = false;
       var saving = false;
-      var printReceipt = false;
+      // Paid receipts are normally required in a restaurant. Staff can still
+      // opt out for a particular payment, but the safe operational default is
+      // to queue one to the venue's dedicated receipt printer.
+      var printReceipt = defaultPrintPaidReceipt;
       var loadingOfficialRate = false;
       ExchangeRateQuote? officialRateQuote;
       final paymentEntries = <_CheckoutPaymentDraft>[];
@@ -1453,28 +1450,48 @@ Future<void> _showCheckoutSheet(
                           }),
                   ),
                   const SizedBox(height: 12),
-                  DropdownButtonFormField<String>(
-                    key: ValueKey(tenderedCurrencyCode),
-                    initialValue: tenderedCurrencyCode,
-                    decoration: const InputDecoration(
-                      labelText: 'Tender currency',
-                    ),
-                    items: [
-                      for (final code in currencyChoices)
-                        DropdownMenuItem(value: code, child: Text(code)),
-                    ],
-                    onChanged: saving || method == PaymentMethod.cardTerminal
-                        ? null
-                        : (value) => setSheetState(() {
-                            tenderedCurrencyCode = value ?? baseCurrencyCode;
-                            exchangeRateController.text =
-                                tenderedCurrencyCode == baseCurrencyCode
-                                ? '1'
-                                : '';
-                            tenderedAmountController.clear();
-                            officialRateQuote = null;
-                          }),
+                  Text(
+                    method == PaymentMethod.cash
+                        ? 'Cash currency'
+                        : 'Card currency',
+                    style: Theme.of(context).textTheme.titleSmall,
                   ),
+                  const SizedBox(height: 8),
+                  if (method == PaymentMethod.cash)
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final code in currencyChoices)
+                          ChoiceChip(
+                            label: Text(code),
+                            selected: tenderedCurrencyCode == code,
+                            onSelected: saving
+                                ? null
+                                : (selected) {
+                                    if (!selected ||
+                                        tenderedCurrencyCode == code) {
+                                      return;
+                                    }
+                                    setSheetState(() {
+                                      tenderedCurrencyCode = code;
+                                      exchangeRateController.text =
+                                          code == baseCurrencyCode ? '1' : '';
+                                      tenderedAmountController.clear();
+                                      officialRateQuote = null;
+                                    });
+                                  },
+                          ),
+                      ],
+                    )
+                  else
+                    InputDecorator(
+                      decoration: const InputDecoration(
+                        helperText:
+                            'Card terminal payments use the venue reporting currency.',
+                      ),
+                      child: Text(baseCurrencyCode),
+                    ),
                   const SizedBox(height: 12),
                   TextField(
                     controller: tenderedAmountController,

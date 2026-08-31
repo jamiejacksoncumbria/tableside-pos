@@ -743,6 +743,20 @@ class PrintJob {
 
 enum PaymentMethod { cash, cardTerminal, online }
 
+/// Checkout policy kept outside the widget so a merge cannot silently remove
+/// the supported foreign cash tenders without breaking a regression test.
+List<String> checkoutTenderCurrencies(String baseCurrencyCode) => <String>{
+  baseCurrencyCode.trim().toUpperCase(),
+  'TRY',
+  'EUR',
+  'GBP',
+  'USD',
+}.toList(growable: false);
+
+/// Restaurants normally issue a paid receipt. A user may opt out for an
+/// individual payment, but every newly opened checkout starts selected.
+const defaultPrintPaidReceipt = true;
+
 enum PaymentRequestStatus {
   requested,
   awaitingTerminal,
