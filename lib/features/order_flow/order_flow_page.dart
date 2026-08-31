@@ -49,7 +49,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   final Set<String> _redAlertedTicketIds = <String>{};
   final Set<String> _activeAllergyTicketIds = <String>{};
   final Set<String> _currentLateTicketIds = <String>{};
-  final Set<String> _silencedLateTicketIds = <String>{};
+  final Set<String> _dismissedLateTicketIds = <String>{};
   final Set<String> _expandedTicketIds = <String>{};
   late final OrderFlowSound _sound;
   bool _receivedInitialOrders = false;
@@ -150,7 +150,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                   IconButton.filledTonal(
                     tooltip: _audioMuted
                         ? 'Enable new-order and allergy audio on this device'
-                        : 'Mute new-order and allergy audio; late alarms are paused on each ticket',
+                        : 'Mute new-order and allergy audio; late alarms are dismissed on each ticket',
                     onPressed: _toggleAudioMuted,
                     icon: Icon(
                       _audioMuted
@@ -229,10 +229,10 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                     amberMinutes: widget.amberMinutes,
                     redMinutes: widget.redMinutes,
                     onAction: (action) => _applyAction(order, action),
-                    lateAlarmSilenced: _silencedLateTicketIds.contains(
+                    lateAlarmDismissed: _dismissedLateTicketIds.contains(
                       order.id,
                     ),
-                    onToggleLateAlarm: () => _toggleTicketLateAlarm(order.id),
+                    onDismissLateAlarm: () => _dismissTicketLateAlarm(order.id),
                     itemsExpanded: _expandedTicketIds.contains(order.id),
                     onToggleItems: () => setState(() {
                       if (!_expandedTicketIds.add(order.id)) {
@@ -298,8 +298,8 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     _currentLateTicketIds
       ..clear()
       ..addAll(currentRedIds);
-    _silencedLateTicketIds.retainAll(currentRedIds);
-    final unsilenced = currentRedIds.difference(_silencedLateTicketIds);
+    _dismissedLateTicketIds.retainAll(currentRedIds);
+    final unsilenced = currentRedIds.difference(_dismissedLateTicketIds);
     if (unsilenced.isEmpty) {
       _lateAlarm?.cancel();
       _lateAlarm = null;
@@ -324,7 +324,9 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   void _startLateAlarm() {
     if (_lateAlarm != null) return;
     _lateAlarm = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (_currentLateTicketIds.difference(_silencedLateTicketIds).isNotEmpty &&
+      if (_currentLateTicketIds
+              .difference(_dismissedLateTicketIds)
+              .isNotEmpty &&
           mounted) {
         unawaited(_sound.playLateOrder());
       }
@@ -332,13 +334,9 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     unawaited(_sound.playLateOrder());
   }
 
-  void _toggleTicketLateAlarm(String ticketId) {
-    setState(() {
-      if (!_silencedLateTicketIds.add(ticketId)) {
-        _silencedLateTicketIds.remove(ticketId);
-      }
-    });
-    if (_currentLateTicketIds.difference(_silencedLateTicketIds).isEmpty) {
+  void _dismissTicketLateAlarm(String ticketId) {
+    setState(() => _dismissedLateTicketIds.add(ticketId));
+    if (_currentLateTicketIds.difference(_dismissedLateTicketIds).isEmpty) {
       _lateAlarm?.cancel();
       _lateAlarm = null;
     } else {
@@ -655,8 +653,8 @@ class _OrderFlowCard extends StatelessWidget {
     required this.onAction,
     required this.itemsExpanded,
     required this.onToggleItems,
-    required this.lateAlarmSilenced,
-    required this.onToggleLateAlarm,
+    required this.lateAlarmDismissed,
+    required this.onDismissLateAlarm,
   });
 
   final OrderFlowOrder order;
@@ -666,8 +664,8 @@ class _OrderFlowCard extends StatelessWidget {
   final ValueChanged<_OrderFlowAction> onAction;
   final bool itemsExpanded;
   final VoidCallback onToggleItems;
-  final bool lateAlarmSilenced;
-  final VoidCallback onToggleLateAlarm;
+  final bool lateAlarmDismissed;
+  final VoidCallback onDismissLateAlarm;
 
   @override
   Widget build(BuildContext context) {
@@ -696,51 +694,80 @@ class _OrderFlowCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    _AreaIcon(area: order.productionArea),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        location,
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w800,
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _AreaIcon(area: order.productionArea),
+                        const SizedBox(width: 7),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 180),
+                          child: Text(
+                            location,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleSmall
+                                ?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    Text(order.productionArea.label),
+                    _StatusPill(status: order.status),
+                    if (late == _LateState.red && !lateAlarmDismissed)
+                      Container(
+                        padding: const EdgeInsets.only(left: 9),
+                        decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.white54),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'LATE — NEEDS ATTENTION',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            _AnimatedAlarmBell(onPressed: onDismissLateAlarm),
+                          ],
+                        ),
+                      ),
+                    _PrimaryFlowAction(order: order, onAction: onAction),
+                    _AlertRow(
+                      icon: late == _LateState.normal
+                          ? Icons.timer_outlined
+                          : Icons.priority_high_rounded,
+                      text: '${_formatElapsed(elapsed)} since ticket release',
+                      color: Colors.white,
+                    ),
+                    SizedBox.square(
+                      dimension: 34,
+                      child: IconButton(
+                        tooltip: itemsExpanded
+                            ? 'Hide order items'
+                            : 'Show ${order.itemSummary.length} order items',
+                        padding: EdgeInsets.zero,
+                        onPressed: onToggleItems,
+                        icon: Icon(
+                          itemsExpanded
+                              ? Icons.expand_less_rounded
+                              : Icons.expand_more_rounded,
                         ),
                       ),
                     ),
-                    if (late == _LateState.red) ...[
-                      const SizedBox(width: 4),
-                      _AnimatedAlarmBell(
-                        ringing: !lateAlarmSilenced,
-                        onPressed: onToggleLateAlarm,
-                      ),
-                    ],
-                    IconButton(
-                      tooltip: itemsExpanded
-                          ? 'Hide order items'
-                          : 'Show ${order.itemSummary.length} order items',
-                      onPressed: onToggleItems,
-                      icon: Icon(
-                        itemsExpanded
-                            ? Icons.expand_less_rounded
-                            : Icons.expand_more_rounded,
-                      ),
-                    ),
                     _OrderActions(order: order, onAction: onAction),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Icon(
-                      Icons.table_restaurant_outlined,
-                      size: 18,
-                      color: Colors.white,
-                    ),
-                    const SizedBox(width: 5),
-                    Expanded(child: Text(order.productionArea.label)),
-                    _StatusPill(status: order.status),
                   ],
                 ),
                 if (itemsExpanded)
@@ -783,50 +810,6 @@ class _OrderFlowCard extends StatelessWidget {
                     color: Colors.white,
                   ),
                 ],
-                if (late == _LateState.red && !lateAlarmSilenced) ...[
-                  const SizedBox(height: 8),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.black26,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: Colors.white54),
-                    ),
-                    child: Row(
-                      children: [
-                        const Expanded(
-                          child: Text(
-                            'THIS ORDER IS LATE AND NEEDS ATTENTION ASAP',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    _PrimaryFlowAction(order: order, onAction: onAction),
-                    _AlertRow(
-                      icon: late == _LateState.normal
-                          ? Icons.timer_outlined
-                          : Icons.priority_high_rounded,
-                      text: '${_formatElapsed(elapsed)} since ticket release',
-                      color: Colors.white,
-                    ),
-                  ],
-                ),
               ],
             ),
           ),
@@ -837,9 +820,8 @@ class _OrderFlowCard extends StatelessWidget {
 }
 
 class _AnimatedAlarmBell extends StatefulWidget {
-  const _AnimatedAlarmBell({required this.ringing, required this.onPressed});
+  const _AnimatedAlarmBell({required this.onPressed});
 
-  final bool ringing;
   final VoidCallback onPressed;
 
   @override
@@ -856,20 +838,7 @@ class _AnimatedAlarmBellState extends State<_AnimatedAlarmBell>
   @override
   void initState() {
     super.initState();
-    if (widget.ringing) _controller.repeat(reverse: true);
-  }
-
-  @override
-  void didUpdateWidget(covariant _AnimatedAlarmBell oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.ringing == oldWidget.ringing) return;
-    if (widget.ringing) {
-      _controller.repeat(reverse: true);
-    } else {
-      _controller
-        ..stop()
-        ..value = 0.5;
-    }
+    _controller.repeat(reverse: true);
   }
 
   @override
@@ -880,29 +849,20 @@ class _AnimatedAlarmBellState extends State<_AnimatedAlarmBell>
 
   @override
   Widget build(BuildContext context) => SizedBox.square(
-    dimension: 34,
-    child: IconButton.filled(
-      tooltip: widget.ringing
-          ? 'Pause this ticket alarm'
-          : 'Resume this ticket alarm',
+    dimension: 28,
+    child: IconButton(
+      tooltip: 'Dismiss this ticket alarm',
       onPressed: widget.onPressed,
-      style: IconButton.styleFrom(
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.red.shade900,
-      ),
       padding: EdgeInsets.zero,
-      iconSize: 19,
+      color: Colors.white,
+      iconSize: 17,
       icon: AnimatedBuilder(
         animation: _controller,
         builder: (context, child) => Transform.rotate(
-          angle: widget.ringing ? (_controller.value - .5) * .45 : 0,
+          angle: (_controller.value - .5) * .45,
           child: child,
         ),
-        child: Icon(
-          widget.ringing
-              ? Icons.notifications_active_rounded
-              : Icons.notifications_paused_rounded,
-        ),
+        child: const Icon(Icons.notifications_active_rounded),
       ),
     ),
   );
@@ -931,16 +891,15 @@ class _PrimaryFlowAction extends StatelessWidget {
       _OrderFlowAction.markServed => 'Mark served',
       _OrderFlowAction.toggleDelayed => '',
     };
-    return SizedBox(
-      width: double.infinity,
-      child: FilledButton.tonal(
-        onPressed: () => onAction(action),
-        style: FilledButton.styleFrom(
-          backgroundColor: Colors.white,
-          foregroundColor: Theme.of(context).colorScheme.onSurface,
-        ),
-        child: Text(label),
+    return FilledButton.tonal(
+      onPressed: () => onAction(action),
+      style: FilledButton.styleFrom(
+        backgroundColor: Colors.white,
+        foregroundColor: Theme.of(context).colorScheme.onSurface,
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       ),
+      child: Text(label),
     );
   }
 }
@@ -1057,13 +1016,15 @@ class _AlertRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
     children: [
       Icon(icon, color: color, size: 18),
       const SizedBox(width: 5),
-      Expanded(
+      ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 280),
         child: Text(
           text,
-          maxLines: 1,
+          maxLines: 2,
           overflow: TextOverflow.ellipsis,
           style: Theme.of(
             context,
