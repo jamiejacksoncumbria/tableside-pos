@@ -56,6 +56,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   bool _audioMuted = false;
   bool _audioPreferenceLoaded = false;
   bool _refreshingPinSession = false;
+  bool _compactFiltersExpanded = false;
   static const _audioMutedPreferenceKey = 'tableside.orderFlow.audioMuted';
 
   @override
@@ -203,11 +204,44 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
             ),
             const SizedBox(height: 12),
           ],
-          _FilterBar(
-            area: _area,
-            filter: _filter,
-            onAreaChanged: (area) => setState(() => _area = area),
-            onFilterChanged: (filter) => setState(() => _filter = filter),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 700;
+              final showFilters = !compact || _compactFiltersExpanded;
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (compact)
+                    TextButton.icon(
+                      onPressed: () => setState(
+                        () =>
+                            _compactFiltersExpanded = !_compactFiltersExpanded,
+                      ),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      icon: Icon(
+                        showFilters
+                            ? Icons.expand_less_rounded
+                            : Icons.filter_list_rounded,
+                        size: 19,
+                      ),
+                      label: Text(
+                        showFilters ? 'Hide filters' : 'Show filters',
+                      ),
+                    ),
+                  if (showFilters)
+                    _FilterBar(
+                      area: _area,
+                      filter: _filter,
+                      onAreaChanged: (area) => setState(() => _area = area),
+                      onFilterChanged: (filter) =>
+                          setState(() => _filter = filter),
+                    ),
+                ],
+              );
+            },
           ),
           const SizedBox(height: 18),
           if (flowValue.isLoading && scope != null && rawOrders.isEmpty)
