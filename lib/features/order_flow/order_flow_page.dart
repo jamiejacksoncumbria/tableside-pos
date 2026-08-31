@@ -709,6 +709,13 @@ class _OrderFlowCard extends StatelessWidget {
                         ),
                       ),
                     ),
+                    if (late == _LateState.red) ...[
+                      const SizedBox(width: 4),
+                      _AnimatedAlarmBell(
+                        ringing: !lateAlarmSilenced,
+                        onPressed: onToggleLateAlarm,
+                      ),
+                    ],
                     IconButton(
                       tooltip: itemsExpanded
                           ? 'Hide order items'
@@ -776,7 +783,7 @@ class _OrderFlowCard extends StatelessWidget {
                     color: Colors.white,
                   ),
                 ],
-                if (late == _LateState.red) ...[
+                if (late == _LateState.red && !lateAlarmSilenced) ...[
                   const SizedBox(height: 8),
                   Container(
                     width: double.infinity,
@@ -791,20 +798,14 @@ class _OrderFlowCard extends StatelessWidget {
                     ),
                     child: Row(
                       children: [
-                        Expanded(
+                        const Expanded(
                           child: Text(
-                            lateAlarmSilenced
-                                ? 'This order is late. Alarm paused on this device.'
-                                : 'THIS ORDER IS LATE AND NEEDS ATTENTION ASAP',
-                            style: const TextStyle(
+                            'THIS ORDER IS LATE AND NEEDS ATTENTION ASAP',
+                            style: TextStyle(
                               color: Colors.white,
                               fontWeight: FontWeight.w900,
                             ),
                           ),
-                        ),
-                        _AnimatedAlarmBell(
-                          ringing: !lateAlarmSilenced,
-                          onPressed: onToggleLateAlarm,
                         ),
                       ],
                     ),
@@ -878,25 +879,30 @@ class _AnimatedAlarmBellState extends State<_AnimatedAlarmBell>
   }
 
   @override
-  Widget build(BuildContext context) => IconButton.filled(
-    tooltip: widget.ringing
-        ? 'Pause this ticket alarm'
-        : 'Resume this ticket alarm',
-    onPressed: widget.onPressed,
-    style: IconButton.styleFrom(
-      backgroundColor: Colors.white,
-      foregroundColor: Colors.red.shade900,
-    ),
-    icon: AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) => Transform.rotate(
-        angle: widget.ringing ? (_controller.value - .5) * .45 : 0,
-        child: child,
+  Widget build(BuildContext context) => SizedBox.square(
+    dimension: 34,
+    child: IconButton.filled(
+      tooltip: widget.ringing
+          ? 'Pause this ticket alarm'
+          : 'Resume this ticket alarm',
+      onPressed: widget.onPressed,
+      style: IconButton.styleFrom(
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.red.shade900,
       ),
-      child: Icon(
-        widget.ringing
-            ? Icons.notifications_active_rounded
-            : Icons.notifications_paused_rounded,
+      padding: EdgeInsets.zero,
+      iconSize: 19,
+      icon: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) => Transform.rotate(
+          angle: widget.ringing ? (_controller.value - .5) * .45 : 0,
+          child: child,
+        ),
+        child: Icon(
+          widget.ringing
+              ? Icons.notifications_active_rounded
+              : Icons.notifications_paused_rounded,
+        ),
       ),
     ),
   );
