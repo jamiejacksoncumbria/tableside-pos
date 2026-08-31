@@ -690,6 +690,19 @@ class ProductionCommandRepository {
     );
   }
 
+  Future<bool> printPreReceipt({
+    required VenueScope scope,
+    required PosOrder order,
+  }) async {
+    final response = await _call('printPreReceipt', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'orderId': order.id,
+      'requestId': 'pre-${DateTime.now().microsecondsSinceEpoch}',
+    });
+    return response['queued'] == true;
+  }
+
   Future<OrderSplitResult> splitOrder({
     required VenueScope scope,
     required PosOrder order,

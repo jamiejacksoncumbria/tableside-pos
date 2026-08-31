@@ -3142,6 +3142,78 @@ function nextIsoDate(isoDate) {
 /// Closes an entire open order against verified payment allocations. A split
 /// child can close independently, while the parent table remains occupied
 /// until its own remaining amount is settled.
+async function printPreReceiptFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const orderId = requiredText(data, "orderId", 180);
+  const requestId = requiredText(data, "requestId", 128);
+  await requireTenantOperationalMember(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const orderRef = tenantRef.collection("orders").doc(orderId);
+  const routeRef = tenantRef.collection("printerRoutes").doc(`${venueId}_receipt`);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  return db.runTransaction(async (transaction) => {
+    const [tenant, venue, order, route] = await Promise.all([
+      transaction.get(tenantRef), transaction.get(venueRef),
+      transaction.get(orderRef), transaction.get(routeRef),
+    ]);
+    if (!tenant.exists || !venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (!order.exists || order.data().venueId !== venueId || order.data().status === "closed") {
+      throw new HttpsError("failed-precondition", "This order is no longer open.");
+    }
+    const lines = Array.isArray(order.data().lines) ? order.data().lines : [];
+    if (lines.length === 0 || lines.some((line) => line?.isSentToProduction !== true)) {
+      throw new HttpsError("failed-precondition", "Send every item before printing a pre receipt.");
+    }
+    const targetDeviceId = route.exists && typeof route.data().primaryDeviceId === "string"
+      ? route.data().primaryDeviceId : null;
+    const device = targetDeviceId == null ? null : await transaction.get(
+      tenantRef.collection("devices").doc(targetDeviceId),
+    );
+    if (targetDeviceId == null || !activeRouteDevice(device, venueId, "receipt")) {
+      throw new HttpsError("failed-precondition", "No active receipt printer is configured for this venue.");
+    }
+    const currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
+    const receiptLines = lines.map((line) => {
+      const quantity = Number(line.quantity);
+      const unitPriceMinor = Number(line.unitPriceMinor);
+      const lineTotalMinor = quantity * unitPriceMinor;
+      const taxRateBasisPoints = validTaxRateBasisPoints(line.taxRateBasisPoints);
+      const taxMinor = inclusiveTaxMinor(lineTotalMinor, taxRateBasisPoints);
+      return {...line, quantity, unitPriceMinor, lineTotalMinor, taxMinor, netMinor: lineTotalMinor - taxMinor};
+    });
+    const totalMinor = receiptLines.reduce((sum, line) => sum + line.lineTotalMinor, 0);
+    const taxTotalMinor = receiptLines.reduce((sum, line) => sum + line.taxMinor, 0);
+    const jobId = `pre_${orderId}_${requestId}`;
+    transaction.create(tenantRef.collection("printJobs").doc(jobId), {
+      venueId, targetDeviceId,
+      fallbackDeviceId: typeof route.data().fallbackDeviceId === "string" ? route.data().fallbackDeviceId : null,
+      orderId, ticketId: `pre_${orderId}`, productionArea: "receipt",
+      status: "queued", attempts: 0, idempotencyKey: jobId,
+      payload: {
+        type: "receipt", isPreReceipt: true,
+        receiptNumber: `PRE-${orderId.slice(-6).toUpperCase()}`,
+        restaurantName: receiptBusinessSnapshot(tenant.data()).name,
+        business: receiptBusinessSnapshot(tenant.data()), currencyCode,
+        tableLabel: typeof order.data().tableLabel === "string" ? order.data().tableLabel : null,
+        tabName: typeof order.data().tabName === "string" ? order.data().tabName : null,
+        totalMinor, netTotalMinor: totalMinor - taxTotalMinor, taxTotalMinor,
+        taxBreakdown: [], lines: receiptLines, payments: [],
+      },
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "printPreReceipt", venueId, orderId, jobId, actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {queued: true, jobId};
+  });
+}
+
 async function closeOrderFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -4780,6 +4852,8 @@ async function invokePosAction(action, caller, data) {
       return sendOrderToProductionFor(actingCaller, data);
     case "closeOrder":
       return closeOrderFor(actingCaller, data);
+    case "printPreReceipt":
+      return printPreReceiptFor(actingCaller, data);
     case "splitOrder":
       return splitOrderFor(actingCaller, data);
     case "updateProductionTicket":

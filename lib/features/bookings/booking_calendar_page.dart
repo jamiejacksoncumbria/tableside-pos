@@ -9,6 +9,7 @@ import '../../data/production_command_repository.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
+import '../reports/booking_report_page.dart';
 import 'booking.dart';
 
 final venueBookingsProvider = StreamProvider<List<VenueBooking>>((ref) {
@@ -80,6 +81,17 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  IconButton(
+                    tooltip: 'Print bookings for ${formatAppDate(_day)}',
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => BookingReportPage(
+                          initialRange: DateTimeRange(start: _day, end: _day),
+                        ),
+                      ),
+                    ),
+                    icon: const Icon(Icons.print_outlined),
+                  ),
                   IconButton(
                     onPressed: () => setState(
                       () => _day = _day.subtract(const Duration(days: 1)),

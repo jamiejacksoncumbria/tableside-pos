@@ -158,17 +158,25 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                 padding: const EdgeInsets.all(12),
                 child: Row(
                   children: [
-                    const Icon(Icons.warning_amber_rounded, color: Colors.white),
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Colors.white,
+                    ),
                     const SizedBox(width: 10),
                     const Expanded(
                       child: Text(
                         'Allergy alert: silence only after the kitchen has acknowledged it.',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                     ),
                     TextButton(
                       onPressed: _silenceAllergyAlarm,
-                      style: TextButton.styleFrom(foregroundColor: Colors.white),
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.white,
+                      ),
                       child: const Text('Silence'),
                     ),
                   ],
@@ -197,7 +205,9 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                     ),
                     TextButton(
                       onPressed: _silenceLateAlarm,
-                      style: TextButton.styleFrom(foregroundColor: Colors.white),
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.white,
+                      ),
                       child: const Text('Silence'),
                     ),
                   ],
@@ -279,7 +289,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     final currentRedIds = orders
         .where(
           (order) =>
-              _lateState(order, DateTime.now(), widget.amberMinutes, widget.redMinutes) ==
+              _lateState(
+                order,
+                DateTime.now(),
+                widget.amberMinutes,
+                widget.redMinutes,
+              ) ==
               _LateState.red,
         )
         .map((order) => order.id)
@@ -330,7 +345,8 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   Future<void> _loadAudioPreference() async {
     try {
       final preferences = SharedPreferencesAsync();
-      final muted = await preferences.getBool(_audioMutedPreferenceKey) ?? false;
+      final muted =
+          await preferences.getBool(_audioMutedPreferenceKey) ?? false;
       if (mounted) {
         setState(() {
           _audioMuted = muted;
@@ -338,7 +354,11 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
         });
       }
     } on Object catch (error, stackTrace) {
-      AppLogger.error('Load local order-flow audio preference', error, stackTrace);
+      AppLogger.error(
+        'Load local order-flow audio preference',
+        error,
+        stackTrace,
+      );
       if (mounted) setState(() => _audioPreferenceLoaded = true);
     }
   }
@@ -349,7 +369,11 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     try {
       await SharedPreferencesAsync().setBool(_audioMutedPreferenceKey, muted);
     } on Object catch (error, stackTrace) {
-      AppLogger.error('Save local order-flow audio preference', error, stackTrace);
+      AppLogger.error(
+        'Save local order-flow audio preference',
+        error,
+        stackTrace,
+      );
     }
     if (!muted) {
       if (_activeAllergyTicketIds.isNotEmpty) _startAllergyAlarm();
@@ -655,6 +679,17 @@ class _OrderFlowCard extends StatelessWidget {
                         ),
                       ),
                     ),
+                    IconButton(
+                      tooltip: itemsExpanded
+                          ? 'Hide order items'
+                          : 'Show ${order.itemSummary.length} order items',
+                      onPressed: onToggleItems,
+                      icon: Icon(
+                        itemsExpanded
+                            ? Icons.expand_less_rounded
+                            : Icons.expand_more_rounded,
+                      ),
+                    ),
                     _OrderActions(order: order, onAction: onAction),
                   ],
                 ),
@@ -670,23 +705,6 @@ class _OrderFlowCard extends StatelessWidget {
                     Expanded(child: Text(order.productionArea.label)),
                     _StatusPill(status: order.status),
                   ],
-                ),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    onPressed: onToggleItems,
-                    style: TextButton.styleFrom(foregroundColor: Colors.white),
-                    icon: Icon(
-                      itemsExpanded
-                          ? Icons.expand_less_rounded
-                          : Icons.expand_more_rounded,
-                    ),
-                    label: Text(
-                      itemsExpanded
-                          ? 'Hide items'
-                          : 'Show items (${order.itemSummary.length})',
-                    ),
-                  ),
                 ),
                 if (itemsExpanded)
                   LayoutBuilder(
@@ -729,14 +747,20 @@ class _OrderFlowCard extends StatelessWidget {
                   ),
                 ],
                 const SizedBox(height: 8),
-                _PrimaryFlowAction(order: order, onAction: onAction),
-                const SizedBox(height: 8),
-                _AlertRow(
-                  icon: late == _LateState.normal
-                      ? Icons.timer_outlined
-                      : Icons.priority_high_rounded,
-                  text: '${_formatElapsed(elapsed)} since ticket release',
-                  color: Colors.white,
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    _PrimaryFlowAction(order: order, onAction: onAction),
+                    _AlertRow(
+                      icon: late == _LateState.normal
+                          ? Icons.timer_outlined
+                          : Icons.priority_high_rounded,
+                      text: '${_formatElapsed(elapsed)} since ticket release',
+                      color: Colors.white,
+                    ),
+                  ],
                 ),
               ],
             ),

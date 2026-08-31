@@ -55,6 +55,17 @@ class _UnsupportedBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   }
 
   @override
+  Future<void> printTextReport({
+    required BluetoothReceiptPrinterDevice device,
+    required String title,
+    required List<String> lines,
+  }) {
+    throw const BluetoothReceiptPrinterException(
+      'Bluetooth report printing is available on Android devices only.',
+    );
+  }
+
+  @override
   Future<void> saveProductionRouting({
     required String venueRoutingKey,
     required BluetoothProductionRouting routing,

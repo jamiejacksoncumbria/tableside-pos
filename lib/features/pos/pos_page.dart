@@ -59,9 +59,8 @@ class PosPage extends ConsumerWidget {
             child: Column(
               children: [
                 TabBar(
-                  onTap: (index) => ref
-                      .read(posCompactTabProvider.notifier)
-                      .select(index),
+                  onTap: (index) =>
+                      ref.read(posCompactTabProvider.notifier).select(index),
                   tabs: [
                     Tab(
                       icon: Icon(Icons.table_restaurant_rounded),
@@ -404,11 +403,13 @@ class _NamedTabButton extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final totalMinor = scope == null
         ? null
-        : ref.watch(tableOpenOrderProvider(tab.orderId)).when(
-            data: (order) => order?.totalMinor,
-            loading: () => null,
-            error: (_, _) => null,
-          );
+        : ref
+              .watch(tableOpenOrderProvider(tab.orderId))
+              .when(
+                data: (order) => order?.totalMinor,
+                loading: () => null,
+                error: (_, _) => null,
+              );
     // Every item here represents a live named tab. Make that operational
     // state as obvious as an open table, not merely the currently selected
     // tab.
@@ -417,7 +418,8 @@ class _NamedTabButton extends ConsumerWidget {
     return Semantics(
       button: true,
       selected: selected,
-      label: 'Open tab for ${tab.name}${totalMinor == null ? '' : ', ${formatMoney(totalMinor, currencyCode: currencyCode)} owed'}',
+      label:
+          'Open tab for ${tab.name}${totalMinor == null ? '' : ', ${formatMoney(totalMinor, currencyCode: currencyCode)} owed'}',
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(12),
@@ -429,11 +431,7 @@ class _NamedTabButton extends ConsumerWidget {
           ),
           child: Row(
             children: [
-              Icon(
-                Icons.person_outline_rounded,
-                size: 18,
-                color: foreground,
-              ),
+              Icon(Icons.person_outline_rounded, size: 18, color: foreground),
               const SizedBox(width: 8),
               Expanded(
                 child: Column(
@@ -453,12 +451,15 @@ class _NamedTabButton extends ConsumerWidget {
                       Text(
                         formatMoney(totalMinor, currencyCode: currencyCode),
                         style: Theme.of(context).textTheme.labelMedium
-                            ?.copyWith(color: foreground.withValues(alpha: .88)),
+                            ?.copyWith(
+                              color: foreground.withValues(alpha: .88),
+                            ),
                       ),
                   ],
                 ),
               ),
-              if (selected) const Icon(Icons.check_circle_rounded, color: Colors.white),
+              if (selected)
+                const Icon(Icons.check_circle_rounded, color: Colors.white),
             ],
           ),
         ),
@@ -516,6 +517,8 @@ class _MenuPanel extends ConsumerStatefulWidget {
 class _MenuPanelState extends ConsumerState<_MenuPanel> {
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _productScrollController = ScrollController();
+  final ScrollController _sectionScrollController = ScrollController();
+  final ScrollController _subsectionScrollController = ScrollController();
 
   String get currencyCode => widget.currencyCode;
 
@@ -531,6 +534,8 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
       ..removeListener(_searchChanged)
       ..dispose();
     _productScrollController.dispose();
+    _sectionScrollController.dispose();
+    _subsectionScrollController.dispose();
     super.dispose();
   }
 
@@ -539,6 +544,68 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     if (_productScrollController.hasClients) {
       _productScrollController.jumpTo(0);
     }
+  }
+
+  Future<void> _showSearchTouchKeyboard() async {
+    const rows = <String>['QWERTYUIOP', 'ASDFGHJKL', 'ZXCVBNM'];
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Product search keyboard'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 620),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final row in rows)
+                Wrap(
+                  alignment: WrapAlignment.center,
+                  spacing: 4,
+                  runSpacing: 4,
+                  children: [
+                    for (final key in row.split(''))
+                      SizedBox(
+                        width: 48,
+                        child: FilledButton.tonal(
+                          onPressed: () => _searchController.text += key,
+                          child: Text(key),
+                        ),
+                      ),
+                  ],
+                ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      final value = _searchController.text;
+                      if (value.isNotEmpty) {
+                        _searchController.text = value.substring(
+                          0,
+                          value.length - 1,
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.backspace_outlined),
+                    label: const Text('Delete'),
+                  ),
+                  OutlinedButton(
+                    onPressed: _searchController.clear,
+                    child: const Text('Clear'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    child: const Text('Done'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -680,21 +747,30 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                       labelText: 'Quick product search',
                       hintText: 'Type the start of a product name',
                       prefixIcon: const Icon(Icons.search_rounded),
-                      suffixIcon: searchQuery.isEmpty
-                          ? null
-                          : IconButton(
+                      suffixIcon: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: 'Open touch keyboard',
+                            onPressed: _showSearchTouchKeyboard,
+                            icon: const Icon(Icons.keyboard_alt_outlined),
+                          ),
+                          if (searchQuery.isNotEmpty)
+                            IconButton(
                               tooltip: 'Clear search',
                               onPressed: _searchController.clear,
                               icon: const Icon(Icons.close_rounded),
                             ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 14),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
+            _HorizontalMenuScroller(
+              controller: _sectionScrollController,
               child: Row(
                 children: [
                   Padding(
@@ -731,8 +807,8 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
             ),
             if (subsections.isNotEmpty) ...[
               const SizedBox(height: 10),
-              SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
+              _HorizontalMenuScroller(
+                controller: _subsectionScrollController,
                 child: Row(
                   children: [
                     Padding(
@@ -829,6 +905,58 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
       ),
     );
   }
+}
+
+class _HorizontalMenuScroller extends StatelessWidget {
+  const _HorizontalMenuScroller({
+    required this.controller,
+    required this.child,
+  });
+
+  final ScrollController controller;
+  final Widget child;
+
+  void _move(double delta) {
+    if (!controller.hasClients) return;
+    controller.animateTo(
+      (controller.offset + delta).clamp(
+        controller.position.minScrollExtent,
+        controller.position.maxScrollExtent,
+      ),
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      IconButton(
+        tooltip: 'Earlier categories',
+        visualDensity: VisualDensity.compact,
+        onPressed: () => _move(-260),
+        icon: const Icon(Icons.chevron_left_rounded),
+      ),
+      Expanded(
+        child: Scrollbar(
+          controller: controller,
+          thumbVisibility: true,
+          child: SingleChildScrollView(
+            controller: controller,
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.only(bottom: 8),
+            child: child,
+          ),
+        ),
+      ),
+      IconButton(
+        tooltip: 'More categories',
+        visualDensity: VisualDensity.compact,
+        onPressed: () => _move(260),
+        icon: const Icon(Icons.chevron_right_rounded),
+      ),
+    ],
+  );
 }
 
 class _MenuStateMessage extends StatelessWidget {
@@ -1270,6 +1398,47 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                           ),
                     icon: const Icon(Icons.call_split_rounded),
                     label: const Text('Split'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: order.lines.isEmpty || hasUnsentLines
+                        ? null
+                        : () async {
+                            try {
+                              final queued = await ref
+                                  .read(activeOrderProvider.notifier)
+                                  .printPreReceipt();
+                              if (!context.mounted) return;
+                              showAppNotification(
+                                context,
+                                ref: ref,
+                                title: queued
+                                    ? 'Pre receipt queued'
+                                    : 'Pre receipt not queued',
+                                message: queued
+                                    ? 'The unpaid bill has been sent to the receipt printer.'
+                                    : 'No receipt printer accepted the pre receipt.',
+                              );
+                            } on Object catch (error, stackTrace) {
+                              AppLogger.error(
+                                'Print pre receipt',
+                                error,
+                                stackTrace,
+                              );
+                              if (!context.mounted) return;
+                              showAppNotification(
+                                context,
+                                ref: ref,
+                                title: 'Pre receipt was not printed',
+                                message: '$error',
+                                level: AppNotificationLevel.error,
+                              );
+                            }
+                          },
+                    icon: const Icon(Icons.receipt_long_outlined),
+                    label: const Text('Pre receipt'),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -2152,7 +2321,9 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final tables = ref.watch(diningTablesProvider).when(
+    final tables = ref
+        .watch(diningTablesProvider)
+        .when(
           data: (items) => items,
           loading: () => const <DiningTable>[],
           error: (error, stackTrace) {

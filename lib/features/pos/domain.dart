@@ -745,7 +745,11 @@ enum PaymentMethod { cash, cardTerminal, online }
 
 bool productNameStartsWith(MenuProduct product, String rawQuery) {
   final query = rawQuery.trim().toLowerCase();
-  return query.isEmpty || product.name.toLowerCase().startsWith(query);
+  if (query.isEmpty) return true;
+  return product.name
+      .toLowerCase()
+      .split(RegExp(r'[\s\-_/,().]+'))
+      .any((word) => word.startsWith(query));
 }
 
 /// Checkout policy kept outside the widget so a merge cannot silently remove

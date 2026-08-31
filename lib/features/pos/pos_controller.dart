@@ -598,6 +598,21 @@ class ActiveOrderController extends Notifier<PosOrder> {
     return result;
   }
 
+  Future<bool> printPreReceipt() async {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) throw StateError('Select a venue first.');
+    _requireValidLiveOrderLocation();
+    if (state.lines.isEmpty) throw StateError('The bill is empty.');
+    if (state.lines.any((line) => !line.isSentToProduction)) {
+      throw StateError(
+        'Send or remove every draft item before printing a pre receipt.',
+      );
+    }
+    return ref
+        .read(productionCommandRepositoryProvider)
+        .printPreReceipt(scope: scope, order: state);
+  }
+
   /// Creates an independent payment-only child bill from already-sent table
   /// items. The server reduces the parent order atomically, so a second till
   /// cannot sell/pay the same portion at the same time.
