@@ -1076,8 +1076,20 @@ Future<void> _showProductDialog({
                         'Stock reduces when the product is released to production.',
                       ),
                       value: trackStock,
-                      onChanged: (value) =>
-                          setDialogState(() => trackStock = value),
+                      onChanged: (value) {
+                        setDialogState(() {
+                          trackStock = value;
+                          // An existing untracked product has no opening-stock
+                          // value. Start it safely at zero when tracking is
+                          // enabled so the form cannot fail validation silently.
+                          if (value && stock.text.trim().isEmpty) {
+                            stock.text = '0';
+                          }
+                          if (value && stockPerSale.text.trim().isEmpty) {
+                            stockPerSale.text = '1';
+                          }
+                        });
+                      },
                     ),
                     if (trackStock) ...[
                       DropdownButtonFormField<String>(
@@ -1219,7 +1231,17 @@ Future<void> _showProductDialog({
             ),
             FilledButton(
               onPressed: () async {
-                if (!(formKey.currentState?.validate() ?? false)) return;
+                if (!(formKey.currentState?.validate() ?? false)) {
+                  showAppNotification(
+                    dialogContext,
+                    ref: ref,
+                    title: 'Check the product details',
+                    message:
+                        'Correct the highlighted fields before saving. Stock quantities must be valid numbers.',
+                    level: AppNotificationLevel.warning,
+                  );
+                  return;
+                }
                 if (selectedSections.isEmpty) {
                   showAppNotification(
                     dialogContext,
