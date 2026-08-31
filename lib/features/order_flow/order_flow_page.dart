@@ -57,6 +57,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   bool _audioPreferenceLoaded = false;
   bool _refreshingPinSession = false;
   bool _compactFiltersExpanded = false;
+  bool _compactStatusExpanded = false;
   static const _audioMutedPreferenceKey = 'tableside.orderFlow.audioMuted';
 
   @override
@@ -124,12 +125,10 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       child: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            runSpacing: 12,
-            children: [
-              Column(
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 700;
+              final heading = Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
@@ -144,30 +143,80 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                     ),
                   ),
                 ],
-              ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton.filledTonal(
-                    tooltip: _audioMuted
-                        ? 'Enable new-order and allergy audio on this device'
-                        : 'Mute new-order and allergy audio; late alarms are dismissed on each ticket',
-                    onPressed: _toggleAudioMuted,
-                    icon: Icon(
-                      _audioMuted
-                          ? Icons.volume_off_rounded
-                          : Icons.volume_up_rounded,
+              );
+              final audioButton = IconButton.filledTonal(
+                tooltip: _audioMuted
+                    ? 'Enable new-order and allergy audio on this device'
+                    : 'Mute new-order and allergy audio; late alarms are dismissed on each ticket',
+                visualDensity: compact
+                    ? VisualDensity.compact
+                    : VisualDensity.standard,
+                onPressed: _toggleAudioMuted,
+                icon: Icon(
+                  _audioMuted
+                      ? Icons.volume_off_rounded
+                      : Icons.volume_up_rounded,
+                ),
+              );
+              final status = _BoardHealth(
+                allOrders: allOrders,
+                amberMinutes: widget.amberMinutes,
+                redMinutes: widget.redMinutes,
+              );
+
+              if (compact) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    heading,
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        audioButton,
+                        const SizedBox(width: 4),
+                        TextButton.icon(
+                          onPressed: () => setState(
+                            () => _compactStatusExpanded =
+                                !_compactStatusExpanded,
+                          ),
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                          ),
+                          icon: Icon(
+                            _compactStatusExpanded
+                                ? Icons.expand_less_rounded
+                                : Icons.monitor_heart_outlined,
+                            size: 19,
+                          ),
+                          label: Text(
+                            _compactStatusExpanded
+                                ? 'Hide status'
+                                : 'Show status',
+                          ),
+                        ),
+                      ],
                     ),
-                  ),
+                    if (_compactStatusExpanded) ...[
+                      const SizedBox(height: 8),
+                      status,
+                    ],
+                  ],
+                );
+              }
+
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(child: heading),
+                  const SizedBox(width: 16),
+                  audioButton,
                   const SizedBox(width: 8),
-                  _BoardHealth(
-                    allOrders: allOrders,
-                    amberMinutes: widget.amberMinutes,
-                    redMinutes: widget.redMinutes,
-                  ),
+                  Flexible(child: status),
                 ],
-              ),
-            ],
+              );
+            },
           ),
           const SizedBox(height: 20),
           if (_activeAllergyTicketIds.isNotEmpty) ...[
