@@ -1360,6 +1360,31 @@ async function changeOwnStaffPinFor(caller, rawData) {
   return {changed: true};
 }
 
+async function updateOwnThemePreferenceFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const themeMode = requiredText(data, "themeMode", 16);
+  if (!["venue", "light", "dark"].includes(themeMode)) {
+    throw new HttpsError("invalid-argument", "The selected appearance is invalid.");
+  }
+  await requireTenantOperationalMember(caller, tenantId);
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  await db.doc(`userPreferences/${caller.uid}`).set({
+    themeMode,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedFromTenantId: tenantId,
+    updatedFromVenueId: venueId,
+  }, {merge: true});
+  await writeAudit(caller.uid, "updateOwnThemePreference", caller.uid, {
+    tenantId, venueId, themeMode,
+  });
+  return {updated: true, themeMode};
+}
+
 async function unlockStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -1478,10 +1503,11 @@ async function verifyStaffPinFor(caller, rawData) {
   const authorizationRef = db.doc(
     `tenants/${tenantId}/staffPinAuthorizations/${caller.uid}`,
   );
-  const [user, platformAdmin, verifiedMembership] = await Promise.all([
+  const [user, platformAdmin, verifiedMembership, userPreferences] = await Promise.all([
     auth.getUser(userId),
     db.doc(`platformAdmins/${userId}`).get(),
     memberRef.get(),
+    db.doc(`userPreferences/${userId}`).get(),
   ]);
   const verifiedRoles = Array.isArray(verifiedMembership.data()?.roles)
     ? verifiedMembership.data().roles
@@ -1518,6 +1544,9 @@ async function verifyStaffPinFor(caller, rawData) {
     displayName: user.displayName || user.email || "Staff member",
     isPlatformAdmin: platformAdmin.exists || user.customClaims?.platformAdmin === true,
     roles: verifiedRoles,
+    themeModePreference: ["light", "dark"].includes(userPreferences.data()?.themeMode)
+      ? userPreferences.data().themeMode
+      : "venue",
   };
 }
 
@@ -1979,6 +2008,7 @@ async function createTenantFor(caller, rawData) {
       nameKey: venueNameKey(venueName),
       timeZone,
       notificationRetentionSeconds: 5,
+      defaultThemeMode: "light",
       backgroundLockSeconds: 120,
       orderFlowAmberMinutes: 15,
       orderFlowRedMinutes: 25,
@@ -2061,6 +2091,7 @@ async function createVenueFor(caller, rawData) {
       nameKey,
       timeZone,
       notificationRetentionSeconds: 5,
+      defaultThemeMode: "light",
       backgroundLockSeconds: 120,
       orderFlowAmberMinutes: 15,
       orderFlowRedMinutes: 25,
@@ -3055,6 +3086,10 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
         "businessDayCutoffMinutes",
         1439,
       );
+  const defaultThemeMode = requiredText(data, "defaultThemeMode", 16);
+  if (!["light", "dark"].includes(defaultThemeMode)) {
+    throw new HttpsError("invalid-argument", "The default venue theme is invalid.");
+  }
   await requireTenantManager(caller, tenantId);
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
@@ -3119,6 +3154,7 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
       orderFlowAmberMinutes,
       orderFlowRedMinutes,
       defaultBookingDurationMinutes,
+      defaultThemeMode,
       ...cutoffUpdate,
       updatedAt: FieldValue.serverTimestamp(),
       updatedByActor: actor,
@@ -3131,6 +3167,7 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
       orderFlowAmberMinutes,
       orderFlowRedMinutes,
       defaultBookingDurationMinutes,
+      defaultThemeMode,
       previousBusinessDayCutoffMinutes: safeCurrentCutoff,
       pendingBusinessDayCutoffMinutes: businessDayCutoffMinutes,
       pendingBusinessDayCutoffEffectiveDate: cutoffEffectiveDate,
@@ -3145,6 +3182,7 @@ async function updateVenueNotificationSettingsFor(caller, rawData) {
     orderFlowAmberMinutes,
     orderFlowRedMinutes,
     defaultBookingDurationMinutes: savedBookingDurationMinutes,
+    defaultThemeMode,
     requestedBusinessDayCutoffMinutes: businessDayCutoffMinutes,
   };
 }
@@ -5650,6 +5688,8 @@ async function invokePosAction(action, caller, data) {
       return setOwnStaffPinFor(caller, data);
     case "changeOwnStaffPin":
       return changeOwnStaffPinFor(actingCaller, data);
+    case "updateOwnThemePreference":
+      return updateOwnThemePreferenceFor(actingCaller, data);
     case "verifyStaffPin":
       return verifyStaffPinFor(caller, data);
     case "refreshStaffPinSession":

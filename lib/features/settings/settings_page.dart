@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/app_theme_controller.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/tenant_profile_repository.dart';
 import '../../data/production_command_repository.dart';
@@ -45,6 +46,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final TextEditingController _orderFlowAmberMinutes;
   late final TextEditingController _orderFlowRedMinutes;
   late final TextEditingController _defaultBookingDurationMinutes;
+  late String _defaultThemeMode;
   late int _businessDayCutoffMinutes;
   Uint8List? _logoBytes;
   String? _logoName;
@@ -84,6 +86,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _defaultBookingDurationMinutes = TextEditingController(
       text: '${widget.venueOverride?.defaultBookingDurationMinutes ?? 120}',
     );
+    _defaultThemeMode = widget.venueOverride?.defaultThemeMode ?? 'light';
     _businessDayCutoffMinutes =
         widget.venueOverride?.pendingBusinessDayCutoffMinutes ??
         widget.venueOverride?.businessDayCutoffMinutes ??
@@ -257,7 +260,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             orderFlowRedMinutes: redMinutes,
             defaultBookingDurationMinutes: bookingDurationMinutes,
             businessDayCutoffMinutes: _businessDayCutoffMinutes,
+            defaultThemeMode: _defaultThemeMode,
           );
+      await ref
+          .read(appThemeControllerProvider.notifier)
+          .applyVenueDefault(_defaultThemeMode);
       if (!mounted) return;
       showAppNotification(
         context,
@@ -640,6 +647,24 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                         'Used for new bookings; staff can adjust it per booking.',
                     suffixText: 'minutes',
                   ),
+                ),
+                const SizedBox(height: 14),
+                DropdownButtonFormField<String>(
+                  initialValue: _defaultThemeMode,
+                  decoration: const InputDecoration(
+                    labelText: 'Default venue appearance',
+                    helperText:
+                        'Used on login and PIN screens unless the signed-in staff member chooses their own appearance.',
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: 'light', child: Text('Light')),
+                    DropdownMenuItem(value: 'dark', child: Text('Dark')),
+                  ],
+                  onChanged: _savingNotificationRetention
+                      ? null
+                      : (value) => setState(
+                          () => _defaultThemeMode = value ?? 'light',
+                        ),
                 ),
                 const SizedBox(height: 14),
                 ListTile(

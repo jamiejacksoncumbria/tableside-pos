@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/app_theme_controller.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/order_flow_display_mode.dart';
 import '../../core/staff_pin_session_store.dart';
@@ -28,11 +29,15 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
       venueId: scope.venueId,
     );
     state = session;
+    ref
+        .read(appThemeControllerProvider.notifier)
+        .applyUserPreference(session.themeModePreference);
   }
 
   void lock() {
     StaffPinSessionStore.current = null;
     state = null;
+    ref.read(appThemeControllerProvider.notifier).clearUserPreference();
   }
 
   void extendUntil(DateTime expiresAt) {
@@ -143,7 +148,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   DateTime? _backgroundedAt;
 
   Duration get _backgroundLockAfter =>
-      Duration(seconds: widget.backgroundLockSeconds.clamp(15, 3600) as int);
+      Duration(seconds: widget.backgroundLockSeconds.clamp(15, 3600));
 
   @override
   void initState() {

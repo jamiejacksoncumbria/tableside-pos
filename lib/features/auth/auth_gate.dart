@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/home_shell.dart';
 import '../../core/app_logger.dart';
+import '../../core/app_theme_controller.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
@@ -353,10 +356,23 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
                                   // just left, even before the POS controller
                                   // rebuilds its live stream.
                                   ref
-                                      .read(activeStaffPinSessionProvider.notifier)
+                                      .read(
+                                        activeStaffPinSessionProvider.notifier,
+                                      )
                                       .lock();
+                                  unawaited(
+                                    ref
+                                        .read(
+                                          appThemeControllerProvider.notifier,
+                                        )
+                                        .applyVenueDefault(
+                                          venue.defaultThemeMode,
+                                        ),
+                                  );
                                   ref
-                                      .read(activePersistedOrderIdProvider.notifier)
+                                      .read(
+                                        activePersistedOrderIdProvider.notifier,
+                                      )
                                       .select(null);
                                   ref
                                       .read(selectedTableProvider.notifier)

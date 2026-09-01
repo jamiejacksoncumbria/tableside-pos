@@ -170,6 +170,7 @@ class Venue {
     int orderFlowRedMinutes = 25,
     int defaultBookingDurationMinutes = 120,
     int businessDayCutoffMinutes = 240,
+    this.defaultThemeMode = 'light',
     this.pendingBusinessDayCutoffMinutes,
     this.pendingBusinessDayCutoffEffectiveDate,
   }) : _orderFlowAmberMinutes = orderFlowAmberMinutes,
@@ -183,6 +184,7 @@ class Venue {
   final String timeZone;
   final int notificationRetentionSeconds;
   final int backgroundLockSeconds;
+  final String defaultThemeMode;
 
   // Nullable backing fields deliberately protect a running debug session
   // whose Venue instances pre-date these fields after a hot reload. Existing

@@ -117,6 +117,9 @@ class FirestorePosRepository {
                   defaultBookingDurationMinutes: _bookingDurationMinutes(
                     data['defaultBookingDurationMinutes'],
                   ),
+                  defaultThemeMode: data['defaultThemeMode'] == 'dark'
+                      ? 'dark'
+                      : 'light',
                   businessDayCutoffMinutes: _businessDayCutoffMinutes(
                     data['businessDayCutoffMinutes'],
                   ),

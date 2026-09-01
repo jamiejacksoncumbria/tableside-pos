@@ -6,7 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/app_logger.dart';
+import '../core/app_theme_controller.dart';
 import '../core/tenant_scope.dart';
+import '../data/production_command_repository.dart';
 import '../features/bookings/booking_calendar_page.dart';
 import '../features/order_flow/order_flow_page.dart';
 import '../features/auth/staff_pin_gate.dart';
@@ -204,6 +206,17 @@ class HomeShell extends ConsumerWidget {
           if (staffSession != null &&
               ref.watch(activeVenueScopeProvider) != null)
             IconButton(
+              tooltip: 'My appearance',
+              onPressed: () => _changeOwnAppearance(
+                context: context,
+                ref: ref,
+                scope: ref.read(activeVenueScopeProvider)!,
+              ),
+              icon: const Icon(Icons.brightness_6_outlined),
+            ),
+          if (staffSession != null &&
+              ref.watch(activeVenueScopeProvider) != null)
+            IconButton(
               tooltip: 'Change my PIN',
               onPressed: () => changeCurrentStaffPin(
                 context: context,
@@ -333,6 +346,70 @@ class HomeShell extends ConsumerWidget {
     ),
     HomeSection.platformAdmin => const PlatformAdminPage(),
   };
+}
+
+Future<void> _changeOwnAppearance({
+  required BuildContext context,
+  required WidgetRef ref,
+  required VenueScope scope,
+}) async {
+  final selected = await showDialog<String>(
+    context: context,
+    builder: (dialogContext) => SimpleDialog(
+      title: const Text('My appearance'),
+      children: [
+        SimpleDialogOption(
+          onPressed: () => Navigator.pop(dialogContext, 'venue'),
+          child: const ListTile(
+            leading: Icon(Icons.storefront_outlined),
+            title: Text('Venue default'),
+          ),
+        ),
+        SimpleDialogOption(
+          onPressed: () => Navigator.pop(dialogContext, 'light'),
+          child: const ListTile(
+            leading: Icon(Icons.light_mode_outlined),
+            title: Text('Light'),
+          ),
+        ),
+        SimpleDialogOption(
+          onPressed: () => Navigator.pop(dialogContext, 'dark'),
+          child: const ListTile(
+            leading: Icon(Icons.dark_mode_outlined),
+            title: Text('Dark'),
+          ),
+        ),
+      ],
+    ),
+  );
+  if (selected == null || !context.mounted) return;
+  try {
+    await ref
+        .read(productionCommandRepositoryProvider)
+        .updateOwnThemePreference(scope: scope, themeMode: selected);
+    ref.read(appThemeControllerProvider.notifier).applyUserPreference(selected);
+    if (context.mounted) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Appearance updated',
+        message: selected == 'venue'
+            ? 'You are now using the venue default appearance.'
+            : 'Your ${selected == 'dark' ? 'dark' : 'light'} appearance will follow you across devices.',
+        level: AppNotificationLevel.success,
+      );
+    }
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('Update own appearance', error, stackTrace);
+    if (!context.mounted) return;
+    showAppNotification(
+      context,
+      ref: ref,
+      title: 'Could not update appearance',
+      message: '$error',
+      level: AppNotificationLevel.error,
+    );
+  }
 }
 
 /// Keeps the currently selected service location unmistakable on every screen.

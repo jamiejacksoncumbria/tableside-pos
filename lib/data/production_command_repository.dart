@@ -51,6 +51,7 @@ class StaffPinVerification {
     required this.displayName,
     required this.isPlatformAdmin,
     required this.roles,
+    required this.themeModePreference,
   });
 
   final String sessionId;
@@ -62,6 +63,7 @@ class StaffPinVerification {
   final String displayName;
   final bool isPlatformAdmin;
   final List<String> roles;
+  final String themeModePreference;
 
   StaffPinVerification copyWith({DateTime? expiresAt}) => StaffPinVerification(
     sessionId: sessionId,
@@ -73,6 +75,7 @@ class StaffPinVerification {
     displayName: displayName,
     isPlatformAdmin: isPlatformAdmin,
     roles: roles,
+    themeModePreference: themeModePreference,
   );
 }
 
@@ -198,6 +201,17 @@ class ProductionCommandRepository {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'pin': pin,
+    });
+  }
+
+  Future<void> updateOwnThemePreference({
+    required VenueScope scope,
+    required String themeMode,
+  }) {
+    return _call('updateOwnThemePreference', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'themeMode': themeMode,
     });
   }
 
@@ -415,6 +429,11 @@ class ProductionCommandRepository {
       displayName: response['displayName'] as String,
       isPlatformAdmin: response['isPlatformAdmin'] == true,
       roles: List<String>.from(response['roles'] as List? ?? const []),
+      themeModePreference:
+          response['themeModePreference'] == 'dark' ||
+              response['themeModePreference'] == 'light'
+          ? response['themeModePreference'] as String
+          : 'venue',
     );
   }
 
@@ -800,6 +819,7 @@ class ProductionCommandRepository {
     required int orderFlowRedMinutes,
     required int defaultBookingDurationMinutes,
     required int businessDayCutoffMinutes,
+    required String defaultThemeMode,
   }) {
     return _call('updateVenueNotificationSettings', {
       'tenantId': scope.tenantId,
@@ -810,6 +830,7 @@ class ProductionCommandRepository {
       'orderFlowRedMinutes': orderFlowRedMinutes,
       'defaultBookingDurationMinutes': defaultBookingDurationMinutes,
       'businessDayCutoffMinutes': businessDayCutoffMinutes,
+      'defaultThemeMode': defaultThemeMode,
     });
   }
 
