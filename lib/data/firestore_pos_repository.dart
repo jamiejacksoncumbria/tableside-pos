@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,6 +15,12 @@ import 'production_command_repository.dart';
 final firestorePosRepositoryProvider = Provider<FirestorePosRepository>(
   (ref) => FirestorePosRepository(FirebaseFirestore.instance),
 );
+
+String? _optionalNonEmptyString(Object? value) {
+  if (value is! String) return null;
+  final cleaned = value.trim();
+  return cleaned.isEmpty ? null : cleaned;
+}
 
 final taxRatesProvider = StreamProvider<List<TaxRate>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
@@ -394,6 +402,10 @@ class FirestorePosRepository {
                 stockComponents: _stockComponents(
                   data['stockComponents'],
                   productDataById,
+                ),
+                imageUrl: _optionalNonEmptyString(data['imageUrl']),
+                imageStoragePath: _optionalNonEmptyString(
+                  data['imageStoragePath'],
                 ),
               );
             })
@@ -856,6 +868,9 @@ class FirestorePosRepository {
     required List<MenuProductVariant> variants,
     required List<String> modifierGroupIds,
     required List<ProductStockComponent> stockComponents,
+    Uint8List? imageBytes,
+    String? imageFileName,
+    String? imageContentType,
   }) async {
     final cleanedName = toCatalogueTitleCase(name);
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
@@ -893,6 +908,12 @@ class FirestorePosRepository {
         'variants': _variantsToMap(variants),
         'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
         'stockComponents': _stockComponentsToMap(stockComponents),
+        if (imageBytes != null)
+          'imageUpload': _productImageUpload(
+            imageBytes,
+            imageFileName,
+            imageContentType,
+          ),
       },
     );
   }
@@ -932,6 +953,10 @@ class FirestorePosRepository {
     required List<MenuProductVariant> variants,
     required List<String> modifierGroupIds,
     required List<ProductStockComponent> stockComponents,
+    Uint8List? imageBytes,
+    String? imageFileName,
+    String? imageContentType,
+    bool removeImage = false,
   }) async {
     final cleanedName = toCatalogueTitleCase(name);
     if (cleanedName.isEmpty || priceMinor < 0 || sectionIds.isEmpty) {
@@ -966,8 +991,30 @@ class FirestorePosRepository {
         'variants': _variantsToMap(variants),
         'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
         'stockComponents': _stockComponentsToMap(stockComponents),
+        if (imageBytes != null)
+          'imageUpload': _productImageUpload(
+            imageBytes,
+            imageFileName,
+            imageContentType,
+          ),
+        if (removeImage) 'removeImage': true,
       },
     );
+  }
+
+  Map<String, Object?> _productImageUpload(
+    Uint8List bytes,
+    String? fileName,
+    String? contentType,
+  ) {
+    if (bytes.isEmpty || bytes.length > 2 * 1024 * 1024) {
+      throw ArgumentError('Product images must be between 1 byte and 2 MB.');
+    }
+    return {
+      'fileName': (fileName ?? 'product-image').trim(),
+      'contentType': (contentType ?? '').trim().toLowerCase(),
+      'base64': base64Encode(bytes),
+    };
   }
 
   List<Map<String, Object?>> _stockComponentsToMap(

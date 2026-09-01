@@ -748,11 +748,13 @@ async function manageMenuConfigurationFor(caller, rawData) {
   if (operation !== "save") {
     throw new HttpsError("invalid-argument", "That menu operation is not supported.");
   }
+  let currentData = null;
   if (documentId != null) {
     const current = await reference.get();
     if (!current.exists || current.data().venueId !== venueId) {
       throw new HttpsError("not-found", "That menu record was not found at this venue.");
     }
+    currentData = current.data();
   }
 
   let cleaned;
@@ -938,13 +940,91 @@ async function manageMenuConfigurationFor(caller, rawData) {
     };
   }
 
+  let uploadedImagePath = null;
+  let previousImagePath = null;
+  if (resource === "product") {
+    previousImagePath = typeof currentData?.imageStoragePath === "string" &&
+      currentData.imageStoragePath.startsWith(`tenants/${tenantId}/products/`)
+      ? currentData.imageStoragePath
+      : null;
+    if (values.imageUpload != null && values.removeImage === true) {
+      throw new HttpsError("invalid-argument", "Choose either replace image or remove image.");
+    }
+    if (values.imageUpload != null) {
+      const upload = requireObject(values.imageUpload);
+      const fileName = requiredText(upload, "fileName", 180)
+        .replace(/[^a-zA-Z0-9._-]/g, "_");
+      const contentType = requiredText(upload, "contentType", 80).toLowerCase();
+      if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(contentType)) {
+        throw new HttpsError("invalid-argument", "Upload a PNG, JPEG, WebP, or GIF image.");
+      }
+      const encoded = requiredText(upload, "base64", 2800000);
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+        throw new HttpsError("invalid-argument", "The product image is invalid.");
+      }
+      const bytes = Buffer.from(encoded, "base64");
+      if (bytes.length === 0 || bytes.length > 2 * 1024 * 1024) {
+        throw new HttpsError("invalid-argument", "Product images must be no larger than 2 MB.");
+      }
+      const isExpectedImage = contentType === "image/png"
+        ? bytes.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+        : contentType === "image/jpeg"
+          ? bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+          : contentType === "image/gif"
+            ? ["GIF87a", "GIF89a"].includes(bytes.subarray(0, 6).toString("ascii"))
+            : bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
+              bytes.subarray(8, 12).toString("ascii") === "WEBP";
+      if (!isExpectedImage) {
+        throw new HttpsError("invalid-argument", "The uploaded file does not match its image type.");
+      }
+      const downloadToken = randomUUID();
+      uploadedImagePath = `tenants/${tenantId}/products/${reference.id}-${Date.now()}-${fileName}`;
+      const bucket = getStorage().bucket();
+      await bucket.file(uploadedImagePath).save(bytes, {
+        resumable: false,
+        metadata: {
+          contentType,
+          metadata: {firebaseStorageDownloadTokens: downloadToken},
+        },
+      });
+      cleaned.imageStoragePath = uploadedImagePath;
+      cleaned.imageUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(uploadedImagePath)}?alt=media&token=${downloadToken}`;
+    } else if (values.removeImage === true) {
+      cleaned.imageStoragePath = FieldValue.delete();
+      cleaned.imageUrl = FieldValue.delete();
+    }
+  }
+
   const writeData = {
     ...cleaned,
     ...(documentId == null ? {venueId, createdAt: FieldValue.serverTimestamp()} : {}),
     updatedAt: FieldValue.serverTimestamp(),
     updatedByActor: actor,
   };
-  await reference.set(writeData, {merge: documentId != null});
+  try {
+    await reference.set(writeData, {merge: documentId != null});
+  } catch (error) {
+    if (uploadedImagePath != null) {
+      try {
+        await getStorage().bucket().file(uploadedImagePath).delete({ignoreNotFound: true});
+      } catch (cleanupError) {
+        console.error("Could not remove an unreferenced product image after save failure.", cleanupError);
+      }
+    }
+    throw error;
+  }
+  if (previousImagePath != null &&
+      (uploadedImagePath != null || values.removeImage === true) &&
+      previousImagePath !== uploadedImagePath) {
+    try {
+      await getStorage().bucket().file(previousImagePath).delete({ignoreNotFound: true});
+    } catch (cleanupError) {
+      // The Firestore record already references the correct image. Cleanup is
+      // deliberately best-effort so a harmless old object cannot make a
+      // successful, retry-safe product save look like a failure to the till.
+      console.error("Could not remove a replaced product image.", cleanupError);
+    }
+  }
   if (resource === "taxRate" && documentId != null) {
     const products = await db.collection(`tenants/${tenantId}/products`)
       .where("taxRateId", "==", documentId).get();

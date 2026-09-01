@@ -488,6 +488,8 @@ class MenuProduct {
     this.variants = const <MenuProductVariant>[],
     this.modifierGroupIds = const <String>[],
     this.stockComponents = const <ProductStockComponent>[],
+    this.imageUrl,
+    this.imageStoragePath,
   });
 
   final String id;
@@ -519,6 +521,8 @@ class MenuProduct {
   final List<MenuProductVariant> variants;
   final List<String> modifierGroupIds;
   final List<ProductStockComponent> stockComponents;
+  final String? imageUrl;
+  final String? imageStoragePath;
 
   double? get estimatedCostMinor {
     if (stockComponents.isNotEmpty) {

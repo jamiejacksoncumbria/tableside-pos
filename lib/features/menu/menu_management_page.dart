@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -1347,6 +1349,10 @@ Future<void> _showProductDialog({
   var stockUnit = existing?.stockUnit ?? remembered?.stockUnit ?? 'each';
   var showOnOrderFlow =
       existing?.showOnOrderFlow ?? remembered?.showOnOrderFlow ?? true;
+  Uint8List? selectedImageBytes;
+  String? selectedImageFileName;
+  String? selectedImageContentType;
+  var removeExistingImage = false;
   final availableTaxRateIds = taxRates.map((rate) => rate.id);
   var selectedTaxRateId = existing == null
       ? (availableTaxRateIds.contains(remembered?.taxRateId)
@@ -1380,6 +1386,114 @@ Future<void> _showProductDialog({
                         labelText: 'Product name',
                       ),
                       validator: _requiredText,
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      'Product image',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    if (selectedImageBytes != null)
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: Image.memory(
+                          selectedImageBytes!,
+                          width: 120,
+                          height: 120,
+                          fit: BoxFit.cover,
+                        ),
+                      )
+                    else if (!removeExistingImage && existing?.imageUrl != null)
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: Image.network(
+                          existing!.imageUrl!,
+                          width: 120,
+                          height: 120,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, _, _) => const SizedBox(
+                            width: 120,
+                            height: 120,
+                            child: Icon(Icons.broken_image_outlined),
+                          ),
+                        ),
+                      )
+                    else
+                      const Text('No image selected.'),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: () async {
+                            final file = await FilePicker.pickFile(
+                              type: FileType.image,
+                            );
+                            if (file == null) return;
+                            final bytes = await file.readAsBytes();
+                            if (bytes.length > 2 * 1024 * 1024) {
+                              if (!dialogContext.mounted) return;
+                              showAppNotification(
+                                dialogContext,
+                                ref: ref,
+                                title: 'Image is too large',
+                                message: 'Choose an image no larger than 2 MB.',
+                                level: AppNotificationLevel.warning,
+                              );
+                              return;
+                            }
+                            final extension = file.extension?.toLowerCase();
+                            final contentType = switch (extension) {
+                              'png' => 'image/png',
+                              'jpg' || 'jpeg' => 'image/jpeg',
+                              'webp' => 'image/webp',
+                              'gif' => 'image/gif',
+                              _ => null,
+                            };
+                            if (contentType == null) {
+                              if (!dialogContext.mounted) return;
+                              showAppNotification(
+                                dialogContext,
+                                ref: ref,
+                                title: 'Unsupported image',
+                                message:
+                                    'Choose a PNG, JPEG, WebP, or GIF image.',
+                                level: AppNotificationLevel.warning,
+                              );
+                              return;
+                            }
+                            setDialogState(() {
+                              selectedImageBytes = bytes;
+                              selectedImageFileName = file.name;
+                              selectedImageContentType = contentType;
+                              removeExistingImage = false;
+                            });
+                          },
+                          icon: const Icon(Icons.add_photo_alternate_outlined),
+                          label: Text(
+                            existing?.imageUrl == null
+                                ? 'Choose image'
+                                : 'Replace image',
+                          ),
+                        ),
+                        if (selectedImageBytes != null ||
+                            (!removeExistingImage &&
+                                existing?.imageUrl != null))
+                          TextButton.icon(
+                            onPressed: () => setDialogState(() {
+                              selectedImageBytes = null;
+                              selectedImageFileName = null;
+                              selectedImageContentType = null;
+                              removeExistingImage = existing?.imageUrl != null;
+                            }),
+                            icon: const Icon(Icons.delete_outline),
+                            label: const Text('Remove image'),
+                          ),
+                      ],
+                    ),
+                    const Text(
+                      'Optional. Used by customer-facing menus and QR ordering later.',
                     ),
                     const SizedBox(height: 12),
                     TextFormField(
@@ -1806,6 +1920,9 @@ Future<void> _showProductDialog({
                         growable: false,
                       ),
                       stockComponents: stockComponents,
+                      imageBytes: selectedImageBytes,
+                      imageFileName: selectedImageFileName,
+                      imageContentType: selectedImageContentType,
                     );
                     await _ProductFormDefaults(
                       sectionIds: selectedSections.toList(growable: false),
@@ -1858,6 +1975,10 @@ Future<void> _showProductDialog({
                         growable: false,
                       ),
                       stockComponents: stockComponents,
+                      imageBytes: selectedImageBytes,
+                      imageFileName: selectedImageFileName,
+                      imageContentType: selectedImageContentType,
+                      removeImage: removeExistingImage,
                     );
                   }
                   if (dialogContext.mounted) Navigator.pop(dialogContext);
