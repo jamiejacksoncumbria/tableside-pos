@@ -9,11 +9,12 @@ import 'core/app_logger.dart';
 
 void main() {
   runZonedGuarded(
-    () {
+    () async {
       // The binding, framework handlers, and runApp must share this guarded
       // zone. Initialising the binding before runZonedGuarded causes Flutter's
       // zone-mismatch assertion in debug builds.
       WidgetsFlutterBinding.ensureInitialized();
+      await AppLogger.initialize();
       FlutterError.onError = (details) {
         AppLogger.flutterError(details);
         FlutterError.presentError(details);

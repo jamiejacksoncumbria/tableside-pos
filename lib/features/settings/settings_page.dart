@@ -18,6 +18,7 @@ import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 import '../stock/stock_management_page.dart';
 import '../tables/table_management_page.dart';
+import 'diagnostics_page.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({
@@ -554,6 +555,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   ),
                 ),
               ),
+              if (canManageVenue) ...[
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.bug_report_outlined),
+                  title: const Text('Device diagnostics'),
+                  subtitle: const Text(
+                    'View and copy the latest 1,000 local diagnostic lines.',
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const DiagnosticsPage(),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
