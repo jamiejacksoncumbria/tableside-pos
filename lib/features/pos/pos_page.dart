@@ -12,13 +12,20 @@ import 'domain.dart';
 import 'pos_controller.dart';
 import 'product_configuration_sheet.dart';
 
-class PosPage extends ConsumerWidget {
+class PosPage extends ConsumerStatefulWidget {
   const PosPage({super.key, required this.currencyCode});
 
   final String currencyCode;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<PosPage> createState() => _PosPageState();
+}
+
+class _PosPageState extends ConsumerState<PosPage> {
+  bool _tablesExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
     final compactTab = ref.watch(posCompactTabProvider);
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -27,6 +34,17 @@ class PosPage extends ConsumerWidget {
         // tables, menu and order made the menu grid receive almost no height
         // at all, despite its Firestore data having loaded successfully.
         if (constraints.maxWidth >= 1100 && constraints.maxHeight >= 700) {
+          if (_tablesExpanded) {
+            return Padding(
+              padding: const EdgeInsets.all(20),
+              child: _TablesPanel(
+                currencyCode: widget.currencyCode,
+                expanded: true,
+                onToggleExpanded: () => setState(() => _tablesExpanded = false),
+                onSelection: () => setState(() => _tablesExpanded = false),
+              ),
+            );
+          }
           return Padding(
             padding: const EdgeInsets.all(20),
             child: Row(
@@ -34,14 +52,18 @@ class PosPage extends ConsumerWidget {
               children: [
                 SizedBox(
                   width: 238,
-                  child: _TablesPanel(currencyCode: currencyCode),
+                  child: _TablesPanel(
+                    currencyCode: widget.currencyCode,
+                    onToggleExpanded: () =>
+                        setState(() => _tablesExpanded = true),
+                  ),
                 ),
                 const SizedBox(width: 16),
-                Expanded(child: _MenuPanel(currencyCode: currencyCode)),
+                Expanded(child: _MenuPanel(currencyCode: widget.currencyCode)),
                 const SizedBox(width: 16),
                 SizedBox(
                   width: 360,
-                  child: _OrderPanel(currencyCode: currencyCode),
+                  child: _OrderPanel(currencyCode: widget.currencyCode),
                 ),
               ],
             ),
@@ -78,9 +100,12 @@ class PosPage extends ConsumerWidget {
                 Expanded(
                   child: TabBarView(
                     children: [
-                      _TablesPanel(currencyCode: currencyCode, compact: true),
-                      _MenuPanel(currencyCode: currencyCode),
-                      _OrderPanel(currencyCode: currencyCode),
+                      _TablesPanel(
+                        currencyCode: widget.currencyCode,
+                        compact: true,
+                      ),
+                      _MenuPanel(currencyCode: widget.currencyCode),
+                      _OrderPanel(currencyCode: widget.currencyCode),
                     ],
                   ),
                 ),
@@ -94,10 +119,19 @@ class PosPage extends ConsumerWidget {
 }
 
 class _TablesPanel extends ConsumerWidget {
-  const _TablesPanel({required this.currencyCode, this.compact = false});
+  const _TablesPanel({
+    required this.currencyCode,
+    this.compact = false,
+    this.expanded = false,
+    this.onToggleExpanded,
+    this.onSelection,
+  });
 
   final String currencyCode;
   final bool compact;
+  final bool expanded;
+  final VoidCallback? onToggleExpanded;
+  final VoidCallback? onSelection;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -140,10 +174,27 @@ class _TablesPanel extends ConsumerWidget {
                   'Tables & tabs',
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
-                TextButton.icon(
-                  onPressed: () => _showNamedTabDialog(context, ref),
-                  icon: const Icon(Icons.person_add_alt_1_rounded),
-                  label: const Text('Named tab'),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (onToggleExpanded != null)
+                      IconButton(
+                        tooltip: expanded
+                            ? 'Return to POS'
+                            : 'Show all tables and tabs',
+                        onPressed: onToggleExpanded,
+                        icon: Icon(
+                          expanded
+                              ? Icons.fullscreen_exit_rounded
+                              : Icons.fullscreen_rounded,
+                        ),
+                      ),
+                    TextButton.icon(
+                      onPressed: () => _showNamedTabDialog(context, ref),
+                      icon: const Icon(Icons.person_add_alt_1_rounded),
+                      label: const Text('Named tab'),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -175,7 +226,7 @@ class _TablesPanel extends ConsumerWidget {
                               selected:
                                   activeOrder.tabName == null &&
                                   table.id == selectedTableId,
-                              compact: compact,
+                              compact: compact || !expanded,
                               onTap: () async {
                                 try {
                                   await ref
@@ -184,6 +235,7 @@ class _TablesPanel extends ConsumerWidget {
                                   ref
                                       .read(selectedTableProvider.notifier)
                                       .select(table.id);
+                                  if (context.mounted) onSelection?.call();
                                 } on Object catch (error, stackTrace) {
                                   AppLogger.error(
                                     'Switch selected table',
@@ -218,40 +270,55 @@ class _TablesPanel extends ConsumerWidget {
                               style: Theme.of(context).textTheme.labelMedium,
                             ),
                           ),
-                          for (final tab in group.tabs)
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 6),
-                              child: _NamedTabButton(
-                                tab: tab,
-                                scope: scope,
-                                currencyCode: currencyCode,
-                                selected: tab.orderId == activeOrder.id,
-                                onTap: () async {
-                                  try {
-                                    await ref
-                                        .read(activeOrderProvider.notifier)
-                                        .openNamedTab(tab.name);
-                                    ref
-                                        .read(selectedTableProvider.notifier)
-                                        .select('');
-                                  } on Object catch (error, stackTrace) {
-                                    AppLogger.error(
-                                      'Open listed named tab',
-                                      error,
-                                      stackTrace,
-                                    );
-                                    if (!context.mounted) return;
-                                    showAppNotification(
-                                      context,
-                                      ref: ref,
-                                      title: 'Could not open named tab',
-                                      message: '$error',
-                                      level: AppNotificationLevel.error,
-                                    );
-                                  }
-                                },
-                              ),
-                            ),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              for (final tab in group.tabs)
+                                SizedBox(
+                                  width: compact
+                                      ? double.infinity
+                                      : expanded
+                                      ? 180
+                                      : 96,
+                                  child: _NamedTabButton(
+                                    tab: tab,
+                                    scope: scope,
+                                    currencyCode: currencyCode,
+                                    selected: tab.orderId == activeOrder.id,
+                                    onTap: () async {
+                                      try {
+                                        await ref
+                                            .read(activeOrderProvider.notifier)
+                                            .openNamedTab(tab.name);
+                                        ref
+                                            .read(
+                                              selectedTableProvider.notifier,
+                                            )
+                                            .select('');
+                                        if (context.mounted) {
+                                          onSelection?.call();
+                                        }
+                                      } on Object catch (error, stackTrace) {
+                                        AppLogger.error(
+                                          'Open listed named tab',
+                                          error,
+                                          stackTrace,
+                                        );
+                                        if (!context.mounted) return;
+                                        showAppNotification(
+                                          context,
+                                          ref: ref,
+                                          title: 'Could not open named tab',
+                                          message: '$error',
+                                          level: AppNotificationLevel.error,
+                                        );
+                                      }
+                                    },
+                                  ),
+                                ),
+                            ],
+                          ),
                         ],
                       ],
                     ],
