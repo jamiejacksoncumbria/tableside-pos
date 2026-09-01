@@ -588,6 +588,38 @@ async function manageMenuConfigurationFor(caller, rawData) {
   const reference = documentId == null ? collection.doc() : collection.doc(documentId);
   const actor = actorSnapshot(await auth.getUser(caller.uid));
 
+  if (operation === "reorder") {
+    if (resource !== "section" || documentId != null) {
+      throw new HttpsError("invalid-argument", "Only menu sections can be reordered.");
+    }
+    const sectionIds = requiredDocumentIdArray(values.sectionIds, "sectionIds", 400);
+    if (new Set(sectionIds).size !== sectionIds.length) {
+      throw new HttpsError("invalid-argument", "The section order contains duplicates.");
+    }
+    const current = await collection.where("venueId", "==", venueId).get();
+    const currentIds = new Set(current.docs.map((item) => item.id));
+    if (currentIds.size !== sectionIds.length ||
+        sectionIds.some((sectionId) => !currentIds.has(sectionId))) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The menu changed while it was being reordered. Refresh and try again.",
+      );
+    }
+    const batch = db.batch();
+    sectionIds.forEach((sectionId, sortOrder) => {
+      batch.update(collection.doc(sectionId), {
+        sortOrder,
+        updatedAt: FieldValue.serverTimestamp(),
+        updatedByActor: actor,
+      });
+    });
+    await batch.commit();
+    await writeAudit(caller.uid, "reorderMenuSections", venueId, {
+      tenantId, venueId, sectionIds, actor,
+    });
+    return {documentId: venueId, updated: true};
+  }
+
   if (operation === "delete") {
     if (documentId == null) {
       throw new HttpsError("invalid-argument", "documentId is required for deletion.");

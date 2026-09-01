@@ -320,6 +320,7 @@ class FirestorePosRepository {
                 name: data['name'] as String? ?? 'Unnamed section',
                 icon: data['icon'] as String? ?? '🍽️',
                 parentSectionId: data['parentSectionId'] as String?,
+                sortOrder: data['sortOrder'] as int? ?? 0,
               );
             })
             .toList(growable: false);
@@ -799,6 +800,21 @@ class FirestorePosRepository {
       resource: 'section',
       operation: 'delete',
       documentId: sectionId,
+    );
+  }
+
+  Future<void> reorderMenuSections({
+    required VenueScope scope,
+    required List<String> sectionIds,
+  }) async {
+    if (sectionIds.isEmpty || sectionIds.toSet().length != sectionIds.length) {
+      throw ArgumentError.value(sectionIds, 'sectionIds');
+    }
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'section',
+      operation: 'reorder',
+      values: {'sectionIds': sectionIds},
     );
   }
 

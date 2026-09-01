@@ -136,6 +136,18 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                   label: const Text('Add section'),
                 ),
                 OutlinedButton.icon(
+                  onPressed: scope == null || sections.length < 2
+                      ? null
+                      : () => _showSectionOrderDialog(
+                          context: context,
+                          ref: ref,
+                          scope: scope,
+                          sections: sections,
+                        ),
+                  icon: const Icon(Icons.swap_vert_rounded),
+                  label: const Text('Order sections'),
+                ),
+                OutlinedButton.icon(
                   onPressed: scope == null
                       ? null
                       : () => _showTaxRateDialog(
@@ -234,7 +246,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                     : 'Manage ${sections.length} categories',
               ),
               subtitle: const Text(
-                'Expand to rename, nest or safely delete categories.',
+                'Expand to rename, nest or safely delete categories. Use Order sections to change their POS display order.',
               ),
               children: [
                 if (filteredSections.isEmpty)
@@ -455,6 +467,111 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
     } finally {
       if (mounted) setState(() => _savingDefaultTaxRate = false);
     }
+  }
+}
+
+Future<void> _showSectionOrderDialog({
+  required BuildContext context,
+  required WidgetRef ref,
+  required VenueScope scope,
+  required List<MenuSection> sections,
+}) async {
+  final ordered = List<MenuSection>.of(sections);
+  final save = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: const Text('Order menu sections'),
+        content: SizedBox(
+          width: 520,
+          height: 520,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Drag categories into the order they should appear on the POS. Subcategories keep their current parent.',
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: ReorderableListView.builder(
+                  buildDefaultDragHandles: false,
+                  itemCount: ordered.length,
+                  onReorderItem: (oldIndex, newIndex) {
+                    setDialogState(() {
+                      final item = ordered.removeAt(oldIndex);
+                      ordered.insert(newIndex, item);
+                    });
+                  },
+                  itemBuilder: (context, index) {
+                    final section = ordered[index];
+                    final parent = sections
+                        .where((item) => item.id == section.parentSectionId)
+                        .firstOrNull;
+                    return Card(
+                      key: ValueKey(section.id),
+                      margin: const EdgeInsets.only(bottom: 6),
+                      child: ListTile(
+                        leading: CircleAvatar(child: Text('${index + 1}')),
+                        title: Text('${section.icon} ${section.name}'),
+                        subtitle: Text(
+                          parent == null
+                              ? 'Top-level category'
+                              : 'Subcategory of ${parent.name}',
+                        ),
+                        trailing: ReorderableDragStartListener(
+                          index: index,
+                          child: const Padding(
+                            padding: EdgeInsets.all(12),
+                            child: Icon(Icons.drag_handle_rounded),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Save order'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (save != true || !context.mounted) return;
+  try {
+    await ref
+        .read(firestorePosRepositoryProvider)
+        .reorderMenuSections(
+          scope: scope,
+          sectionIds: ordered.map((item) => item.id).toList(growable: false),
+        );
+    if (!context.mounted) return;
+    showAppNotification(
+      context,
+      ref: ref,
+      title: 'Section order updated',
+      message: 'The POS category order has been updated for this venue.',
+      level: AppNotificationLevel.success,
+    );
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('Reorder menu sections', error, stackTrace);
+    if (!context.mounted) return;
+    showAppNotification(
+      context,
+      ref: ref,
+      title: 'Could not reorder sections',
+      message: '$error',
+      level: AppNotificationLevel.error,
+    );
   }
 }
 
