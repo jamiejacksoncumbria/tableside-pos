@@ -7,10 +7,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/home_shell.dart';
 import '../../core/app_logger.dart';
 import '../../core/app_theme_controller.dart';
+import '../../core/platform_admin_pin_session_store.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
 import '../platform_admin/platform_admin_page.dart';
+import '../platform_admin/platform_admin_pin_gate.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 import 'session_providers.dart';
@@ -30,6 +32,7 @@ class FirebaseAuthGate extends ConsumerWidget {
           'Firebase authentication changed; clearing local venue and staff sessions.',
         );
         ref.read(activeStaffPinSessionProvider.notifier).lock();
+        PlatformAdminPinSessionStore.clear();
         ref.read(activeVenueScopeProvider.notifier).clear();
         ref.read(homeSectionProvider.notifier).select(HomeSection.pos);
       }
@@ -604,6 +607,6 @@ class _PlatformAdminScaffold extends StatelessWidget {
         ),
       ],
     ),
-    body: const PlatformAdminPage(),
+    body: const PlatformAdminPinGate(child: PlatformAdminPage()),
   );
 }

@@ -1896,6 +1896,157 @@ async function bootstrapPlatformAdminFor(caller) {
   return {claimUpdated: true};
 }
 
+async function platformAdminPinStatusFor(caller) {
+  await requirePlatformAdmin(caller);
+  const pin = await db.doc(`platformAdminPins/${caller.uid}`).get();
+  return {configured: pin.exists};
+}
+
+async function setPlatformAdminPinFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const pin = requiredSixDigitPin(data);
+  const pinRef = db.doc(`platformAdminPins/${caller.uid}`);
+  await db.runTransaction(async (transaction) => {
+    const existing = await transaction.get(pinRef);
+    if (existing.exists) {
+      throw new HttpsError(
+        "already-exists",
+        "A platform administrator PIN is already configured.",
+      );
+    }
+    const salt = randomBytes(16).toString("base64url");
+    transaction.create(pinRef, {
+      userId: caller.uid,
+      salt,
+      pinHash: hashStaffPin(pin, salt),
+      pinVersion: 1,
+      failedAttempts: 0,
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  });
+  await writeAudit(caller.uid, "setPlatformAdminPin", caller.uid, {});
+  return {configured: true};
+}
+
+async function verifyPlatformAdminPinFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const pin = requiredSixDigitPin(data);
+  const pinRef = db.doc(`platformAdminPins/${caller.uid}`);
+  const verification = await db.runTransaction(async (transaction) => {
+    const document = await transaction.get(pinRef);
+    if (!document.exists) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Create your platform administrator PIN first.",
+      );
+    }
+    const pinData = document.data();
+    const lockedUntil = pinData.lockedUntil?.toDate?.() ?? null;
+    if (lockedUntil != null && lockedUntil.getTime() > Date.now()) {
+      throw new HttpsError(
+        "resource-exhausted",
+        "Platform PIN entry is temporarily locked. Try again in 15 minutes.",
+      );
+    }
+    const expected = Buffer.from(pinData.pinHash, "base64");
+    const supplied = Buffer.from(hashStaffPin(pin, pinData.salt), "base64");
+    const valid = expected.length === supplied.length &&
+      timingSafeEqual(expected, supplied);
+    if (!valid) {
+      const previousAttempts = lockedUntil != null && lockedUntil.getTime() <= Date.now()
+        ? 0
+        : (Number.isInteger(pinData.failedAttempts) ? pinData.failedAttempts : 0);
+      const failedAttempts = previousAttempts + 1;
+      transaction.update(pinRef, {
+        failedAttempts: failedAttempts >= 3 ? 0 : failedAttempts,
+        lockedUntil: failedAttempts >= 3
+          ? new Date(Date.now() + 15 * 60 * 1000)
+          : FieldValue.delete(),
+        lastFailedAt: FieldValue.serverTimestamp(),
+      });
+      return {valid: false, failedAttempts};
+    }
+    transaction.update(pinRef, {
+      failedAttempts: 0,
+      lockedUntil: FieldValue.delete(),
+      lastVerifiedAt: FieldValue.serverTimestamp(),
+    });
+    return {
+      valid: true,
+      pinVersion: Number.isInteger(pinData.pinVersion) ? pinData.pinVersion : 1,
+    };
+  });
+  if (!verification.valid) {
+    await db.collection("platformSecurityAlerts").add({
+      type: verification.failedAttempts >= 3
+        ? "platformAdminPinLocked"
+        : "platformAdminPinFailed",
+      userId: caller.uid,
+      failedAttempts: verification.failedAttempts,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    throw new HttpsError(
+      verification.failedAttempts >= 3 ? "resource-exhausted" : "permission-denied",
+      verification.failedAttempts >= 3
+        ? "Platform PIN entry is locked for 15 minutes after three failed attempts."
+        : `Incorrect platform PIN. ${3 - verification.failedAttempts} attempt(s) remain.`,
+    );
+  }
+  const token = randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+  const sessionRef = db.collection("platformAdminPinSessions").doc();
+  await sessionRef.set({
+    userId: caller.uid,
+    hostUserId: caller.uid,
+    pinVersion: verification.pinVersion,
+    tokenHash: createHash("sha256").update(token).digest("base64"),
+    expiresAt,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  await writeAudit(caller.uid, "verifyPlatformAdminPin", caller.uid, {});
+  return {
+    sessionId: sessionRef.id,
+    sessionToken: token,
+    expiresAt: expiresAt.toISOString(),
+  };
+}
+
+async function requirePlatformAdminPinSession(caller, data) {
+  const sessionId = requiredText(data, "platformAdminPinSessionId", 128);
+  const sessionToken = requiredText(data, "platformAdminPinSessionToken", 128);
+  const session = await db.doc(`platformAdminPinSessions/${sessionId}`).get();
+  if (!session.exists) {
+    throw new HttpsError("unauthenticated", "The platform PIN session no longer exists.");
+  }
+  const sessionData = session.data();
+  const suppliedHash = createHash("sha256").update(sessionToken).digest("base64");
+  const expectedHash = typeof sessionData.tokenHash === "string"
+    ? sessionData.tokenHash
+    : "";
+  const hashesMatch = expectedHash.length === suppliedHash.length &&
+    timingSafeEqual(Buffer.from(expectedHash), Buffer.from(suppliedHash));
+  const expiresAt = sessionData.expiresAt?.toDate?.() ?? null;
+  const pin = await db.doc(`platformAdminPins/${caller.uid}`).get();
+  const currentPinVersion = Number.isInteger(pin.data()?.pinVersion)
+    ? pin.data().pinVersion
+    : 0;
+  if (!hashesMatch ||
+      sessionData.userId !== caller.uid ||
+      sessionData.hostUserId !== caller.uid ||
+      sessionData.pinVersion !== currentPinVersion ||
+      expiresAt == null ||
+      expiresAt.getTime() <= Date.now()) {
+    throw new HttpsError(
+      "unauthenticated",
+      "The platform PIN session has expired. Enter your platform administrator PIN again.",
+    );
+  }
+  await requirePlatformAdmin(caller);
+}
+
 async function listAuthUsersFor(caller, rawData) {
   await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
@@ -5604,8 +5755,19 @@ async function invokePlatformAction(action, caller, data) {
   if (action !== "bootstrapPlatformAdmin") {
     const hasPinSession = typeof data.staffPinSessionId === "string" ||
       typeof data.staffPinSessionToken === "string";
+    const hasPlatformPinSession = typeof data.platformAdminPinSessionId === "string" ||
+      typeof data.platformAdminPinSessionToken === "string";
     if (hasPinSession) {
       actingCaller = await actingCallerFromStaffSession(caller, data);
+    } else if (hasPlatformPinSession) {
+      await requirePlatformAdminPinSession(caller, data);
+    } else if ([
+      "platformAdminPinStatus",
+      "setPlatformAdminPin",
+      "verifyPlatformAdminPin",
+    ].includes(action)) {
+      // These narrowly scoped actions establish the separate platform PIN
+      // session. Each still verifies the Firebase platform administrator.
     } else {
       // A brand-new platform administrator has no restaurant in which to set
       // a PIN. Permit only the minimum onboarding surface until its first
@@ -5638,6 +5800,12 @@ async function invokePlatformAction(action, caller, data) {
   switch (action) {
     case "bootstrapPlatformAdmin":
       return bootstrapPlatformAdminFor(caller);
+    case "platformAdminPinStatus":
+      return platformAdminPinStatusFor(caller);
+    case "setPlatformAdminPin":
+      return setPlatformAdminPinFor(caller, data);
+    case "verifyPlatformAdminPin":
+      return verifyPlatformAdminPinFor(caller, data);
     case "listAuthUsers":
       return listAuthUsersFor(actingCaller, data);
     case "listTenants":

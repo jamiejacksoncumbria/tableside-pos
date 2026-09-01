@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import '../core/app_logger.dart';
 import '../core/firebase_bootstrap.dart';
+import '../core/platform_admin_pin_session_store.dart';
 import '../core/staff_pin_session_store.dart';
 import '../firebase_options.dart';
 
@@ -16,6 +17,26 @@ final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
 class PlatformAdminRepository {
   List<String>? _supportedTimeZones;
   List<String>? _supportedCurrencyCodes;
+
+  Future<bool> hasPlatformAdminPin() async {
+    final data = await _call('platformAdminPinStatus');
+    return data['configured'] == true;
+  }
+
+  Future<void> setPlatformAdminPin(String pin) async {
+    await _call('setPlatformAdminPin', {'pin': pin});
+  }
+
+  Future<PlatformAdminPinSession> verifyPlatformAdminPin(String pin) async {
+    final data = await _call('verifyPlatformAdminPin', {'pin': pin});
+    final session = PlatformAdminPinSession(
+      sessionId: data['sessionId'] as String,
+      sessionToken: data['sessionToken'] as String,
+      expiresAt: DateTime.parse(data['expiresAt'] as String),
+    );
+    PlatformAdminPinSessionStore.current = session;
+    return session;
+  }
 
   /// Creates the first administrator, then waits for its custom claim to be
   /// present in the locally held Firebase ID token.
@@ -244,15 +265,23 @@ class PlatformAdminRepository {
     );
     AppLogger.info('Platform API $name: sending request.');
     final staffSession = StaffPinSessionStore.current;
+    final platformSession = PlatformAdminPinSessionStore.current;
+    if (platformSession != null && !platformSession.isValid) {
+      PlatformAdminPinSessionStore.clear();
+    }
+    final activePlatformSession = PlatformAdminPinSessionStore.current;
     final requestData = <String, Object?>{
       ...data,
       if (staffSession != null)
         'staffPinSessionTenantId': staffSession.tenantId,
-      if (staffSession != null)
-        'staffPinSessionVenueId': staffSession.venueId,
+      if (staffSession != null) 'staffPinSessionVenueId': staffSession.venueId,
       if (staffSession != null) 'staffPinSessionId': staffSession.sessionId,
       if (staffSession != null)
         'staffPinSessionToken': staffSession.sessionToken,
+      if (staffSession == null && activePlatformSession != null) ...{
+        'platformAdminPinSessionId': activePlatformSession.sessionId,
+        'platformAdminPinSessionToken': activePlatformSession.sessionToken,
+      },
     };
     final response = await http.post(
       endpoint,
