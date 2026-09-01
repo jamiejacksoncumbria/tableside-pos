@@ -19,6 +19,15 @@ class ModifierGroupsPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final scope = ref.watch(activeVenueScopeProvider);
     final groupsValue = ref.watch(menuModifierGroupsProvider);
+    final stockProducts = ref
+        .watch(menuProductsProvider)
+        .when(
+          data: (products) => products
+              .where((product) => product.trackStock)
+              .toList(growable: false),
+          loading: () => const <MenuProduct>[],
+          error: (_, _) => const <MenuProduct>[],
+        );
     final groups = groupsValue.when(
       data: (items) => items,
       loading: () => const <MenuModifierGroup>[],
@@ -38,6 +47,7 @@ class ModifierGroupsPage extends ConsumerWidget {
                 ref: ref,
                 scope: scope,
                 currencyCode: currencyCode,
+                stockProducts: stockProducts,
               ),
         icon: const Icon(Icons.add_rounded),
         label: const Text('Add option group'),
@@ -92,6 +102,7 @@ class ModifierGroupsPage extends ConsumerWidget {
                             ref: ref,
                             scope: scope,
                             currencyCode: currencyCode,
+                            stockProducts: stockProducts,
                             existing: group,
                           );
                         } else {
@@ -129,6 +140,7 @@ Future<void> _showModifierGroupDialog({
   required WidgetRef ref,
   required VenueScope scope,
   required String currencyCode,
+  required List<MenuProduct> stockProducts,
   MenuModifierGroup? existing,
 }) async {
   final name = TextEditingController(text: existing?.name ?? '');
@@ -144,6 +156,7 @@ Future<void> _showModifierGroupDialog({
           id: option.id,
           name: option.name,
           priceDelta: _minorText(option.priceDeltaMinor),
+          stockComponents: option.stockComponents,
         ),
       )
       .toList(growable: true);
@@ -224,6 +237,18 @@ Future<void> _showModifierGroupDialog({
                           setDialogState(() => drafts.removeAt(index)),
                       onChanged: () =>
                           setDialogState(() => validationMessage = null),
+                      onEditRecipe: () async {
+                        final recipe = await _showOptionStockRecipeDialog(
+                          context: dialogContext,
+                          products: stockProducts,
+                          initial: drafts[index].stockComponents,
+                        );
+                        if (recipe != null) {
+                          setDialogState(
+                            () => drafts[index].stockComponents = recipe,
+                          );
+                        }
+                      },
                     ),
                     const SizedBox(height: 8),
                   ],
@@ -283,6 +308,7 @@ Future<void> _showModifierGroupDialog({
                       id: draft.id,
                       name: optionName,
                       priceDeltaMinor: priceDelta,
+                      stockComponents: draft.stockComponents,
                     ),
                   );
                 }
@@ -396,40 +422,61 @@ class _ModifierOptionRow extends StatelessWidget {
     required this.canRemove,
     required this.onRemove,
     required this.onChanged,
+    required this.onEditRecipe,
   });
 
   final _ModifierOptionDraft draft;
   final bool canRemove;
   final VoidCallback onRemove;
   final VoidCallback onChanged;
+  final VoidCallback onEditRecipe;
 
   @override
-  Widget build(BuildContext context) => Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      Expanded(
-        flex: 3,
-        child: TextField(
-          controller: draft.name,
-          textCapitalization: TextCapitalization.words,
-          decoration: const InputDecoration(labelText: 'Choice name'),
-          onChanged: (_) => onChanged(),
-        ),
+      Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            flex: 3,
+            child: TextField(
+              controller: draft.name,
+              textCapitalization: TextCapitalization.words,
+              decoration: const InputDecoration(labelText: 'Choice name'),
+              onChanged: (_) => onChanged(),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            flex: 2,
+            child: TextField(
+              controller: draft.priceDelta,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: const InputDecoration(labelText: 'Price +/-'),
+              onChanged: (_) => onChanged(),
+            ),
+          ),
+          IconButton(
+            tooltip: 'Remove choice',
+            onPressed: canRemove ? onRemove : null,
+            icon: const Icon(Icons.delete_outline_rounded),
+          ),
+        ],
       ),
-      const SizedBox(width: 10),
-      Expanded(
-        flex: 2,
-        child: TextField(
-          controller: draft.priceDelta,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(labelText: 'Price +/-'),
-          onChanged: (_) => onChanged(),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: TextButton.icon(
+          onPressed: onEditRecipe,
+          icon: const Icon(Icons.inventory_2_outlined, size: 18),
+          label: Text(
+            draft.stockComponents.isEmpty
+                ? 'Set stock used by this choice'
+                : '${draft.stockComponents.length} stock component${draft.stockComponents.length == 1 ? '' : 's'}',
+          ),
         ),
-      ),
-      IconButton(
-        tooltip: 'Remove choice',
-        onPressed: canRemove ? onRemove : null,
-        icon: const Icon(Icons.delete_outline_rounded),
       ),
     ],
   );
@@ -440,6 +487,7 @@ class _ModifierOptionDraft {
     required this.id,
     required String name,
     required String priceDelta,
+    this.stockComponents = const <ProductStockComponent>[],
   }) : name = TextEditingController(text: name),
        priceDelta = TextEditingController(text: priceDelta);
 
@@ -452,10 +500,117 @@ class _ModifierOptionDraft {
   final String id;
   final TextEditingController name;
   final TextEditingController priceDelta;
+  List<ProductStockComponent> stockComponents;
 
   void dispose() {
     name.dispose();
     priceDelta.dispose();
+  }
+}
+
+Future<List<ProductStockComponent>?> _showOptionStockRecipeDialog({
+  required BuildContext context,
+  required List<MenuProduct> products,
+  required List<ProductStockComponent> initial,
+}) async {
+  final selected = initial.map((item) => item.productId).toSet();
+  final initialById = {for (final item in initial) item.productId: item};
+  final quantities = <String, TextEditingController>{
+    for (final product in products)
+      product.id: TextEditingController(
+        text: initialById[product.id]?.quantityPerSale.toString() ?? '1',
+      ),
+  };
+  try {
+    return await showDialog<List<ProductStockComponent>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Stock used by this choice'),
+          content: SizedBox(
+            width: 560,
+            child: products.isEmpty
+                ? const Text(
+                    'Create and enable stock tracking on an ingredient first.',
+                  )
+                : ListView(
+                    shrinkWrap: true,
+                    children: [
+                      const Text(
+                        'The price may remain zero. Selected ingredients still reduce stock when this option is ordered.',
+                      ),
+                      const SizedBox(height: 12),
+                      for (final product in products)
+                        CheckboxListTile(
+                          value: selected.contains(product.id),
+                          title: Text(product.name),
+                          subtitle: selected.contains(product.id)
+                              ? TextField(
+                                  controller: quantities[product.id],
+                                  keyboardType:
+                                      const TextInputType.numberWithOptions(
+                                        decimal: true,
+                                      ),
+                                  decoration: InputDecoration(
+                                    labelText:
+                                        '${product.stockUnit} used per selection',
+                                  ),
+                                )
+                              : Text('Measured in ${product.stockUnit}'),
+                          onChanged: (value) => setDialogState(() {
+                            value == true
+                                ? selected.add(product.id)
+                                : selected.remove(product.id);
+                          }),
+                        ),
+                    ],
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final recipe = <ProductStockComponent>[];
+                for (final product in products.where(
+                  (item) => selected.contains(item.id),
+                )) {
+                  final quantity = _decimal(quantities[product.id]!.text);
+                  if (quantity == null || quantity <= 0) {
+                    showAppNotification(
+                      dialogContext,
+                      title: 'Check stock quantities',
+                      message:
+                          'Enter a positive quantity for every selected stock item.',
+                      level: AppNotificationLevel.warning,
+                    );
+                    return;
+                  }
+                  recipe.add(
+                    ProductStockComponent(
+                      productId: product.id,
+                      productName: product.name,
+                      quantityPerSale: quantity,
+                      stockUnit: product.stockUnit,
+                      stockOnHand: product.stockOnHand,
+                      latestUnitCostMinor: product.latestUnitCostMinor,
+                    ),
+                  );
+                }
+                Navigator.pop(dialogContext, recipe);
+              },
+              child: const Text('Apply recipe'),
+            ),
+          ],
+        ),
+      ),
+    );
+  } finally {
+    for (final controller in quantities.values) {
+      controller.dispose();
+    }
   }
 }
 

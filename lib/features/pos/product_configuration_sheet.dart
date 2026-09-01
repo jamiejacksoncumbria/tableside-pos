@@ -10,19 +10,33 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
   required BuildContext context,
   required MenuProduct product,
   required List<MenuModifierGroup> availableGroups,
+  required List<MenuProduct> availableProducts,
   required String currencyCode,
 }) async {
   final note = TextEditingController();
   final groupsById = <String, MenuModifierGroup>{
     for (final group in availableGroups) group.id: group,
   };
+  final productsById = <String, MenuProduct>{
+    for (final item in availableProducts) item.id: item,
+  };
+  bool componentsAvailable(List<ProductStockComponent> components) =>
+      components.every((component) {
+        final live = productsById[component.productId];
+        return live != null &&
+            live.isAvailable &&
+            (live.stockOnHand ?? 0) >= component.quantityPerSale;
+      });
   final groups = product.modifierGroupIds
       .map((id) => groupsById[id])
       .whereType<MenuModifierGroup>()
       .toList(growable: false);
   final missingGroupCount = product.modifierGroupIds.length - groups.length;
   final variants = product.variants
-      .where((variant) => variant.isAvailable)
+      .where(
+        (variant) =>
+            variant.isAvailable && componentsAvailable(variant.stockComponents),
+      )
       .toList(growable: false);
   MenuProductVariant? selectedVariant = variants.length == 1
       ? variants.single
@@ -49,6 +63,19 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
                     optionId: option.id,
                     optionName: option.name,
                     priceDeltaMinor: option.priceDeltaMinor,
+                    stockComponents: option.stockComponents
+                        .map((component) {
+                          final live = productsById[component.productId];
+                          return ProductStockComponent(
+                            productId: component.productId,
+                            productName: live?.name ?? component.productName,
+                            quantityPerSale: component.quantityPerSale,
+                            stockUnit: live?.stockUnit ?? component.stockUnit,
+                            stockOnHand: live?.stockOnHand,
+                            latestUnitCostMinor: live?.latestUnitCostMinor,
+                          );
+                        })
+                        .toList(growable: false),
                   ),
           ];
           final priceDeltaMinor =
@@ -151,6 +178,13 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
                           for (final group in groups) ...[
                             _GroupChooser(
                               group: group,
+                              unavailableOptionIds: {
+                                for (final option in group.options)
+                                  if (!componentsAvailable(
+                                    option.stockComponents,
+                                  ))
+                                    option.id,
+                              },
                               selectedOptionIds:
                                   selectedOptionIds[group.id] ?? const {},
                               currencyCode: currencyCode,
@@ -279,12 +313,14 @@ class _GroupChooser extends StatelessWidget {
   const _GroupChooser({
     required this.group,
     required this.selectedOptionIds,
+    required this.unavailableOptionIds,
     required this.currencyCode,
     required this.onChanged,
   });
 
   final MenuModifierGroup group;
   final Set<String> selectedOptionIds;
+  final Set<String> unavailableOptionIds;
   final String currencyCode;
   final void Function(String optionId, bool isSelected) onChanged;
 
@@ -320,7 +356,9 @@ class _GroupChooser extends StatelessWidget {
                   FilterChip(
                     label: Text(
                       _priceChoiceLabel(
-                        option.name,
+                        unavailableOptionIds.contains(option.id)
+                            ? '${option.name} · sold out'
+                            : option.name,
                         option.priceDeltaMinor,
                         currencyCode,
                       ),
@@ -328,6 +366,7 @@ class _GroupChooser extends StatelessWidget {
                     selected: selectedOptionIds.contains(option.id),
                     onSelected:
                         !group.isAvailable ||
+                            unavailableOptionIds.contains(option.id) ||
                             (!selectedOptionIds.contains(option.id) &&
                                 selectionLimitReached)
                         ? null

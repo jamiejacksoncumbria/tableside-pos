@@ -625,12 +625,12 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
         return scope == null ? demoSections : const [];
       },
     );
-    final catalog = catalogState.when(
+    final List<MenuProduct> catalog = catalogState.when(
       data: (items) => items,
-      loading: () => scope == null ? demoProducts : const [],
+      loading: () => scope == null ? demoProducts : const <MenuProduct>[],
       error: (error, stackTrace) {
         AppLogger.error('Display menu products', error, stackTrace);
-        return scope == null ? demoProducts : const [];
+        return scope == null ? demoProducts : const <MenuProduct>[];
       },
     );
     final modifierGroups = modifierGroupsState.when(
@@ -701,6 +701,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                 context: context,
                 product: product,
                 availableGroups: modifierGroups,
+                availableProducts: catalog,
                 currencyCode: currencyCode,
               )
             : const ProductConfigurationSelection();

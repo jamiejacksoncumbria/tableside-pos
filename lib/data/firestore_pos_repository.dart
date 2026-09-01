@@ -236,6 +236,10 @@ class FirestorePosRepository {
           id: id.trim(),
           name: name.trim(),
           priceDeltaMinor: (data['priceDeltaMinor'] as num?)?.toInt() ?? 0,
+          stockComponents: _stockComponents(
+            data['stockComponents'],
+            const <String, Map<String, dynamic>>{},
+          ),
           isAvailable: data['isAvailable'] as bool? ?? true,
         ),
       );
@@ -268,6 +272,10 @@ class FirestorePosRepository {
           optionId: optionId.trim(),
           optionName: optionName.trim(),
           priceDeltaMinor: (data['priceDeltaMinor'] as num?)?.toInt() ?? 0,
+          stockComponents: _stockComponents(
+            data['stockComponents'],
+            const <String, Map<String, dynamic>>{},
+          ),
         ),
       );
     }
@@ -1113,6 +1121,7 @@ class FirestorePosRepository {
         'name': optionName,
         'priceDeltaMinor': option.priceDeltaMinor,
         'isAvailable': option.isAvailable,
+        'stockComponents': _stockComponentsToMap(option.stockComponents),
       });
     }
     return {

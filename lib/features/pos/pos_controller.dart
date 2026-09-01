@@ -208,6 +208,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
     for (final component in [
       ...product.stockComponents,
       ...?selection.variant?.stockComponents,
+      ...selection.modifiers.expand((modifier) => modifier.stockComponents),
     ]) {
       final current = componentById[component.productId];
       componentById[component.productId] = ProductStockComponent(

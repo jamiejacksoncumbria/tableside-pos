@@ -388,12 +388,14 @@ class MenuModifierOption {
     required this.name,
     this.priceDeltaMinor = 0,
     this.isAvailable = true,
+    this.stockComponents = const <ProductStockComponent>[],
   });
 
   final String id;
   final String name;
   final int priceDeltaMinor;
   final bool isAvailable;
+  final List<ProductStockComponent> stockComponents;
 }
 
 /// Reusable choices such as "Cooking preference", "Spice level" or "Ice".
@@ -427,6 +429,7 @@ class OrderModifierSelection {
     required this.optionId,
     required this.optionName,
     this.priceDeltaMinor = 0,
+    this.stockComponents = const <ProductStockComponent>[],
   });
 
   final String groupId;
@@ -434,6 +437,7 @@ class OrderModifierSelection {
   final String optionId;
   final String optionName;
   final int priceDeltaMinor;
+  final List<ProductStockComponent> stockComponents;
 
   String get displayLabel => '$groupName: $optionName';
 }

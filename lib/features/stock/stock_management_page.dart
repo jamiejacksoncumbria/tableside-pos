@@ -57,6 +57,8 @@ enum _StockStatusFilter {
   belowMargin,
 }
 
+enum _StockSort { name, quantityLow, stockValueHigh, marginLow }
+
 class _InventoryTab extends ConsumerStatefulWidget {
   const _InventoryTab({required this.scope, required this.currencyCode});
   final VenueScope scope;
@@ -71,6 +73,7 @@ class _InventoryTabState extends ConsumerState<_InventoryTab> {
   _StockStatusFilter _status = _StockStatusFilter.all;
   String _unit = 'all';
   String _location = 'all';
+  _StockSort _sort = _StockSort.name;
 
   @override
   void dispose() {
@@ -101,34 +104,54 @@ class _InventoryTabState extends ConsumerState<_InventoryTab> {
                   .toList()
                 ..sort();
           final query = _search.text.trim().toLowerCase();
-          final tracked = allTracked
-              .where((product) {
-                final matchesSearch =
-                    query.isEmpty ||
-                    product.name.toLowerCase().contains(query) ||
-                    product.storageLocation.toLowerCase().contains(query) ||
-                    product.stockUnit.toLowerCase().contains(query);
-                final matchesUnit =
-                    _unit == 'all' || product.stockUnit == _unit;
-                final matchesLocation =
-                    _location == 'all' || product.storageLocation == _location;
-                final quantity = product.stockOnHand ?? 0;
-                final matchesStatus = switch (_status) {
-                  _StockStatusFilter.all => true,
-                  _StockStatusFilter.inStock =>
-                    quantity > product.lowStockThreshold,
-                  _StockStatusFilter.low =>
-                    quantity > 0 && quantity <= product.lowStockThreshold,
-                  _StockStatusFilter.outOfStock => quantity <= 0,
-                  _StockStatusFilter.unavailable => !product.isAvailable,
-                  _StockStatusFilter.belowMargin => product.isBelowTargetMargin,
-                };
-                return matchesSearch &&
-                    matchesUnit &&
-                    matchesLocation &&
-                    matchesStatus;
-              })
-              .toList(growable: false);
+          final tracked =
+              allTracked
+                  .where((product) {
+                    final matchesSearch =
+                        query.isEmpty ||
+                        product.name.toLowerCase().contains(query) ||
+                        product.storageLocation.toLowerCase().contains(query) ||
+                        product.stockUnit.toLowerCase().contains(query);
+                    final matchesUnit =
+                        _unit == 'all' || product.stockUnit == _unit;
+                    final matchesLocation =
+                        _location == 'all' ||
+                        product.storageLocation == _location;
+                    final quantity = product.stockOnHand ?? 0;
+                    final matchesStatus = switch (_status) {
+                      _StockStatusFilter.all => true,
+                      _StockStatusFilter.inStock =>
+                        quantity > product.lowStockThreshold,
+                      _StockStatusFilter.low =>
+                        quantity > 0 && quantity <= product.lowStockThreshold,
+                      _StockStatusFilter.outOfStock => quantity <= 0,
+                      _StockStatusFilter.unavailable => !product.isAvailable,
+                      _StockStatusFilter.belowMargin =>
+                        product.isBelowTargetMargin,
+                    };
+                    return matchesSearch &&
+                        matchesUnit &&
+                        matchesLocation &&
+                        matchesStatus;
+                  })
+                  .toList(growable: true)
+                ..sort(
+                  (a, b) => switch (_sort) {
+                    _StockSort.name => a.name.compareTo(b.name),
+                    _StockSort.quantityLow => (a.stockOnHand ?? 0).compareTo(
+                      b.stockOnHand ?? 0,
+                    ),
+                    _StockSort.stockValueHigh =>
+                      ((b.stockOnHand ?? 0) * (b.latestUnitCostMinor ?? 0))
+                          .compareTo(
+                            (a.stockOnHand ?? 0) * (a.latestUnitCostMinor ?? 0),
+                          ),
+                    _StockSort.marginLow =>
+                      (a.estimatedMarginPercent ?? double.infinity).compareTo(
+                        b.estimatedMarginPercent ?? double.infinity,
+                      ),
+                  },
+                );
           if (allTracked.isEmpty) {
             return const _EmptyMessage(
               icon: Icons.inventory_2_outlined,
@@ -222,6 +245,29 @@ class _InventoryTabState extends ConsumerState<_InventoryTab> {
                           value: location,
                           child: Text(location),
                         ),
+                    ],
+                  ),
+                  DropdownButton<_StockSort>(
+                    value: _sort,
+                    onChanged: (value) =>
+                        setState(() => _sort = value ?? _sort),
+                    items: const [
+                      DropdownMenuItem(
+                        value: _StockSort.name,
+                        child: Text('Name A–Z'),
+                      ),
+                      DropdownMenuItem(
+                        value: _StockSort.quantityLow,
+                        child: Text('Lowest quantity'),
+                      ),
+                      DropdownMenuItem(
+                        value: _StockSort.stockValueHigh,
+                        child: Text('Highest stock value'),
+                      ),
+                      DropdownMenuItem(
+                        value: _StockSort.marginLow,
+                        child: Text('Lowest margin'),
+                      ),
                     ],
                   ),
                 ],
@@ -682,48 +728,89 @@ Future<void> _adjustStock(
 ) async {
   final quantity = TextEditingController();
   final reason = TextEditingController();
+  var type = _StockAdjustmentType.correction;
   final confirmed = await showDialog<bool>(
     context: context,
-    builder: (context) => AlertDialog(
-      title: Text('Adjust ${product.name}'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: quantity,
-            keyboardType: const TextInputType.numberWithOptions(
-              decimal: true,
-              signed: true,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: Text('Update ${product.name}'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            DropdownButtonFormField<_StockAdjustmentType>(
+              initialValue: type,
+              decoration: const InputDecoration(labelText: 'Stock action'),
+              items: const [
+                DropdownMenuItem(
+                  value: _StockAdjustmentType.correction,
+                  child: Text('Correction / adjustment'),
+                ),
+                DropdownMenuItem(
+                  value: _StockAdjustmentType.physicalCount,
+                  child: Text('Record physical count'),
+                ),
+                DropdownMenuItem(
+                  value: _StockAdjustmentType.wastage,
+                  child: Text('Record wastage'),
+                ),
+                DropdownMenuItem(
+                  value: _StockAdjustmentType.spillage,
+                  child: Text('Record spillage'),
+                ),
+              ],
+              onChanged: (value) => setDialogState(() {
+                type = value ?? type;
+                quantity.clear();
+              }),
             ),
-            decoration: InputDecoration(
-              labelText: 'Quantity change',
-              helperText:
-                  'Use a negative number to remove ${product.stockUnit}.',
+            const SizedBox(height: 12),
+            TextField(
+              controller: quantity,
+              keyboardType: TextInputType.numberWithOptions(
+                decimal: true,
+                signed: type == _StockAdjustmentType.correction,
+              ),
+              decoration: InputDecoration(
+                labelText: type == _StockAdjustmentType.physicalCount
+                    ? 'Counted quantity (${product.stockUnit})'
+                    : type == _StockAdjustmentType.correction
+                    ? 'Quantity change (${product.stockUnit})'
+                    : 'Quantity removed (${product.stockUnit})',
+                helperText: type == _StockAdjustmentType.physicalCount
+                    ? 'Current system quantity: ${_quantity(product.stockOnHand ?? 0)}.'
+                    : type == _StockAdjustmentType.correction
+                    ? 'Use a negative number to remove stock.'
+                    : 'Enter a positive discarded quantity.',
+              ),
             ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reason,
+              decoration: const InputDecoration(labelText: 'Required reason'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
           ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: reason,
-            decoration: const InputDecoration(labelText: 'Required reason'),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Apply'),
           ),
         ],
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context, false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, true),
-          child: const Text('Apply'),
-        ),
-      ],
     ),
   );
-  final amount = double.tryParse(quantity.text.trim());
+  final amount = double.tryParse(quantity.text.trim().replaceAll(',', '.'));
   if (confirmed == true &&
       amount != null &&
-      amount != 0 &&
+      amount.isFinite &&
+      (type == _StockAdjustmentType.physicalCount
+          ? amount >= 0
+          : amount != 0) &&
+      (type == _StockAdjustmentType.correction || amount > 0) &&
       reason.text.trim().isNotEmpty &&
       context.mounted) {
     await _runCommand(
@@ -733,7 +820,13 @@ Future<void> _adjustStock(
       'adjustStock',
       values: {
         'productId': product.id,
-        'quantity': amount,
+        if (type == _StockAdjustmentType.physicalCount)
+          'countedQuantity': amount
+        else
+          'quantity': type == _StockAdjustmentType.correction
+              ? amount
+              : -amount,
+        'adjustmentType': type.name,
         'reason': reason.text.trim(),
       },
       success: 'Stock adjusted',
@@ -742,6 +835,8 @@ Future<void> _adjustStock(
   quantity.dispose();
   reason.dispose();
 }
+
+enum _StockAdjustmentType { correction, physicalCount, wastage, spillage }
 
 Future<void> _editSupplier(
   BuildContext context,

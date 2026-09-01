@@ -364,6 +364,16 @@ function canonicalLineConfiguration({productData, modifierGroupsById, line}) {
         optionId,
         optionName,
         priceDeltaMinor,
+        stockComponents: Array.isArray(option.stockComponents)
+          ? option.stockComponents.map((component) => ({
+              productId: requiredDocumentId(component, "productId"),
+              productName: requiredText(component, "productName", 120),
+              stockUnit: requiredText(component, "stockUnit", 20),
+              quantityPerSale: requiredFiniteNumber(
+                component.quantityPerSale, "quantityPerSale", 0.000001, 1000000000,
+              ),
+            }))
+          : [],
       });
     }
   }
@@ -379,6 +389,8 @@ function canonicalLineConfiguration({productData, modifierGroupsById, line}) {
     variantName: variant?.name ?? null,
     variantPriceDeltaMinor: variant?.priceDeltaMinor ?? 0,
     variantStockComponents: variant?.stockComponents ?? [],
+    modifierStockComponents: modifierSelections.flatMap((selection) =>
+      selection.stockComponents ?? []),
     modifierSelections,
     itemNote: line.itemNote,
     priceDeltaMinor,
@@ -488,7 +500,13 @@ function validatedModifierOptions(value) {
     }
     ids.add(id);
     names.add(name.toLowerCase());
-    return {id, name, priceDeltaMinor, isAvailable: option.isAvailable !== false};
+    return {
+      id,
+      name,
+      priceDeltaMinor,
+      isAvailable: option.isAvailable !== false,
+      stockComponents: validatedStockComponents(option.stockComponents ?? []),
+    };
   });
 }
 
@@ -614,7 +632,29 @@ async function manageMenuConfigurationFor(caller, rawData) {
         : {}),
     };
   } else if (resource === "modifierGroup") {
-    const options = validatedModifierOptions(values.options);
+    const requestedOptions = validatedModifierOptions(values.options);
+    const componentIds = [...new Set(requestedOptions.flatMap((option) =>
+      option.stockComponents.map((component) => component.productId)))];
+    const componentSnapshots = componentIds.length === 0
+      ? []
+      : await db.getAll(...componentIds.map((id) =>
+          db.doc(`tenants/${tenantId}/products/${id}`)));
+    if (componentSnapshots.some((item) => !item.exists ||
+        item.data().venueId !== venueId || item.data().trackStock !== true)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Every option ingredient must be a stock-tracked product at this venue.",
+      );
+    }
+    const componentById = new Map(componentSnapshots.map((item) => [item.id, item.data()]));
+    const options = requestedOptions.map((option) => ({
+      ...option,
+      stockComponents: option.stockComponents.map((component) => ({
+        ...component,
+        productName: componentById.get(component.productId).name,
+        stockUnit: componentById.get(component.productId).stockUnit ?? "each",
+      })),
+    }));
     const minimumSelections = requiredNonNegativeInteger(
       values.minimumSelections, "minimumSelections", options.length,
     );
@@ -2414,6 +2454,19 @@ async function addOrderDraftLineFor(caller, rawData) {
       throw new HttpsError("not-found", "A selected menu product no longer exists at this venue.");
     }
     const productData = product.data();
+    const modifierGroupIds = configuredModifierGroupIds(productData);
+    const modifierGroups = await Promise.all(
+      modifierGroupIds.map((groupId) =>
+        transaction.get(tenantRef.collection("modifierGroups").doc(groupId))),
+    );
+    const modifierGroupsById = new Map(
+      modifierGroups.map((group) => [group.id, group.exists ? group.data() : null]),
+    );
+    const configuration = canonicalLineConfiguration({
+      productData,
+      modifierGroupsById,
+      line,
+    });
     const baseStockComponents = Array.isArray(productData.stockComponents)
       ? productData.stockComponents.map((component) => ({
           productId: requiredDocumentId(component, "productId"),
@@ -2424,12 +2477,10 @@ async function addOrderDraftLineFor(caller, rawData) {
           ),
         }))
       : [];
-    const selectedVariant = line.variantId == null
-      ? null
-      : configuredProductVariants(productData).find((variant) => variant.id === line.variantId) ?? null;
     const combinedComponents = [
       ...baseStockComponents,
-      ...(selectedVariant?.stockComponents ?? []),
+      ...configuration.variantStockComponents,
+      ...configuration.modifierStockComponents,
     ];
     const componentTotals = new Map();
     for (const component of combinedComponents) {
@@ -2466,19 +2517,6 @@ async function addOrderDraftLineFor(caller, rawData) {
         );
       }
     }
-    const modifierGroupIds = configuredModifierGroupIds(productData);
-    const modifierGroups = await Promise.all(
-      modifierGroupIds.map((groupId) =>
-        transaction.get(tenantRef.collection("modifierGroups").doc(groupId))),
-    );
-    const modifierGroupsById = new Map(
-      modifierGroups.map((group) => [group.id, group.exists ? group.data() : null]),
-    );
-    const configuration = canonicalLineConfiguration({
-      productData,
-      modifierGroupsById,
-      line,
-    });
     if (productData.isAvailable === false) {
       throw new HttpsError("failed-precondition", "This product is currently unavailable.");
     }
@@ -4509,16 +4547,35 @@ async function sendOrderToProductionFor(caller, rawData) {
       }
       productById.set(snapshot.id, snapshot.data());
     }
-    const componentIds = [...new Set(
+    const configuredModifierGroupIdsForOrder = [...new Set(
       [...productById.values()].flatMap((product) =>
-        [
+        configuredModifierGroupIds(product)),
+    )];
+    const modifierGroupSnapshots = await Promise.all(
+      configuredModifierGroupIdsForOrder.map((groupId) =>
+        transaction.get(tenantRef.collection("modifierGroups").doc(groupId))),
+    );
+    const modifierGroupsById = new Map(
+      modifierGroupSnapshots.map((group) => [
+        group.id,
+        group.exists ? group.data() : null,
+      ]),
+    );
+    const componentIds = [...new Set(
+      [
+        ...[...productById.values()].flatMap((product) => [
           ...(Array.isArray(product.stockComponents) ? product.stockComponents : []),
           ...(Array.isArray(product.variants)
             ? product.variants.flatMap((variant) =>
                 Array.isArray(variant?.stockComponents) ? variant.stockComponents : [])
             : []),
-        ].map((component) => component?.productId)
-          .filter((productId) => typeof productId === "string")),
+        ]),
+        ...modifierGroupSnapshots.flatMap((group) => group.exists && Array.isArray(group.data().options)
+          ? group.data().options.flatMap((option) =>
+              Array.isArray(option?.stockComponents) ? option.stockComponents : [])
+          : []),
+      ].map((component) => component?.productId)
+        .filter((productId) => typeof productId === "string"),
     )];
     const componentRefs = new Map(componentIds.map((productId) => [
       productId,
@@ -4540,21 +4597,6 @@ async function sendOrderToProductionFor(caller, rawData) {
       stockProductById.set(snapshot.id, snapshot.data());
       stockProductRefs.set(snapshot.id, snapshot.ref);
     }
-
-    const configuredModifierGroupIdsForOrder = [...new Set(
-      [...productById.values()].flatMap((product) =>
-        configuredModifierGroupIds(product)),
-    )];
-    const modifierGroupSnapshots = await Promise.all(
-      configuredModifierGroupIdsForOrder.map((groupId) =>
-        transaction.get(tenantRef.collection("modifierGroups").doc(groupId))),
-    );
-    const modifierGroupsById = new Map(
-      modifierGroupSnapshots.map((group) => [
-        group.id,
-        group.exists ? group.data() : null,
-      ]),
-    );
 
     const canonicalLines = lines.map((line) => {
       const product = productById.get(line.productId);
@@ -4592,6 +4634,7 @@ async function sendOrderToProductionFor(caller, rawData) {
       for (const component of [
         ...(Array.isArray(product.stockComponents) ? product.stockComponents : []),
         ...configuration.variantStockComponents,
+        ...configuration.modifierStockComponents,
       ]) {
         const quantity = Number(component.quantityPerSale);
         const current = componentTotals.get(component.productId);
@@ -5411,29 +5454,55 @@ async function manageInventoryFor(caller, rawData) {
 
   if (operation === "adjustStock") {
     const productId = requiredDocumentId(values, "productId");
-    const quantity = requiredFiniteNumber(values.quantity, "quantity", -1000000000, 1000000000);
-    if (Math.abs(quantity) < 0.000001) {
+    // Older clients only supplied a signed quantity and reason; preserve that
+    // safe audited behaviour while newer clients send an explicit action.
+    const adjustmentType = optionalText(values, "adjustmentType", 32) || "correction";
+    if (!["correction", "physicalCount", "wastage", "spillage"].includes(adjustmentType)) {
+      throw new HttpsError("invalid-argument", "Select a valid stock action.");
+    }
+    const requestedQuantity = adjustmentType === "physicalCount"
+      ? requiredFiniteNumber(values.countedQuantity, "countedQuantity", 0, 1000000000)
+      : requiredFiniteNumber(values.quantity, "quantity", -1000000000, 1000000000);
+    if (adjustmentType !== "physicalCount" && Math.abs(requestedQuantity) < 0.000001) {
       throw new HttpsError("invalid-argument", "Enter a non-zero stock adjustment.");
+    }
+    if (["wastage", "spillage"].includes(adjustmentType) && requestedQuantity >= 0) {
+      throw new HttpsError("invalid-argument", "Wastage and spillage must remove stock.");
     }
     const reason = requiredText(values, "reason", 500);
     const productRef = tenantRef.collection("products").doc(productId);
+    let appliedQuantity = requestedQuantity;
     await db.runTransaction(async (transaction) => {
       const product = await transaction.get(productRef);
       if (!product.exists || product.data().venueId !== venueId || product.data().trackStock !== true) {
         throw new HttpsError("not-found", "That stock-tracked product was not found at this venue.");
       }
+      const priorQuantity = Number(product.data().stockOnHand ?? 0);
+      if (!Number.isFinite(priorQuantity)) {
+        throw new HttpsError("failed-precondition", "That product has an invalid stock balance.");
+      }
+      appliedQuantity = adjustmentType === "physicalCount"
+        ? requestedQuantity - priorQuantity
+        : requestedQuantity;
       transaction.update(productRef, {
-        stockOnHand: FieldValue.increment(quantity),
+        stockOnHand: adjustmentType === "physicalCount"
+          ? requestedQuantity
+          : FieldValue.increment(appliedQuantity),
         updatedAt: FieldValue.serverTimestamp(), updatedByActor: actor,
       });
       transaction.create(tenantRef.collection("stockMovements").doc(), {
         venueId, productId, productName: product.data().name,
-        stockUnit: product.data().stockUnit ?? "each", quantity,
-        reason: "manualAdjustment", adjustmentReason: reason,
+        stockUnit: product.data().stockUnit ?? "each", quantity: appliedQuantity,
+        reason: adjustmentType, adjustmentReason: reason,
+        ...(adjustmentType === "physicalCount"
+          ? {priorQuantity, countedQuantity: requestedQuantity}
+          : {}),
         actor, createdAt: FieldValue.serverTimestamp(),
       });
     });
-    await audit(productId, {resource: "stockAdjustment", quantity, reason});
+    await audit(productId, {
+      resource: "stockAdjustment", adjustmentType, quantity: appliedQuantity, reason,
+    });
     return {documentId: productId};
   }
 
