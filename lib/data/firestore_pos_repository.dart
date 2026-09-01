@@ -335,7 +335,10 @@ class FirestorePosRepository {
     }
   }
 
-  Stream<List<MenuProduct>> watchProducts(VenueScope scope) async* {
+  Stream<List<MenuProduct>> watchProducts(
+    VenueScope scope, {
+    bool includeArchived = false,
+  }) async* {
     AppLogger.info(
       'Load menu products: tenant=${scope.tenantId}, venue=${scope.venueId}.',
     );
@@ -351,7 +354,8 @@ class FirestorePosRepository {
         final items = snapshot.docs
             .where(
               (document) =>
-                  (document.data()['venueId'] as String?) == scope.venueId,
+                  (document.data()['venueId'] as String?) == scope.venueId &&
+                  (includeArchived || document.data()['archived'] != true),
             )
             .map((document) {
               final data = document.data();
@@ -378,6 +382,7 @@ class FirestorePosRepository {
                 latestUnitCostMinor: (data['latestUnitCostMinor'] as num?)
                     ?.toDouble(),
                 isAvailable: data['isAvailable'] as bool? ?? true,
+                isArchived: data['archived'] as bool? ?? false,
                 showOnOrderFlow: data['showOnOrderFlow'] as bool? ?? true,
                 taxRateBasisPoints: _taxRateBasisPoints(
                   data['taxRateBasisPoints'],
@@ -815,6 +820,19 @@ class FirestorePosRepository {
       resource: 'section',
       operation: 'reorder',
       values: {'sectionIds': sectionIds},
+    );
+  }
+
+  Future<void> setProductArchived({
+    required VenueScope scope,
+    required String productId,
+    required bool archived,
+  }) async {
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'product',
+      operation: archived ? 'archive' : 'restore',
+      documentId: productId,
     );
   }
 

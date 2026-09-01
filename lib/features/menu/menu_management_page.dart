@@ -36,7 +36,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
   Widget build(BuildContext context) {
     final scope = ref.watch(activeVenueScopeProvider);
     final sectionsValue = ref.watch(menuSectionsProvider);
-    final productsValue = ref.watch(menuProductsProvider);
+    final productsValue = ref.watch(allMenuProductsProvider);
     final taxRatesValue = ref.watch(taxRatesProvider);
     final defaultTaxRateIdValue = ref.watch(defaultTaxRateIdProvider);
     final modifierGroupsValue = ref.watch(menuModifierGroupsProvider);
@@ -45,11 +45,17 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
       loading: () => scope == null ? demoSections : const <MenuSection>[],
       error: (_, _) => scope == null ? demoSections : const <MenuSection>[],
     );
-    final products = productsValue.when(
+    final allProducts = productsValue.when(
       data: (items) => items,
       loading: () => scope == null ? demoProducts : const <MenuProduct>[],
       error: (_, _) => scope == null ? demoProducts : const <MenuProduct>[],
     );
+    final products = allProducts
+        .where((product) => !product.isArchived)
+        .toList(growable: false);
+    final archivedProducts = allProducts
+        .where((product) => product.isArchived)
+        .toList(growable: false);
     final taxRates = taxRatesValue.when(
       data: (items) => items,
       loading: () => const <TaxRate>[],
@@ -424,10 +430,54 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                               );
                             }
                           },
+                    onArchive: scope == null
+                        ? null
+                        : () => _setProductArchived(
+                            context: context,
+                            ref: ref,
+                            scope: scope,
+                            product: product,
+                            archived: true,
+                          ),
                   ),
               ],
             ),
           ),
+        if (archivedProducts.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          Card(
+            child: ExpansionTile(
+              leading: const Icon(Icons.inventory_2_outlined),
+              title: Text(
+                '${archivedProducts.length} archived product${archivedProducts.length == 1 ? '' : 's'}',
+              ),
+              subtitle: const Text(
+                'Archived products are hidden from the POS but retained for historic records.',
+              ),
+              children: [
+                for (final product in archivedProducts)
+                  ListTile(
+                    leading: const Icon(Icons.archive_outlined),
+                    title: Text(product.name),
+                    subtitle: const Text('Not available for sale'),
+                    trailing: TextButton.icon(
+                      onPressed: scope == null
+                          ? null
+                          : () => _setProductArchived(
+                              context: context,
+                              ref: ref,
+                              scope: scope,
+                              product: product,
+                              archived: false,
+                            ),
+                      icon: const Icon(Icons.unarchive_outlined),
+                      label: const Text('Restore'),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -677,6 +727,72 @@ Future<void> _deleteSection({
   }
 }
 
+Future<void> _setProductArchived({
+  required BuildContext context,
+  required WidgetRef ref,
+  required VenueScope scope,
+  required MenuProduct product,
+  required bool archived,
+}) async {
+  if (archived) {
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Archive product?'),
+        content: Text(
+          '“${product.name}” will be removed from the POS and active menu. Its historic sales, stock and supplier records will be preserved.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Archive product'),
+          ),
+        ],
+      ),
+    );
+    if (approved != true || !context.mounted) return;
+  }
+  try {
+    await ref
+        .read(firestorePosRepositoryProvider)
+        .setProductArchived(
+          scope: scope,
+          productId: product.id,
+          archived: archived,
+        );
+    if (!context.mounted) return;
+    showAppNotification(
+      context,
+      ref: ref,
+      title: archived ? 'Product archived' : 'Product restored',
+      message: archived
+          ? '${product.name} has been removed from the active menu.'
+          : '${product.name} is restored but remains unavailable until you turn For sale on.',
+      level: AppNotificationLevel.success,
+    );
+  } on Object catch (error, stackTrace) {
+    AppLogger.error(
+      archived ? 'Archive menu product' : 'Restore menu product',
+      error,
+      stackTrace,
+    );
+    if (!context.mounted) return;
+    showAppNotification(
+      context,
+      ref: ref,
+      title: archived
+          ? 'Could not archive product'
+          : 'Could not restore product',
+      message: '$error',
+      level: AppNotificationLevel.error,
+    );
+  }
+}
+
 class _ProductTile extends StatelessWidget {
   const _ProductTile({
     required this.product,
@@ -685,6 +801,7 @@ class _ProductTile extends StatelessWidget {
     required this.canEdit,
     required this.onEdit,
     required this.onAvailabilityChanged,
+    required this.onArchive,
   });
 
   final MenuProduct product;
@@ -693,6 +810,7 @@ class _ProductTile extends StatelessWidget {
   final bool canEdit;
   final VoidCallback? onEdit;
   final ValueChanged<bool>? onAvailabilityChanged;
+  final VoidCallback? onArchive;
 
   @override
   Widget build(BuildContext context) {
@@ -740,6 +858,11 @@ class _ProductTile extends StatelessWidget {
             tooltip: 'Edit product',
             onPressed: canEdit ? onEdit : null,
             icon: const Icon(Icons.edit_outlined),
+          ),
+          IconButton(
+            tooltip: 'Archive product',
+            onPressed: canEdit ? onArchive : null,
+            icon: const Icon(Icons.archive_outlined),
           ),
         ],
       ),

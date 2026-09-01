@@ -480,6 +480,7 @@ class MenuProduct {
     this.targetMarginBasisPoints = 0,
     this.latestUnitCostMinor,
     this.isAvailable = true,
+    this.isArchived = false,
     this.showOnOrderFlow = true,
     this.taxRateBasisPoints = 0,
     this.taxRateId,
@@ -503,6 +504,7 @@ class MenuProduct {
   final int targetMarginBasisPoints;
   final double? latestUnitCostMinor;
   final bool isAvailable;
+  final bool isArchived;
 
   /// Drinks can still print to the bar while being omitted from the live
   /// kitchen/manager flow board.

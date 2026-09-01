@@ -624,6 +624,12 @@ async function manageMenuConfigurationFor(caller, rawData) {
     if (documentId == null) {
       throw new HttpsError("invalid-argument", "documentId is required for deletion.");
     }
+    if (resource === "product") {
+      throw new HttpsError(
+        "failed-precondition",
+        "Products must be archived so historic sales and stock records remain intact.",
+      );
+    }
     const current = await reference.get();
     if (!current.exists || current.data().venueId !== venueId) {
       throw new HttpsError("not-found", "That menu record was not found at this venue.");
@@ -666,12 +672,69 @@ async function manageMenuConfigurationFor(caller, rawData) {
     return {documentId, deleted: true};
   }
 
+  if (["archive", "restore"].includes(operation)) {
+    if (resource !== "product" || documentId == null) {
+      throw new HttpsError("invalid-argument", "A valid product is required.");
+    }
+    const current = await reference.get();
+    if (!current.exists || current.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "That product was not found at this venue.");
+    }
+    if (operation === "archive") {
+      const [products, modifierGroups, purchaseOrders] = await Promise.all([
+        collection.where("venueId", "==", venueId).get(),
+        db.collection(`tenants/${tenantId}/modifierGroups`)
+          .where("venueId", "==", venueId).get(),
+        db.collection(`tenants/${tenantId}/purchaseOrders`)
+          .where("venueId", "==", venueId).get(),
+      ]);
+      const referencesProduct = (components) => Array.isArray(components) &&
+        components.some((component) => component?.productId === documentId);
+      const usedByProduct = products.docs.some((item) => {
+        if (item.id === documentId || item.data().archived === true) return false;
+        const product = item.data();
+        return referencesProduct(product.stockComponents) ||
+          (Array.isArray(product.variants) && product.variants.some(
+            (variant) => referencesProduct(variant?.stockComponents),
+          ));
+      });
+      const usedByModifier = modifierGroups.docs.some((item) =>
+        item.data().isAvailable !== false && Array.isArray(item.data().options) &&
+        item.data().options.some((option) => referencesProduct(option?.stockComponents)));
+      const usedByOpenPurchaseOrder = purchaseOrders.docs.some((item) =>
+        ["draft", "ordered", "partiallyReceived"].includes(item.data().status) &&
+        Array.isArray(item.data().lines) &&
+        item.data().lines.some((line) => line?.productId === documentId));
+      if (usedByProduct || usedByModifier || usedByOpenPurchaseOrder) {
+        throw new HttpsError(
+          "failed-precondition",
+          usedByOpenPurchaseOrder
+            ? "Finish or cancel this product's open purchase order before archiving it."
+            : "Remove this product from active recipes and product options before archiving it.",
+        );
+      }
+    }
+    await reference.update({
+      archived: operation === "archive",
+      ...(operation === "archive"
+        ? {isAvailable: false, archivedAt: FieldValue.serverTimestamp()}
+        : {archivedAt: FieldValue.delete()}),
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+    await writeAudit(caller.uid, `${operation}MenuProduct`, documentId, {
+      tenantId, venueId, actor,
+    });
+    return {documentId, updated: true};
+  }
+
   if (operation === "availability") {
     if (resource !== "product" || documentId == null || typeof values.isAvailable !== "boolean") {
       throw new HttpsError("invalid-argument", "A valid product availability change is required.");
     }
     const current = await reference.get();
-    if (!current.exists || current.data().venueId !== venueId) {
+    if (!current.exists || current.data().venueId !== venueId ||
+        current.data().archived === true) {
       throw new HttpsError("not-found", "That product was not found at this venue.");
     }
     await reference.update({
@@ -724,7 +787,8 @@ async function manageMenuConfigurationFor(caller, rawData) {
       : await db.getAll(...componentIds.map((id) =>
           db.doc(`tenants/${tenantId}/products/${id}`)));
     if (componentSnapshots.some((item) => !item.exists ||
-        item.data().venueId !== venueId || item.data().trackStock !== true)) {
+        item.data().venueId !== venueId || item.data().trackStock !== true ||
+        item.data().archived === true)) {
       throw new HttpsError(
         "failed-precondition",
         "Every option ingredient must be a stock-tracked product at this venue.",
@@ -809,7 +873,8 @@ async function manageMenuConfigurationFor(caller, rawData) {
       : await db.getAll(...componentIds.map((id) =>
           db.doc(`tenants/${tenantId}/products/${id}`)));
     if (componentSnapshots.some((item) => !item.exists ||
-        item.data().venueId !== venueId || item.data().trackStock !== true)) {
+        item.data().venueId !== venueId || item.data().trackStock !== true ||
+        item.data().archived === true)) {
       throw new HttpsError(
         "failed-precondition",
         "Every ingredient must be a stock-tracked product at this venue.",
@@ -863,7 +928,7 @@ async function manageMenuConfigurationFor(caller, rawData) {
         values.targetMarginBasisPoints ?? 0, "targetMarginBasisPoints", 10000,
       ),
       stockComponents,
-      ...(documentId == null ? {isAvailable: true} : {}),
+      ...(documentId == null ? {isAvailable: true, archived: false} : {}),
       showOnOrderFlow: values.showOnOrderFlow === true,
       taxRateBasisPoints,
       taxRateId,
@@ -2783,7 +2848,7 @@ async function addOrderDraftLineFor(caller, rawData) {
         );
       }
     }
-    if (productData.isAvailable === false) {
+    if (productData.archived === true || productData.isAvailable === false) {
       throw new HttpsError("failed-precondition", "This product is currently unavailable.");
     }
     const basePriceMinor = Number(productData.priceMinor);
@@ -5568,7 +5633,8 @@ async function manageInventoryFor(caller, rawData) {
       const mapping = activeMappings[index];
       const mapData = mapping.data();
       const product = productSnapshots[index];
-      if (!product.exists || product.data().venueId !== venueId || product.data().trackStock !== true) continue;
+      if (!product.exists || product.data().venueId !== venueId ||
+          product.data().trackStock !== true || product.data().archived === true) continue;
       const productData = product.data();
       const recentDailyUsage = (recentSales.get(product.id) ?? 0) / 30;
       const priorQuantity = priorSales.get(product.id) ?? 0;

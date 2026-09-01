@@ -20,6 +20,14 @@ final menuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
   return ref.watch(firestorePosRepositoryProvider).watchProducts(scope);
 });
 
+final allMenuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  if (scope == null) return Stream.value(demoProducts);
+  return ref
+      .watch(firestorePosRepositoryProvider)
+      .watchProducts(scope, includeArchived: true);
+});
+
 final diningTablesProvider = StreamProvider<List<DiningTable>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoTables);
