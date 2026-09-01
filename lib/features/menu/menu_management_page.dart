@@ -1288,6 +1288,7 @@ Future<void> _showProductDialog({
   final remembered = existing == null
       ? await _ProductFormDefaults.load(scope)
       : null;
+  if (!context.mounted) return;
   final name = TextEditingController(text: existing?.name ?? '');
   final price = TextEditingController(
     text: existing == null ? '' : _priceText(existing.priceMinor),
@@ -1318,7 +1319,9 @@ Future<void> _showProductDialog({
   );
   final formKey = GlobalKey<FormState>();
   final availableSectionIds = sections.map((item) => item.id).toSet();
-  final availableModifierGroupIds = modifierGroups.map((item) => item.id).toSet();
+  final availableModifierGroupIds = modifierGroups
+      .map((item) => item.id)
+      .toSet();
   final selectedSections = <String>{
     ...?existing?.sectionIds,
     if (existing == null)
@@ -1937,8 +1940,7 @@ class _ProductFormDefaults {
         trackStock: json['trackStock'] as bool? ?? false,
         stockUnit: json['stockUnit'] as String? ?? 'each',
         stockPerSale: (json['stockPerSale'] as num?)?.toDouble() ?? 1,
-        lowStockThreshold:
-            (json['lowStockThreshold'] as num?)?.toDouble() ?? 0,
+        lowStockThreshold: (json['lowStockThreshold'] as num?)?.toDouble() ?? 0,
         storageLocation: json['storageLocation'] as String? ?? '',
         targetMarginBasisPoints:
             (json['targetMarginBasisPoints'] as num?)?.toInt() ?? 0,
@@ -1954,7 +1956,9 @@ class _ProductFormDefaults {
                 isAvailable: item['isAvailable'] as bool? ?? true,
               ),
             )
-            .where((variant) => variant.id.isNotEmpty && variant.name.isNotEmpty)
+            .where(
+              (variant) => variant.id.isNotEmpty && variant.name.isNotEmpty,
+            )
             .toList(growable: false),
       );
     } on Object catch (error, stackTrace) {
@@ -1990,9 +1994,7 @@ class _ProductFormDefaults {
           ],
         }),
       );
-      AppLogger.debug(
-        'Remembered product choices for venue ${scope.venueId}.',
-      );
+      AppLogger.info('Remembered product choices for venue ${scope.venueId}.');
     } on Object catch (error, stackTrace) {
       // The product already exists on the server. A local cache failure must
       // not turn that successful save into a misleading error for the user.
@@ -2136,7 +2138,6 @@ Future<List<MenuProductVariant>?> _showVariantsDialog({
         ),
       )
       .toList(growable: true);
-  if (drafts.isEmpty) drafts.add(_VariantDraft.empty());
   String? validationMessage;
 
   try {
@@ -2156,12 +2157,20 @@ Future<List<MenuProductVariant>?> _showVariantsDialog({
                     'Examples: Small, Large, Glass or Bottle. Prices are adjustments from the product’s base price ($currencyCode).',
                   ),
                   const SizedBox(height: 12),
+                  if (drafts.isEmpty) ...[
+                    const Text(
+                      'No variants configured. The product will be sold at its base price.',
+                    ),
+                    const SizedBox(height: 8),
+                  ],
                   for (var index = 0; index < drafts.length; index++) ...[
                     _VariantDraftRow(
                       draft: drafts[index],
-                      canRemove: drafts.length > 1,
-                      onRemove: () =>
-                          setDialogState(() => drafts.removeAt(index)),
+                      onRemove: () => setDialogState(() {
+                        final removed = drafts.removeAt(index);
+                        removed.dispose();
+                        validationMessage = null;
+                      }),
                       onChanged: () =>
                           setDialogState(() => validationMessage = null),
                       onEditRecipe: () async {
@@ -2256,14 +2265,12 @@ Future<List<MenuProductVariant>?> _showVariantsDialog({
 class _VariantDraftRow extends StatelessWidget {
   const _VariantDraftRow({
     required this.draft,
-    required this.canRemove,
     required this.onRemove,
     required this.onChanged,
     required this.onEditRecipe,
   });
 
   final _VariantDraft draft;
-  final bool canRemove;
   final VoidCallback onRemove;
   final VoidCallback onChanged;
   final VoidCallback onEditRecipe;
@@ -2312,7 +2319,7 @@ class _VariantDraftRow extends StatelessWidget {
               ),
               IconButton(
                 tooltip: 'Remove variant',
-                onPressed: canRemove ? onRemove : null,
+                onPressed: onRemove,
                 icon: const Icon(Icons.delete_outline_rounded),
               ),
             ],
