@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/money.dart';
@@ -1282,41 +1285,72 @@ Future<void> _showProductDialog({
   required String defaultTaxRateId,
   MenuProduct? existing,
 }) async {
+  final remembered = existing == null
+      ? await _ProductFormDefaults.load(scope)
+      : null;
   final name = TextEditingController(text: existing?.name ?? '');
   final price = TextEditingController(
     text: existing == null ? '' : _priceText(existing.priceMinor),
   );
   final stock = TextEditingController(
-    text: existing?.stockOnHand == null ? '' : '${existing!.stockOnHand}',
+    text: existing == null
+        ? (remembered?.trackStock == true ? '0' : '')
+        : (existing.stockOnHand == null ? '' : '${existing.stockOnHand}'),
   );
   final stockPerSale = TextEditingController(
-    text: '${existing?.stockPerSale ?? 1}',
+    text: '${existing?.stockPerSale ?? remembered?.stockPerSale ?? 1}',
   );
   final lowStockThreshold = TextEditingController(
-    text: '${existing?.lowStockThreshold ?? 0}',
+    text:
+        '${existing?.lowStockThreshold ?? remembered?.lowStockThreshold ?? 0}',
   );
   final storageLocation = TextEditingController(
-    text: existing?.storageLocation ?? '',
+    text: existing?.storageLocation ?? remembered?.storageLocation ?? '',
   );
+  final initialMarginBasisPoints =
+      existing?.targetMarginBasisPoints ??
+      remembered?.targetMarginBasisPoints ??
+      0;
   final targetMargin = TextEditingController(
-    text: existing == null || existing.targetMarginBasisPoints == 0
+    text: initialMarginBasisPoints == 0
         ? ''
-        : (existing.targetMarginBasisPoints / 100).toStringAsFixed(2),
+        : (initialMarginBasisPoints / 100).toStringAsFixed(2),
   );
   final formKey = GlobalKey<FormState>();
-  final selectedSections = <String>{...?existing?.sectionIds};
-  final selectedModifierGroupIds = <String>{...?existing?.modifierGroupIds};
-  var variants = <MenuProductVariant>[...?existing?.variants];
+  final availableSectionIds = sections.map((item) => item.id).toSet();
+  final availableModifierGroupIds = modifierGroups.map((item) => item.id).toSet();
+  final selectedSections = <String>{
+    ...?existing?.sectionIds,
+    if (existing == null)
+      ...?remembered?.sectionIds.where(availableSectionIds.contains),
+  };
+  final selectedModifierGroupIds = <String>{
+    ...?existing?.modifierGroupIds,
+    if (existing == null)
+      ...?remembered?.modifierGroupIds.where(
+        availableModifierGroupIds.contains,
+      ),
+  };
+  var variants = <MenuProductVariant>[
+    ...?existing?.variants,
+    if (existing == null) ...?remembered?.variants,
+  ];
   var stockComponents = <ProductStockComponent>[...?existing?.stockComponents];
-  var productionArea = existing?.productionArea ?? ProductionArea.kitchen;
-  var trackStock = existing?.trackStock ?? false;
-  var stockUnit = existing?.stockUnit ?? 'each';
-  var showOnOrderFlow = existing?.showOnOrderFlow ?? true;
+  var productionArea =
+      existing?.productionArea ??
+      remembered?.productionArea ??
+      ProductionArea.kitchen;
+  var trackStock = existing?.trackStock ?? remembered?.trackStock ?? false;
+  var stockUnit = existing?.stockUnit ?? remembered?.stockUnit ?? 'each';
+  var showOnOrderFlow =
+      existing?.showOnOrderFlow ?? remembered?.showOnOrderFlow ?? true;
   final availableTaxRateIds = taxRates.map((rate) => rate.id);
   var selectedTaxRateId = existing == null
-      ? (availableTaxRateIds.contains(defaultTaxRateId)
-            ? defaultTaxRateId
-            : TaxRate.zero.id)
+      ? (availableTaxRateIds.contains(remembered?.taxRateId)
+            ? remembered!.taxRateId
+            : (availableTaxRateIds.contains(defaultTaxRateId)
+                  ? defaultTaxRateId
+                  : TaxRate.zero.id))
       : (availableTaxRateIds.contains(existing.taxRateId)
             ? existing.taxRateId!
             : TaxRate.zero.id);
@@ -1770,6 +1804,31 @@ Future<void> _showProductDialog({
                       ),
                       stockComponents: stockComponents,
                     );
+                    await _ProductFormDefaults(
+                      sectionIds: selectedSections.toList(growable: false),
+                      modifierGroupIds: selectedModifierGroupIds.toList(
+                        growable: false,
+                      ),
+                      productionArea: productionArea,
+                      showOnOrderFlow: showOnOrderFlow,
+                      trackStock: trackStock,
+                      stockUnit: stockUnit,
+                      stockPerSale: unitStock,
+                      lowStockThreshold: lowStock,
+                      storageLocation: storageLocation.text.trim(),
+                      targetMarginBasisPoints: targetMarginBasisPoints,
+                      taxRateId: selectedTaxRate.id,
+                      variants: variants
+                          .map(
+                            (variant) => MenuProductVariant(
+                              id: variant.id,
+                              name: variant.name,
+                              priceDeltaMinor: variant.priceDeltaMinor,
+                              isAvailable: variant.isAvailable,
+                            ),
+                          )
+                          .toList(growable: false),
+                    ).save(scope);
                   } else {
                     await repository.updateProduct(
                       scope: scope,
@@ -1826,6 +1885,125 @@ Future<void> _showProductDialog({
     storageLocation.dispose();
     targetMargin.dispose();
   }
+}
+
+class _ProductFormDefaults {
+  const _ProductFormDefaults({
+    required this.sectionIds,
+    required this.modifierGroupIds,
+    required this.productionArea,
+    required this.showOnOrderFlow,
+    required this.trackStock,
+    required this.stockUnit,
+    required this.stockPerSale,
+    required this.lowStockThreshold,
+    required this.storageLocation,
+    required this.targetMarginBasisPoints,
+    required this.taxRateId,
+    required this.variants,
+  });
+
+  final List<String> sectionIds;
+  final List<String> modifierGroupIds;
+  final ProductionArea productionArea;
+  final bool showOnOrderFlow;
+  final bool trackStock;
+  final String stockUnit;
+  final double stockPerSale;
+  final double lowStockThreshold;
+  final String storageLocation;
+  final int targetMarginBasisPoints;
+  final String taxRateId;
+  final List<MenuProductVariant> variants;
+
+  static String _key(VenueScope scope) =>
+      'tableside.productFormDefaults.${scope.tenantId}.${scope.venueId}';
+
+  static Future<_ProductFormDefaults?> load(VenueScope scope) async {
+    try {
+      final raw = await SharedPreferencesAsync().getString(_key(scope));
+      if (raw == null || raw.isEmpty) return null;
+      final json = jsonDecode(raw) as Map<String, dynamic>;
+      final areaName = json['productionArea'] as String?;
+      final productionArea = ProductionArea.values.firstWhere(
+        (area) => area.name == areaName,
+        orElse: () => ProductionArea.kitchen,
+      );
+      return _ProductFormDefaults(
+        sectionIds: _stringList(json['sectionIds']),
+        modifierGroupIds: _stringList(json['modifierGroupIds']),
+        productionArea: productionArea,
+        showOnOrderFlow: json['showOnOrderFlow'] as bool? ?? true,
+        trackStock: json['trackStock'] as bool? ?? false,
+        stockUnit: json['stockUnit'] as String? ?? 'each',
+        stockPerSale: (json['stockPerSale'] as num?)?.toDouble() ?? 1,
+        lowStockThreshold:
+            (json['lowStockThreshold'] as num?)?.toDouble() ?? 0,
+        storageLocation: json['storageLocation'] as String? ?? '',
+        targetMarginBasisPoints:
+            (json['targetMarginBasisPoints'] as num?)?.toInt() ?? 0,
+        taxRateId: json['taxRateId'] as String? ?? TaxRate.zero.id,
+        variants: (json['variants'] as List<dynamic>? ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(
+              (item) => MenuProductVariant(
+                id: item['id'] as String? ?? '',
+                name: item['name'] as String? ?? '',
+                priceDeltaMinor:
+                    (item['priceDeltaMinor'] as num?)?.toInt() ?? 0,
+                isAvailable: item['isAvailable'] as bool? ?? true,
+              ),
+            )
+            .where((variant) => variant.id.isNotEmpty && variant.name.isNotEmpty)
+            .toList(growable: false),
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Load remembered product choices', error, stackTrace);
+      return null;
+    }
+  }
+
+  Future<void> save(VenueScope scope) async {
+    try {
+      await SharedPreferencesAsync().setString(
+        _key(scope),
+        jsonEncode({
+          'sectionIds': sectionIds,
+          'modifierGroupIds': modifierGroupIds,
+          'productionArea': productionArea.name,
+          'showOnOrderFlow': showOnOrderFlow,
+          'trackStock': trackStock,
+          'stockUnit': stockUnit,
+          'stockPerSale': stockPerSale,
+          'lowStockThreshold': lowStockThreshold,
+          'storageLocation': storageLocation,
+          'targetMarginBasisPoints': targetMarginBasisPoints,
+          'taxRateId': taxRateId,
+          'variants': [
+            for (final variant in variants)
+              {
+                'id': variant.id,
+                'name': variant.name,
+                'priceDeltaMinor': variant.priceDeltaMinor,
+                'isAvailable': variant.isAvailable,
+              },
+          ],
+        }),
+      );
+      AppLogger.debug(
+        'Remembered product choices for venue ${scope.venueId}.',
+      );
+    } on Object catch (error, stackTrace) {
+      // The product already exists on the server. A local cache failure must
+      // not turn that successful save into a misleading error for the user.
+      AppLogger.error('Remember product choices', error, stackTrace);
+    }
+  }
+
+  static List<String> _stringList(Object? value) =>
+      (value as List<dynamic>? ?? const []).whereType<String>().toList(
+        growable: false,
+      );
 }
 
 String? _requiredText(String? value) =>
