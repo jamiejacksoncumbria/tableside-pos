@@ -19,6 +19,18 @@ final taxRatesProvider = StreamProvider<List<TaxRate>>((ref) {
   return ref.watch(firestorePosRepositoryProvider).watchTaxRates(scope);
 });
 
+final defaultTaxRateIdProvider = StreamProvider<String?>((ref) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  if (scope == null) return Stream.value(null);
+  return FirebaseFirestore.instance
+      .doc('tenants/${scope.tenantId}/venues/${scope.venueId}')
+      .snapshots()
+      .map((snapshot) {
+        final value = snapshot.data()?['defaultTaxRateId'];
+        return value is String && value.trim().isNotEmpty ? value : null;
+      });
+});
+
 class FirestorePosRepository {
   FirestorePosRepository(
     this._firestore, {
@@ -1243,6 +1255,18 @@ class FirestorePosRepository {
       resource: 'taxRate',
       operation: 'delete',
       documentId: rate.id,
+    );
+  }
+
+  Future<void> setDefaultTaxRate({
+    required VenueScope scope,
+    required String? taxRateId,
+  }) async {
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'venueDefaultTaxRate',
+      operation: 'save',
+      values: {'taxRateId': taxRateId},
     );
   }
 

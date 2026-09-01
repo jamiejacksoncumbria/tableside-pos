@@ -24,6 +24,7 @@ class MenuManagementPage extends ConsumerStatefulWidget {
 class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
   final _searchController = TextEditingController();
   String _searchQuery = '';
+  bool _savingDefaultTaxRate = false;
 
   @override
   void dispose() {
@@ -37,6 +38,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
     final sectionsValue = ref.watch(menuSectionsProvider);
     final productsValue = ref.watch(menuProductsProvider);
     final taxRatesValue = ref.watch(taxRatesProvider);
+    final defaultTaxRateIdValue = ref.watch(defaultTaxRateIdProvider);
     final modifierGroupsValue = ref.watch(menuModifierGroupsProvider);
     final sections = sectionsValue.when(
       data: (items) => items,
@@ -58,6 +60,11 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
       loading: () => const <MenuModifierGroup>[],
       error: (_, _) => const <MenuModifierGroup>[],
     );
+    final configuredDefaultTaxRateId = defaultTaxRateIdValue.value;
+    final defaultTaxRateId =
+        taxRates.any((rate) => rate.id == configuredDefaultTaxRateId)
+        ? configuredDefaultTaxRateId!
+        : TaxRate.zero.id;
     final filteredSections = sections.where((section) {
       final parentName = sections
           .where((candidate) => candidate.id == section.parentSectionId)
@@ -151,6 +158,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                           modifierGroups: modifierGroups,
                           allProducts: products,
                           currencyCode: widget.currencyCode,
+                          defaultTaxRateId: defaultTaxRateId,
                         ),
                   icon: const Icon(Icons.add_rounded),
                   label: const Text('Add product'),
@@ -280,6 +288,35 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
               'Prices are inclusive. Editing a rate updates future product sales only; closed bills remain unchanged.',
             ),
             children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                child: DropdownButtonFormField<String>(
+                  key: ValueKey(
+                    'default-tax-rate-$defaultTaxRateId-$_savingDefaultTaxRate',
+                  ),
+                  initialValue: defaultTaxRateId,
+                  decoration: const InputDecoration(
+                    labelText: 'Default tax rate for new products',
+                    helperText:
+                        'Existing products and closed sales are not changed.',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    for (final rate in [TaxRate.zero, ...taxRates])
+                      DropdownMenuItem(
+                        value: rate.id,
+                        child: Text('${rate.name} (${rate.percentageLabel})'),
+                      ),
+                  ],
+                  onChanged:
+                      scope == null ||
+                          _savingDefaultTaxRate ||
+                          !defaultTaxRateIdValue.hasValue
+                      ? null
+                      : (value) =>
+                            _setDefaultTaxRate(scope, value ?? TaxRate.zero.id),
+                ),
+              ),
               ListTile(
                 leading: const CircleAvatar(child: Text('0%')),
                 title: Text(TaxRate.zero.name),
@@ -344,6 +381,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                             modifierGroups: modifierGroups,
                             allProducts: products,
                             currencyCode: widget.currencyCode,
+                            defaultTaxRateId: defaultTaxRateId,
                             existing: product,
                           ),
                     onAvailabilityChanged: scope == null
@@ -380,6 +418,43 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
           ),
       ],
     );
+  }
+
+  Future<void> _setDefaultTaxRate(
+    VenueScope scope,
+    String selectedTaxRateId,
+  ) async {
+    setState(() => _savingDefaultTaxRate = true);
+    try {
+      await ref
+          .read(firestorePosRepositoryProvider)
+          .setDefaultTaxRate(
+            scope: scope,
+            taxRateId: selectedTaxRateId == TaxRate.zero.id
+                ? null
+                : selectedTaxRateId,
+          );
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Default tax rate updated',
+        message: 'New products will start with the selected tax rate.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Set default tax rate', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not update default tax rate',
+        message: 'The venue default was not changed: $error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _savingDefaultTaxRate = false);
+    }
   }
 }
 
@@ -964,6 +1039,7 @@ Future<void> _showProductDialog({
   required List<MenuModifierGroup> modifierGroups,
   required List<MenuProduct> allProducts,
   required String currencyCode,
+  required String defaultTaxRateId,
   MenuProduct? existing,
 }) async {
   final name = TextEditingController(text: existing?.name ?? '');
@@ -996,10 +1072,14 @@ Future<void> _showProductDialog({
   var trackStock = existing?.trackStock ?? false;
   var stockUnit = existing?.stockUnit ?? 'each';
   var showOnOrderFlow = existing?.showOnOrderFlow ?? true;
-  var selectedTaxRateId =
-      taxRates.map((rate) => rate.id).contains(existing?.taxRateId)
-      ? existing!.taxRateId!
-      : TaxRate.zero.id;
+  final availableTaxRateIds = taxRates.map((rate) => rate.id);
+  var selectedTaxRateId = existing == null
+      ? (availableTaxRateIds.contains(defaultTaxRateId)
+            ? defaultTaxRateId
+            : TaxRate.zero.id)
+      : (availableTaxRateIds.contains(existing.taxRateId)
+            ? existing.taxRateId!
+            : TaxRate.zero.id);
 
   try {
     await showDialog<void>(

@@ -528,6 +528,35 @@ async function manageMenuConfigurationFor(caller, rawData) {
   if (!venue.exists || venue.data().status === "deleting") {
     throw new HttpsError("failed-precondition", "The selected venue is not active.");
   }
+  if (resource === "venueDefaultTaxRate") {
+    if (operation !== "save") {
+      throw new HttpsError("invalid-argument", "That default tax operation is not supported.");
+    }
+    const rawTaxRateId = optionalText(values, "taxRateId", 1500);
+    const taxRateId = rawTaxRateId
+      ? requiredDocumentId({taxRateId: rawTaxRateId}, "taxRateId")
+      : null;
+    if (taxRateId != null) {
+      const taxRate = await db.doc(`tenants/${tenantId}/taxRates/${taxRateId}`).get();
+      if (!taxRate.exists || taxRate.data().venueId !== venueId ||
+          taxRate.data().active === false) {
+        throw new HttpsError(
+          "failed-precondition",
+          "The selected default tax rate is not available at this venue.",
+        );
+      }
+    }
+    const actor = actorSnapshot(await auth.getUser(caller.uid));
+    await venue.ref.update({
+      defaultTaxRateId: taxRateId == null ? FieldValue.delete() : taxRateId,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+    await writeAudit(caller.uid, "setDefaultTaxRate", venueId, {
+      tenantId, venueId, taxRateId, actor,
+    });
+    return {documentId: venueId, saved: true};
+  }
   const collectionNames = {
     section: "menuSections",
     product: "products",
@@ -569,6 +598,12 @@ async function manageMenuConfigurationFor(caller, rawData) {
       }
     }
     if (resource === "taxRate") {
+      if (venue.data().defaultTaxRateId === documentId) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Choose another venue default tax rate before deleting this one.",
+        );
+      }
       const products = await db.collection(`tenants/${tenantId}/products`)
         .where("taxRateId", "==", documentId).get();
       if (products.docs.some((item) => item.data().venueId === venueId)) {
