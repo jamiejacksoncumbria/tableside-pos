@@ -12,13 +12,27 @@ import 'modifier_groups_page.dart';
 
 /// Venue-scoped menu setup. A product may be attached to several sections but
 /// keeps one default production area, allowing separate food/bar tickets.
-class MenuManagementPage extends ConsumerWidget {
+class MenuManagementPage extends ConsumerStatefulWidget {
   const MenuManagementPage({super.key, required this.currencyCode});
 
   final String currencyCode;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MenuManagementPage> createState() => _MenuManagementPageState();
+}
+
+class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
+  final _searchController = TextEditingController();
+  String _searchQuery = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final scope = ref.watch(activeVenueScopeProvider);
     final sectionsValue = ref.watch(menuSectionsProvider);
     final productsValue = ref.watch(menuProductsProvider);
@@ -44,6 +58,24 @@ class MenuManagementPage extends ConsumerWidget {
       loading: () => const <MenuModifierGroup>[],
       error: (_, _) => const <MenuModifierGroup>[],
     );
+    final filteredSections = sections.where((section) {
+      final parentName = sections
+          .where((candidate) => candidate.id == section.parentSectionId)
+          .map((candidate) => candidate.name)
+          .firstOrNull;
+      return _matchesMenuSearch(
+        _searchQuery,
+        '${section.name} ${parentName ?? ''}',
+      );
+    }).toList();
+    final filteredProducts = products.where((product) {
+      final sectionNames = sections
+          .where((section) => product.sectionIds.contains(section.id))
+          .map((section) => section.name)
+          .join(' ');
+      return _matchesMenuSearch(_searchQuery, '${product.name} $sectionNames');
+    }).toList();
+    final isSearching = _searchQuery.trim().isNotEmpty;
 
     return ListView(
       padding: const EdgeInsets.all(20),
@@ -75,8 +107,9 @@ class MenuManagementPage extends ConsumerWidget {
                       ? null
                       : () => Navigator.of(context).push(
                           MaterialPageRoute<void>(
-                            builder: (_) =>
-                                ModifierGroupsPage(currencyCode: currencyCode),
+                            builder: (_) => ModifierGroupsPage(
+                              currencyCode: widget.currencyCode,
+                            ),
                           ),
                         ),
                   icon: const Icon(Icons.tune_rounded),
@@ -117,7 +150,7 @@ class MenuManagementPage extends ConsumerWidget {
                           taxRates: [TaxRate.zero, ...taxRates],
                           modifierGroups: modifierGroups,
                           allProducts: products,
-                          currencyCode: currencyCode,
+                          currencyCode: widget.currencyCode,
                         ),
                   icon: const Icon(Icons.add_rounded),
                   label: const Text('Add product'),
@@ -127,6 +160,35 @@ class MenuManagementPage extends ConsumerWidget {
           ],
         ),
         const SizedBox(height: 10),
+        TextField(
+          controller: _searchController,
+          onChanged: (value) => setState(() => _searchQuery = value),
+          textInputAction: TextInputAction.search,
+          decoration: InputDecoration(
+            labelText: 'Search sections and products',
+            hintText: 'Type any part of a name, such as wine or large',
+            prefixIcon: const Icon(Icons.search_rounded),
+            suffixIcon: isSearching
+                ? IconButton(
+                    tooltip: 'Clear search',
+                    onPressed: () {
+                      _searchController.clear();
+                      setState(() => _searchQuery = '');
+                    },
+                    icon: const Icon(Icons.clear_rounded),
+                  )
+                : null,
+            border: const OutlineInputBorder(),
+          ),
+        ),
+        if (isSearching) ...[
+          const SizedBox(height: 8),
+          Text(
+            '${filteredSections.length} section${filteredSections.length == 1 ? '' : 's'} and '
+            '${filteredProducts.length} product${filteredProducts.length == 1 ? '' : 's'} found',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
         if (scope == null)
           const _SetupHint(
             icon: Icons.cloud_off_outlined,
@@ -155,13 +217,24 @@ class MenuManagementPage extends ConsumerWidget {
         else
           Card(
             child: ExpansionTile(
+              key: ValueKey('menu-sections-search-$_searchQuery'),
+              initiallyExpanded: isSearching,
               leading: const Icon(Icons.account_tree_outlined),
-              title: Text('Manage ${sections.length} categories'),
+              title: Text(
+                isSearching
+                    ? '${filteredSections.length} matching categor${filteredSections.length == 1 ? 'y' : 'ies'}'
+                    : 'Manage ${sections.length} categories',
+              ),
               subtitle: const Text(
                 'Expand to rename, nest or safely delete categories.',
               ),
               children: [
-                for (final section in sections)
+                if (filteredSections.isEmpty)
+                  const ListTile(
+                    leading: Icon(Icons.search_off_rounded),
+                    title: Text('No matching sections'),
+                  ),
+                for (final section in filteredSections)
                   _SectionTile(
                     section: section,
                     allSections: sections,
@@ -244,16 +317,21 @@ class MenuManagementPage extends ConsumerWidget {
             text:
                 'No products yet. Add a product and assign its sections, production area, price and optional stock tracking.',
           )
+        else if (filteredProducts.isEmpty)
+          const _SetupHint(
+            icon: Icons.search_off_rounded,
+            text: 'No products match this search.',
+          )
         else
           Card(
             clipBehavior: Clip.antiAlias,
             child: Column(
               children: [
-                for (final product in products)
+                for (final product in filteredProducts)
                   _ProductTile(
                     product: product,
                     sections: sections,
-                    currencyCode: currencyCode,
+                    currencyCode: widget.currencyCode,
                     canEdit: scope != null,
                     onEdit: scope == null
                         ? null
@@ -265,7 +343,7 @@ class MenuManagementPage extends ConsumerWidget {
                             taxRates: [TaxRate.zero, ...taxRates],
                             modifierGroups: modifierGroups,
                             allProducts: products,
-                            currencyCode: currencyCode,
+                            currencyCode: widget.currencyCode,
                             existing: product,
                           ),
                     onAvailabilityChanged: scope == null
@@ -303,6 +381,17 @@ class MenuManagementPage extends ConsumerWidget {
       ],
     );
   }
+}
+
+bool _matchesMenuSearch(String query, String value) {
+  final terms = query
+      .trim()
+      .toLowerCase()
+      .split(RegExp(r'\s+'))
+      .where((term) => term.isNotEmpty);
+  if (terms.isEmpty) return true;
+  final searchableValue = value.toLowerCase();
+  return terms.every(searchableValue.contains);
 }
 
 class _SectionTile extends StatelessWidget {
