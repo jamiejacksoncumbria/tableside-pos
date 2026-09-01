@@ -42,18 +42,6 @@
         { "fieldPath": "venueId", "order": "ASCENDING" },
         { "fieldPath": "businessDate", "order": "ASCENDING" }
       ]
-    },
-    {
-      "collectionGroup": "staffPinSessions",
-      "fieldPath": "expiresAt",
-      "ttl": true,
-      "indexes": []
-    },
-    {
-      "collectionGroup": "platformAdminPinSessions",
-      "fieldPath": "expiresAt",
-      "ttl": true,
-      "indexes": []
     }
   ],
   "fieldOverrides": [
@@ -70,6 +58,18 @@
           "queryScope": "COLLECTION_GROUP"
         }
       ]
+    },
+    {
+      "collectionGroup": "staffPinSessions",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "platformAdminPinSessions",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
     }
   ]
 }
