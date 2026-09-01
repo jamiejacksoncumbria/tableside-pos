@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
+import '../core/text_case.dart';
 import '../features/bookings/booking.dart';
 import '../features/pos/domain.dart';
 import 'production_command_repository.dart';
@@ -715,7 +716,7 @@ class FirestorePosRepository {
     required int sortOrder,
     String? parentSectionId,
   }) async {
-    final cleanedName = name.trim();
+    final cleanedName = toCatalogueTitleCase(name);
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
     await _commands.manageMenuConfiguration(
       scope: scope,
@@ -738,7 +739,7 @@ class FirestorePosRepository {
     required String icon,
     String? parentSectionId,
   }) async {
-    final cleanedName = name.trim();
+    final cleanedName = toCatalogueTitleCase(name);
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
     if (parentSectionId == sectionId) {
       throw ArgumentError('A section cannot be its own parent.');
@@ -819,7 +820,7 @@ class FirestorePosRepository {
     required List<String> modifierGroupIds,
     required List<ProductStockComponent> stockComponents,
   }) async {
-    final cleanedName = name.trim();
+    final cleanedName = toCatalogueTitleCase(name);
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
     if (priceMinor < 0) {
       throw ArgumentError.value(priceMinor, 'priceMinor');
@@ -895,7 +896,7 @@ class FirestorePosRepository {
     required List<String> modifierGroupIds,
     required List<ProductStockComponent> stockComponents,
   }) async {
-    final cleanedName = name.trim();
+    final cleanedName = toCatalogueTitleCase(name);
     if (cleanedName.isEmpty || priceMinor < 0 || sectionIds.isEmpty) {
       throw ArgumentError('Product details are incomplete.');
     }
@@ -949,7 +950,7 @@ class FirestorePosRepository {
     final names = <String>{};
     for (final variant in variants) {
       final id = variant.id.trim();
-      final name = variant.name.trim();
+      final name = toCatalogueTitleCase(variant.name);
       final nameKey = name.toLowerCase();
       if (id.isEmpty ||
           name.isEmpty ||
@@ -1100,7 +1101,7 @@ class FirestorePosRepository {
     required int maximumSelections,
     required List<MenuModifierOption> options,
   }) {
-    final cleanedName = name.trim();
+    final cleanedName = toCatalogueTitleCase(name);
     if (cleanedName.isEmpty || cleanedName.length > 80) {
       throw ArgumentError.value(name, 'name');
     }
@@ -1117,7 +1118,7 @@ class FirestorePosRepository {
     final optionData = <Map<String, Object?>>[];
     for (final option in options) {
       final id = option.id.trim();
-      final optionName = option.name.trim();
+      final optionName = toCatalogueTitleCase(option.name);
       if (id.isEmpty ||
           optionName.isEmpty ||
           !ids.add(id) ||
@@ -1155,7 +1156,7 @@ class FirestorePosRepository {
   }
 
   String _cleanTaxRateName(String value) {
-    final name = value.trim();
+    final name = toCatalogueTitleCase(value);
     if (name.isEmpty || name.length > 80) {
       throw ArgumentError.value(value, 'taxRateName');
     }

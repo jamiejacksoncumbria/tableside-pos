@@ -128,6 +128,23 @@ function optionalText(data, name, maxLength = 500) {
   return value.trim();
 }
 
+const catalogueAcronyms = new Set(["BBQ", "IPA", "KDV", "NFC", "QR", "SKU", "VAT"]);
+
+function catalogueTitleCase(value) {
+  return value.trim().replace(/\s+/gu, " ").split(" ").map((word) =>
+    word.split(/([-/])/u).map((segment) => {
+      if (segment === "-" || segment === "/" || segment.length === 0) return segment;
+      const letters = segment.replace(/[^A-Za-z]/gu, "").toUpperCase();
+      if (catalogueAcronyms.has(letters)) return segment.toUpperCase();
+      if (/^\d+(?:\.\d+)?(?:cl|g|kg|l|ml|oz)$/iu.test(segment)) {
+        return segment.toLowerCase();
+      }
+      const lower = segment.toLowerCase();
+      return lower.replace(/[A-Za-zÀ-ÖØ-öø-ÿ]/u, (letter) => letter.toUpperCase());
+    }).join(""),
+  ).join(" ");
+}
+
 function receiptBusinessSnapshot(tenantData) {
   const clean = (value, maximum) => typeof value === "string"
     ? value.trim().slice(0, maximum)
@@ -465,7 +482,7 @@ function validatedVariants(value) {
   return value.map((raw) => {
     const variant = requireObject(raw);
     const id = requiredText(variant, "id", 180);
-    const name = requiredText(variant, "name", 80);
+    const name = catalogueTitleCase(requiredText(variant, "name", 80));
     const priceDeltaMinor = variant.priceDeltaMinor;
     if (!Number.isInteger(priceDeltaMinor) || Math.abs(priceDeltaMinor) > 100000000 ||
         ids.has(id) || names.has(name.toLowerCase())) {
@@ -492,7 +509,7 @@ function validatedModifierOptions(value) {
   return value.map((raw) => {
     const option = requireObject(raw);
     const id = requiredText(option, "id", 180);
-    const name = requiredText(option, "name", 80);
+    const name = catalogueTitleCase(requiredText(option, "name", 80));
     const priceDeltaMinor = option.priceDeltaMinor;
     if (!Number.isInteger(priceDeltaMinor) || Math.abs(priceDeltaMinor) > 100000000 ||
         ids.has(id) || names.has(name.toLowerCase())) {
@@ -659,7 +676,7 @@ async function manageMenuConfigurationFor(caller, rawData) {
       }
     }
     cleaned = {
-      name: requiredText(values, "name", 80),
+      name: catalogueTitleCase(requiredText(values, "name", 80)),
       icon: optionalText(values, "icon", 20) || "🍽️",
       parentSectionId,
       ...(documentId == null
@@ -700,14 +717,14 @@ async function manageMenuConfigurationFor(caller, rawData) {
       throw new HttpsError("invalid-argument", "Modifier selection limits are invalid.");
     }
     cleaned = {
-      name: requiredText(values, "name", 80),
+      name: catalogueTitleCase(requiredText(values, "name", 80)),
       minimumSelections,
       maximumSelections,
       options,
       ...(documentId == null ? {isAvailable: true} : {}),
     };
   } else if (resource === "taxRate") {
-    const name = requiredText(values, "name", 80);
+    const name = catalogueTitleCase(requiredText(values, "name", 80));
     const basisPoints = requiredNonNegativeInteger(values.basisPoints, "basisPoints", 100000);
     const duplicates = await collection.get();
     if (duplicates.docs.some((item) => item.id !== documentId &&
@@ -781,7 +798,7 @@ async function manageMenuConfigurationFor(caller, rawData) {
     const taxRateId = rawTaxRateId
       ? requiredDocumentId({taxRateId: rawTaxRateId}, "taxRateId")
       : null;
-    let taxRateName = requiredText(values, "taxRateName", 80);
+    let taxRateName = catalogueTitleCase(requiredText(values, "taxRateName", 80));
     let taxRateBasisPoints = requiredNonNegativeInteger(
       values.taxRateBasisPoints, "taxRateBasisPoints", 100000,
     );
@@ -796,7 +813,7 @@ async function manageMenuConfigurationFor(caller, rawData) {
       );
     }
     cleaned = {
-      name: requiredText(values, "name", 120),
+      name: catalogueTitleCase(requiredText(values, "name", 120)),
       priceMinor: requiredNonNegativeInteger(values.priceMinor, "priceMinor"),
       sectionIds,
       productionArea,

@@ -324,7 +324,7 @@ class TaxRate {
 
   static const zero = TaxRate(
     id: 'zero-rate',
-    name: 'Zero rate',
+    name: 'Zero Rate',
     basisPoints: 0,
   );
 
