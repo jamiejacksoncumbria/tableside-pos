@@ -943,7 +943,8 @@ class _HorizontalMenuScroller extends StatelessWidget {
         child: Listener(
           onPointerSignal: (event) {
             if (event is! PointerScrollEvent || !controller.hasClients) return;
-            final delta = event.scrollDelta.dx.abs() > event.scrollDelta.dy.abs()
+            final delta =
+                event.scrollDelta.dx.abs() > event.scrollDelta.dy.abs()
                 ? event.scrollDelta.dx
                 : event.scrollDelta.dy;
             if (delta == 0) return;
@@ -1091,7 +1092,8 @@ class _ProductTile extends StatelessWidget {
                     if (compact) const SizedBox(height: 4) else const Spacer(),
                     Text(
                       product.name,
-                      maxLines: compact ? 1 : 2,
+                      maxLines: 2,
+                      softWrap: true,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontWeight: FontWeight.w700),
                     ),
