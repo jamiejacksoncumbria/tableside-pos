@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -939,14 +940,40 @@ class _HorizontalMenuScroller extends StatelessWidget {
         icon: const Icon(Icons.chevron_left_rounded),
       ),
       Expanded(
-        child: Scrollbar(
-          controller: controller,
-          thumbVisibility: true,
-          child: SingleChildScrollView(
-            controller: controller,
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.only(bottom: 8),
-            child: child,
+        child: Listener(
+          onPointerSignal: (event) {
+            if (event is! PointerScrollEvent || !controller.hasClients) return;
+            final delta = event.scrollDelta.dx.abs() > event.scrollDelta.dy.abs()
+                ? event.scrollDelta.dx
+                : event.scrollDelta.dy;
+            if (delta == 0) return;
+            GestureBinding.instance.pointerSignalResolver.register(
+              event,
+              (_) => _move(delta),
+            );
+          },
+          child: ScrollConfiguration(
+            behavior: ScrollConfiguration.of(context).copyWith(
+              dragDevices: const {
+                PointerDeviceKind.touch,
+                PointerDeviceKind.mouse,
+                PointerDeviceKind.stylus,
+                PointerDeviceKind.invertedStylus,
+                PointerDeviceKind.trackpad,
+              },
+            ),
+            child: Scrollbar(
+              controller: controller,
+              thumbVisibility: true,
+              interactive: true,
+              child: SingleChildScrollView(
+                controller: controller,
+                scrollDirection: Axis.horizontal,
+                physics: const ClampingScrollPhysics(),
+                padding: const EdgeInsets.only(bottom: 8),
+                child: child,
+              ),
+            ),
           ),
         ),
       ),
