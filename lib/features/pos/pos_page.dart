@@ -1,7 +1,9 @@
 import 'package:flutter/gestures.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
@@ -994,73 +996,6 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                       ],
                     ),
             ),
-            if (searchQuery.isEmpty && !_menuControlsCollapsed) ...[
-              Row(
-                children: [
-                  Expanded(
-                    child: DropdownButtonFormField<String>(
-                      initialValue: effectiveSection,
-                      isExpanded: true,
-                      decoration: const InputDecoration(
-                        isDense: true,
-                        labelText: 'Filter products by category',
-                      ),
-                      items: [
-                        const DropdownMenuItem(
-                          value: '',
-                          child: Text('All categories'),
-                        ),
-                        for (final item in topLevelSections)
-                          DropdownMenuItem(
-                            value: item.id,
-                            child: Text(item.name),
-                          ),
-                      ],
-                      onChanged: (value) {
-                        ref
-                            .read(activeSectionProvider.notifier)
-                            .select(
-                              value == null || value.isEmpty ? null : value,
-                            );
-                        ref
-                            .read(activeSubsectionProvider.notifier)
-                            .select(null);
-                      },
-                    ),
-                  ),
-                  if (subsections.isNotEmpty) ...[
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        initialValue: effectiveSubsection,
-                        isExpanded: true,
-                        decoration: const InputDecoration(
-                          isDense: true,
-                          labelText: 'Subcategory',
-                        ),
-                        items: [
-                          const DropdownMenuItem(
-                            value: '',
-                            child: Text('All subcategories'),
-                          ),
-                          for (final item in subsections)
-                            DropdownMenuItem(
-                              value: item.id,
-                              child: Text(item.name),
-                            ),
-                        ],
-                        onChanged: (value) => ref
-                            .read(activeSubsectionProvider.notifier)
-                            .select(
-                              value == null || value.isEmpty ? null : value,
-                            ),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 10),
-            ],
             Expanded(
               child: loading
                   ? const Center(child: CircularProgressIndicator())
@@ -1361,6 +1296,7 @@ class _OrderPanel extends ConsumerStatefulWidget {
 
 class _OrderPanelState extends ConsumerState<_OrderPanel> {
   final _lineScrollController = ScrollController();
+  final Set<String> _selectedLineIds = {};
   String? _lastOrderLinesKey;
 
   @override
@@ -1399,7 +1335,8 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
         title: Text(switch (operation) {
           'remove' => 'Remove ${line.productName}',
           'setUnitPrice' => 'Change item price',
-          _ => 'Discount item',
+          'discountPercent' => 'Discount item by percentage',
+          _ => 'Discount item by amount',
         }),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1413,7 +1350,10 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 decoration: InputDecoration(
                   labelText: operation == 'setUnitPrice'
                       ? 'New price per item (${widget.currencyCode})'
+                      : operation == 'discountPercent'
+                      ? 'Percentage discount'
                       : 'Discount per item (${widget.currencyCode})',
+                  suffixText: operation == 'discountPercent' ? '%' : null,
                 ),
               ),
             const SizedBox(height: 12),
@@ -1444,11 +1384,24 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
       value.dispose();
       return;
     }
-    final valueMinor = operation == 'remove'
+    var serverOperation = operation;
+    final parsedValue = operation == 'remove'
         ? null
         : value.text.trim() == '0'
         ? 0
         : _minorFromMoneyInput(value.text, widget.currencyCode);
+    int? valueMinor = parsedValue;
+    if (operation == 'discountPercent') {
+      final percentage = double.tryParse(
+        value.text.trim().replaceAll(',', '.'),
+      );
+      if (percentage != null && percentage > 0 && percentage <= 100) {
+        valueMinor = (line.unitPriceMinor * (100 - percentage) / 100).round();
+        serverOperation = 'setUnitPrice';
+      } else {
+        valueMinor = null;
+      }
+    }
     if (reason.text.trim().isEmpty ||
         (operation != 'remove' && valueMinor == null)) {
       showAppNotification(
@@ -1467,7 +1420,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
           .read(activeOrderProvider.notifier)
           .managerAdjustLine(
             lineId: line.id,
-            operation: operation,
+            operation: serverOperation,
             reason: reason.text.trim(),
             valueMinor: valueMinor,
           );
@@ -1488,9 +1441,139 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     }
   }
 
+  Future<void> _bulkAdjust(String operation, PosOrder order) async {
+    final selected = order.lines
+        .where((line) => _selectedLineIds.contains(line.id))
+        .toList();
+    if (selected.isEmpty) return;
+    if (operation == 'remove' && selected.length == order.lines.length) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Keep one item',
+        message:
+            'Cancel the whole order separately rather than removing every item in bulk.',
+        level: AppNotificationLevel.warning,
+      );
+      return;
+    }
+    final value = TextEditingController();
+    final reason = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          operation == 'remove'
+              ? 'Remove ${selected.length} items'
+              : 'Discount ${selected.length} items',
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (operation != 'remove')
+              TextField(
+                controller: value,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: InputDecoration(
+                  labelText: operation == 'discountPercent'
+                      ? 'Percentage discount'
+                      : 'Discount per item',
+                  suffixText: operation == 'discountPercent'
+                      ? '%'
+                      : widget.currencyCode,
+                ),
+              ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reason,
+              maxLength: 240,
+              decoration: const InputDecoration(
+                labelText: 'Reason',
+                helperText: 'Required for the audit trail.',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      value.dispose();
+      reason.dispose();
+      return;
+    }
+    final percentage = operation == 'discountPercent'
+        ? double.tryParse(value.text.trim().replaceAll(',', '.'))
+        : null;
+    final fixedMinor = operation == 'discountUnitAmount'
+        ? _minorFromMoneyInput(value.text, widget.currencyCode)
+        : null;
+    if (reason.text.trim().isEmpty ||
+        (operation == 'discountPercent' &&
+            (percentage == null || percentage <= 0 || percentage > 100)) ||
+        (operation == 'discountUnitAmount' && fixedMinor == null)) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Bulk change not saved',
+        message: 'Enter a valid discount and reason.',
+        level: AppNotificationLevel.error,
+      );
+      value.dispose();
+      reason.dispose();
+      return;
+    }
+    var completed = 0;
+    try {
+      for (final line in selected) {
+        await ref
+            .read(activeOrderProvider.notifier)
+            .managerAdjustLine(
+              lineId: line.id,
+              operation: operation == 'discountPercent'
+                  ? 'setUnitPrice'
+                  : operation,
+              reason: reason.text.trim(),
+              valueMinor: operation == 'discountPercent'
+                  ? (line.unitPriceMinor * (100 - percentage!) / 100).round()
+                  : fixedMinor,
+            );
+        completed++;
+      }
+      if (mounted) setState(_selectedLineIds.clear);
+    } catch (error, stackTrace) {
+      AppLogger.error('Bulk manager sale adjustment', error, stackTrace);
+      if (mounted) {
+        showAppNotification(
+          context,
+          ref: ref,
+          title: 'Bulk change partly completed',
+          message: '$completed of ${selected.length} items changed. $error',
+          level: AppNotificationLevel.error,
+        );
+      }
+    } finally {
+      value.dispose();
+      reason.dispose();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final order = ref.watch(activeOrderProvider);
+    final currentLineIds = order.lines.map((line) => line.id).toSet();
+    _selectedLineIds.removeWhere((id) => !currentLineIds.contains(id));
     final splitOrdersValue = order.isSplitOrder
         ? null
         : ref.watch(openSplitOrdersProvider(order.id));
@@ -1618,6 +1701,40 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
               ),
             ],
             const Divider(height: 24),
+            if (_selectedLineIds.isNotEmpty && canAdjustSale) ...[
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(
+                    '${_selectedLineIds.length} selected',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _bulkAdjust('discountPercent', order),
+                    icon: const Icon(Icons.percent_rounded),
+                    label: const Text('Percentage'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _bulkAdjust('discountUnitAmount', order),
+                    icon: const Icon(Icons.discount_outlined),
+                    label: const Text('Amount'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _bulkAdjust('remove', order),
+                    icon: const Icon(Icons.remove_shopping_cart_outlined),
+                    label: const Text('Remove'),
+                  ),
+                  IconButton(
+                    tooltip: 'Clear selection',
+                    onPressed: () => setState(_selectedLineIds.clear),
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
             Expanded(
               child: order.lines.isEmpty
                   ? const Center(child: Text('Choose menu items to begin.'))
@@ -1630,102 +1747,137 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                         separatorBuilder: (_, _) => const SizedBox(height: 8),
                         itemBuilder: (context, index) {
                           final line = order.lines[index];
-                          return Row(
-                            children: [
-                              IconButton.filledTonal(
-                                tooltip: 'Remove one ${line.productName}',
-                                onPressed: line.isSentToProduction
-                                    ? null
-                                    : () async {
-                                        try {
-                                          await ref
-                                              .read(
-                                                activeOrderProvider.notifier,
-                                              )
-                                              .reduceLine(line.id);
-                                        } on Object catch (error, stackTrace) {
-                                          AppLogger.error(
-                                            'Remove item from shared draft order',
-                                            error,
-                                            stackTrace,
-                                          );
-                                          if (!context.mounted) return;
-                                          showAppNotification(
+                          final selected = _selectedLineIds.contains(line.id);
+                          return InkWell(
+                            onLongPress: canAdjustSale
+                                ? () => setState(() {
+                                    selected
+                                        ? _selectedLineIds.remove(line.id)
+                                        : _selectedLineIds.add(line.id);
+                                  })
+                                : null,
+                            child: ColoredBox(
+                              color: selected
+                                  ? scheme.secondaryContainer
+                                  : Colors.transparent,
+                              child: Row(
+                                children: [
+                                  if (_selectedLineIds.isNotEmpty &&
+                                      canAdjustSale)
+                                    Checkbox(
+                                      value: selected,
+                                      onChanged: (_) => setState(() {
+                                        selected
+                                            ? _selectedLineIds.remove(line.id)
+                                            : _selectedLineIds.add(line.id);
+                                      }),
+                                    ),
+                                  IconButton.filledTonal(
+                                    tooltip: 'Remove one ${line.productName}',
+                                    onPressed: line.isSentToProduction
+                                        ? null
+                                        : () async {
+                                            try {
+                                              await ref
+                                                  .read(
+                                                    activeOrderProvider
+                                                        .notifier,
+                                                  )
+                                                  .reduceLine(line.id);
+                                            } on Object catch (
+                                              error,
+                                              stackTrace
+                                            ) {
+                                              AppLogger.error(
+                                                'Remove item from shared draft order',
+                                                error,
+                                                stackTrace,
+                                              );
+                                              if (!context.mounted) return;
+                                              showAppNotification(
+                                                context,
+                                                ref: ref,
+                                                title: 'Item was not removed',
+                                                message: '$error',
+                                                level:
+                                                    AppNotificationLevel.error,
+                                              );
+                                            }
+                                          },
+                                    icon: const Icon(
+                                      Icons.remove_rounded,
+                                      size: 18,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          line.productName,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        if (line.productionDetails.isNotEmpty)
+                                          Text(
+                                            line.productionDetails.join(' · '),
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.labelSmall,
+                                          ),
+                                        Text(
+                                          '${line.quantity} × ${formatMoney(line.unitPriceMinor, currencyCode: widget.currencyCode)}',
+                                          style: Theme.of(
                                             context,
-                                            ref: ref,
-                                            title: 'Item was not removed',
-                                            message: '$error',
-                                            level: AppNotificationLevel.error,
-                                          );
-                                        }
-                                      },
-                                icon: const Icon(
-                                  Icons.remove_rounded,
-                                  size: 18,
-                                ),
+                                          ).textTheme.bodySmall,
+                                        ),
+                                        if (line.isSentToProduction)
+                                          Text(
+                                            'Sent to production',
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.labelSmall,
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                  Text(
+                                    formatMoney(
+                                      line.totalMinor,
+                                      currencyCode: widget.currencyCode,
+                                    ),
+                                  ),
+                                  if (canAdjustSale)
+                                    PopupMenuButton<String>(
+                                      tooltip: 'Manager item actions',
+                                      onSelected: (operation) =>
+                                          _adjustLine(line, operation),
+                                      itemBuilder: (_) => const [
+                                        PopupMenuItem(
+                                          value: 'discountUnitAmount',
+                                          child: Text('Discount by amount'),
+                                        ),
+                                        PopupMenuItem(
+                                          value: 'discountPercent',
+                                          child: Text('Discount by percentage'),
+                                        ),
+                                        PopupMenuItem(
+                                          value: 'setUnitPrice',
+                                          child: Text('Change item price'),
+                                        ),
+                                        PopupMenuItem(
+                                          value: 'remove',
+                                          child: Text('Remove from sale'),
+                                        ),
+                                      ],
+                                    ),
+                                ],
                               ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      line.productName,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    if (line.productionDetails.isNotEmpty)
-                                      Text(
-                                        line.productionDetails.join(' · '),
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(
-                                          context,
-                                        ).textTheme.labelSmall,
-                                      ),
-                                    Text(
-                                      '${line.quantity} × ${formatMoney(line.unitPriceMinor, currencyCode: widget.currencyCode)}',
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.bodySmall,
-                                    ),
-                                    if (line.isSentToProduction)
-                                      Text(
-                                        'Sent to production',
-                                        style: Theme.of(
-                                          context,
-                                        ).textTheme.labelSmall,
-                                      ),
-                                  ],
-                                ),
-                              ),
-                              Text(
-                                formatMoney(
-                                  line.totalMinor,
-                                  currencyCode: widget.currencyCode,
-                                ),
-                              ),
-                              if (canAdjustSale)
-                                PopupMenuButton<String>(
-                                  tooltip: 'Manager item actions',
-                                  onSelected: (operation) =>
-                                      _adjustLine(line, operation),
-                                  itemBuilder: (_) => const [
-                                    PopupMenuItem(
-                                      value: 'discountUnitAmount',
-                                      child: Text('Discount item'),
-                                    ),
-                                    PopupMenuItem(
-                                      value: 'setUnitPrice',
-                                      child: Text('Change item price'),
-                                    ),
-                                    PopupMenuItem(
-                                      value: 'remove',
-                                      child: Text('Remove from sale'),
-                                    ),
-                                  ],
-                                ),
-                            ],
+                            ),
                           );
                         },
                       ),
@@ -1927,6 +2079,7 @@ Future<void> _showCheckoutSheet(
       var printReceipt = defaultPrintPaidReceipt;
       var loadingOfficialRate = false;
       ExchangeRateQuote? officialRateQuote;
+      var voucherSuggestions = <String>[];
       final paymentEntries = <_CheckoutPaymentDraft>[];
       return StatefulBuilder(
         builder: (context, setSheetState) {
@@ -2117,8 +2270,85 @@ Future<void> _showCheckoutSheet(
                         helperText:
                             'Hardware QR scanners can type directly into this field.',
                       ),
-                      onChanged: (_) => setSheetState(() {}),
+                      onChanged: (value) async {
+                        setSheetState(() {});
+                        final normalized = value.toUpperCase().replaceAll(
+                          RegExp('[^A-Z0-9]'),
+                          '',
+                        );
+                        final scope = ref.read(activeVenueScopeProvider);
+                        if (scope == null ||
+                            normalized.length < 9 ||
+                            (!kIsWeb &&
+                                defaultTargetPlatform !=
+                                    TargetPlatform.windows)) {
+                          if (voucherSuggestions.isNotEmpty) {
+                            setSheetState(() => voucherSuggestions = []);
+                          }
+                          return;
+                        }
+                        try {
+                          final matches = await ref
+                              .read(productionCommandRepositoryProvider)
+                              .suggestVoucherCodes(
+                                scope: scope,
+                                prefix: normalized,
+                              );
+                          if (sheetContext.mounted &&
+                              voucherCodeController.text == value) {
+                            setSheetState(() => voucherSuggestions = matches);
+                          }
+                        } catch (error, stackTrace) {
+                          AppLogger.error(
+                            'Suggest voucher codes',
+                            error,
+                            stackTrace,
+                          );
+                        }
+                      },
                     ),
+                    if (!kIsWeb &&
+                        (defaultTargetPlatform == TargetPlatform.android ||
+                            defaultTargetPlatform == TargetPlatform.iOS))
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton.icon(
+                          onPressed: saving
+                              ? null
+                              : () async {
+                                  final code = await _scanVoucherQr(
+                                    sheetContext,
+                                  );
+                                  if (code != null && sheetContext.mounted) {
+                                    voucherCodeController.text = code;
+                                    setSheetState(
+                                      () => voucherSuggestions = [],
+                                    );
+                                  }
+                                },
+                          icon: const Icon(Icons.qr_code_scanner_rounded),
+                          label: const Text('Scan QR'),
+                        ),
+                      ),
+                    if (voucherSuggestions.isNotEmpty)
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: [
+                          for (final code in voucherSuggestions)
+                            ActionChip(
+                              avatar: const Icon(
+                                Icons.card_giftcard_rounded,
+                                size: 18,
+                              ),
+                              label: Text(_displayVoucherCode(code)),
+                              onPressed: () => setSheetState(() {
+                                voucherCodeController.text = code;
+                                voucherSuggestions = [];
+                              }),
+                            ),
+                        ],
+                      ),
                   ],
                   const SizedBox(height: 12),
                   TextField(
@@ -2369,55 +2599,90 @@ Future<void> _showCheckoutSheet(
                                   (method == PaymentMethod.voucher &&
                                       voucherCodeController.text.trim().isEmpty)
                               ? null
-                              : () => setSheetState(() {
-                                  paymentEntries.add(
-                                    _CheckoutPaymentDraft(
-                                      method: method,
-                                      tenderedAmountMinor: tenderedMinor,
-                                      tenderedCurrencyCode:
-                                          tenderedCurrencyCode,
-                                      exchangeRateToBase: exchangeRateController
-                                          .text
-                                          .trim(),
-                                      baseAmountMinor: appliedBaseMinor,
-                                      cardPaymentApproved: cardApproved,
-                                      terminalLabel: terminalController.text
-                                          .trim(),
-                                      cashChangeBaseMinor: cashChangeBaseMinor,
-                                      exchangeRateSource:
-                                          officialRateQuote?.source,
-                                      exchangeRatePublishedDate:
-                                          officialRateQuote?.publishedDate,
-                                      exchangeRateFetchedAt:
-                                          officialRateQuote?.fetchedAt,
-                                      voucherCode:
-                                          method == PaymentMethod.voucher
-                                          ? voucherCodeController.text.trim()
-                                          : null,
-                                    ),
-                                  );
-                                  final nextRemaining =
-                                      order.totalMinor -
-                                      paymentEntries.fold<int>(
-                                        0,
-                                        (total, payment) =>
-                                            total + payment.baseAmountMinor,
-                                      );
-                                  method = PaymentMethod.cash;
-                                  tenderedCurrencyCode = baseCurrencyCode;
-                                  cardApproved = false;
-                                  exchangeRateController.text = '1';
-                                  officialRateQuote = null;
-                                  terminalController.clear();
-                                  voucherCodeController.clear();
-                                  tenderedAmountController.text =
-                                      nextRemaining <= 0
-                                      ? ''
-                                      : _moneyInputFromMinor(
-                                          nextRemaining,
-                                          currencyCode,
+                              : () async {
+                                  if (method == PaymentMethod.voucher) {
+                                    final code = voucherCodeController.text
+                                        .trim();
+                                    final confirmed = await showDialog<bool>(
+                                      context: sheetContext,
+                                      builder: (context) => AlertDialog(
+                                        title: const Text(
+                                          'Confirm gift voucher',
+                                        ),
+                                        content: Text(
+                                          'Apply ${_displayVoucherCode(code)} for ${formatMoney(appliedBaseMinor, currencyCode: currencyCode)}?',
+                                        ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.pop(context, false),
+                                            child: const Text('No'),
+                                          ),
+                                          FilledButton(
+                                            onPressed: () =>
+                                                Navigator.pop(context, true),
+                                            child: const Text(
+                                              'Yes, apply voucher',
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                    if (confirmed != true ||
+                                        !sheetContext.mounted) {
+                                      return;
+                                    }
+                                  }
+                                  setSheetState(() {
+                                    paymentEntries.add(
+                                      _CheckoutPaymentDraft(
+                                        method: method,
+                                        tenderedAmountMinor: tenderedMinor,
+                                        tenderedCurrencyCode:
+                                            tenderedCurrencyCode,
+                                        exchangeRateToBase:
+                                            exchangeRateController.text.trim(),
+                                        baseAmountMinor: appliedBaseMinor,
+                                        cardPaymentApproved: cardApproved,
+                                        terminalLabel: terminalController.text
+                                            .trim(),
+                                        cashChangeBaseMinor:
+                                            cashChangeBaseMinor,
+                                        exchangeRateSource:
+                                            officialRateQuote?.source,
+                                        exchangeRatePublishedDate:
+                                            officialRateQuote?.publishedDate,
+                                        exchangeRateFetchedAt:
+                                            officialRateQuote?.fetchedAt,
+                                        voucherCode:
+                                            method == PaymentMethod.voucher
+                                            ? voucherCodeController.text.trim()
+                                            : null,
+                                      ),
+                                    );
+                                    final nextRemaining =
+                                        order.totalMinor -
+                                        paymentEntries.fold<int>(
+                                          0,
+                                          (total, payment) =>
+                                              total + payment.baseAmountMinor,
                                         );
-                                }),
+                                    method = PaymentMethod.cash;
+                                    tenderedCurrencyCode = baseCurrencyCode;
+                                    cardApproved = false;
+                                    exchangeRateController.text = '1';
+                                    officialRateQuote = null;
+                                    terminalController.clear();
+                                    voucherCodeController.clear();
+                                    tenderedAmountController.text =
+                                        nextRemaining <= 0
+                                        ? ''
+                                        : _moneyInputFromMinor(
+                                            nextRemaining,
+                                            currencyCode,
+                                          );
+                                  });
+                                },
                           icon: const Icon(Icons.add_card_rounded),
                           label: const Text('Add payment'),
                         ),
@@ -2544,6 +2809,55 @@ class _CheckoutPaymentDraft {
     exchangeRatePublishedDate: exchangeRatePublishedDate,
     exchangeRateFetchedAt: exchangeRateFetchedAt,
     voucherCode: voucherCode,
+  );
+}
+
+String _displayVoucherCode(String raw) {
+  final value = raw.toUpperCase().replaceAll(RegExp('[^A-Z0-9]'), '');
+  if (value.length != 21 || !value.startsWith('TSV')) return raw.toUpperCase();
+  return 'TSV-${value.substring(3, 9)}-${value.substring(9, 15)}-${value.substring(15, 21)}';
+}
+
+Future<String?> _scanVoucherQr(BuildContext context) async {
+  var detected = false;
+  return showModalBottomSheet<String>(
+    context: context,
+    isScrollControlled: true,
+    builder: (sheetContext) => SafeArea(
+      child: SizedBox(
+        height: MediaQuery.sizeOf(sheetContext).height * 0.72,
+        child: Column(
+          children: [
+            ListTile(
+              title: const Text('Scan gift voucher'),
+              subtitle: const Text(
+                'Place the voucher QR code inside the camera view.',
+              ),
+              trailing: IconButton(
+                onPressed: () => Navigator.pop(sheetContext),
+                icon: const Icon(Icons.close_rounded),
+              ),
+            ),
+            Expanded(
+              child: MobileScanner(
+                onDetect: (capture) {
+                  if (detected) return;
+                  final value = capture.barcodes
+                      .map((barcode) => barcode.rawValue?.trim())
+                      .whereType<String>()
+                      .firstOrNull;
+                  if (value == null || !value.toUpperCase().startsWith('TSV')) {
+                    return;
+                  }
+                  detected = true;
+                  Navigator.pop(sheetContext, value);
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
   );
 }
 

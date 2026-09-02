@@ -36,6 +36,7 @@ dependencies:
   # Bundled alert tones provide the same kitchen-order audio on Android,
   # Windows and web. SystemSound is not implemented consistently by Android.
   audioplayers: ^6.5.1
+  mobile_scanner: ^7.4.0
 
 dev_dependencies:
   flutter_test:

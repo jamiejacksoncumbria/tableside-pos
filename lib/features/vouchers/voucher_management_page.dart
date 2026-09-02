@@ -252,24 +252,39 @@ class VoucherManagementPage extends ConsumerWidget {
     amount.dispose();
     reason.dispose();
     if (result != null && pageContext.mounted) {
+      // Let the creation dialog finish its route/layout transition before
+      // presenting the QR. Showing two dialogs in the same frame can leave
+      // the incoming AlertDialog without a laid-out render box on desktop.
+      await Future<void>.delayed(const Duration(milliseconds: 220));
+      if (!pageContext.mounted) return;
       await showDialog<void>(
         context: pageContext,
         builder: (context) => AlertDialog(
           title: const Text('Voucher created'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              QrImageView(data: result.code, size: 220),
-              SelectableText(
-                result.code,
-                style: Theme.of(context).textTheme.titleMedium,
+          content: SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 360),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox.square(
+                    dimension: 220,
+                    child: QrImageView(data: result.code),
+                  ),
+                  SelectableText(
+                    result.code,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    formatMoney(result.amountMinor, currencyCode: currencyCode),
+                  ),
+                  const Text(
+                    'This QR was also queued to the venue receipt printer when one was available. Only the final six characters are shown later.',
+                  ),
+                ],
               ),
-              const SizedBox(height: 8),
-              Text(formatMoney(result.amountMinor, currencyCode: currencyCode)),
-              const Text(
-                'Save or print this code now. Only the final six characters are shown later.',
-              ),
-            ],
+            ),
           ),
           actions: [
             FilledButton(

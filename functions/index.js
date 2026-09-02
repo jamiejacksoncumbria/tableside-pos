@@ -3959,6 +3959,24 @@ async function manageVoucherFor(caller, rawData) {
   const venueId = requiredText(data, "venueId", 128);
   const operation = requiredText(data, "operation", 40);
   const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  if (operation === "suggest") {
+    const prefix = normalizedVoucherCode(requiredText(data, "prefix", 80));
+    // Require the TSV prefix plus the first six random characters. This makes
+    // suggestions useful without exposing an enumerable list of active value.
+    if (prefix.length < 9) return {codes: []};
+    const candidates = await tenantRef.collection("vouchers")
+      .where("codeSearch", ">=", prefix)
+      .where("codeSearch", "<=", `${prefix}\uf8ff`)
+      .limit(8)
+      .get();
+    const now = Date.now();
+    return {codes: candidates.docs
+      .filter((doc) => doc.data().status === "active" &&
+        (doc.data().expiresAt?.toDate?.()?.getTime?.() ?? now) >= now)
+      .map((doc) => doc.data().codeSearch)
+      .filter((code) => typeof code === "string")};
+  }
   if (!roles.some((role) => role === "owner" || role === "manager")) {
     throw new HttpsError("permission-denied", "Only a manager or owner can issue vouchers.");
   }
@@ -3979,7 +3997,6 @@ async function manageVoucherFor(caller, rawData) {
   if (expiresAtMillis != null && (!Number.isSafeInteger(expiresAtMillis) || expiresAtMillis <= Date.now())) {
     throw new HttpsError("invalid-argument", "The voucher expiry date must be in the future.");
   }
-  const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
   const code = newVoucherCode();
   const voucherRef = tenantRef.collection("vouchers").doc(voucherDocumentId(code));
@@ -4005,6 +4022,7 @@ async function manageVoucherFor(caller, rawData) {
     transaction.create(voucherRef, {
       venueId, originalValueMinor: amountMinor, remainingValueMinor: amountMinor,
       currencyCode, status: "active", codeSuffix: normalizedVoucherCode(code).slice(-6),
+      codeSearch: normalizedVoucherCode(code),
       expiresAt: expiresAtMillis == null ? null : new Date(expiresAtMillis),
       chargeable, issueReason, createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
     });

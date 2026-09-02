@@ -29,6 +29,8 @@ class MenuManagementPage extends ConsumerStatefulWidget {
 class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
   final _searchController = TextEditingController();
   String _searchQuery = '';
+  String? _productCategoryFilter;
+  String? _productSubcategoryFilter;
   bool _savingDefaultTaxRate = false;
 
   @override
@@ -86,12 +88,29 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
         '${section.name} ${parentName ?? ''}',
       );
     }).toList();
+    final filterSubcategories = sections
+        .where((section) => section.parentSectionId == _productCategoryFilter)
+        .toList(growable: false);
     final filteredProducts = products.where((product) {
       final sectionNames = sections
           .where((section) => product.sectionIds.contains(section.id))
           .map((section) => section.name)
           .join(' ');
-      return _matchesMenuSearch(_searchQuery, '${product.name} $sectionNames');
+      if (_searchQuery.trim().isNotEmpty) {
+        return _matchesMenuSearch(
+          _searchQuery,
+          '${product.name} $sectionNames',
+        );
+      }
+      if (_productSubcategoryFilter != null) {
+        return product.sectionIds.contains(_productSubcategoryFilter);
+      }
+      if (_productCategoryFilter == null) return true;
+      final included = <String>{
+        _productCategoryFilter!,
+        ...filterSubcategories.map((section) => section.id),
+      };
+      return product.sectionIds.any(included.contains);
     }).toList();
     final isSearching = _searchQuery.trim().isNotEmpty;
 
@@ -371,6 +390,74 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
         const SizedBox(height: 24),
         Text('Products', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 8),
+        if (!isSearching) ...[
+          Wrap(
+            spacing: 12,
+            runSpacing: 10,
+            children: [
+              SizedBox(
+                width: 280,
+                child: DropdownButtonFormField<String>(
+                  initialValue: _productCategoryFilter,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    labelText: 'Filter products by category',
+                  ),
+                  items: [
+                    const DropdownMenuItem(
+                      value: '',
+                      child: Text('All categories'),
+                    ),
+                    for (final section in sections.where(
+                      (item) => item.parentSectionId == null,
+                    ))
+                      DropdownMenuItem(
+                        value: section.id,
+                        child: Text(section.name),
+                      ),
+                  ],
+                  onChanged: (value) => setState(() {
+                    _productCategoryFilter = value == null || value.isEmpty
+                        ? null
+                        : value;
+                    _productSubcategoryFilter = null;
+                  }),
+                ),
+              ),
+              if (filterSubcategories.isNotEmpty)
+                SizedBox(
+                  width: 280,
+                  child: DropdownButtonFormField<String>(
+                    initialValue: _productSubcategoryFilter,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      labelText: 'Filter by subcategory',
+                    ),
+                    items: [
+                      const DropdownMenuItem(
+                        value: '',
+                        child: Text('All subcategories'),
+                      ),
+                      for (final section in filterSubcategories)
+                        DropdownMenuItem(
+                          value: section.id,
+                          child: Text(section.name),
+                        ),
+                    ],
+                    onChanged: (value) => setState(() {
+                      _productSubcategoryFilter = value == null || value.isEmpty
+                          ? null
+                          : value;
+                    }),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+        ] else
+          const Text('The main search is overriding category filters.'),
         if (products.isEmpty)
           const _SetupHint(
             icon: Icons.restaurant_menu_outlined,

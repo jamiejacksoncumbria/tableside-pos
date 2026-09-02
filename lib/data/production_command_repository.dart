@@ -207,6 +207,21 @@ final productionCommandRepositoryProvider =
 /// Cloud Function verifies the signed-in membership, loads the canonical menu
 /// product, creates production tickets, and records stock movement atomically.
 class ProductionCommandRepository {
+  Future<List<String>> suggestVoucherCodes({
+    required VenueScope scope,
+    required String prefix,
+  }) async {
+    final response = await _call('manageVoucher', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'operation': 'suggest',
+      'prefix': prefix,
+    });
+    return (response['codes'] as List? ?? const []).whereType<String>().toList(
+      growable: false,
+    );
+  }
+
   Future<IssuedVoucher> issueVoucher({
     required VenueScope scope,
     required int amountMinor,
