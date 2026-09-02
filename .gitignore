@@ -32,6 +32,9 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+.firebase/
+.gradle/
+/dist/
 .firebase-cli-config/
 functions/node_modules/
 functions/.env
