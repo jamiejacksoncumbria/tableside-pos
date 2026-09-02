@@ -1,6 +1,4 @@
-import {
-  createHash, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual,
-} from "node:crypto";
+import {createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual} from "node:crypto";
 import {getApps, initializeApp} from "firebase-admin/app";
 import {getAppCheck} from "firebase-admin/app-check";
 import {getAuth} from "firebase-admin/auth";
@@ -1601,24 +1599,32 @@ async function unlockStaffPinFor(caller, rawData) {
   return {unlocked: true};
 }
 
-async function requestOwnStaffPinRecoveryFor(caller, rawData) {
+async function recoverOwnStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
+  const newPin = requiredSixDigitPin({pin: data.newPin});
+  const authTime = Number(caller.token.auth_time);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(authTime) || authTime > nowSeconds || nowSeconds - authTime > 5 * 60) {
+    throw new HttpsError(
+      "unauthenticated",
+      "Re-enter your Firebase account password before resetting your staff PIN.",
+    );
+  }
   const {roles} = await requireTenantOperationalMember(caller, tenantId);
   if (!roles.some((role) => role === "owner" || role === "manager")) {
     throw new HttpsError(
       "permission-denied",
-      "Only a manager or owner can recover their own blocked PIN by email.",
+      "Only a manager or owner can recover their own blocked PIN.",
     );
   }
   const pinRef = db.doc(
     `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`,
   );
-  const [venue, pin, user] = await Promise.all([
+  const [venue, pin] = await Promise.all([
     db.doc(`tenants/${tenantId}/venues/${venueId}`).get(),
     pinRef.get(),
-    auth.getUser(caller.uid),
   ]);
   if (!venue.exists || venue.data().status === "deleting") {
     throw new HttpsError("failed-precondition", "The selected venue is not active.");
@@ -1626,132 +1632,25 @@ async function requestOwnStaffPinRecoveryFor(caller, rawData) {
   if (!pin.exists || pin.data().venueId !== venueId || pin.data().locked !== true) {
     throw new HttpsError("failed-precondition", "This staff PIN is not currently blocked.");
   }
-  const email = user.email?.trim().toLowerCase();
-  if (!email) {
-    throw new HttpsError(
-      "failed-precondition",
-      "This account has no recovery email address.",
-    );
-  }
-  const lastRequestedAt = pin.data().recoveryRequestedAt?.toDate?.();
-  if (lastRequestedAt instanceof Date && Date.now() - lastRequestedAt.getTime() < 60_000) {
-    throw new HttpsError(
-      "resource-exhausted",
-      "Wait one minute before requesting another recovery code.",
-    );
-  }
-  const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
   const salt = randomBytes(16).toString("base64");
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-  const mailRef = db.collection("mail").doc();
-  const recoveryBatch = db.batch();
-  recoveryBatch.update(pinRef, {
-    recoveryCodeHash: hashStaffPin(code, salt),
-    recoveryCodeSalt: salt,
-    recoveryCodeExpiresAt: expiresAt,
-    recoveryFailedAttempts: 0,
-    recoveryRequestedAt: FieldValue.serverTimestamp(),
-    recoveryRequestedBy: caller.uid,
+  await pinRef.update({
+    pinHash: hashStaffPin(newPin, salt),
+    salt,
+    pinVersion: FieldValue.increment(1),
+    locked: false,
+    failedAttempts: 0,
+    recoveredAt: FieldValue.serverTimestamp(),
+    recoveredBy: caller.uid,
+    recoveryCodeHash: FieldValue.delete(),
+    recoveryCodeSalt: FieldValue.delete(),
+    recoveryCodeExpiresAt: FieldValue.delete(),
+    recoveryFailedAttempts: FieldValue.delete(),
+    recoveryRequestedAt: FieldValue.delete(),
+    recoveryRequestedBy: FieldValue.delete(),
+    recoveryLastFailedAt: FieldValue.delete(),
   });
-  recoveryBatch.create(mailRef, {
-    to: [email],
-    message: {
-      subject: "TableSide PIN recovery code",
-      text: `Your TableSide PIN recovery code is ${code}. ` +
-        "It expires in 10 minutes. If you did not request this, do not share the code.",
-    },
-    metadata: {
-      kind: "tablesideStaffPinRecovery",
-      tenantId,
-      venueId,
-      userId: caller.uid,
-    },
-    createdAt: FieldValue.serverTimestamp(),
-  });
-  await recoveryBatch.commit();
-  await writeAudit(caller.uid, "requestOwnStaffPinRecovery", caller.uid, {
-    tenantId, venueId,
-  });
-  return {sent: true, expiresAt: expiresAt.toISOString()};
-}
-
-async function confirmOwnStaffPinRecoveryFor(caller, rawData) {
-  const data = requireObject(rawData);
-  const tenantId = requiredText(data, "tenantId", 128);
-  const venueId = requiredText(data, "venueId", 128);
-  const recoveryCode = requiredText(data, "recoveryCode", 6);
-  const newPin = requiredSixDigitPin({pin: data.newPin});
-  if (!/^\d{6}$/.test(recoveryCode)) {
-    throw new HttpsError("invalid-argument", "Recovery code must contain six digits.");
-  }
-  const {roles} = await requireTenantOperationalMember(caller, tenantId);
-  if (!roles.some((role) => role === "owner" || role === "manager")) {
-    throw new HttpsError("permission-denied", "This account cannot recover a manager PIN.");
-  }
-  const pinRef = db.doc(
-    `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`,
-  );
-  const result = await db.runTransaction(async (transaction) => {
-    const pin = await transaction.get(pinRef);
-    if (!pin.exists || pin.data().venueId !== venueId || pin.data().locked !== true) {
-      throw new HttpsError("failed-precondition", "This staff PIN is not currently blocked.");
-    }
-    const values = pin.data();
-    const expiresAt = values.recoveryCodeExpiresAt?.toDate?.();
-    if (!(expiresAt instanceof Date) || expiresAt.getTime() <= Date.now()) {
-      throw new HttpsError("deadline-exceeded", "The recovery code has expired.");
-    }
-    const attempts = Number.isInteger(values.recoveryFailedAttempts)
-      ? values.recoveryFailedAttempts
-      : 0;
-    if (attempts >= 5) {
-      throw new HttpsError(
-        "resource-exhausted",
-        "Too many recovery attempts. Request a new code.",
-      );
-    }
-    const expected = Buffer.from(values.recoveryCodeHash || "", "base64");
-    const supplied = Buffer.from(
-      hashStaffPin(recoveryCode, values.recoveryCodeSalt || ""),
-      "base64",
-    );
-    const valid = expected.length === supplied.length && timingSafeEqual(expected, supplied);
-    if (!valid) {
-      transaction.update(pinRef, {
-        recoveryFailedAttempts: attempts + 1,
-        recoveryLastFailedAt: FieldValue.serverTimestamp(),
-      });
-      return {valid: false, attempts: attempts + 1};
-    }
-    const salt = randomBytes(16).toString("base64");
-    transaction.update(pinRef, {
-      pinHash: hashStaffPin(newPin, salt),
-      salt,
-      pinVersion: FieldValue.increment(1),
-      locked: false,
-      failedAttempts: 0,
-      recoveredAt: FieldValue.serverTimestamp(),
-      recoveredBy: caller.uid,
-      recoveryCodeHash: FieldValue.delete(),
-      recoveryCodeSalt: FieldValue.delete(),
-      recoveryCodeExpiresAt: FieldValue.delete(),
-      recoveryFailedAttempts: FieldValue.delete(),
-      recoveryRequestedAt: FieldValue.delete(),
-      recoveryRequestedBy: FieldValue.delete(),
-      recoveryLastFailedAt: FieldValue.delete(),
-    });
-    return {valid: true};
-  });
-  if (!result.valid) {
-    throw new HttpsError(
-      result.attempts >= 5 ? "resource-exhausted" : "permission-denied",
-      result.attempts >= 5
-        ? "Too many recovery attempts. Request a new code."
-        : `Incorrect recovery code. ${5 - result.attempts} attempt(s) remain.`,
-    );
-  }
-  await writeAudit(caller.uid, "confirmOwnStaffPinRecovery", caller.uid, {
-    tenantId, venueId,
+  await writeAudit(caller.uid, "recoverOwnStaffPin", caller.uid, {
+    tenantId, venueId, authentication: "recentFirebaseSignIn",
   });
   return {recovered: true};
 }
@@ -6179,7 +6078,7 @@ async function invokePlatformAction(action, caller, data) {
 async function invokePosAction(action, caller, data) {
   const sessionBootstrapActions = new Set([
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
-    "requestOwnStaffPinRecovery", "confirmOwnStaffPinRecovery",
+    "recoverOwnStaffPin",
     "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
   ]);
   const actingCaller = sessionBootstrapActions.has(action)
@@ -6206,10 +6105,8 @@ async function invokePosAction(action, caller, data) {
       return completeDevicePrintJobFor(caller, data);
     case "unlockStaffPin":
       return unlockStaffPinFor(actingCaller, data);
-    case "requestOwnStaffPinRecovery":
-      return requestOwnStaffPinRecoveryFor(caller, data);
-    case "confirmOwnStaffPinRecovery":
-      return confirmOwnStaffPinRecoveryFor(caller, data);
+    case "recoverOwnStaffPin":
+      return recoverOwnStaffPinFor(caller, data);
     case "openNamedTab":
       return openNamedTabFor(actingCaller, data);
     case "addOrderDraftLine":

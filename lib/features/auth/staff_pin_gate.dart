@@ -316,31 +316,31 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   }
 
   Future<void> _recoverOwnPin(VenuePinStaff staff) async {
-    if (FirebaseAuth.instance.currentUser?.uid != staff.userId) {
+    final user = FirebaseAuth.instance.currentUser;
+    final email = user?.email;
+    if (user == null || user.uid != staff.userId || email == null) {
       setState(() {
         _error =
             'Sign out of this device account and sign in with your own email before recovering your PIN.';
       });
       return;
     }
+    final password = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _PasswordReauthenticationDialog(email: email),
+    );
+    if (password == null || !mounted) return;
     setState(() {
       _submitting = true;
       _error = null;
     });
     try {
-      await _repository.requestOwnStaffPinRecovery(scope: widget.scope);
-      if (!mounted) return;
-      final code = await showDialog<String>(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => const _PinPadDialog(
-          title: Text('Enter email recovery code'),
-          message:
-              'Enter the six-digit code sent to your Firebase sign-in email. It expires after 10 minutes.',
-          confirmLabel: 'Continue',
-        ),
+      await user.reauthenticateWithCredential(
+        EmailAuthProvider.credential(email: email, password: password),
       );
-      if (code == null || !mounted) return;
+      await user.getIdToken(true);
+      if (!mounted) return;
       final newPin = await showDialog<String>(
         context: context,
         barrierDismissible: false,
@@ -365,11 +365,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         setState(() => _error = 'The two new PIN entries did not match.');
         return;
       }
-      await _repository.confirmOwnStaffPinRecovery(
-        scope: widget.scope,
-        recoveryCode: code,
-        newPin: newPin,
-      );
+      await _repository.recoverOwnStaffPin(scope: widget.scope, newPin: newPin);
       await _loadStaff();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -497,7 +493,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
                               if (selected?.userId == currentUserId) ...[
                                 const SizedBox(height: 8),
                                 const Text(
-                                  'Because you are signed in with this staff member’s email account, you can securely reset the PIN by email.',
+                                  'Verify this staff member’s Firebase account password, then choose a new PIN. No email extension is required.',
                                 ),
                                 const SizedBox(height: 12),
                                 FilledButton.icon(
@@ -505,12 +501,12 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
                                       ? null
                                       : () => _recoverOwnPin(selected!),
                                   icon: const Icon(
-                                    Icons.mark_email_read_outlined,
+                                    Icons.verified_user_outlined,
                                   ),
                                   label: Text(
                                     _submitting
-                                        ? 'Sending code…'
-                                        : 'Reset PIN by email',
+                                        ? 'Resetting PIN…'
+                                        : 'Verify account and reset PIN',
                                   ),
                                 ),
                               ] else ...[
@@ -635,6 +631,84 @@ class _StaffTile extends StatelessWidget {
       ),
     );
   }
+}
+
+class _PasswordReauthenticationDialog extends StatefulWidget {
+  const _PasswordReauthenticationDialog({required this.email});
+
+  final String email;
+
+  @override
+  State<_PasswordReauthenticationDialog> createState() =>
+      _PasswordReauthenticationDialogState();
+}
+
+class _PasswordReauthenticationDialogState
+    extends State<_PasswordReauthenticationDialog> {
+  final TextEditingController _passwordController = TextEditingController();
+  bool _obscurePassword = true;
+
+  @override
+  void dispose() {
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final password = _passwordController.text;
+    if (password.isNotEmpty) Navigator.of(context).pop(password);
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Verify your Firebase account'),
+    content: SizedBox(
+      width: 420,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Enter the password for ${widget.email}. It is sent directly to Firebase Authentication and is never stored by TableSide.',
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _passwordController,
+            autofocus: true,
+            obscureText: _obscurePassword,
+            autofillHints: const [AutofillHints.password],
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => _submit(),
+            decoration: InputDecoration(
+              labelText: 'Firebase account password',
+              border: const OutlineInputBorder(),
+              suffixIcon: IconButton(
+                tooltip: _obscurePassword ? 'Show password' : 'Hide password',
+                onPressed: () =>
+                    setState(() => _obscurePassword = !_obscurePassword),
+                icon: Icon(
+                  _obscurePassword
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'Forgot the password? Cancel, sign out, and use Forgot password on the email sign-in screen.',
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.of(context).pop(),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(onPressed: _submit, child: const Text('Verify')),
+    ],
+  );
 }
 
 class _PinPadDialog extends StatefulWidget {
