@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
@@ -21,12 +22,52 @@ class PosPage extends ConsumerStatefulWidget {
   ConsumerState<PosPage> createState() => _PosPageState();
 }
 
-class _PosPageState extends ConsumerState<PosPage> {
+class _PosPageState extends ConsumerState<PosPage>
+    with SingleTickerProviderStateMixin {
   bool _tablesExpanded = false;
+  late final TabController _compactTabController;
+
+  @override
+  void initState() {
+    super.initState();
+    _compactTabController = TabController(
+      length: 3,
+      vsync: this,
+      initialIndex: ref.read(posCompactTabProvider),
+    )..addListener(_compactTabChanged);
+  }
+
+  void _compactTabChanged() {
+    if (_compactTabController.indexIsChanging ||
+        _compactTabController.animation?.value !=
+            _compactTabController.index.toDouble()) {
+      return;
+    }
+    final index = _compactTabController.index;
+    if (ref.read(posCompactTabProvider) != index) {
+      ref.read(posCompactTabProvider.notifier).select(index);
+    }
+  }
+
+  @override
+  void dispose() {
+    _compactTabController
+      ..removeListener(_compactTabChanged)
+      ..dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final compactTab = ref.watch(posCompactTabProvider);
+    if (_compactTabController.index != compactTab &&
+        !_compactTabController.indexIsChanging) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _compactTabController.index != compactTab) {
+          _compactTabController.animateTo(compactTab);
+        }
+      });
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         // Three simultaneously visible panels need both a genuinely wide and
@@ -75,42 +116,36 @@ class _PosPageState extends ConsumerState<PosPage> {
         // primary waiter action; tables and the live order stay one tap away.
         return Padding(
           padding: const EdgeInsets.all(12),
-          child: DefaultTabController(
-            key: ValueKey(compactTab),
-            length: 3,
-            initialIndex: compactTab,
-            child: Column(
-              children: [
-                TabBar(
-                  onTap: (index) =>
-                      ref.read(posCompactTabProvider.notifier).select(index),
-                  tabs: [
-                    Tab(
-                      icon: Icon(Icons.table_restaurant_rounded),
-                      text: 'Tables',
+          child: Column(
+            children: [
+              TabBar(
+                controller: _compactTabController,
+                onTap: (index) =>
+                    ref.read(posCompactTabProvider.notifier).select(index),
+                tabs: [
+                  Tab(
+                    icon: Icon(Icons.table_restaurant_rounded),
+                    text: 'Tables',
+                  ),
+                  Tab(icon: Icon(Icons.restaurant_menu_rounded), text: 'Menu'),
+                  Tab(icon: Icon(Icons.receipt_long_rounded), text: 'Order'),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: TabBarView(
+                  controller: _compactTabController,
+                  children: [
+                    _TablesPanel(
+                      currencyCode: widget.currencyCode,
+                      compact: true,
                     ),
-                    Tab(
-                      icon: Icon(Icons.restaurant_menu_rounded),
-                      text: 'Menu',
-                    ),
-                    Tab(icon: Icon(Icons.receipt_long_rounded), text: 'Order'),
+                    _MenuPanel(currencyCode: widget.currencyCode),
+                    _OrderPanel(currencyCode: widget.currencyCode),
                   ],
                 ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: TabBarView(
-                    children: [
-                      _TablesPanel(
-                        currencyCode: widget.currencyCode,
-                        compact: true,
-                      ),
-                      _MenuPanel(currencyCode: widget.currencyCode),
-                      _OrderPanel(currencyCode: widget.currencyCode),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
         );
       },
@@ -587,6 +622,8 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
   final ScrollController _productScrollController = ScrollController();
   final ScrollController _sectionScrollController = ScrollController();
   final ScrollController _subsectionScrollController = ScrollController();
+  bool _menuControlsCollapsed = false;
+  bool _compactLayout = false;
 
   String get currencyCode => widget.currencyCode;
 
@@ -594,6 +631,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
   void initState() {
     super.initState();
     _searchController.addListener(_searchChanged);
+    _productScrollController.addListener(_productScrollChanged);
   }
 
   @override
@@ -608,9 +646,25 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
   }
 
   void _searchChanged() {
-    setState(() {});
+    setState(() => _menuControlsCollapsed = false);
     if (_productScrollController.hasClients) {
       _productScrollController.jumpTo(0);
+    }
+  }
+
+  void _productScrollChanged() {
+    if (!_compactLayout || !_productScrollController.hasClients) return;
+    final position = _productScrollController.position;
+    final shouldCollapse =
+        position.pixels > 28 &&
+        position.userScrollDirection == ScrollDirection.reverse;
+    final shouldExpand =
+        position.pixels <= 8 ||
+        position.userScrollDirection == ScrollDirection.forward;
+    if (shouldCollapse && !_menuControlsCollapsed) {
+      setState(() => _menuControlsCollapsed = true);
+    } else if (shouldExpand && _menuControlsCollapsed) {
+      setState(() => _menuControlsCollapsed = false);
     }
   }
 
@@ -678,6 +732,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
 
   @override
   Widget build(BuildContext context) {
+    _compactLayout = MediaQuery.sizeOf(context).width < 700;
     final selectedSection = ref.watch(activeSectionProvider);
     final selectedSubsection = ref.watch(activeSubsectionProvider);
     final activeOrder = ref.watch(activeOrderProvider);
@@ -797,126 +852,147 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Flexible(
-                  child: Text(
-                    'New order',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  flex: 2,
-                  child: TextField(
-                    controller: _searchController,
-                    textInputAction: TextInputAction.search,
-                    decoration: InputDecoration(
-                      isDense: true,
-                      labelText: 'Quick product search',
-                      hintText: 'Type the start of a product name',
-                      prefixIcon: const Icon(Icons.search_rounded),
-                      suffixIcon: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: 'Open touch keyboard',
-                            onPressed: _showSearchTouchKeyboard,
-                            icon: const Icon(Icons.keyboard_alt_outlined),
-                          ),
-                          if (searchQuery.isNotEmpty)
-                            IconButton(
-                              tooltip: 'Clear search',
-                              onPressed: _searchController.clear,
-                              icon: const Icon(Icons.close_rounded),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOut,
+              child: _compactLayout && _menuControlsCollapsed
+                  ? const SizedBox.shrink()
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                'New order',
+                                style: Theme.of(context).textTheme.titleLarge,
+                              ),
                             ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            _HorizontalMenuScroller(
-              controller: _sectionScrollController,
-              child: Row(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: ChoiceChip(
-                      label: const Text('All'),
-                      selected: effectiveSection == null,
-                      onSelected: (_) {
-                        ref.read(activeSectionProvider.notifier).select(null);
-                        ref
-                            .read(activeSubsectionProvider.notifier)
-                            .select(null);
-                      },
-                    ),
-                  ),
-                  for (final item in topLevelSections)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ChoiceChip(
-                        label: Text('${item.icon} ${item.name}'),
-                        selected: item.id == effectiveSection,
-                        onSelected: (_) {
-                          ref
-                              .read(activeSectionProvider.notifier)
-                              .select(item.id);
-                          ref
-                              .read(activeSubsectionProvider.notifier)
-                              .select(null);
-                        },
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            if (subsections.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              _HorizontalMenuScroller(
-                controller: _subsectionScrollController,
-                child: Row(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: FilterChip(
-                        label: Text('All ${section?.name ?? ''}'),
-                        selected: effectiveSubsection == null,
-                        onSelected: (_) => ref
-                            .read(activeSubsectionProvider.notifier)
-                            .select(null),
-                      ),
-                    ),
-                    for (final item in subsections)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: FilterChip(
-                          label: Text('${item.icon} ${item.name}'),
-                          selected: item.id == effectiveSubsection,
-                          onSelected: (_) => ref
-                              .read(activeSubsectionProvider.notifier)
-                              .select(item.id),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              flex: 2,
+                              child: TextField(
+                                controller: _searchController,
+                                textInputAction: TextInputAction.search,
+                                decoration: InputDecoration(
+                                  isDense: true,
+                                  labelText: 'Quick product search',
+                                  hintText: 'Type the start of a product name',
+                                  prefixIcon: const Icon(Icons.search_rounded),
+                                  suffixIcon: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        tooltip: 'Open touch keyboard',
+                                        onPressed: _showSearchTouchKeyboard,
+                                        icon: const Icon(
+                                          Icons.keyboard_alt_outlined,
+                                        ),
+                                      ),
+                                      if (searchQuery.isNotEmpty)
+                                        IconButton(
+                                          tooltip: 'Clear search',
+                                          onPressed: _searchController.clear,
+                                          icon: const Icon(Icons.close_rounded),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-            const SizedBox(height: 14),
-            Text(
-              searchQuery.isNotEmpty
-                  ? 'Search results for “${_searchController.text.trim()}”'
-                  : effectiveSubsection == null
-                  ? section?.name ?? 'All menu items'
-                  : subsections
-                        .firstWhere((item) => item.id == effectiveSubsection)
-                        .name,
-              style: Theme.of(context).textTheme.titleMedium,
+                        const SizedBox(height: 14),
+                        _HorizontalMenuScroller(
+                          controller: _sectionScrollController,
+                          child: Row(
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: ChoiceChip(
+                                  label: const Text('All'),
+                                  selected: effectiveSection == null,
+                                  onSelected: (_) {
+                                    ref
+                                        .read(activeSectionProvider.notifier)
+                                        .select(null);
+                                    ref
+                                        .read(activeSubsectionProvider.notifier)
+                                        .select(null);
+                                  },
+                                ),
+                              ),
+                              for (final item in topLevelSections)
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: ChoiceChip(
+                                    label: Text('${item.icon} ${item.name}'),
+                                    selected: item.id == effectiveSection,
+                                    onSelected: (_) {
+                                      ref
+                                          .read(activeSectionProvider.notifier)
+                                          .select(item.id);
+                                      ref
+                                          .read(
+                                            activeSubsectionProvider.notifier,
+                                          )
+                                          .select(null);
+                                    },
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                        if (subsections.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          _HorizontalMenuScroller(
+                            controller: _subsectionScrollController,
+                            child: Row(
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: FilterChip(
+                                    label: Text('All ${section?.name ?? ''}'),
+                                    selected: effectiveSubsection == null,
+                                    onSelected: (_) => ref
+                                        .read(activeSubsectionProvider.notifier)
+                                        .select(null),
+                                  ),
+                                ),
+                                for (final item in subsections)
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 8),
+                                    child: FilterChip(
+                                      label: Text('${item.icon} ${item.name}'),
+                                      selected: item.id == effectiveSubsection,
+                                      onSelected: (_) => ref
+                                          .read(
+                                            activeSubsectionProvider.notifier,
+                                          )
+                                          .select(item.id),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 14),
+                        Text(
+                          searchQuery.isNotEmpty
+                              ? 'Search results for “${_searchController.text.trim()}”'
+                              : effectiveSubsection == null
+                              ? section?.name ?? 'All menu items'
+                              : subsections
+                                    .firstWhere(
+                                      (item) => item.id == effectiveSubsection,
+                                    )
+                                    .name,
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 10),
+                      ],
+                    ),
             ),
-            const SizedBox(height: 10),
             Expanded(
               child: loading
                   ? const Center(child: CircularProgressIndicator())

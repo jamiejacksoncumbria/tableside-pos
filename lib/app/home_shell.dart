@@ -87,9 +87,12 @@ class HomeShell extends ConsumerWidget {
             (protectedVenueSection && !canManageVenue)
         ? HomeSection.pos
         : section;
+    final compactPosTab = ref.watch(posCompactTabProvider);
     final TenantProfile profile =
         profileOverride ?? ref.watch(tenantProfileProvider);
     final wide = MediaQuery.sizeOf(context).width >= 840;
+    final immersiveCompactPosMenu =
+        !wide && visibleSection == HomeSection.pos && compactPosTab == 1;
     final destinations = [
       const _Destination(HomeSection.pos, Icons.point_of_sale_rounded, 'POS'),
       const _Destination(
@@ -141,121 +144,125 @@ class HomeShell extends ConsumerWidget {
     );
 
     return Scaffold(
-      appBar: AppBar(
-        titleSpacing: wide ? 20 : 12,
-        title: Row(
-          children: [
-            CircleAvatar(
-              radius: 16,
-              foregroundImage: profile.logoUrl == null
-                  ? null
-                  : NetworkImage(profile.logoUrl!),
-              child: profile.logoUrl == null
-                  ? const Icon(Icons.storefront_rounded, size: 18)
-                  : null,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+      appBar: immersiveCompactPosMenu
+          ? null
+          : AppBar(
+              titleSpacing: wide ? 20 : 12,
+              title: Row(
                 children: [
-                  Text(
-                    profile.displayName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium,
+                  CircleAvatar(
+                    radius: 16,
+                    foregroundImage: profile.logoUrl == null
+                        ? null
+                        : NetworkImage(profile.logoUrl!),
+                    child: profile.logoUrl == null
+                        ? const Icon(Icons.storefront_rounded, size: 18)
+                        : null,
                   ),
-                  Text(
-                    venueOverride?.name ?? 'Market Street',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          profile.displayName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        Text(
+                          venueOverride?.name ?? 'Market Street',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
-            ),
-          ],
-        ),
-        actions: [
-          if (onSwitchVenue != null)
-            wide
-                ? TextButton.icon(
-                    onPressed: onSwitchVenue,
-                    icon: const Icon(Icons.storefront_rounded),
-                    label: const Text('Switch venue'),
-                  )
-                : IconButton(
-                    tooltip: 'Switch venue',
-                    onPressed: onSwitchVenue,
-                    icon: const Icon(Icons.storefront_rounded),
+              actions: [
+                if (onSwitchVenue != null)
+                  wide
+                      ? TextButton.icon(
+                          onPressed: onSwitchVenue,
+                          icon: const Icon(Icons.storefront_rounded),
+                          label: const Text('Switch venue'),
+                        )
+                      : IconButton(
+                          tooltip: 'Switch venue',
+                          onPressed: onSwitchVenue,
+                          icon: const Icon(Icons.storefront_rounded),
+                        ),
+                if (staffSession != null)
+                  wide
+                      ? TextButton.icon(
+                          onPressed: () => ref
+                              .read(activeStaffPinSessionProvider.notifier)
+                              .lock(),
+                          icon: const Icon(Icons.switch_account_rounded),
+                          label: Text(staffSession.displayName),
+                        )
+                      : IconButton(
+                          tooltip: 'Switch staff: ${staffSession.displayName}',
+                          onPressed: () => ref
+                              .read(activeStaffPinSessionProvider.notifier)
+                              .lock(),
+                          icon: const Icon(Icons.switch_account_rounded),
+                        ),
+                if (staffSession != null &&
+                    ref.watch(activeVenueScopeProvider) != null)
+                  IconButton(
+                    tooltip: 'My appearance',
+                    onPressed: () => _changeOwnAppearance(
+                      context: context,
+                      ref: ref,
+                      scope: ref.read(activeVenueScopeProvider)!,
+                    ),
+                    icon: const Icon(Icons.brightness_6_outlined),
                   ),
-          if (staffSession != null)
-            wide
-                ? TextButton.icon(
-                    onPressed: () =>
-                        ref.read(activeStaffPinSessionProvider.notifier).lock(),
-                    icon: const Icon(Icons.switch_account_rounded),
-                    label: Text(staffSession.displayName),
-                  )
-                : IconButton(
-                    tooltip: 'Switch staff: ${staffSession.displayName}',
-                    onPressed: () =>
-                        ref.read(activeStaffPinSessionProvider.notifier).lock(),
-                    icon: const Icon(Icons.switch_account_rounded),
+                if (staffSession != null &&
+                    ref.watch(activeVenueScopeProvider) != null)
+                  IconButton(
+                    tooltip: 'Change my PIN',
+                    onPressed: () => changeCurrentStaffPin(
+                      context: context,
+                      ref: ref,
+                      scope: ref.read(activeVenueScopeProvider)!,
+                    ),
+                    icon: const Icon(Icons.pin_outlined),
                   ),
-          if (staffSession != null &&
-              ref.watch(activeVenueScopeProvider) != null)
-            IconButton(
-              tooltip: 'My appearance',
-              onPressed: () => _changeOwnAppearance(
-                context: context,
-                ref: ref,
-                scope: ref.read(activeVenueScopeProvider)!,
+                if (canOpenPlatformTools && !wide)
+                  IconButton(
+                    tooltip: 'Platform administration',
+                    onPressed: () => ref
+                        .read(homeSectionProvider.notifier)
+                        .select(HomeSection.platformAdmin),
+                    icon: const Icon(Icons.admin_panel_settings_outlined),
+                  ),
+                IconButton(
+                  tooltip: 'Notifications',
+                  onPressed: () => openNotificationCentre(context),
+                  icon: unreadNotifications == 0
+                      ? const Icon(Icons.notifications_none_rounded)
+                      : Badge.count(
+                          count: unreadNotifications,
+                          child: const Icon(Icons.notifications_none_rounded),
+                        ),
+                ),
+                if (onSignOut != null)
+                  IconButton(
+                    tooltip: 'Sign out',
+                    onPressed: onSignOut,
+                    icon: const Icon(Icons.logout_rounded),
+                  ),
+                const SizedBox(width: 8),
+              ],
+              bottom: const PreferredSize(
+                preferredSize: Size.fromHeight(42),
+                child: _CurrentOrderLocationIndicator(),
               ),
-              icon: const Icon(Icons.brightness_6_outlined),
             ),
-          if (staffSession != null &&
-              ref.watch(activeVenueScopeProvider) != null)
-            IconButton(
-              tooltip: 'Change my PIN',
-              onPressed: () => changeCurrentStaffPin(
-                context: context,
-                ref: ref,
-                scope: ref.read(activeVenueScopeProvider)!,
-              ),
-              icon: const Icon(Icons.pin_outlined),
-            ),
-          if (canOpenPlatformTools && !wide)
-            IconButton(
-              tooltip: 'Platform administration',
-              onPressed: () => ref
-                  .read(homeSectionProvider.notifier)
-                  .select(HomeSection.platformAdmin),
-              icon: const Icon(Icons.admin_panel_settings_outlined),
-            ),
-          IconButton(
-            tooltip: 'Notifications',
-            onPressed: () => openNotificationCentre(context),
-            icon: unreadNotifications == 0
-                ? const Icon(Icons.notifications_none_rounded)
-                : Badge.count(
-                    count: unreadNotifications,
-                    child: const Icon(Icons.notifications_none_rounded),
-                  ),
-          ),
-          if (onSignOut != null)
-            IconButton(
-              tooltip: 'Sign out',
-              onPressed: onSignOut,
-              icon: const Icon(Icons.logout_rounded),
-            ),
-          const SizedBox(width: 8),
-        ],
-        bottom: const PreferredSize(
-          preferredSize: Size.fromHeight(42),
-          child: _CurrentOrderLocationIndicator(),
-        ),
-      ),
       body: Row(
         children: [
           if (wide)
@@ -298,26 +305,28 @@ class HomeShell extends ConsumerWidget {
       // Notifications live in the scaffold's bottom area rather than as a
       // floating SnackBar. This reserves layout space, so a message can never
       // cover a POS control or require staff to dismiss it before continuing.
-      bottomNavigationBar: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const _BottomNotificationTray(),
-          if (!wide)
-            NavigationBar(
-              selectedIndex: compactIndex < 0 ? 0 : compactIndex,
-              onDestinationSelected: (selected) => ref
-                  .read(homeSectionProvider.notifier)
-                  .select(compactDestinations[selected].section),
-              destinations: [
-                for (final item in compactDestinations)
-                  NavigationDestination(
-                    icon: Icon(item.icon),
-                    label: item.label,
+      bottomNavigationBar: immersiveCompactPosMenu
+          ? null
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const _BottomNotificationTray(),
+                if (!wide)
+                  NavigationBar(
+                    selectedIndex: compactIndex < 0 ? 0 : compactIndex,
+                    onDestinationSelected: (selected) => ref
+                        .read(homeSectionProvider.notifier)
+                        .select(compactDestinations[selected].section),
+                    destinations: [
+                      for (final item in compactDestinations)
+                        NavigationDestination(
+                          icon: Icon(item.icon),
+                          label: item.label,
+                        ),
+                    ],
                   ),
               ],
             ),
-        ],
-      ),
     );
   }
 

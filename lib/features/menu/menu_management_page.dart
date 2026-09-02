@@ -828,6 +828,90 @@ class _ProductTile extends StatelessWidget {
               ? 'Stock tracking enabled'
               : '${_formatQuantity(product.stockOnHand!)} ${product.stockUnit} in stock'
         : 'Stock not tracked';
+    final details =
+        '${product.productionArea.label} · ${product.taxRateLabel} · $stock';
+    if (MediaQuery.sizeOf(context).width < 650) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CircleAvatar(
+                  radius: 18,
+                  child: Icon(switch (product.productionArea) {
+                    ProductionArea.bar => Icons.local_bar_rounded,
+                    ProductionArea.kitchen => Icons.restaurant_rounded,
+                    ProductionArea.dessert => Icons.cake_outlined,
+                  }, size: 19),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    product.name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  formatMoney(product.priceMinor, currencyCode: currencyCode),
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ],
+            ),
+            if (sectionNames.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                sectionNames,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+            const SizedBox(height: 3),
+            Text(
+              details,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Text(
+                  product.isAvailable ? 'For sale' : 'Unavailable',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+                Transform.scale(
+                  scale: 0.82,
+                  child: Switch(
+                    value: product.isAvailable,
+                    onChanged: onAvailabilityChanged,
+                  ),
+                ),
+                const Spacer(),
+                IconButton(
+                  tooltip: 'Edit product',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: canEdit ? onEdit : null,
+                  icon: const Icon(Icons.edit_outlined),
+                ),
+                IconButton(
+                  tooltip: 'Archive product',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: canEdit ? onArchive : null,
+                  icon: const Icon(Icons.archive_outlined),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
     return ListTile(
       isThreeLine: true,
       leading: CircleAvatar(
@@ -838,9 +922,7 @@ class _ProductTile extends StatelessWidget {
         }),
       ),
       title: Text(product.name),
-      subtitle: Text(
-        '$sectionNames\n${product.productionArea.label} · ${product.taxRateLabel} · $stock',
-      ),
+      subtitle: Text('$sectionNames\n$details'),
       trailing: Wrap(
         crossAxisAlignment: WrapCrossAlignment.center,
         spacing: 4,

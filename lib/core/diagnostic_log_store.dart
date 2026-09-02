@@ -17,7 +17,7 @@ class DiagnosticLogStore {
 
   final ValueNotifier<int> revision = ValueNotifier<int>(0);
   final List<String> _lines = <String>[];
-  final SharedPreferencesAsync _preferences = SharedPreferencesAsync();
+  SharedPreferencesAsync? _preferences;
   Timer? _persistTimer;
   Future<void> _pendingWrite = Future<void>.value();
   bool _initialized = false;
@@ -29,7 +29,9 @@ class DiagnosticLogStore {
   Future<void> initialize() async {
     if (_initialized) return;
     try {
-      final stored = await _preferences.getStringList(_storageKey);
+      final preferences = SharedPreferencesAsync();
+      _preferences = preferences;
+      final stored = await preferences.getStringList(_storageKey);
       if (stored != null) {
         _lines
           ..clear()
@@ -85,10 +87,12 @@ class DiagnosticLogStore {
   }
 
   Future<void> _queueWrite(List<String> snapshot) {
+    final preferences = _preferences;
+    if (preferences == null) return Future<void>.value();
     _pendingWrite = _pendingWrite
         .then(
-          (_) => _preferences.setStringList(_storageKey, snapshot),
-          onError: (_) => _preferences.setStringList(_storageKey, snapshot),
+          (_) => preferences.setStringList(_storageKey, snapshot),
+          onError: (_) => preferences.setStringList(_storageKey, snapshot),
         )
         .catchError((Object _) {
           // Diagnostics must never create a recursive unhandled error when local

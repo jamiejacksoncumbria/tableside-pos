@@ -31,6 +31,20 @@ class BookingCalendarPage extends ConsumerStatefulWidget {
 class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
   DateTime _day = DateUtils.dateOnly(DateTime.now());
 
+  DateTime get _earliestHistoryDay {
+    final today = DateUtils.dateOnly(DateTime.now());
+    final targetMonth = DateTime(today.year, today.month - 3);
+    final lastDay = DateUtils.getDaysInMonth(
+      targetMonth.year,
+      targetMonth.month,
+    );
+    return DateTime(
+      targetMonth.year,
+      targetMonth.month,
+      today.day.clamp(1, lastDay),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final scope = ref.watch(activeVenueScopeProvider);
@@ -93,9 +107,14 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
                     icon: const Icon(Icons.print_outlined),
                   ),
                   IconButton(
-                    onPressed: () => setState(
-                      () => _day = _day.subtract(const Duration(days: 1)),
-                    ),
+                    tooltip: _day.isAfter(_earliestHistoryDay)
+                        ? 'Previous day'
+                        : 'Booking history is available for three months',
+                    onPressed: _day.isAfter(_earliestHistoryDay)
+                        ? () => setState(
+                            () => _day = _day.subtract(const Duration(days: 1)),
+                          )
+                        : null,
                     icon: const Icon(Icons.chevron_left),
                   ),
                   Tooltip(
@@ -162,7 +181,7 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
     final selected = await showDatePicker(
       context: context,
       initialDate: _day,
-      firstDate: DateTime.now().subtract(const Duration(days: 365 * 7)),
+      firstDate: _earliestHistoryDay,
       lastDate: DateTime.now().add(const Duration(days: 365 * 7)),
       helpText: 'Jump to booking date',
     );
