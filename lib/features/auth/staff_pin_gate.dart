@@ -337,9 +337,11 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     });
     try {
       AppLogger.info('PIN recovery: verifying Firebase account password.');
-      final authentication = await user
-          .reauthenticateWithCredential(
-            EmailAuthProvider.credential(email: email, password: password),
+      final recentlyAuthenticatedIdToken = await _repository
+          .verifyPasswordForPinRecovery(
+            email: email,
+            password: password,
+            expectedUserId: user.uid,
           )
           .timeout(
             const Duration(seconds: 30),
@@ -348,12 +350,6 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             ),
           );
       AppLogger.info('PIN recovery: Firebase account password verified.');
-      // Reauthentication itself issues a recently authenticated ID token.
-      // Forcing a second refresh can stall on some native Firebase SDKs; the
-      // repository obtains the current token immediately before the API call.
-      if (authentication.user == null) {
-        throw StateError('Firebase did not return the verified account.');
-      }
       if (!mounted) return;
       AppLogger.info('PIN recovery: opening replacement PIN entry.');
       final newPin = await showDialog<String>(
@@ -382,7 +378,11 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       }
       AppLogger.info('PIN recovery: submitting replacement PIN securely.');
       await _repository
-          .recoverOwnStaffPin(scope: widget.scope, newPin: newPin)
+          .recoverOwnStaffPin(
+            scope: widget.scope,
+            newPin: newPin,
+            recentlyAuthenticatedIdToken: recentlyAuthenticatedIdToken,
+          )
           .timeout(
             const Duration(seconds: 30),
             onTimeout: () => throw TimeoutException(

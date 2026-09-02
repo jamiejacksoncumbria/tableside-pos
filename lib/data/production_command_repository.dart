@@ -487,12 +487,74 @@ class ProductionCommandRepository {
   Future<void> recoverOwnStaffPin({
     required VenueScope scope,
     required String newPin,
+    required String recentlyAuthenticatedIdToken,
   }) {
     return _call('recoverOwnStaffPin', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'newPin': newPin,
-    });
+    }, firebaseIdToken: recentlyAuthenticatedIdToken);
+  }
+
+  /// Verifies an email/password directly with Google's Firebase Auth REST
+  /// endpoint. This avoids native plugin reauthentication deadlocks while
+  /// keeping the password away from TableSide's Functions and diagnostics.
+  Future<String> verifyPasswordForPinRecovery({
+    required String email,
+    required String password,
+    required String expectedUserId,
+  }) async {
+    final options = DefaultFirebaseOptions.currentPlatform;
+    final endpoint = Uri.https(
+      'identitytoolkit.googleapis.com',
+      '/v1/accounts:signInWithPassword',
+      {'key': options.apiKey},
+    );
+    AppLogger.info('PIN recovery: contacting Google Firebase Authentication.');
+    final response = await http
+        .post(
+          endpoint,
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'email': email,
+            'password': password,
+            'returnSecureToken': true,
+          }),
+        )
+        .timeout(const Duration(seconds: 30));
+    AppLogger.info(
+      'PIN recovery: Firebase Authentication HTTP ${response.statusCode}.',
+    );
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map) {
+      throw StateError('Firebase Authentication returned an invalid response.');
+    }
+    final body = Map<String, Object?>.from(decoded);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final error = body['error'];
+      final errorMap = error is Map
+          ? Map<String, Object?>.from(error)
+          : const <String, Object?>{};
+      final code = errorMap['message']?.toString().split(' : ').first ?? '';
+      final message = switch (code) {
+        'INVALID_LOGIN_CREDENTIALS' ||
+        'INVALID_PASSWORD' => 'The Firebase account password is incorrect.',
+        'EMAIL_NOT_FOUND' => 'This Firebase account no longer exists.',
+        'USER_DISABLED' => 'This Firebase account has been disabled.',
+        'TOO_MANY_ATTEMPTS_TRY_LATER' =>
+          'Firebase temporarily blocked password attempts. Try again later.',
+        _ => 'Firebase could not verify this account.',
+      };
+      throw StateError(message);
+    }
+    final userId = body['localId'];
+    final idToken = body['idToken'];
+    if (userId != expectedUserId || idToken is! String || idToken.isEmpty) {
+      throw StateError(
+        'The verified Firebase account does not match this staff member.',
+      );
+    }
+    return idToken;
   }
 
   Future<void> createTable({
@@ -871,13 +933,14 @@ class ProductionCommandRepository {
 
   Future<Map<String, Object?>> _call(
     String action,
-    Map<String, Object?> data,
-  ) async {
+    Map<String, Object?> data, {
+    String? firebaseIdToken,
+  }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       throw StateError('Sign in before sending an order to production.');
     }
-    final token = await user.getIdToken();
+    final token = firebaseIdToken ?? await user.getIdToken();
     if (token == null || token.isEmpty) {
       throw StateError('Could not obtain a Firebase sign-in token.');
     }
