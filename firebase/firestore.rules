@@ -254,6 +254,14 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // Immutable operational history is visible only while a manager or
+      // owner has a current PIN-authorized session. Events are always written
+      // by trusted server commands and can never be edited by the client.
+      match /auditEvents/{auditId} {
+        allow read: if managesTenantWithActivePin(tenantId);
+        allow create, update, delete: if false;
+      }
+
       match /paymentRequests/{requestId} {
         allow read: if canReadOperationalData(tenantId);
         // A server function validates the bill amount, creates the provider

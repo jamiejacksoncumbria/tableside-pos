@@ -2191,13 +2191,27 @@ async function revokeMembershipsFor(userUid, actorUid) {
 }
 
 async function writeAudit(callerUid, action, target, details = {}) {
-  await db.collection("platformAdminAudit").add({
+  const batch = db.batch();
+  batch.create(db.collection("platformAdminAudit").doc(), {
     callerUid,
     action,
     target,
     details,
     createdAt: FieldValue.serverTimestamp(),
   });
+  const tenantId = typeof details.tenantId === "string" ? details.tenantId : null;
+  if (tenantId != null && tenantId.length > 0) {
+    batch.create(db.collection(`tenants/${tenantId}/auditEvents`).doc(), {
+      action,
+      target,
+      actorUid: callerUid,
+      venueId: typeof details.venueId === "string" ? details.venueId : null,
+      details,
+      source: "serverAction",
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  }
+  await batch.commit();
 }
 
 async function bootstrapPlatformAdminFor(caller) {

@@ -18,6 +18,7 @@ import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 import '../stock/stock_management_page.dart';
 import '../tables/table_management_page.dart';
+import 'audit_trail_page.dart';
 import 'diagnostics_page.dart';
 import 'staff_pin_management_page.dart';
 
@@ -562,12 +563,26 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   leading: const Icon(Icons.lock_reset_rounded),
                   title: const Text('Staff PIN access'),
                   subtitle: const Text(
-                    'Review staff PIN status and unlock blocked users.',
+                    'Lock, unlock or securely replace staff PINs.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
                       builder: (_) => const StaffPinManagementPage(),
+                    ),
+                  ),
+                ),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.manage_history_rounded),
+                  title: const Text('Audit trail'),
+                  subtitle: const Text(
+                    'Review the restaurant’s immutable operational history.',
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const AuditTrailPage(),
                     ),
                   ),
                 ),
