@@ -31,6 +31,20 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
       );
       return;
     }
+    if (payload['type'] == 'giftVoucher') {
+      await _printer.printGiftVoucher(
+        device: selectedDevice,
+        voucher: BluetoothGiftVoucher(
+          restaurantName:
+              payload['restaurantName'] as String? ?? 'TABLESIDE POS',
+          code: payload['code'] as String? ?? '',
+          amountMinor: (payload['amountMinor'] as num?)?.toInt() ?? 0,
+          currencyCode: payload['currencyCode'] as String? ?? 'GBP',
+          expiresAt: payload['expiresAt'] as String?,
+        ),
+      );
+      return;
+    }
     final rawLines = payload['lines'];
     final lines = rawLines is List
         ? rawLines

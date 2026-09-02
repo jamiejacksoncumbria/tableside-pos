@@ -3767,10 +3767,10 @@ function convertedBaseMinor({amountMinor, tenderCurrencyCode, baseCurrencyCode, 
 function validClosePayment(value, index, baseCurrencyCode) {
   const payment = requireObject(value);
   const method = requiredText(payment, "method", 40);
-  if (!["cash", "cardTerminal"].includes(method)) {
+  if (!["cash", "cardTerminal", "voucher"].includes(method)) {
     throw new HttpsError(
       "invalid-argument",
-      `payments[${index}].method must be cash or cardTerminal.`,
+      `payments[${index}].method must be cash, cardTerminal or voucher.`,
     );
   }
   const tenderedAmountMinor = requiredPositiveInteger(
@@ -3793,6 +3793,7 @@ function validClosePayment(value, index, baseCurrencyCode) {
     );
   }
   const terminalLabel = optionalText(payment, "terminalLabel", 120) || null;
+  const voucherCode = optionalText(payment, "voucherCode", 80) || null;
   const exchangeRateSource = optionalText(payment, "exchangeRateSource", 160) || null;
   const exchangeRatePublishedDate =
     optionalText(payment, "exchangeRatePublishedDate", 80) || null;
@@ -3847,7 +3848,196 @@ function validClosePayment(value, index, baseCurrencyCode) {
     exchangeRatePublishedDate,
     exchangeRateFetchedAt,
     cardPaymentApproved: method === "cardTerminal",
+    voucherCode,
   };
+}
+
+async function adjustOrderLineFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const orderId = requiredText(data, "orderId", 180);
+  const lineId = requiredText(data, "lineId", 180);
+  const operation = requiredText(data, "operation", 40);
+  const reason = requiredText(data, "reason", 240);
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager or owner can adjust sale items.");
+  }
+  if (!["remove", "setUnitPrice", "discountUnitAmount"].includes(operation)) {
+    throw new HttpsError("invalid-argument", "That sale adjustment is not supported.");
+  }
+  const valueMinor = operation === "remove" ? null :
+    requiredNonNegativeInteger(data.valueMinor, "valueMinor", 100000000);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const orderRef = tenantRef.collection("orders").doc(orderId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  return db.runTransaction(async (transaction) => {
+    const order = await transaction.get(orderRef);
+    if (!order.exists || order.data().venueId !== venueId || order.data().status === "closed") {
+      throw new HttpsError("failed-precondition", "This order is no longer open at this venue.");
+    }
+    const lines = Array.isArray(order.data().lines) ? order.data().lines : [];
+    const target = lines.find((line) => line?.id === lineId);
+    if (target == null) throw new HttpsError("not-found", "That sale item is no longer present.");
+    const productionArea = typeof target.productionArea === "string" ? target.productionArea : "kitchen";
+    const cancellationRouteRef = target.isSentToProduction === true && operation === "remove"
+      ? tenantRef.collection("printerRoutes").doc(`${venueId}_${productionArea}`) : null;
+    const cancellationRoute = cancellationRouteRef == null
+      ? null : await transaction.get(cancellationRouteRef);
+    const cancellationDeviceId = cancellationRoute?.exists &&
+        typeof cancellationRoute.data().primaryDeviceId === "string"
+      ? cancellationRoute.data().primaryDeviceId : null;
+    const cancellationDevice = cancellationDeviceId == null
+      ? null : await transaction.get(tenantRef.collection("devices").doc(cancellationDeviceId));
+    const originalUnitPriceMinor = Number.isSafeInteger(Number(target.originalUnitPriceMinor))
+      ? Number(target.originalUnitPriceMinor) : Number(target.unitPriceMinor);
+    let nextLines;
+    let nextUnitPriceMinor = null;
+    if (operation === "remove") {
+      nextLines = lines.filter((line) => line?.id !== lineId);
+    } else {
+      nextUnitPriceMinor = operation === "setUnitPrice"
+        ? valueMinor : Math.max(0, Number(target.unitPriceMinor) - valueMinor);
+      nextLines = lines.map((line) => line?.id === lineId ? {
+        ...line, unitPriceMinor: nextUnitPriceMinor, originalUnitPriceMinor,
+        priceAdjustment: {operation, valueMinor, reason, actor, adjustedAt: new Date().toISOString()},
+      } : line);
+    }
+    if (nextLines.length === 0) {
+      throw new HttpsError("failed-precondition", "Keep at least one item on the order or cancel the whole order.");
+    }
+    transaction.update(orderRef, {
+      lines: nextLines, updatedAt: FieldValue.serverTimestamp(), updatedByActor: actor,
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: operation === "remove" ? "removeSaleItem" : "adjustSaleItemPrice",
+      venueId, orderId, lineId, productId: target.productId ?? null,
+      operation, reason, originalUnitPriceMinor,
+      previousUnitPriceMinor: Number(target.unitPriceMinor), nextUnitPriceMinor,
+      actor, createdAt: FieldValue.serverTimestamp(),
+    });
+    if (operation === "remove" && target.isSentToProduction === true &&
+        cancellationDeviceId != null && activeRouteDevice(cancellationDevice, venueId, productionArea)) {
+      const jobId = `cancel_${orderId}_${lineId}_${Date.now()}`;
+      transaction.create(tenantRef.collection("printJobs").doc(jobId), {
+        venueId, targetDeviceId: cancellationDeviceId,
+        fallbackDeviceId: typeof cancellationRoute.data().fallbackDeviceId === "string"
+          ? cancellationRoute.data().fallbackDeviceId : null,
+        orderId, ticketId: jobId, productionArea, status: "queued", attempts: 0,
+        idempotencyKey: jobId,
+        payload: {
+          type: "production", ticketId: jobId, productionArea,
+          restaurantName: "TABLESIDE POS", reference: `CANCEL ${orderId.slice(-6).toUpperCase()}`,
+          tableLabel: order.data().tableLabel ?? null, tabName: order.data().tabName ?? null,
+          isAddition: true,
+          lines: [{name: `CANCEL ${target.productName ?? "Item"}`, quantity: Number(target.quantity), details: [`Reason: ${reason}`]}],
+        },
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    }
+    return {updated: true};
+  });
+}
+
+function normalizedVoucherCode(value) {
+  return String(value ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function voucherDocumentId(code) {
+  return createHash("sha256").update(normalizedVoucherCode(code)).digest("hex");
+}
+
+function newVoucherCode() {
+  const raw = randomBytes(9).toString("hex").toUpperCase();
+  return `TSV-${raw.slice(0, 6)}-${raw.slice(6, 12)}-${raw.slice(12, 18)}`;
+}
+
+async function manageVoucherFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const operation = requiredText(data, "operation", 40);
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager or owner can issue vouchers.");
+  }
+  if (operation !== "issue") {
+    throw new HttpsError("invalid-argument", "That voucher operation is not supported.");
+  }
+  const amountMinor = requiredPositiveInteger(data.amountMinor, "amountMinor", 100000000);
+  const chargeable = data.chargeable === true;
+  const issueReason = requiredText(data, "issueReason", 240);
+  const paymentMethod = chargeable ? requiredText(data, "paymentMethod", 40) : "complimentary";
+  if (chargeable && !["cash", "cardTerminal"].includes(paymentMethod)) {
+    throw new HttpsError("invalid-argument", "A paid voucher must use cash or card terminal.");
+  }
+  if (chargeable && paymentMethod === "cardTerminal" && data.cardPaymentApproved !== true) {
+    throw new HttpsError("failed-precondition", "Confirm the card terminal approved the voucher sale.");
+  }
+  const expiresAtMillis = data.expiresAtMillis == null ? null : Number(data.expiresAtMillis);
+  if (expiresAtMillis != null && (!Number.isSafeInteger(expiresAtMillis) || expiresAtMillis <= Date.now())) {
+    throw new HttpsError("invalid-argument", "The voucher expiry date must be in the future.");
+  }
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const code = newVoucherCode();
+  const voucherRef = tenantRef.collection("vouchers").doc(voucherDocumentId(code));
+  const saleRef = tenantRef.collection("voucherTransactions").doc();
+  const routeRef = tenantRef.collection("printerRoutes").doc(`${venueId}_receipt`);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  let currencyCode = "GBP";
+  let printQueued = false;
+  await db.runTransaction(async (transaction) => {
+    const [tenant, venue, route] = await Promise.all([
+      transaction.get(tenantRef), transaction.get(venueRef), transaction.get(routeRef),
+    ]);
+    if (!tenant.exists || !venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
+    const targetDeviceId = route.exists && typeof route.data().primaryDeviceId === "string"
+      ? route.data().primaryDeviceId : null;
+    const device = targetDeviceId == null ? null : await transaction.get(
+      tenantRef.collection("devices").doc(targetDeviceId),
+    );
+    printQueued = targetDeviceId != null && activeRouteDevice(device, venueId, "receipt");
+    transaction.create(voucherRef, {
+      venueId, originalValueMinor: amountMinor, remainingValueMinor: amountMinor,
+      currencyCode, status: "active", codeSuffix: normalizedVoucherCode(code).slice(-6),
+      expiresAt: expiresAtMillis == null ? null : new Date(expiresAtMillis),
+      chargeable, issueReason, createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
+    });
+    transaction.create(saleRef, {
+      venueId, voucherId: voucherRef.id, type: chargeable ? "sale" : "complimentaryIssue",
+      amountMinor, currencyCode, paymentMethod, issueReason,
+      createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
+    });
+    if (printQueued) {
+      const jobId = `voucher_${saleRef.id}_${targetDeviceId}`;
+      transaction.create(tenantRef.collection("printJobs").doc(jobId), {
+        venueId, targetDeviceId,
+        fallbackDeviceId: typeof route.data().fallbackDeviceId === "string"
+          ? route.data().fallbackDeviceId : null,
+        orderId: saleRef.id, ticketId: `voucher_${saleRef.id}`,
+        productionArea: "receipt", status: "queued", attempts: 0,
+        idempotencyKey: jobId,
+        payload: {
+          type: "giftVoucher", code, amountMinor, currencyCode,
+          expiresAt: expiresAtMillis == null ? null : new Date(expiresAtMillis).toISOString(),
+          restaurantName: receiptBusinessSnapshot(tenant.data()).name,
+          business: receiptBusinessSnapshot(tenant.data()),
+        },
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    }
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "issueGiftVoucher", venueId, voucherId: voucherRef.id,
+      transactionId: saleRef.id, amountMinor, currencyCode, chargeable,
+      paymentMethod, issueReason, printQueued, actor, createdAt: FieldValue.serverTimestamp(),
+    });
+  });
+  return {id: voucherRef.id, code, amountMinor, currencyCode, printQueued};
 }
 
 function billBusinessDate(timeZone, cutoffMinutes, now = new Date()) {
@@ -4171,6 +4361,36 @@ async function closeOrderFor(caller, rawData) {
     const receiptBusiness = receiptBusinessSnapshot(tenant.data());
     const payments = rawPayments.map((payment, index) =>
       validClosePayment(payment, index, currencyCode));
+    const voucherPayments = payments.filter((payment) => payment.method === "voucher");
+    const seenVoucherIds = new Set();
+    const voucherRedemptions = [];
+    for (const payment of voucherPayments) {
+      const voucherId = voucherDocumentId(payment.voucherCode);
+      if (seenVoucherIds.has(voucherId)) {
+        throw new HttpsError("invalid-argument", "Add each voucher only once per bill.");
+      }
+      seenVoucherIds.add(voucherId);
+      const voucherRef = tenantRef.collection("vouchers").doc(voucherId);
+      const voucher = await transaction.get(voucherRef);
+      if (!voucher.exists || voucher.data().status !== "active") {
+        throw new HttpsError("failed-precondition", "That voucher is invalid or no longer active.");
+      }
+      if (voucher.data().currencyCode !== currencyCode) {
+        throw new HttpsError("failed-precondition", "That voucher uses a different currency.");
+      }
+      const expiresAt = voucher.data().expiresAt?.toDate?.() ?? null;
+      if (expiresAt != null && expiresAt.getTime() < Date.now()) {
+        throw new HttpsError("failed-precondition", "That voucher has expired.");
+      }
+      const remainingValueMinor = Number(voucher.data().remainingValueMinor);
+      if (!Number.isSafeInteger(remainingValueMinor) || remainingValueMinor < payment.baseAmountMinor) {
+        throw new HttpsError("failed-precondition", "That voucher does not have enough remaining value.");
+      }
+      voucherRedemptions.push({voucherRef, voucherId, remainingValueMinor, payment});
+      payment.voucherId = voucherId;
+      delete payment.voucherCode;
+      payment.voucherCodeSuffix = normalizedVoucherCode(rawPayments[payments.indexOf(payment)].voucherCode).slice(-6);
+    }
     if (payments.some((payment) => payment.tenderedCurrencyCode !== currencyCode) &&
         !roles.some((role) => role === "owner" || role === "manager")) {
       throw new HttpsError(
@@ -4267,6 +4487,22 @@ async function closeOrderFor(caller, rawData) {
     const receiptPrintJobId = receiptPrintQueued
       ? `receipt_${orderId}_${receiptTargetDeviceId}`
       : null;
+
+    for (const redemption of voucherRedemptions) {
+      const nextBalance = redemption.remainingValueMinor - redemption.payment.baseAmountMinor;
+      transaction.update(redemption.voucherRef, {
+        remainingValueMinor: nextBalance,
+        status: nextBalance === 0 ? "redeemed" : "active",
+        lastRedeemedAt: FieldValue.serverTimestamp(),
+        lastRedeemedVenueId: venueId,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      transaction.create(tenantRef.collection("voucherTransactions").doc(), {
+        venueId, voucherId: redemption.voucherId, billId: billRef.id,
+        type: "redemption", amountMinor: -redemption.payment.baseAmountMinor,
+        currencyCode, createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
+      });
+    }
 
     transaction.create(billRef, {
       venueId,
@@ -5603,6 +5839,12 @@ function validatedStockComponents(value) {
   if (!Array.isArray(value) || value.length > 50) {
     throw new HttpsError("invalid-argument", "A product can use at most 50 stock ingredients.");
   }
+  if (method === "voucher" && (voucherCode == null || tenderedCurrencyCode !== baseCurrencyCode)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Voucher payments require a voucher code and the restaurant currency.",
+    );
+  }
   const productIds = new Set();
   return value.map((raw) => {
     const component = requireObject(raw);
@@ -6231,6 +6473,8 @@ async function invokePosAction(action, caller, data) {
       return addOrderDraftLineFor(actingCaller, data);
     case "updateOrderDraftLine":
       return updateOrderDraftLineFor(actingCaller, data);
+    case "adjustOrderLine":
+      return adjustOrderLineFor(actingCaller, data);
     case "createTable":
       return createTableFor(actingCaller, data);
     case "saveBooking":
@@ -6251,6 +6495,8 @@ async function invokePosAction(action, caller, data) {
       return uploadTenantLogoFor(actingCaller, data);
     case "lookupExchangeRate":
       return lookupExchangeRateFor(actingCaller, data);
+    case "manageVoucher":
+      return manageVoucherFor(actingCaller, data);
     case "sendOrderToProduction":
       return sendOrderToProductionFor(actingCaller, data);
     case "closeOrder":

@@ -8,6 +8,7 @@ import '../../core/date_formats.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
+import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
 import 'domain.dart';
 import 'pos_controller.dart';
@@ -993,6 +994,73 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                       ],
                     ),
             ),
+            if (searchQuery.isEmpty && !_menuControlsCollapsed) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      initialValue: effectiveSection,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        labelText: 'Filter products by category',
+                      ),
+                      items: [
+                        const DropdownMenuItem(
+                          value: '',
+                          child: Text('All categories'),
+                        ),
+                        for (final item in topLevelSections)
+                          DropdownMenuItem(
+                            value: item.id,
+                            child: Text(item.name),
+                          ),
+                      ],
+                      onChanged: (value) {
+                        ref
+                            .read(activeSectionProvider.notifier)
+                            .select(
+                              value == null || value.isEmpty ? null : value,
+                            );
+                        ref
+                            .read(activeSubsectionProvider.notifier)
+                            .select(null);
+                      },
+                    ),
+                  ),
+                  if (subsections.isNotEmpty) ...[
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        initialValue: effectiveSubsection,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          labelText: 'Subcategory',
+                        ),
+                        items: [
+                          const DropdownMenuItem(
+                            value: '',
+                            child: Text('All subcategories'),
+                          ),
+                          for (final item in subsections)
+                            DropdownMenuItem(
+                              value: item.id,
+                              child: Text(item.name),
+                            ),
+                        ],
+                        onChanged: (value) => ref
+                            .read(activeSubsectionProvider.notifier)
+                            .select(
+                              value == null || value.isEmpty ? null : value,
+                            ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 10),
+            ],
             Expanded(
               child: loading
                   ? const Center(child: CircularProgressIndicator())
@@ -1318,6 +1386,108 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     });
   }
 
+  Future<void> _adjustLine(OrderLine line, String operation) async {
+    final reason = TextEditingController();
+    final value = TextEditingController(
+      text: operation == 'setUnitPrice'
+          ? _moneyInputFromMinor(line.unitPriceMinor, widget.currencyCode)
+          : '',
+    );
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(switch (operation) {
+          'remove' => 'Remove ${line.productName}',
+          'setUnitPrice' => 'Change item price',
+          _ => 'Discount item',
+        }),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (operation != 'remove')
+              TextField(
+                controller: value,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: InputDecoration(
+                  labelText: operation == 'setUnitPrice'
+                      ? 'New price per item (${widget.currencyCode})'
+                      : 'Discount per item (${widget.currencyCode})',
+                ),
+              ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reason,
+              maxLength: 240,
+              decoration: const InputDecoration(
+                labelText: 'Reason',
+                helperText: 'Required and saved in the audit trail.',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Confirm'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) {
+      reason.dispose();
+      value.dispose();
+      return;
+    }
+    final valueMinor = operation == 'remove'
+        ? null
+        : value.text.trim() == '0'
+        ? 0
+        : _minorFromMoneyInput(value.text, widget.currencyCode);
+    if (reason.text.trim().isEmpty ||
+        (operation != 'remove' && valueMinor == null)) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Adjustment not saved',
+        message: 'Enter a valid amount and a reason.',
+        level: AppNotificationLevel.error,
+      );
+      reason.dispose();
+      value.dispose();
+      return;
+    }
+    try {
+      await ref
+          .read(activeOrderProvider.notifier)
+          .managerAdjustLine(
+            lineId: line.id,
+            operation: operation,
+            reason: reason.text.trim(),
+            valueMinor: valueMinor,
+          );
+    } catch (error, stackTrace) {
+      AppLogger.error('Manager sale item adjustment', error, stackTrace);
+      if (mounted) {
+        showAppNotification(
+          context,
+          ref: ref,
+          title: 'Adjustment failed',
+          message: '$error',
+          level: AppNotificationLevel.error,
+        );
+      }
+    } finally {
+      reason.dispose();
+      value.dispose();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final order = ref.watch(activeOrderProvider);
@@ -1355,6 +1525,10 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
         order.tabName ??
         (tableLabel.isEmpty ? 'No table selected' : tableLabel);
     final scheme = Theme.of(context).colorScheme;
+    final staff = ref.watch(activeStaffPinSessionProvider);
+    final canAdjustSale =
+        staff?.roles.any((role) => role == 'owner' || role == 'manager') ??
+        false;
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Padding(
@@ -1531,6 +1705,26 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                   currencyCode: widget.currencyCode,
                                 ),
                               ),
+                              if (canAdjustSale)
+                                PopupMenuButton<String>(
+                                  tooltip: 'Manager item actions',
+                                  onSelected: (operation) =>
+                                      _adjustLine(line, operation),
+                                  itemBuilder: (_) => const [
+                                    PopupMenuItem(
+                                      value: 'discountUnitAmount',
+                                      child: Text('Discount item'),
+                                    ),
+                                    PopupMenuItem(
+                                      value: 'setUnitPrice',
+                                      child: Text('Change item price'),
+                                    ),
+                                    PopupMenuItem(
+                                      value: 'remove',
+                                      child: Text('Remove from sale'),
+                                    ),
+                                  ],
+                                ),
                             ],
                           );
                         },
@@ -1711,6 +1905,7 @@ Future<void> _showCheckoutSheet(
   required String currencyCode,
 }) async {
   final terminalController = TextEditingController();
+  final voucherCodeController = TextEditingController();
   final baseCurrencyCode = currencyCode.trim().toUpperCase();
   final tenderedAmountController = TextEditingController(
     text: _moneyInputFromMinor(order.totalMinor, currencyCode),
@@ -1839,6 +2034,11 @@ Future<void> _showCheckoutSheet(
                         icon: Icon(Icons.credit_card_rounded),
                         label: Text('Card'),
                       ),
+                      ButtonSegment(
+                        value: PaymentMethod.voucher,
+                        icon: Icon(Icons.card_giftcard_rounded),
+                        label: Text('Voucher'),
+                      ),
                     ],
                     selected: {method},
                     onSelectionChanged: saving
@@ -1846,7 +2046,8 @@ Future<void> _showCheckoutSheet(
                         : (selection) => setSheetState(() {
                             method = selection.first;
                             cardApproved = false;
-                            if (method == PaymentMethod.cardTerminal) {
+                            if (method == PaymentMethod.cardTerminal ||
+                                method == PaymentMethod.voucher) {
                               tenderedCurrencyCode = baseCurrencyCode;
                               exchangeRateController.text = '1';
                               tenderedAmountController.text =
@@ -1862,6 +2063,8 @@ Future<void> _showCheckoutSheet(
                   Text(
                     method == PaymentMethod.cash
                         ? 'Cash currency'
+                        : method == PaymentMethod.voucher
+                        ? 'Voucher currency'
                         : 'Card currency',
                     style: Theme.of(context).textTheme.titleSmall,
                   ),
@@ -1901,6 +2104,22 @@ Future<void> _showCheckoutSheet(
                       ),
                       child: Text(baseCurrencyCode),
                     ),
+                  if (method == PaymentMethod.voucher) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: voucherCodeController,
+                      enabled: !saving,
+                      textCapitalization: TextCapitalization.characters,
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        labelText: 'Scan or enter voucher QR code',
+                        prefixIcon: Icon(Icons.qr_code_scanner_rounded),
+                        helperText:
+                            'Hardware QR scanners can type directly into this field.',
+                      ),
+                      onChanged: (_) => setSheetState(() {}),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   TextField(
                     controller: tenderedAmountController,
@@ -2049,10 +2268,17 @@ Future<void> _showCheckoutSheet(
                         leading: Icon(
                           paymentEntries[index].method == PaymentMethod.cash
                               ? Icons.payments_outlined
+                              : paymentEntries[index].method ==
+                                    PaymentMethod.voucher
+                              ? Icons.card_giftcard_rounded
                               : Icons.credit_card_rounded,
                         ),
                         title: Text(
-                          '${paymentEntries[index].method == PaymentMethod.cash ? 'Cash' : 'Card'} · ${formatMoney(paymentEntries[index].tenderedAmountMinor, currencyCode: paymentEntries[index].tenderedCurrencyCode)}',
+                          '${paymentEntries[index].method == PaymentMethod.cash
+                              ? 'Cash'
+                              : paymentEntries[index].method == PaymentMethod.voucher
+                              ? 'Voucher'
+                              : 'Card'} · ${formatMoney(paymentEntries[index].tenderedAmountMinor, currencyCode: paymentEntries[index].tenderedCurrencyCode)}',
                         ),
                         subtitle:
                             paymentEntries[index].tenderedCurrencyCode ==
@@ -2139,7 +2365,9 @@ Future<void> _showCheckoutSheet(
                                   !amountFits ||
                                   tenderedMinor == null ||
                                   (method == PaymentMethod.cardTerminal &&
-                                      !cardApproved)
+                                      !cardApproved) ||
+                                  (method == PaymentMethod.voucher &&
+                                      voucherCodeController.text.trim().isEmpty)
                               ? null
                               : () => setSheetState(() {
                                   paymentEntries.add(
@@ -2162,6 +2390,10 @@ Future<void> _showCheckoutSheet(
                                           officialRateQuote?.publishedDate,
                                       exchangeRateFetchedAt:
                                           officialRateQuote?.fetchedAt,
+                                      voucherCode:
+                                          method == PaymentMethod.voucher
+                                          ? voucherCodeController.text.trim()
+                                          : null,
                                     ),
                                   );
                                   final nextRemaining =
@@ -2177,6 +2409,7 @@ Future<void> _showCheckoutSheet(
                                   exchangeRateController.text = '1';
                                   officialRateQuote = null;
                                   terminalController.clear();
+                                  voucherCodeController.clear();
                                   tenderedAmountController.text =
                                       nextRemaining <= 0
                                       ? ''
@@ -2266,6 +2499,7 @@ Future<void> _showCheckoutSheet(
     terminalController.dispose();
     tenderedAmountController.dispose();
     exchangeRateController.dispose();
+    voucherCodeController.dispose();
   });
 }
 
@@ -2282,6 +2516,7 @@ class _CheckoutPaymentDraft {
     this.exchangeRateSource,
     this.exchangeRatePublishedDate,
     this.exchangeRateFetchedAt,
+    this.voucherCode,
   });
 
   final PaymentMethod method;
@@ -2295,6 +2530,7 @@ class _CheckoutPaymentDraft {
   final String? exchangeRateSource;
   final String? exchangeRatePublishedDate;
   final String? exchangeRateFetchedAt;
+  final String? voucherCode;
 
   BillPaymentInput toPaymentInput() => BillPaymentInput(
     method: method,
@@ -2307,6 +2543,7 @@ class _CheckoutPaymentDraft {
     exchangeRateSource: exchangeRateSource,
     exchangeRatePublishedDate: exchangeRatePublishedDate,
     exchangeRateFetchedAt: exchangeRateFetchedAt,
+    voucherCode: voucherCode,
   );
 }
 

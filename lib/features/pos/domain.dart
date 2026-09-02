@@ -846,7 +846,7 @@ class PrintJob {
   final Map<String, Object?> payload;
 }
 
-enum PaymentMethod { cash, cardTerminal, online }
+enum PaymentMethod { cash, cardTerminal, voucher, online }
 
 bool productNameStartsWith(MenuProduct product, String rawQuery) {
   final query = rawQuery.trim().toLowerCase();

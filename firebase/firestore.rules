@@ -191,6 +191,16 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      match /vouchers/{voucherId} {
+        allow read: if managesTenantWithActivePin(tenantId);
+        allow write: if false;
+      }
+
+      match /voucherTransactions/{transactionId} {
+        allow read: if managesTenantWithActivePin(tenantId);
+        allow write: if false;
+      }
+
       match /tables/{tableId} {
         allow read: if canReadOperationalData(tenantId);
         allow write: if false;

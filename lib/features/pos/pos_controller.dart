@@ -403,6 +403,27 @@ class ActiveOrderController extends Notifier<PosOrder> {
     }
   }
 
+  Future<void> managerAdjustLine({
+    required String lineId,
+    required String operation,
+    required String reason,
+    int? valueMinor,
+  }) async {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) throw StateError('Select a venue first.');
+    _requireValidLiveOrderLocation();
+    await ref
+        .read(productionCommandRepositoryProvider)
+        .adjustOrderLine(
+          scope: scope,
+          order: state,
+          lineId: lineId,
+          operation: operation,
+          reason: reason,
+          valueMinor: valueMinor,
+        );
+  }
+
   void markSent() => state = state.copyWith(status: OrderStatus.sent);
 
   /// Opens the selected table's current order if there is one; otherwise

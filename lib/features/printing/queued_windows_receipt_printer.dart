@@ -1,3 +1,4 @@
+import '../../core/date_formats.dart';
 import 'native_print_worker.dart';
 import 'receipt_line_aggregation.dart';
 import 'receipt_paper_width.dart';
@@ -25,17 +26,60 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       );
     }
     final isReceipt = payload['type'] == 'receipt';
+    final isVoucher = payload['type'] == 'giftVoucher';
     final lines = isReceipt
         ? _receiptLines(payload, idempotencyKey, selectedPrinter.paperWidth)
+        : isVoucher
+        ? _voucherLines(payload)
         : _productionLines(payload, idempotencyKey);
     await _printer.printText(
       printer: selectedPrinter,
       title: isReceipt
           ? 'TableSide paid receipt'
+          : isVoucher
+          ? 'TableSide gift voucher'
           : 'TableSide production ticket',
       lines: lines,
     );
   }
+
+  List<WindowsPrintLine> _voucherLines(Map<String, Object?> payload) => [
+    WindowsPrintLine(
+      payload['restaurantName'] as String? ?? 'TABLESIDE POS',
+      alignment: WindowsPrintTextAlignment.center,
+      bold: true,
+      fontSizeDelta: 2,
+    ),
+    const WindowsPrintLine(
+      'GIFT VOUCHER',
+      alignment: WindowsPrintTextAlignment.center,
+      bold: true,
+    ),
+    WindowsPrintLine(
+      _money(
+        (payload['amountMinor'] as num?)?.toInt() ?? 0,
+        payload['currencyCode'] as String? ?? 'GBP',
+      ),
+      alignment: WindowsPrintTextAlignment.center,
+      bold: true,
+      fontSizeDelta: 2,
+    ),
+    const WindowsPrintLine(''),
+    WindowsPrintLine(
+      payload['code'] as String? ?? '',
+      alignment: WindowsPrintTextAlignment.center,
+      bold: true,
+    ),
+    if ((payload['expiresAt'] as String?)?.isNotEmpty == true)
+      WindowsPrintLine(
+        'Expires: ${formatAppDate(DateTime.parse(payload['expiresAt'] as String))}',
+        alignment: WindowsPrintTextAlignment.center,
+      ),
+    const WindowsPrintLine(
+      'Present this code when paying.',
+      alignment: WindowsPrintTextAlignment.center,
+    ),
+  ];
 
   List<WindowsPrintLine> _productionLines(
     Map<String, Object?> payload,

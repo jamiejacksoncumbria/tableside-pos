@@ -55,6 +55,16 @@ class _UnsupportedBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   }
 
   @override
+  Future<void> printGiftVoucher({
+    required BluetoothReceiptPrinterDevice device,
+    required BluetoothGiftVoucher voucher,
+  }) {
+    throw const BluetoothReceiptPrinterException(
+      'Gift voucher printing is available on Android devices only.',
+    );
+  }
+
+  @override
   Future<void> printTextReport({
     required BluetoothReceiptPrinterDevice device,
     required String title,

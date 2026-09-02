@@ -192,4 +192,10 @@ class _FakePrinter implements BluetoothReceiptPrinter {
 
   @override
   Future<void> selectDevice(BluetoothReceiptPrinterDevice device) async {}
+
+  @override
+  Future<void> printGiftVoucher({
+    required BluetoothReceiptPrinterDevice device,
+    required BluetoothGiftVoucher voucher,
+  }) async {}
 }

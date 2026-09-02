@@ -381,6 +381,60 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     );
   }
 
+  @override
+  Future<void> printGiftVoucher({
+    required BluetoothReceiptPrinterDevice device,
+    required BluetoothGiftVoucher voucher,
+  }) async {
+    final profile = await CapabilityProfile.load();
+    final generator = Generator(_paperSize(device.paperWidth), profile);
+    final bytes = <int>[
+      ...generator.reset(),
+      ...generator.text(
+        voucher.restaurantName,
+        styles: const PosStyles(
+          align: PosAlign.center,
+          bold: true,
+          height: PosTextSize.size2,
+        ),
+      ),
+      ...generator.text(
+        'GIFT VOUCHER',
+        styles: const PosStyles(align: PosAlign.center, bold: true),
+      ),
+      ...generator.text(
+        _money(voucher.amountMinor, voucher.currencyCode),
+        styles: const PosStyles(
+          align: PosAlign.center,
+          bold: true,
+          height: PosTextSize.size2,
+        ),
+      ),
+      ...generator.feed(1),
+      ...generator.qrcode(voucher.code, size: QRSize.size6),
+      ...generator.text(
+        voucher.code,
+        styles: const PosStyles(align: PosAlign.center),
+      ),
+      if (voucher.expiresAt?.trim().isNotEmpty == true)
+        ...generator.text(
+          'Expires: ${formatAppDate(DateTime.parse(voucher.expiresAt!))}',
+          styles: const PosStyles(align: PosAlign.center),
+        ),
+      ...generator.text(
+        'Present this QR code when paying.',
+        styles: const PosStyles(align: PosAlign.center),
+      ),
+      ...generator.feed(4),
+    ];
+    await _write(
+      device,
+      bytes,
+      failureMessage:
+          'The printer connection was lost while printing the gift voucher.',
+    );
+  }
+
   String _money(int minor, String currencyCode) {
     final negative = minor < 0;
     final absolute = minor.abs();

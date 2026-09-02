@@ -165,6 +165,21 @@ class BluetoothReceiptTaxBreakdown {
   final int taxMinor;
 }
 
+class BluetoothGiftVoucher {
+  const BluetoothGiftVoucher({
+    required this.restaurantName,
+    required this.code,
+    required this.amountMinor,
+    required this.currencyCode,
+    this.expiresAt,
+  });
+  final String restaurantName;
+  final String code;
+  final int amountMinor;
+  final String currencyCode;
+  final String? expiresAt;
+}
+
 class BluetoothReceiptPrinterException implements Exception {
   const BluetoothReceiptPrinterException(this.message);
 
@@ -216,6 +231,11 @@ abstract interface class BluetoothReceiptPrinter {
   Future<void> printBillReceipt({
     required BluetoothReceiptPrinterDevice device,
     required BluetoothBillReceipt receipt,
+  });
+
+  Future<void> printGiftVoucher({
+    required BluetoothReceiptPrinterDevice device,
+    required BluetoothGiftVoucher voucher,
   });
 
   /// Prints a locally selected operational text report (for example today's

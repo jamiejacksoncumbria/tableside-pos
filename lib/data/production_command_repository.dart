@@ -155,6 +155,7 @@ class BillPaymentInput {
     this.exchangeRateSource,
     this.exchangeRatePublishedDate,
     this.exchangeRateFetchedAt,
+    this.voucherCode,
   });
 
   final PaymentMethod method;
@@ -167,6 +168,7 @@ class BillPaymentInput {
   final String? exchangeRateSource;
   final String? exchangeRatePublishedDate;
   final String? exchangeRateFetchedAt;
+  final String? voucherCode;
 
   Map<String, Object?> toRequestData() => {
     'method': method.name,
@@ -179,7 +181,19 @@ class BillPaymentInput {
     'exchangeRateSource': exchangeRateSource,
     'exchangeRatePublishedDate': exchangeRatePublishedDate,
     'exchangeRateFetchedAt': exchangeRateFetchedAt,
+    if (voucherCode != null) 'voucherCode': voucherCode,
   };
+}
+
+class IssuedVoucher {
+  const IssuedVoucher({
+    required this.id,
+    required this.code,
+    required this.amountMinor,
+  });
+  final String id;
+  final String code;
+  final int amountMinor;
 }
 
 final productionCommandRepositoryProvider =
@@ -193,6 +207,34 @@ final productionCommandRepositoryProvider =
 /// Cloud Function verifies the signed-in membership, loads the canonical menu
 /// product, creates production tickets, and records stock movement atomically.
 class ProductionCommandRepository {
+  Future<IssuedVoucher> issueVoucher({
+    required VenueScope scope,
+    required int amountMinor,
+    required DateTime? expiresAt,
+    required bool chargeable,
+    required String paymentMethod,
+    required bool cardPaymentApproved,
+    required String issueReason,
+  }) async {
+    final response = await _call('manageVoucher', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'operation': 'issue',
+      'amountMinor': amountMinor,
+      'expiresAtMillis': expiresAt?.millisecondsSinceEpoch,
+      'chargeable': chargeable,
+      'paymentMethod': paymentMethod,
+      'cardPaymentApproved': cardPaymentApproved,
+      'issueReason': issueReason,
+    });
+    final id = response['id'];
+    final code = response['code'];
+    if (id is! String || code is! String) {
+      throw StateError('The server did not return the new voucher.');
+    }
+    return IssuedVoucher(id: id, code: code, amountMinor: amountMinor);
+  }
+
   Future<void> changeOwnStaffPin({
     required VenueScope scope,
     required String pin,
@@ -687,6 +729,25 @@ class ProductionCommandRepository {
       'tabName': order.tabName,
       'lineId': lineId,
       'quantity': quantity,
+    });
+  }
+
+  Future<void> adjustOrderLine({
+    required VenueScope scope,
+    required PosOrder order,
+    required String lineId,
+    required String operation,
+    required String reason,
+    int? valueMinor,
+  }) {
+    return _call('adjustOrderLine', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'orderId': order.id,
+      'lineId': lineId,
+      'operation': operation,
+      'reason': reason,
+      if (valueMinor != null) 'valueMinor': valueMinor,
     });
   }
 
