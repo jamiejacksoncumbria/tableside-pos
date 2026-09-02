@@ -654,6 +654,7 @@ class _PinPadDialog extends StatefulWidget {
 
 class _PinPadDialogState extends State<_PinPadDialog> {
   String _pin = '';
+  bool _submitted = false;
   final FocusNode _keyboardFocus = FocusNode(debugLabel: 'Staff PIN keypad');
 
   @override
@@ -671,9 +672,19 @@ class _PinPadDialogState extends State<_PinPadDialog> {
   }
 
   void _digit(String digit) {
-    if (_pin.length >= 6) return;
+    if (_submitted || _pin.length >= 6) return;
     setState(() => _pin += digit);
+    if (_pin.length == 6) _submit();
     _keyboardFocus.requestFocus();
+  }
+
+  void _submit() {
+    if (_submitted || _pin.length != 6) return;
+    _submitted = true;
+    final completedPin = _pin;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).pop(completedPin);
+    });
   }
 
   void _backspace() {
@@ -718,7 +729,7 @@ class _PinPadDialogState extends State<_PinPadDialog> {
     if ((event.logicalKey == LogicalKeyboardKey.enter ||
             event.logicalKey == LogicalKeyboardKey.numpadEnter) &&
         _pin.length == 6) {
-      Navigator.of(context).pop(_pin);
+      _submit();
     }
   }
 
@@ -814,9 +825,7 @@ class _PinPadDialogState extends State<_PinPadDialog> {
         child: const Text('Cancel'),
       ),
       FilledButton(
-        onPressed: _pin.length == 6
-            ? () => Navigator.of(context).pop(_pin)
-            : null,
+        onPressed: _pin.length == 6 && !_submitted ? _submit : null,
         child: Text(widget.confirmLabel),
       ),
     ],
