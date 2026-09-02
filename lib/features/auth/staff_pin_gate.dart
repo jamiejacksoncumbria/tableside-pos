@@ -125,11 +125,15 @@ class StaffPinGate extends ConsumerStatefulWidget {
     super.key,
     required this.scope,
     required this.child,
+    required this.onSwitchVenue,
+    required this.onSignOut,
     this.backgroundLockSeconds = 120,
   });
 
   final VenueScope scope;
   final Widget child;
+  final VoidCallback onSwitchVenue;
+  final VoidCallback onSignOut;
   final int backgroundLockSeconds;
 
   @override
@@ -393,6 +397,22 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         .firstOrNull;
     final currentUserId = FirebaseAuth.instance.currentUser?.uid;
     return Scaffold(
+      appBar: AppBar(
+        title: const Text('Staff PIN'),
+        actions: [
+          IconButton(
+            tooltip: 'Switch venue',
+            onPressed: _submitting ? null : widget.onSwitchVenue,
+            icon: const Icon(Icons.storefront_outlined),
+          ),
+          IconButton(
+            tooltip: 'Sign out',
+            onPressed: _submitting ? null : widget.onSignOut,
+            icon: const Icon(Icons.logout_rounded),
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -501,7 +521,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
                                 OutlinedButton.icon(
                                   onPressed: _submitting
                                       ? null
-                                      : FirebaseAuth.instance.signOut,
+                                      : widget.onSignOut,
                                   icon: const Icon(Icons.logout_rounded),
                                   label: const Text('Sign in with my email'),
                                 ),

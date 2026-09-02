@@ -857,6 +857,25 @@ bool productNameStartsWith(MenuProduct product, String rawQuery) {
       .any((word) => word.startsWith(query));
 }
 
+bool productMatchesMenuSearch(
+  MenuProduct product,
+  Iterable<MenuSection> sections,
+  String rawQuery,
+) {
+  final terms = rawQuery
+      .trim()
+      .toLowerCase()
+      .split(RegExp(r'\s+'))
+      .where((term) => term.isNotEmpty);
+  if (terms.isEmpty) return true;
+  final sectionNames = sections
+      .where((section) => product.sectionIds.contains(section.id))
+      .map((section) => section.name)
+      .join(' ');
+  final searchableValue = '${product.name} $sectionNames'.toLowerCase();
+  return terms.every(searchableValue.contains);
+}
+
 /// Checkout policy kept outside the widget so a merge cannot silently remove
 /// the supported foreign cash tenders without breaking a regression test.
 List<String> checkoutTenderCurrencies(String baseCurrencyCode) => <String>{

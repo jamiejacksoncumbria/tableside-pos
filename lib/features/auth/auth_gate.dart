@@ -442,6 +442,19 @@ class _TenantWorkspace extends ConsumerWidget {
     return StaffPinGate(
       scope: scope,
       backgroundLockSeconds: venue.backgroundLockSeconds,
+      onSwitchVenue: () {
+        AppLogger.info(
+          'Returning to the company and venue picker from PIN screen.',
+        );
+        ref.read(activeStaffPinSessionProvider.notifier).lock();
+        ref.read(homeSectionProvider.notifier).select(HomeSection.pos);
+        ref.read(activeVenueScopeProvider.notifier).clear();
+      },
+      onSignOut: () {
+        ref.read(activeStaffPinSessionProvider.notifier).lock();
+        ref.read(activeVenueScopeProvider.notifier).clear();
+        ref.read(authRepositoryProvider).signOut();
+      },
       child: HomeShell(
         profileOverride: profile.requireValue,
         venueOverride: venue,

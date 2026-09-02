@@ -740,12 +740,12 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     final sectionsState = ref.watch(menuSectionsProvider);
     final catalogState = ref.watch(menuProductsProvider);
     final modifierGroupsState = ref.watch(menuModifierGroupsProvider);
-    final sections = sectionsState.when(
+    final List<MenuSection> sections = sectionsState.when(
       data: (items) => items,
-      loading: () => scope == null ? demoSections : const [],
+      loading: () => scope == null ? demoSections : const <MenuSection>[],
       error: (error, stackTrace) {
         AppLogger.error('Display menu sections', error, stackTrace);
-        return scope == null ? demoSections : const [];
+        return scope == null ? demoSections : const <MenuSection>[];
       },
     );
     final List<MenuProduct> catalog = catalogState.when(
@@ -800,7 +800,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     final products = catalog
         .where((product) {
           if (searchQuery.isNotEmpty) {
-            return productNameStartsWith(product, searchQuery);
+            return productMatchesMenuSearch(product, sections, searchQuery);
           }
           if (effectiveSubsection != null) {
             return product.sectionIds.contains(effectiveSubsection);
@@ -877,7 +877,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                                 decoration: InputDecoration(
                                   isDense: true,
                                   labelText: 'Quick product search',
-                                  hintText: 'Type the start of a product name',
+                                  hintText: 'Search products or categories',
                                   prefixIcon: const Icon(Icons.search_rounded),
                                   suffixIcon: Row(
                                     mainAxisSize: MainAxisSize.min,
