@@ -311,6 +311,76 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     }
   }
 
+  Future<void> _recoverOwnPin(VenuePinStaff staff) async {
+    if (FirebaseAuth.instance.currentUser?.uid != staff.userId) {
+      setState(() {
+        _error =
+            'Sign out of this device account and sign in with your own email before recovering your PIN.';
+      });
+      return;
+    }
+    setState(() {
+      _submitting = true;
+      _error = null;
+    });
+    try {
+      await _repository.requestOwnStaffPinRecovery(scope: widget.scope);
+      if (!mounted) return;
+      final code = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const _PinPadDialog(
+          title: Text('Enter email recovery code'),
+          message:
+              'Enter the six-digit code sent to your Firebase sign-in email. It expires after 10 minutes.',
+          confirmLabel: 'Continue',
+        ),
+      );
+      if (code == null || !mounted) return;
+      final newPin = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const _PinPadDialog(
+          title: Text('Choose a new staff PIN'),
+          message: 'Choose a new six-digit PIN that only you know.',
+          confirmLabel: 'Continue',
+        ),
+      );
+      if (newPin == null || !mounted) return;
+      final confirmation = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const _PinPadDialog(
+          title: Text('Confirm new staff PIN'),
+          message: 'Enter the same new PIN again.',
+          confirmLabel: 'Reset PIN',
+        ),
+      );
+      if (confirmation == null || !mounted) return;
+      if (newPin != confirmation) {
+        setState(() => _error = 'The two new PIN entries did not match.');
+        return;
+      }
+      await _repository.confirmOwnStaffPinRecovery(
+        scope: widget.scope,
+        recoveryCode: code,
+        newPin: newPin,
+      );
+      await _loadStaff();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('PIN reset securely. Enter your new PIN to continue.'),
+        ),
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Recover own staff PIN', error, stackTrace);
+      if (mounted) setState(() => _error = 'Could not reset PIN: $error');
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(activeStaffPinSessionProvider);
@@ -404,9 +474,38 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
                               const Text(
                                 'This PIN is locked after three failed attempts.',
                               ),
-                              const Text(
-                                ' Ask a manager or owner to unlock it from staff management.',
-                              ),
+                              if (selected?.userId == currentUserId) ...[
+                                const SizedBox(height: 8),
+                                const Text(
+                                  'Because you are signed in with this staff member’s email account, you can securely reset the PIN by email.',
+                                ),
+                                const SizedBox(height: 12),
+                                FilledButton.icon(
+                                  onPressed: _submitting
+                                      ? null
+                                      : () => _recoverOwnPin(selected!),
+                                  icon: const Icon(
+                                    Icons.mark_email_read_outlined,
+                                  ),
+                                  label: Text(
+                                    _submitting
+                                        ? 'Sending code…'
+                                        : 'Reset PIN by email',
+                                  ),
+                                ),
+                              ] else ...[
+                                const Text(
+                                  'Ask another manager to unlock it, or sign out and sign in with your own email to reset it securely.',
+                                ),
+                                const SizedBox(height: 8),
+                                OutlinedButton.icon(
+                                  onPressed: _submitting
+                                      ? null
+                                      : FirebaseAuth.instance.signOut,
+                                  icon: const Icon(Icons.logout_rounded),
+                                  label: const Text('Sign in with my email'),
+                                ),
+                              ],
                             ] else if (selected?.hasPin == true)
                               FilledButton.icon(
                                 onPressed: _submitting

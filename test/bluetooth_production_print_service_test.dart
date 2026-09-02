@@ -163,6 +163,13 @@ class _FakePrinter implements BluetoothReceiptPrinter {
   }) async {}
 
   @override
+  Future<void> printTextReport({
+    required BluetoothReceiptPrinterDevice device,
+    required String title,
+    required List<String> lines,
+  }) async {}
+
+  @override
   Future<void> printTestTicket({
     required BluetoothReceiptPrinterDevice device,
     required String restaurantName,

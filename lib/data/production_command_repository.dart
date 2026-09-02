@@ -460,6 +460,26 @@ class ProductionCommandRepository {
     });
   }
 
+  Future<void> requestOwnStaffPinRecovery({required VenueScope scope}) {
+    return _call('requestOwnStaffPinRecovery', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+    });
+  }
+
+  Future<void> confirmOwnStaffPinRecovery({
+    required VenueScope scope,
+    required String recoveryCode,
+    required String newPin,
+  }) {
+    return _call('confirmOwnStaffPinRecovery', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'recoveryCode': recoveryCode,
+      'newPin': newPin,
+    });
+  }
+
   Future<void> createTable({
     required VenueScope scope,
     required String label,
