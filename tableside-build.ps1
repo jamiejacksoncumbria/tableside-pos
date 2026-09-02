@@ -58,8 +58,34 @@ function Invoke-Git([Parameter(ValueFromRemainingArguments)] [string[]]$Argument
 }
 
 function Confirm-RemoteAction([string]$Message) {
-    $answer = Read-Host "$Message Type YES to continue"
-    return $answer -ceq 'YES'
+    while ($true) {
+        $answer = (Read-Host "$Message [Y]es/[N]o").Trim()
+        if ($answer -match '(?i)^(y|yes)$') { return $true }
+        if ($answer -match '(?i)^(n|no)$' -or [string]::IsNullOrWhiteSpace($answer)) {
+            Write-Host 'Operation cancelled; nothing was deployed.' -ForegroundColor Yellow
+            return $false
+        }
+        Write-Host 'Enter Y, YES, N, or NO.' -ForegroundColor Yellow
+    }
+}
+
+function Start-OperationLog([string]$Name) {
+    $logDirectory = Join-Path $script:RepoRoot 'build-logs'
+    New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $logPath = Join-Path $logDirectory "$stamp-$Name.log"
+    Start-Transcript -LiteralPath $logPath -Force | Out-Null
+    Write-Host "Live output is also being saved to: $logPath" -ForegroundColor DarkGray
+    return $logPath
+}
+
+function Stop-OperationLog([string]$LogPath, [bool]$Succeeded) {
+    try { Stop-Transcript | Out-Null } catch { }
+    if ($Succeeded) {
+        Write-Host "COMPLETED successfully. Log: $LogPath" -ForegroundColor Green
+    } else {
+        Write-Host "FAILED. Review log: $LogPath" -ForegroundColor Red
+    }
 }
 
 function Install-Dependencies {
@@ -169,30 +195,70 @@ function Check-Functions {
 
 function Deploy-Functions {
     if (-not (Confirm-RemoteAction "Deploy Cloud Functions to '$ProjectId'?")) { return }
-    Check-Functions
-    Firebase deploy --only functions --project $ProjectId
+    Write-Heading "Deploy Cloud Functions to $ProjectId"
+    $logPath = Start-OperationLog 'deploy-functions'
+    $succeeded = $false
+    try {
+        Check-Functions
+        Firebase deploy --only functions --project $ProjectId
+        $succeeded = $true
+    } finally {
+        Stop-OperationLog $logPath $succeeded
+    }
 }
 
 function Deploy-Firestore {
     if (-not (Confirm-RemoteAction "Deploy Firestore rules and indexes to '$ProjectId'?")) { return }
-    Firebase deploy --only 'firestore:rules,firestore:indexes' --project $ProjectId
+    Write-Heading "Deploy Firestore to $ProjectId"
+    $logPath = Start-OperationLog 'deploy-firestore'
+    $succeeded = $false
+    try {
+        Firebase deploy --only 'firestore:rules,firestore:indexes' --project $ProjectId
+        $succeeded = $true
+    } finally {
+        Stop-OperationLog $logPath $succeeded
+    }
 }
 
 function Deploy-Storage {
     if (-not (Confirm-RemoteAction "Deploy Storage rules to '$ProjectId'?")) { return }
-    Firebase deploy --only storage --project $ProjectId
+    Write-Heading "Deploy Storage rules to $ProjectId"
+    $logPath = Start-OperationLog 'deploy-storage'
+    $succeeded = $false
+    try {
+        Firebase deploy --only storage --project $ProjectId
+        $succeeded = $true
+    } finally {
+        Stop-OperationLog $logPath $succeeded
+    }
 }
 
 function Deploy-Web {
     if (-not (Confirm-RemoteAction "Build and deploy Firebase Hosting to '$ProjectId'?")) { return }
-    Build-Web
-    Firebase deploy --only hosting --project $ProjectId
+    Write-Heading "Build and deploy Firebase Hosting to $ProjectId"
+    $logPath = Start-OperationLog 'deploy-web'
+    $succeeded = $false
+    try {
+        Build-Web
+        Firebase deploy --only hosting --project $ProjectId
+        $succeeded = $true
+    } finally {
+        Stop-OperationLog $logPath $succeeded
+    }
 }
 
 function Deploy-Backend {
     if (-not (Confirm-RemoteAction "Deploy Functions, Firestore, and Storage to '$ProjectId'?")) { return }
-    Check-Functions
-    Firebase deploy --only 'functions,firestore:rules,firestore:indexes,storage' --project $ProjectId
+    Write-Heading "Deploy backend to $ProjectId"
+    $logPath = Start-OperationLog 'deploy-backend'
+    $succeeded = $false
+    try {
+        Check-Functions
+        Firebase deploy --only 'functions,firestore:rules,firestore:indexes,storage' --project $ProjectId
+        $succeeded = $true
+    } finally {
+        Stop-OperationLog $logPath $succeeded
+    }
 }
 
 function Show-GitStatus {

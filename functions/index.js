@@ -1585,6 +1585,12 @@ async function unlockStaffPinFor(caller, rawData) {
   if (!staffMembership.exists || staffMembership.data().active === false) {
     throw new HttpsError("failed-precondition", "This staff account is not active.");
   }
+  const targetRoles = Array.isArray(staffMembership.data().roles)
+    ? staffMembership.data().roles
+    : [];
+  if (targetRoles.includes("owner") && !roles.includes("owner")) {
+    throw new HttpsError("permission-denied", "Only an owner can manage an owner's PIN.");
+  }
   if (!pin.exists || pin.data().venueId !== venueId) {
     throw new HttpsError("not-found", "This staff PIN was not found for the selected venue.");
   }
@@ -1597,6 +1603,100 @@ async function unlockStaffPinFor(caller, rawData) {
   });
   await writeAudit(caller.uid, "unlockStaffPin", userId, {tenantId, venueId});
   return {unlocked: true};
+}
+
+async function lockStaffPinFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const userId = requiredText(data, "userId", 128);
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager can lock a staff PIN.");
+  }
+  if (userId === caller.uid) {
+    throw new HttpsError(
+      "failed-precondition",
+      "You cannot lock your own active PIN. Ask another manager or owner.",
+    );
+  }
+  const pinRef = db.doc(
+    `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, userId)}`,
+  );
+  const [venue, staffMembership, pin] = await Promise.all([
+    db.doc(`tenants/${tenantId}/venues/${venueId}`).get(),
+    db.doc(`tenants/${tenantId}/members/${userId}`).get(),
+    pinRef.get(),
+  ]);
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  if (!staffMembership.exists || staffMembership.data().active === false) {
+    throw new HttpsError("failed-precondition", "This staff account is not active.");
+  }
+  const targetRoles = Array.isArray(staffMembership.data().roles)
+    ? staffMembership.data().roles
+    : [];
+  if (targetRoles.includes("owner") && !roles.includes("owner")) {
+    throw new HttpsError("permission-denied", "Only an owner can manage an owner's PIN.");
+  }
+  if (!pin.exists || pin.data().venueId !== venueId) {
+    throw new HttpsError("not-found", "This staff PIN was not found for the selected venue.");
+  }
+  await pinRef.update({
+    locked: true,
+    failedAttempts: 0,
+    pinVersion: FieldValue.increment(1),
+    lockedAt: FieldValue.serverTimestamp(),
+    lockedBy: caller.uid,
+  });
+  await writeAudit(caller.uid, "lockStaffPin", userId, {tenantId, venueId});
+  return {locked: true};
+}
+
+async function resetStaffPinFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const userId = requiredText(data, "userId", 128);
+  const newPin = requiredSixDigitPin({pin: data.newPin});
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager can reset a staff PIN.");
+  }
+  const pinRef = db.doc(
+    `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, userId)}`,
+  );
+  const [venue, staffMembership] = await Promise.all([
+    db.doc(`tenants/${tenantId}/venues/${venueId}`).get(),
+    db.doc(`tenants/${tenantId}/members/${userId}`).get(),
+  ]);
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  if (!staffMembership.exists || staffMembership.data().active === false) {
+    throw new HttpsError("failed-precondition", "This staff account is not active.");
+  }
+  const targetRoles = Array.isArray(staffMembership.data().roles)
+    ? staffMembership.data().roles
+    : [];
+  if (targetRoles.includes("owner") && !roles.includes("owner")) {
+    throw new HttpsError("permission-denied", "Only an owner can manage an owner's PIN.");
+  }
+  const salt = randomBytes(16).toString("base64url");
+  await pinRef.set({
+    userId,
+    venueId,
+    salt,
+    pinHash: hashStaffPin(newPin, salt),
+    pinVersion: FieldValue.increment(1),
+    failedAttempts: 0,
+    locked: false,
+    resetAt: FieldValue.serverTimestamp(),
+    resetBy: caller.uid,
+  }, {merge: true});
+  await writeAudit(caller.uid, "resetStaffPin", userId, {tenantId, venueId});
+  return {reset: true};
 }
 
 async function recoverOwnStaffPinFor(caller, rawData) {
@@ -6105,6 +6205,10 @@ async function invokePosAction(action, caller, data) {
       return completeDevicePrintJobFor(caller, data);
     case "unlockStaffPin":
       return unlockStaffPinFor(actingCaller, data);
+    case "lockStaffPin":
+      return lockStaffPinFor(actingCaller, data);
+    case "resetStaffPin":
+      return resetStaffPinFor(actingCaller, data);
     case "recoverOwnStaffPin":
       return recoverOwnStaffPinFor(caller, data);
     case "openNamedTab":
