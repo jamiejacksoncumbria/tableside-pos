@@ -19,6 +19,7 @@ import '../pos/pos_controller.dart';
 import '../stock/stock_management_page.dart';
 import '../tables/table_management_page.dart';
 import 'diagnostics_page.dart';
+import 'staff_pin_management_page.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({
@@ -556,6 +557,20 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ),
               ),
               if (canManageVenue) ...[
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.lock_reset_rounded),
+                  title: const Text('Staff PIN access'),
+                  subtitle: const Text(
+                    'Review staff PIN status and unlock blocked users.',
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const StaffPinManagementPage(),
+                    ),
+                  ),
+                ),
                 const Divider(),
                 ListTile(
                   leading: const Icon(Icons.bug_report_outlined),
