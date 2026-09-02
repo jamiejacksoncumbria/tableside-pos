@@ -336,11 +336,26 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       _error = null;
     });
     try {
-      await user.reauthenticateWithCredential(
-        EmailAuthProvider.credential(email: email, password: password),
-      );
-      await user.getIdToken(true);
+      AppLogger.info('PIN recovery: verifying Firebase account password.');
+      final authentication = await user
+          .reauthenticateWithCredential(
+            EmailAuthProvider.credential(email: email, password: password),
+          )
+          .timeout(
+            const Duration(seconds: 30),
+            onTimeout: () => throw TimeoutException(
+              'Firebase account verification timed out. Check the connection and try again.',
+            ),
+          );
+      AppLogger.info('PIN recovery: Firebase account password verified.');
+      // Reauthentication itself issues a recently authenticated ID token.
+      // Forcing a second refresh can stall on some native Firebase SDKs; the
+      // repository obtains the current token immediately before the API call.
+      if (authentication.user == null) {
+        throw StateError('Firebase did not return the verified account.');
+      }
       if (!mounted) return;
+      AppLogger.info('PIN recovery: opening replacement PIN entry.');
       final newPin = await showDialog<String>(
         context: context,
         barrierDismissible: false,
@@ -365,7 +380,16 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         setState(() => _error = 'The two new PIN entries did not match.');
         return;
       }
-      await _repository.recoverOwnStaffPin(scope: widget.scope, newPin: newPin);
+      AppLogger.info('PIN recovery: submitting replacement PIN securely.');
+      await _repository
+          .recoverOwnStaffPin(scope: widget.scope, newPin: newPin)
+          .timeout(
+            const Duration(seconds: 30),
+            onTimeout: () => throw TimeoutException(
+              'The PIN reset request timed out. Check the connection and try again.',
+            ),
+          );
+      AppLogger.info('PIN recovery: replacement PIN saved successfully.');
       await _loadStaff();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
