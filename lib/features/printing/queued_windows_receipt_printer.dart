@@ -1,3 +1,5 @@
+import 'package:qr/qr.dart';
+
 import '../../core/date_formats.dart';
 import 'native_print_worker.dart';
 import 'receipt_line_aggregation.dart';
@@ -65,6 +67,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       fontSizeDelta: 2,
     ),
     const WindowsPrintLine(''),
+    ..._voucherQrLines(payload['code'] as String? ?? ''),
     WindowsPrintLine(
       payload['code'] as String? ?? '',
       alignment: WindowsPrintTextAlignment.center,
@@ -80,6 +83,40 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       alignment: WindowsPrintTextAlignment.center,
     ),
   ];
+
+  List<WindowsPrintLine> _voucherQrLines(String code) {
+    if (code.isEmpty) return const [];
+    final image = QrImage(
+      QrCode.fromData(
+        data: code,
+        errorCorrectLevel: QrErrorCorrectLevel.M,
+      ),
+    );
+    const quiet = 4;
+    final size = image.moduleCount + quiet * 2;
+    bool dark(int row, int column) =>
+        row >= quiet &&
+        column >= quiet &&
+        row < quiet + image.moduleCount &&
+        column < quiet + image.moduleCount &&
+        image.isDark(row - quiet, column - quiet);
+    final result = <WindowsPrintLine>[];
+    for (var row = 0; row < size; row += 2) {
+      final buffer = StringBuffer();
+      for (var column = 0; column < size; column++) {
+        final top = dark(row, column);
+        final bottom = row + 1 < size && dark(row + 1, column);
+        buffer.write(top && bottom ? '██' : top ? '▀▀' : bottom ? '▄▄' : '  ');
+      }
+      result.add(
+        WindowsPrintLine(
+          buffer.toString(),
+          alignment: WindowsPrintTextAlignment.center,
+        ),
+      );
+    }
+    return result;
+  }
 
   List<WindowsPrintLine> _productionLines(
     Map<String, Object?> payload,
