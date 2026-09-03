@@ -108,6 +108,13 @@ class FirestorePosRepository {
                   tenantId: tenantId,
                   name: data['name'] as String? ?? 'Unnamed venue',
                   timeZone: data['timeZone'] as String? ?? 'UTC',
+                  receiptName: data['receiptName'] as String? ?? '',
+                  address: data['address'] as String? ?? '',
+                  phoneNumbers: (data['phoneNumbers'] as List? ?? const [])
+                      .whereType<String>()
+                      .take(3)
+                      .toList(growable: false),
+                  receiptFooter: data['receiptFooter'] as String? ?? '',
                   notificationRetentionSeconds: _notificationRetentionSeconds(
                     data['notificationRetentionSeconds'],
                   ),

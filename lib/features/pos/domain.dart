@@ -173,6 +173,10 @@ class Venue {
     this.defaultThemeMode = 'light',
     this.pendingBusinessDayCutoffMinutes,
     this.pendingBusinessDayCutoffEffectiveDate,
+    this.receiptName = '',
+    this.address = '',
+    this.phoneNumbers = const [],
+    this.receiptFooter = '',
   }) : _orderFlowAmberMinutes = orderFlowAmberMinutes,
        _orderFlowRedMinutes = orderFlowRedMinutes,
        _defaultBookingDurationMinutes = defaultBookingDurationMinutes,
@@ -185,6 +189,12 @@ class Venue {
   final int notificationRetentionSeconds;
   final int backgroundLockSeconds;
   final String defaultThemeMode;
+
+  /// Optional venue-specific receipt details. Empty values inherit the company.
+  final String receiptName;
+  final String address;
+  final List<String> phoneNumbers;
+  final String receiptFooter;
 
   // Nullable backing fields deliberately protect a running debug session
   // whose Venue instances pre-date these fields after a hot reload. Existing

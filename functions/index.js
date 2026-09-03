@@ -145,7 +145,7 @@ function catalogueTitleCase(value) {
   ).join(" ");
 }
 
-function receiptBusinessSnapshot(tenantData) {
+function receiptBusinessSnapshot(tenantData, venueData = null) {
   const clean = (value, maximum) => typeof value === "string"
     ? value.trim().slice(0, maximum)
     : "";
@@ -164,11 +164,21 @@ function receiptBusinessSnapshot(tenantData) {
       phoneNumbers.length < 3) {
     phoneNumbers.push(legacyPhone);
   }
+  const venuePhones = [];
+  if (Array.isArray(venueData?.phoneNumbers)) {
+    for (const value of venueData.phoneNumbers) {
+      const phone = clean(value, 60);
+      if (phone.length > 0 && !venuePhones.includes(phone)) venuePhones.push(phone);
+      if (venuePhones.length === 3) break;
+    }
+  }
   return {
-    name: clean(tenantData?.displayName, 120) || "TABLESIDE POS",
-    address: clean(tenantData?.address, 400),
-    phoneNumbers,
-    receiptFooter: clean(tenantData?.receiptFooter, 300),
+    name: clean(venueData?.receiptName, 120) || clean(venueData?.name, 120) ||
+      clean(tenantData?.displayName, 120) || "TABLESIDE POS",
+    address: clean(venueData?.address, 400) || clean(tenantData?.address, 400),
+    phoneNumbers: venuePhones.length > 0 ? venuePhones : phoneNumbers,
+    receiptFooter: clean(venueData?.receiptFooter, 300) ||
+      clean(tenantData?.receiptFooter, 300),
   };
 }
 
@@ -1074,6 +1084,18 @@ async function manageVenueConfigurationFor(caller, rawData) {
       phoneNumbers,
       receiptFooter: optionalText(values, "receiptFooter", 300),
       logoUrl,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    }, {merge: true});
+  } else if (resource === "venueProfile") {
+    const phoneNumbers = requiredStringArray(
+      values.phoneNumbers ?? [], "phoneNumbers", 3, 40,
+    );
+    await db.doc(`tenants/${tenantId}/venues/${venueId}`).set({
+      receiptName: optionalText(values, "receiptName", 120),
+      address: optionalText(values, "address", 500),
+      phoneNumbers,
+      receiptFooter: optionalText(values, "receiptFooter", 300),
       updatedAt: FieldValue.serverTimestamp(),
       updatedByActor: actor,
     }, {merge: true});
@@ -4043,8 +4065,8 @@ async function manageVoucherFor(caller, rawData) {
         payload: {
           type: "giftVoucher", code, amountMinor, currencyCode,
           expiresAt: expiresAtMillis == null ? null : new Date(expiresAtMillis).toISOString(),
-          restaurantName: receiptBusinessSnapshot(tenant.data()).name,
-          business: receiptBusinessSnapshot(tenant.data()),
+          restaurantName: receiptBusinessSnapshot(tenant.data(), venue.data()).name,
+          business: receiptBusinessSnapshot(tenant.data(), venue.data()),
         },
         createdAt: FieldValue.serverTimestamp(),
       });
@@ -4149,8 +4171,8 @@ async function printPreReceiptFor(caller, rawData) {
       payload: {
         type: "receipt", isPreReceipt: true,
         receiptNumber: `PRE-${orderId.slice(-6).toUpperCase()}`,
-        restaurantName: receiptBusinessSnapshot(tenant.data()).name,
-        business: receiptBusinessSnapshot(tenant.data()), currencyCode,
+        restaurantName: receiptBusinessSnapshot(tenant.data(), venue.data()).name,
+        business: receiptBusinessSnapshot(tenant.data(), venue.data()), currencyCode,
         tableLabel: typeof order.data().tableLabel === "string" ? order.data().tableLabel : null,
         tabName: typeof order.data().tabName === "string" ? order.data().tabName : null,
         totalMinor, netTotalMinor: totalMinor - taxTotalMinor, taxTotalMinor,
@@ -4376,7 +4398,7 @@ async function closeOrderFor(caller, rawData) {
     );
     const netTotalMinor = totalMinor - taxTotalMinor;
     const currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
-    const receiptBusiness = receiptBusinessSnapshot(tenant.data());
+    const receiptBusiness = receiptBusinessSnapshot(tenant.data(), venue.data());
     const payments = rawPayments.map((payment, index) =>
       validClosePayment(payment, index, currencyCode));
     const voucherPayments = payments.filter((payment) => payment.method === "voucher");
@@ -5343,7 +5365,7 @@ async function sendOrderToProductionFor(caller, rawData) {
   );
   const actor = actorSnapshot(await auth.getUser(caller.uid));
   const tenant = await tenantRef.get();
-  const restaurantName = tenant.exists && typeof tenant.data().displayName === "string"
+  let restaurantName = tenant.exists && typeof tenant.data().displayName === "string"
     ? tenant.data().displayName
     : "TABLESIDE POS";
 
@@ -5360,6 +5382,7 @@ async function sendOrderToProductionFor(caller, rawData) {
     if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
     }
+    restaurantName = receiptBusinessSnapshot(tenant.data(), venue.data()).name;
     if (tableRef != null && (!table.exists || table.data().venueId !== venueId)) {
       throw new HttpsError("failed-precondition", "The selected table is not available at this venue.");
     }

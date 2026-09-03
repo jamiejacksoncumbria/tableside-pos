@@ -45,6 +45,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final TextEditingController _address;
   late final List<TextEditingController> _phoneNumbers;
   late final TextEditingController _footer;
+  late final TextEditingController _venueReceiptName;
+  late final TextEditingController _venueAddress;
+  late final List<TextEditingController> _venuePhoneNumbers;
+  late final TextEditingController _venueReceiptFooter;
   late final TextEditingController _notificationRetentionSeconds;
   late final TextEditingController _backgroundLockSeconds;
   late final TextEditingController _orderFlowAmberMinutes;
@@ -75,6 +79,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       ),
     );
     _footer = TextEditingController(text: profile.receiptFooter);
+    _venueReceiptName = TextEditingController(
+      text: widget.venueOverride?.receiptName ?? '',
+    );
+    _venueAddress = TextEditingController(
+      text: widget.venueOverride?.address ?? '',
+    );
+    final venuePhones = widget.venueOverride?.phoneNumbers ?? const <String>[];
+    _venuePhoneNumbers = List<TextEditingController>.generate(
+      3,
+      (index) => TextEditingController(
+        text: index < venuePhones.length ? venuePhones[index] : '',
+      ),
+    );
+    _venueReceiptFooter = TextEditingController(
+      text: widget.venueOverride?.receiptFooter ?? '',
+    );
     _notificationRetentionSeconds = TextEditingController(
       text: '${widget.venueOverride?.notificationRetentionSeconds ?? 5}',
     );
@@ -106,6 +126,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       controller.dispose();
     }
     _footer.dispose();
+    _venueReceiptName.dispose();
+    _venueAddress.dispose();
+    for (final controller in _venuePhoneNumbers) {
+      controller.dispose();
+    }
+    _venueReceiptFooter.dispose();
     _notificationRetentionSeconds.dispose();
     _backgroundLockSeconds.dispose();
     _orderFlowAmberMinutes.dispose();
@@ -293,6 +319,49 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     }
   }
 
+  Future<void> _saveVenueReceiptDetails(VenueScope scope) async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    try {
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .manageVenueConfiguration(
+            scope: scope,
+            resource: 'venueProfile',
+            values: {
+              'receiptName': _venueReceiptName.text.trim(),
+              'address': _venueAddress.text.trim(),
+              'phoneNumbers': _venuePhoneNumbers
+                  .map((controller) => controller.text.trim())
+                  .where((value) => value.isNotEmpty)
+                  .take(3)
+                  .toList(growable: false),
+              'receiptFooter': _venueReceiptFooter.text.trim(),
+            },
+          );
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Venue details saved',
+        message: 'New tickets and receipts will use this venue’s details.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Save venue receipt details', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not save venue details',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   Future<void> _pickBusinessDayCutoff() async {
     final selected = await showTimePicker(
       context: context,
@@ -320,6 +389,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   Widget build(BuildContext context) {
     final TenantProfile profile =
         widget.profileOverride ?? ref.watch(tenantProfileProvider);
+    final venueTradingName =
+        widget.venueOverride?.receiptName.trim().isNotEmpty == true
+        ? widget.venueOverride!.receiptName.trim()
+        : (widget.venueOverride?.name.trim().isNotEmpty == true
+              ? widget.venueOverride!.name.trim()
+              : profile.displayName);
     final venueScope = ref.watch(activeVenueScopeProvider);
     final staffSession = ref.watch(activeStaffPinSessionProvider);
     final canManageVenue =
@@ -502,7 +577,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
                       builder: (_) => BluetoothPrinterSetupPage(
-                        restaurantName: profile.displayName,
+                        restaurantName: venueTradingName,
                         venueRoutingKey: venueScope == null
                             ? 'demo'
                             : '${venueScope.tenantId}_${venueScope.venueId}',
@@ -524,7 +599,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
                       builder: (_) => WindowsPrinterSetupPage(
-                        restaurantName: profile.displayName,
+                        restaurantName: venueTradingName,
                       ),
                     ),
                   ),
@@ -622,6 +697,74 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         ),
         if (venueScope != null && canManageVenue) ...[
+          const SizedBox(height: 16),
+          _SettingsCard(
+            title: 'Venue receipt details',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Set details for ${widget.venueOverride?.name ?? 'this venue'}. Leave a field blank to inherit the company detail.',
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _venueReceiptName,
+                  decoration: InputDecoration(
+                    labelText: 'Venue trading name',
+                    hintText: profile.displayName,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _venueAddress,
+                  maxLines: 2,
+                  decoration: InputDecoration(
+                    labelText: 'Venue address',
+                    hintText: profile.address,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                for (
+                  var index = 0;
+                  index < _venuePhoneNumbers.length;
+                  index++
+                ) ...[
+                  TextField(
+                    controller: _venuePhoneNumbers[index],
+                    keyboardType: TextInputType.phone,
+                    decoration: InputDecoration(
+                      labelText: index == 0
+                          ? 'Venue phone number'
+                          : 'Additional venue phone number ${index + 1}',
+                      hintText: index < profile.phoneNumbers.length
+                          ? profile.phoneNumbers[index]
+                          : null,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                TextField(
+                  controller: _venueReceiptFooter,
+                  maxLines: 2,
+                  decoration: InputDecoration(
+                    labelText: 'Venue receipt footer',
+                    hintText: profile.receiptFooter,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton.icon(
+                    onPressed: _saving
+                        ? null
+                        : () => _saveVenueReceiptDetails(venueScope),
+                    icon: const Icon(Icons.storefront_outlined),
+                    label: const Text('Save venue details'),
+                  ),
+                ),
+              ],
+            ),
+          ),
           const SizedBox(height: 16),
           _SettingsCard(
             title: 'Venue operational settings',
