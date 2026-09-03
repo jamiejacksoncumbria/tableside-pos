@@ -3816,6 +3816,13 @@ function validClosePayment(value, index, baseCurrencyCode) {
   }
   const terminalLabel = optionalText(payment, "terminalLabel", 120) || null;
   const voucherCode = optionalText(payment, "voucherCode", 80) || null;
+  if (method === "voucher" &&
+      (voucherCode == null || tenderedCurrencyCode !== baseCurrencyCode)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Voucher payments require a voucher code and the restaurant currency.",
+    );
+  }
   const exchangeRateSource = optionalText(payment, "exchangeRateSource", 160) || null;
   const exchangeRatePublishedDate =
     optionalText(payment, "exchangeRatePublishedDate", 80) || null;
@@ -5879,12 +5886,6 @@ function purchaseOrderDateKey(date) {
 function validatedStockComponents(value) {
   if (!Array.isArray(value) || value.length > 50) {
     throw new HttpsError("invalid-argument", "A product can use at most 50 stock ingredients.");
-  }
-  if (method === "voucher" && (voucherCode == null || tenderedCurrencyCode !== baseCurrencyCode)) {
-    throw new HttpsError(
-      "invalid-argument",
-      "Voucher payments require a voucher code and the restaurant currency.",
-    );
   }
   const productIds = new Set();
   return value.map((raw) => {
