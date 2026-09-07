@@ -1016,6 +1016,36 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                               ),
                             ],
                           ),
+                          if (useCategoryTiles &&
+                              _tileCategoryOpen &&
+                              searchQuery.isEmpty) ...[
+                            const SizedBox(height: 4),
+                            SizedBox(
+                              height: 40,
+                              child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: TextButton.icon(
+                                  onPressed: () => setState(() {
+                                    if (effectiveSubsection != null) {
+                                      ref
+                                          .read(
+                                            activeSubsectionProvider.notifier,
+                                          )
+                                          .select(null);
+                                    } else {
+                                      _tileCategoryOpen = false;
+                                    }
+                                  }),
+                                  icon: const Icon(Icons.arrow_back_rounded),
+                                  label: Text(
+                                    effectiveSubsection != null
+                                        ? section?.name ?? 'Category'
+                                        : 'Categories',
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                           const SizedBox(height: 14),
                           if (!useCategoryTiles)
                             _HorizontalMenuScroller(
@@ -1154,29 +1184,6 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                               ],
                             ),
                           ],
-                          if (useCategoryTiles &&
-                              _tileCategoryOpen &&
-                              searchQuery.isEmpty)
-                            Align(
-                              alignment: Alignment.centerLeft,
-                              child: TextButton.icon(
-                                onPressed: () => setState(() {
-                                  if (effectiveSubsection != null) {
-                                    ref
-                                        .read(activeSubsectionProvider.notifier)
-                                        .select(null);
-                                  } else {
-                                    _tileCategoryOpen = false;
-                                  }
-                                }),
-                                icon: const Icon(Icons.arrow_back_rounded),
-                                label: Text(
-                                  effectiveSubsection != null
-                                      ? section?.name ?? 'Category'
-                                      : 'Categories',
-                                ),
-                              ),
-                            ),
                           if (!showTileCategoryBrowser) ...[
                             const SizedBox(height: 14),
                             Text(
