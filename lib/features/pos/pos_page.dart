@@ -3792,19 +3792,44 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
     }
   }
 
+  Future<void> _selectNamedTab(OpenNamedTab tab) async {
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await ref.read(activeOrderProvider.notifier).openNamedTab(tab.name);
+      ref.read(selectedTableProvider.notifier).select('');
+      if (mounted) Navigator.of(context).pop(true);
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Choose existing named tab for order', error, stackTrace);
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final tables = ref
-        .watch(diningTablesProvider)
-        .when(
-          data: (items) => items,
-          loading: () => const <DiningTable>[],
-          error: (error, stackTrace) {
-            AppLogger.error('Load tables for new order', error, stackTrace);
-            return const <DiningTable>[];
-          },
-        );
-    final tablesLoading = ref.watch(diningTablesProvider).isLoading;
+    final tablesState = ref.watch(diningTablesProvider);
+    final tabsState = ref.watch(openNamedTabsProvider);
+    final tables = tablesState.when(
+      data: (items) => items,
+      loading: () => const <DiningTable>[],
+      error: (error, stackTrace) {
+        AppLogger.error('Load tables for new order', error, stackTrace);
+        return const <DiningTable>[];
+      },
+    );
+    final namedTabs = tabsState.when(
+      data: (items) => items,
+      loading: () => const <OpenNamedTab>[],
+      error: (error, stackTrace) {
+        AppLogger.error('Load named tabs for new order', error, stackTrace);
+        return const <OpenNamedTab>[];
+      },
+    );
+    final locationsLoading = tablesState.isLoading || tabsState.isLoading;
     return AlertDialog(
       icon: const Icon(Icons.receipt_long_outlined),
       title: const Text('Start this order'),
@@ -3824,24 +3849,56 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
               const SizedBox(height: 8),
             ],
             ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 230),
-              child: tablesLoading
+              constraints: const BoxConstraints(maxHeight: 300),
+              child: locationsLoading
                   ? const Center(child: CircularProgressIndicator())
-                  : ListView.separated(
+                  : ListView(
                       shrinkWrap: true,
-                      itemCount: tables.length,
-                      separatorBuilder: (_, _) => const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final table = tables[index];
-                        return ListTile(
-                          enabled: !_saving,
-                          leading: const Icon(Icons.table_restaurant_rounded),
-                          title: Text(table.label),
-                          subtitle: Text('${table.seats} seats'),
-                          trailing: const Icon(Icons.chevron_right_rounded),
-                          onTap: () => _selectTable(table),
-                        );
-                      },
+                      children: [
+                        if (tables.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                            child: Text(
+                              'Tables',
+                              style: Theme.of(context).textTheme.labelLarge,
+                            ),
+                          ),
+                        for (final table in tables)
+                          ListTile(
+                            enabled: !_saving,
+                            leading: const Icon(Icons.table_restaurant_rounded),
+                            title: Text(table.label),
+                            subtitle: Text('${table.seats} seats'),
+                            trailing: const Icon(Icons.chevron_right_rounded),
+                            onTap: () => _selectTable(table),
+                          ),
+                        if (tables.isNotEmpty && namedTabs.isNotEmpty)
+                          const Divider(height: 16),
+                        if (namedTabs.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                            child: Text(
+                              'Open named tabs',
+                              style: Theme.of(context).textTheme.labelLarge,
+                            ),
+                          ),
+                        for (final tab in namedTabs)
+                          ListTile(
+                            enabled: !_saving,
+                            leading: const Icon(Icons.person_outline_rounded),
+                            title: Text(tab.name),
+                            subtitle: const Text('Open named tab'),
+                            trailing: const Icon(Icons.chevron_right_rounded),
+                            onTap: () => _selectNamedTab(tab),
+                          ),
+                        if (tables.isEmpty && namedTabs.isEmpty)
+                          const Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Text(
+                              'No tables or open named tabs are available.',
+                            ),
+                          ),
+                      ],
                     ),
             ),
             const SizedBox(height: 16),
