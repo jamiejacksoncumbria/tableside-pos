@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -2779,15 +2781,26 @@ Future<void> _showCheckoutSheet(
                   TextField(
                     controller: tenderedAmountController,
                     enabled: !saving,
+                    readOnly: true,
+                    showCursor: false,
                     keyboardType: const TextInputType.numberWithOptions(
                       decimal: true,
                     ),
                     decoration: InputDecoration(
                       labelText: 'Amount received ($tenderedCurrencyCode)',
+                      suffixIcon: const Icon(Icons.dialpad_rounded),
                       helperText: isForeignCash
                           ? 'Enter the physical cash received in $tenderedCurrencyCode.'
                           : 'Enter the amount received.',
                     ),
+                    onTap: saving
+                        ? null
+                        : () => _showDecimalKeypad(
+                            sheetContext,
+                            controller: tenderedAmountController,
+                            title: 'Amount received ($tenderedCurrencyCode)',
+                            onChanged: () => setSheetState(() {}),
+                          ),
                     onChanged: (_) => setSheetState(() {}),
                   ),
                   if (isForeignCash) ...[
@@ -3358,28 +3371,187 @@ int _minorScale(int decimalDigits) {
 /// the order recorded and visible on the flow board without wasting a ticket.
 Future<bool?> _confirmProductionPrint(BuildContext context) => showDialog<bool>(
   context: context,
-  builder: (dialogContext) => AlertDialog(
+  barrierDismissible: false,
+  builder: (_) => const _ProductionPrintCountdownDialog(),
+);
+
+class _ProductionPrintCountdownDialog extends StatefulWidget {
+  const _ProductionPrintCountdownDialog();
+
+  @override
+  State<_ProductionPrintCountdownDialog> createState() =>
+      _ProductionPrintCountdownDialogState();
+}
+
+class _ProductionPrintCountdownDialogState
+    extends State<_ProductionPrintCountdownDialog> {
+  static const _initialSeconds = 10;
+  late final Timer _timer;
+  var _seconds = _initialSeconds;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (_seconds <= 1) {
+        _timer.cancel();
+        Navigator.of(context).pop(true);
+      } else {
+        setState(() => _seconds--);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
     icon: const Icon(Icons.print_outlined),
     title: const Text('Send order'),
-    content: const Text(
-      'Do you need a production ticket printed for these new items?',
+    content: Text(
+      'Do you need a production ticket printed for these new items?\n\n'
+      'Sending and printing automatically in $_seconds seconds.',
     ),
     actions: [
       TextButton(
-        onPressed: () => Navigator.of(dialogContext).pop(),
+        onPressed: () => Navigator.of(context).pop(),
         child: const Text('Cancel'),
       ),
       OutlinedButton(
-        onPressed: () => Navigator.of(dialogContext).pop(false),
-        child: const Text('Send without printing'),
+        onPressed: () => Navigator.of(context).pop(false),
+        child: const Text('No print'),
       ),
       FilledButton.icon(
-        onPressed: () => Navigator.of(dialogContext).pop(true),
+        onPressed: () => Navigator.of(context).pop(true),
         icon: const Icon(Icons.print_rounded),
-        label: const Text('Send & print'),
+        label: Text('Send & print ($_seconds)'),
       ),
     ],
-  ),
+  );
+}
+
+Future<void> _showDecimalKeypad(
+  BuildContext context, {
+  required TextEditingController controller,
+  required String title,
+  required VoidCallback onChanged,
+}) => showDialog<void>(
+  context: context,
+  builder: (dialogContext) {
+    void enter(String value, StateSetter setDialogState) {
+      var text = controller.text;
+      if (value == '.' && text.contains('.')) return;
+      if (value == '.' && text.isEmpty) text = '0';
+      controller.text = '$text$value';
+      controller.selection = TextSelection.collapsed(
+        offset: controller.text.length,
+      );
+      setDialogState(() {});
+      onChanged();
+    }
+
+    return StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: 300,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controller,
+                autofocus: true,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                textAlign: TextAlign.end,
+                decoration: const InputDecoration(
+                  labelText: 'Enter amount',
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (_) {
+                  setDialogState(() {});
+                  onChanged();
+                },
+              ),
+              const SizedBox(height: 12),
+              GridView.count(
+                shrinkWrap: true,
+                crossAxisCount: 3,
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+                childAspectRatio: 1.7,
+                physics: const NeverScrollableScrollPhysics(),
+                children: [
+                  for (final key in const [
+                    '1',
+                    '2',
+                    '3',
+                    '4',
+                    '5',
+                    '6',
+                    '7',
+                    '8',
+                    '9',
+                  ])
+                    FilledButton.tonal(
+                      onPressed: () => enter(key, setDialogState),
+                      child: Text(key, style: const TextStyle(fontSize: 20)),
+                    ),
+                  OutlinedButton(
+                    onPressed: () {
+                      controller.clear();
+                      setDialogState(() {});
+                      onChanged();
+                    },
+                    child: const Text('Clear'),
+                  ),
+                  FilledButton.tonal(
+                    onPressed: () => enter('0', setDialogState),
+                    child: const Text('0', style: TextStyle(fontSize: 20)),
+                  ),
+                  FilledButton.tonal(
+                    onPressed: () => enter('.', setDialogState),
+                    child: const Text('.', style: TextStyle(fontSize: 24)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: controller.text.isEmpty
+                      ? null
+                      : () {
+                          final text = controller.text;
+                          controller.text = text.substring(0, text.length - 1);
+                          controller.selection = TextSelection.collapsed(
+                            offset: controller.text.length,
+                          );
+                          setDialogState(() {});
+                          onChanged();
+                        },
+                  icon: const Icon(Icons.backspace_outlined),
+                  label: const Text('Delete'),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Done'),
+          ),
+        ],
+      ),
+    );
+  },
 );
 
 class _StatusChip extends StatelessWidget {
