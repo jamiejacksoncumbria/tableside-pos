@@ -939,6 +939,31 @@ class FirestorePosRepository {
     );
   }
 
+  Future<void> bulkUpdateProducts({
+    required VenueScope scope,
+    required List<String> productIds,
+    List<String>? sectionIds,
+    ProductionArea? productionArea,
+    bool? showOnOrderFlow,
+    List<String>? modifierGroupIds,
+    int? targetMarginBasisPoints,
+  }) async {
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'product',
+      operation: 'bulkUpdate',
+      values: {
+        'productIds': productIds,
+        if (sectionIds != null) 'sectionIds': sectionIds,
+        if (productionArea != null) 'productionArea': productionArea.name,
+        if (showOnOrderFlow != null) 'showOnOrderFlow': showOnOrderFlow,
+        if (modifierGroupIds != null) 'modifierGroupIds': modifierGroupIds,
+        if (targetMarginBasisPoints != null)
+          'targetMarginBasisPoints': targetMarginBasisPoints,
+      },
+    );
+  }
+
   Future<void> updateProduct({
     required VenueScope scope,
     required String productId,

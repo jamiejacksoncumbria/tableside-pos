@@ -31,6 +31,8 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
   String _searchQuery = '';
   String? _productCategoryFilter;
   String? _productSubcategoryFilter;
+  final Set<String> _selectedProductIds = {};
+  bool _savingBulkProducts = false;
   bool _savingDefaultTaxRate = false;
 
   @override
@@ -113,6 +115,10 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
       return product.sectionIds.any(included.contains);
     }).toList();
     final isSearching = _searchQuery.trim().isNotEmpty;
+    final visibleProductIds = filteredProducts.map((item) => item.id).toSet();
+    final allVisibleSelected =
+        visibleProductIds.isNotEmpty &&
+        visibleProductIds.every(_selectedProductIds.contains);
 
     return ListView(
       padding: const EdgeInsets.all(20),
@@ -388,7 +394,34 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
           ),
         ),
         const SizedBox(height: 24),
-        Text('Products', style: Theme.of(context).textTheme.titleLarge),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Products · ${filteredProducts.length} found',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+            ),
+            if (scope != null && filteredProducts.isNotEmpty)
+              TextButton.icon(
+                onPressed: _savingBulkProducts
+                    ? null
+                    : () => setState(() {
+                        if (allVisibleSelected) {
+                          _selectedProductIds.removeAll(visibleProductIds);
+                        } else {
+                          _selectedProductIds.addAll(visibleProductIds);
+                        }
+                      }),
+                icon: Icon(
+                  allVisibleSelected
+                      ? Icons.deselect_rounded
+                      : Icons.select_all_rounded,
+                ),
+                label: Text(allVisibleSelected ? 'Deselect all' : 'Select all'),
+              ),
+          ],
+        ),
         const SizedBox(height: 8),
         if (!isSearching) ...[
           Wrap(
@@ -414,7 +447,12 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                     ))
                       DropdownMenuItem(
                         value: section.id,
-                        child: Text(section.name),
+                        child: Text(
+                          '${section.name} (${products.where((product) {
+                            final childIds = sections.where((item) => item.parentSectionId == section.id).map((item) => item.id).toSet();
+                            return product.sectionIds.contains(section.id) || product.sectionIds.any(childIds.contains);
+                          }).length})',
+                        ),
                       ),
                   ],
                   onChanged: (value) => setState(() {
@@ -443,7 +481,9 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                       for (final section in filterSubcategories)
                         DropdownMenuItem(
                           value: section.id,
-                          child: Text(section.name),
+                          child: Text(
+                            '${section.name} (${products.where((product) => product.sectionIds.contains(section.id)).length})',
+                          ),
                         ),
                     ],
                     onChanged: (value) => setState(() {
@@ -458,6 +498,40 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
           const SizedBox(height: 10),
         ] else
           const Text('The main search is overriding category filters.'),
+        if (_selectedProductIds.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Card(
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text('${_selectedProductIds.length} products selected'),
+                  FilledButton.tonalIcon(
+                    onPressed: scope == null || _savingBulkProducts
+                        ? null
+                        : () => _showBulkProductEditor(
+                            scope: scope,
+                            sections: sections,
+                            modifierGroups: modifierGroups,
+                          ),
+                    icon: const Icon(Icons.edit_note_rounded),
+                    label: const Text('Bulk change'),
+                  ),
+                  TextButton(
+                    onPressed: _savingBulkProducts
+                        ? null
+                        : () => setState(_selectedProductIds.clear),
+                    child: const Text('Clear'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
         if (products.isEmpty)
           const _SetupHint(
             icon: Icons.restaurant_menu_outlined,
@@ -480,6 +554,14 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                     sections: sections,
                     currencyCode: widget.currencyCode,
                     canEdit: scope != null,
+                    selected: _selectedProductIds.contains(product.id),
+                    onSelected: scope == null
+                        ? null
+                        : (selected) => setState(() {
+                            selected
+                                ? _selectedProductIds.add(product.id)
+                                : _selectedProductIds.remove(product.id);
+                          }),
                     onEdit: scope == null
                         ? null
                         : () => _showProductDialog(
@@ -572,6 +654,291 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
         ],
       ],
     );
+  }
+
+  Future<void> _showBulkProductEditor({
+    required VenueScope scope,
+    required List<MenuSection> sections,
+    required List<MenuModifierGroup> modifierGroups,
+  }) async {
+    var replaceSections = false;
+    var replaceOptions = false;
+    var changeProductionArea = false;
+    var changeMargin = false;
+    var orderFlowChoice = 'unchanged';
+    var productionArea = ProductionArea.kitchen;
+    final selectedSections = <String>{};
+    final selectedGroups = <String>{};
+    final margin = TextEditingController();
+    final changes = await showDialog<_BulkProductChanges>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('Change ${_selectedProductIds.length} products'),
+          content: SizedBox(
+            width: 620,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  CheckboxListTile(
+                    value: replaceSections,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Replace menu sections'),
+                    subtitle: const Text(
+                      'Every selected product will use exactly these categories.',
+                    ),
+                    onChanged: (value) =>
+                        setDialogState(() => replaceSections = value ?? false),
+                  ),
+                  if (replaceSections)
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        for (final section in sections)
+                          FilterChip(
+                            label: Text(section.name),
+                            selected: selectedSections.contains(section.id),
+                            onSelected: (selected) => setDialogState(() {
+                              selected
+                                  ? selectedSections.add(section.id)
+                                  : selectedSections.remove(section.id);
+                            }),
+                          ),
+                      ],
+                    ),
+                  const Divider(height: 28),
+                  CheckboxListTile(
+                    value: changeProductionArea,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Change printer/production area'),
+                    onChanged: (value) => setDialogState(
+                      () => changeProductionArea = value ?? false,
+                    ),
+                  ),
+                  if (changeProductionArea)
+                    DropdownButtonFormField<ProductionArea>(
+                      initialValue: productionArea,
+                      decoration: const InputDecoration(
+                        labelText: 'Production area',
+                      ),
+                      items: [
+                        for (final area in ProductionArea.values)
+                          DropdownMenuItem(
+                            value: area,
+                            child: Text(area.label),
+                          ),
+                      ],
+                      onChanged: (value) => setDialogState(
+                        () => productionArea = value ?? productionArea,
+                      ),
+                    ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: orderFlowChoice,
+                    decoration: const InputDecoration(
+                      labelText: 'Order flow board',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'unchanged',
+                        child: Text('Leave unchanged'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'show',
+                        child: Text('Show selected products'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'hide',
+                        child: Text('Exclude selected products'),
+                      ),
+                    ],
+                    onChanged: (value) => setDialogState(
+                      () => orderFlowChoice = value ?? 'unchanged',
+                    ),
+                  ),
+                  const Divider(height: 28),
+                  CheckboxListTile(
+                    value: replaceOptions,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Replace product option groups'),
+                    onChanged: (value) =>
+                        setDialogState(() => replaceOptions = value ?? false),
+                  ),
+                  if (replaceOptions)
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        for (final group in modifierGroups)
+                          FilterChip(
+                            label: Text(group.name),
+                            selected: selectedGroups.contains(group.id),
+                            onSelected: (selected) => setDialogState(() {
+                              selected
+                                  ? selectedGroups.add(group.id)
+                                  : selectedGroups.remove(group.id);
+                            }),
+                          ),
+                      ],
+                    ),
+                  const Divider(height: 28),
+                  CheckboxListTile(
+                    value: changeMargin,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Change target margin'),
+                    onChanged: (value) =>
+                        setDialogState(() => changeMargin = value ?? false),
+                  ),
+                  if (changeMargin)
+                    TextField(
+                      controller: margin,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Target margin',
+                        suffixText: '%',
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final marginPercent = changeMargin
+                    ? double.tryParse(margin.text.trim().replaceAll(',', '.'))
+                    : null;
+                if (replaceSections && selectedSections.isEmpty) {
+                  showAppNotification(
+                    context,
+                    ref: ref,
+                    title: 'Choose a menu section',
+                    message: 'Products must remain in at least one section.',
+                    level: AppNotificationLevel.warning,
+                  );
+                  return;
+                }
+                if (changeMargin &&
+                    (marginPercent == null ||
+                        marginPercent < 0 ||
+                        marginPercent > 100)) {
+                  showAppNotification(
+                    context,
+                    ref: ref,
+                    title: 'Enter a valid margin',
+                    message: 'Target margin must be between 0 and 100%.',
+                    level: AppNotificationLevel.warning,
+                  );
+                  return;
+                }
+                if (!replaceSections &&
+                    !replaceOptions &&
+                    !changeProductionArea &&
+                    !changeMargin &&
+                    orderFlowChoice == 'unchanged') {
+                  showAppNotification(
+                    context,
+                    ref: ref,
+                    title: 'Choose something to change',
+                    message: 'No product fields have been selected.',
+                    level: AppNotificationLevel.warning,
+                  );
+                  return;
+                }
+                Navigator.pop(
+                  dialogContext,
+                  _BulkProductChanges(
+                    sectionIds: replaceSections
+                        ? selectedSections.toList(growable: false)
+                        : null,
+                    productionArea: changeProductionArea
+                        ? productionArea
+                        : null,
+                    showOnOrderFlow: orderFlowChoice == 'unchanged'
+                        ? null
+                        : orderFlowChoice == 'show',
+                    modifierGroupIds: replaceOptions
+                        ? selectedGroups.toList(growable: false)
+                        : null,
+                    targetMarginBasisPoints: marginPercent == null
+                        ? null
+                        : (marginPercent * 100).round(),
+                  ),
+                );
+              },
+              child: const Text('Review and apply'),
+            ),
+          ],
+        ),
+      ),
+    );
+    margin.dispose();
+    if (changes == null || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirm bulk product change'),
+        content: Text(
+          'Apply the selected changes to ${_selectedProductIds.length} products? This will be recorded in the audit trail.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Go back'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Apply changes'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _savingBulkProducts = true);
+    try {
+      final count = _selectedProductIds.length;
+      await ref
+          .read(firestorePosRepositoryProvider)
+          .bulkUpdateProducts(
+            scope: scope,
+            productIds: _selectedProductIds.toList(growable: false),
+            sectionIds: changes.sectionIds,
+            productionArea: changes.productionArea,
+            showOnOrderFlow: changes.showOnOrderFlow,
+            modifierGroupIds: changes.modifierGroupIds,
+            targetMarginBasisPoints: changes.targetMarginBasisPoints,
+          );
+      if (!mounted) return;
+      setState(_selectedProductIds.clear);
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Products updated',
+        message: '$count products were changed securely.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Bulk update menu products', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Bulk change failed',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _savingBulkProducts = false);
+    }
   }
 
   Future<void> _setDefaultTaxRate(
@@ -885,12 +1252,30 @@ Future<void> _setProductArchived({
   }
 }
 
+class _BulkProductChanges {
+  const _BulkProductChanges({
+    this.sectionIds,
+    this.productionArea,
+    this.showOnOrderFlow,
+    this.modifierGroupIds,
+    this.targetMarginBasisPoints,
+  });
+
+  final List<String>? sectionIds;
+  final ProductionArea? productionArea;
+  final bool? showOnOrderFlow;
+  final List<String>? modifierGroupIds;
+  final int? targetMarginBasisPoints;
+}
+
 class _ProductTile extends StatelessWidget {
   const _ProductTile({
     required this.product,
     required this.sections,
     required this.currencyCode,
     required this.canEdit,
+    required this.selected,
+    required this.onSelected,
     required this.onEdit,
     required this.onAvailabilityChanged,
     required this.onArchive,
@@ -900,6 +1285,8 @@ class _ProductTile extends StatelessWidget {
   final List<MenuSection> sections;
   final String currencyCode;
   final bool canEdit;
+  final bool selected;
+  final ValueChanged<bool>? onSelected;
   final VoidCallback? onEdit;
   final ValueChanged<bool>? onAvailabilityChanged;
   final VoidCallback? onArchive;
@@ -926,6 +1313,12 @@ class _ProductTile extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Checkbox(
+                  value: selected,
+                  onChanged: onSelected == null
+                      ? null
+                      : (value) => onSelected!(value ?? false),
+                ),
                 CircleAvatar(
                   radius: 18,
                   child: Icon(switch (product.productionArea) {
@@ -1001,12 +1394,11 @@ class _ProductTile extends StatelessWidget {
     }
     return ListTile(
       isThreeLine: true,
-      leading: CircleAvatar(
-        child: Icon(switch (product.productionArea) {
-          ProductionArea.bar => Icons.local_bar_rounded,
-          ProductionArea.kitchen => Icons.restaurant_rounded,
-          ProductionArea.dessert => Icons.cake_outlined,
-        }),
+      leading: Checkbox(
+        value: selected,
+        onChanged: onSelected == null
+            ? null
+            : (value) => onSelected!(value ?? false),
       ),
       title: Text(product.name),
       subtitle: Text('$sectionNames\n$details'),

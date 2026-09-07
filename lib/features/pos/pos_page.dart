@@ -822,6 +822,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     }) async {
       try {
         if (!await _ensureOrderLocation(context, ref)) return;
+        if (!context.mounted) return;
         final selection = forceConfiguration || product.requiresConfiguration
             ? await showProductConfigurationSheet(
                 context: context,
@@ -835,6 +836,14 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
         await ref
             .read(activeOrderProvider.notifier)
             .addProduct(product, selection: selection);
+        if (!context.mounted) return;
+        showAppNotification(
+          context,
+          ref: ref,
+          title: 'Added to order',
+          message: product.name,
+          level: AppNotificationLevel.success,
+        );
       } on Object catch (error, stackTrace) {
         AppLogger.error('Add item to shared draft order', error, stackTrace);
         if (!context.mounted) return;
@@ -1026,10 +1035,14 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                                   maxCrossAxisExtent: 180,
                                   crossAxisSpacing: 12,
                                   mainAxisSpacing: 12,
-                                  mainAxisExtent: 126,
+                                  mainAxisExtent: 148,
                                 ),
                             itemBuilder: (context, index) => _ProductTile(
                               product: products[index],
+                              categoryLabel: _primaryCategoryLabel(
+                                products[index],
+                                sections,
+                              ),
                               currencyCode: currencyCode,
                               canAdd: activeOrder.canAddProduct(
                                 products[index],
@@ -1038,9 +1051,15 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                                 products[index],
                                 forceConfiguration: false,
                               ),
-                              onLongPress: () => addSelectedProduct(
-                                products[index],
-                                forceConfiguration: true,
+                              onLongPress: () => _showPosProductDetails(
+                                context: context,
+                                product: products[index],
+                                sections: sections,
+                                currencyCode: currencyCode,
+                                onAdd: () => addSelectedProduct(
+                                  products[index],
+                                  forceConfiguration: true,
+                                ),
                               ),
                             ),
                           ),
@@ -1176,9 +1195,10 @@ class _MenuStateMessage extends StatelessWidget {
   }
 }
 
-class _ProductTile extends StatelessWidget {
+class _ProductTile extends StatefulWidget {
   const _ProductTile({
     required this.product,
+    required this.categoryLabel,
     required this.currencyCode,
     required this.canAdd,
     required this.onTap,
@@ -1186,95 +1206,195 @@ class _ProductTile extends StatelessWidget {
   });
 
   final MenuProduct product;
+  final String categoryLabel;
   final String currencyCode;
   final bool canAdd;
-  final VoidCallback onTap;
-  final VoidCallback onLongPress;
+  final Future<void> Function() onTap;
+  final Future<void> Function() onLongPress;
+
+  @override
+  State<_ProductTile> createState() => _ProductTileState();
+}
+
+class _ProductTileState extends State<_ProductTile> {
+  bool _pressed = false;
+
+  Future<void> _activate(Future<void> Function() action) async {
+    if (_pressed) return;
+    setState(() => _pressed = true);
+    await Future<void>.delayed(const Duration(milliseconds: 90));
+    try {
+      await action();
+    } finally {
+      if (mounted) setState(() => _pressed = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final unavailable = !canAdd;
-    final unavailableLabel = product.isAvailable ? 'Sold out' : 'Unavailable';
+    final unavailable = !widget.canAdd;
+    final unavailableLabel = widget.product.isAvailable
+        ? 'Sold out'
+        : 'Unavailable';
     return Semantics(
       button: true,
       enabled: !unavailable,
       label: unavailable
-          ? '${product.name}, $unavailableLabel'
-          : 'Add ${product.name}',
-      child: InkWell(
-        onTap: unavailable ? null : onTap,
-        onLongPress: unavailable ? null : onLongPress,
-        borderRadius: BorderRadius.circular(16),
-        child: Ink(
-          decoration: BoxDecoration(
-            color: unavailable
-                ? scheme.surfaceContainerHighest
-                : scheme.primaryContainer,
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                // Phone grids intentionally use a short tile. Keep its most
-                // useful information visible without causing a layout overflow.
-                final compact = constraints.maxHeight < 120;
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      product.productionArea == ProductionArea.bar
-                          ? Icons.local_bar_rounded
-                          : Icons.restaurant_rounded,
-                      size: compact ? 20 : null,
-                      color: unavailable ? scheme.outline : scheme.primary,
-                    ),
-                    if (!compact && product.requiresConfiguration)
-                      const Align(
-                        alignment: Alignment.centerRight,
-                        child: Icon(Icons.tune_rounded, size: 16),
+          ? '${widget.product.name}, $unavailableLabel'
+          : 'Add ${widget.product.name}',
+      child: AnimatedScale(
+        scale: _pressed ? .92 : 1,
+        duration: const Duration(milliseconds: 110),
+        child: InkWell(
+          onTap: unavailable ? null : () => _activate(widget.onTap),
+          onLongPress: unavailable ? null : () => _activate(widget.onLongPress),
+          borderRadius: BorderRadius.circular(16),
+          child: Ink(
+            decoration: BoxDecoration(
+              color: unavailable
+                  ? scheme.surfaceContainerHighest
+                  : scheme.primaryContainer,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  // Phone grids intentionally use a short tile. Keep its most
+                  // useful information visible without causing a layout overflow.
+                  final compact = constraints.maxHeight < 150;
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        widget.product.productionArea == ProductionArea.bar
+                            ? Icons.local_bar_rounded
+                            : Icons.restaurant_rounded,
+                        size: compact ? 20 : null,
+                        color: unavailable ? scheme.outline : scheme.primary,
                       ),
-                    if (compact) const SizedBox(height: 4) else const Spacer(),
-                    Text(
-                      product.name,
-                      maxLines: 2,
-                      softWrap: true,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                    SizedBox(height: compact ? 2 : 4),
-                    Text(
-                      formatMoney(
-                        product.priceMinor,
-                        currencyCode: currencyCode,
-                      ),
-                    ),
-                    if (unavailable)
+                      if (!compact && widget.product.requiresConfiguration)
+                        const Align(
+                          alignment: Alignment.centerRight,
+                          child: Icon(Icons.tune_rounded, size: 16),
+                        ),
+                      if (compact)
+                        const SizedBox(height: 4)
+                      else
+                        const Spacer(),
                       Text(
-                        unavailableLabel,
-                        maxLines: 1,
+                        widget.product.name,
+                        maxLines: 2,
+                        softWrap: true,
                         overflow: TextOverflow.ellipsis,
-                        style: Theme.of(
-                          context,
-                        ).textTheme.labelSmall?.copyWith(color: scheme.error),
+                        style: const TextStyle(fontWeight: FontWeight.w700),
                       ),
-                    if (!compact && product.trackStock)
+                      SizedBox(height: compact ? 2 : 4),
                       Text(
-                        '${_formatStock(product.stockOnHand ?? 0)} ${product.stockUnit} left',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.labelSmall,
+                        formatMoney(
+                          widget.product.priceMinor,
+                          currencyCode: widget.currencyCode,
+                        ),
                       ),
-                  ],
-                );
-              },
+                      if (widget.categoryLabel.isNotEmpty)
+                        Text(
+                          widget.categoryLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                      if (unavailable)
+                        Text(
+                          unavailableLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(
+                            context,
+                          ).textTheme.labelSmall?.copyWith(color: scheme.error),
+                        ),
+                      if (!compact && widget.product.trackStock)
+                        Text(
+                          '${_formatStock(widget.product.stockOnHand ?? 0)} ${widget.product.stockUnit} left',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                    ],
+                  );
+                },
+              ),
             ),
           ),
         ),
       ),
     );
   }
+}
+
+String _primaryCategoryLabel(MenuProduct product, List<MenuSection> sections) {
+  final assigned = sections.where(
+    (section) => product.sectionIds.contains(section.id),
+  );
+  final primary = assigned.where((section) => section.parentSectionId == null);
+  if (primary.isNotEmpty) return primary.first.name;
+  for (final section in assigned) {
+    final parent = sections.where((item) => item.id == section.parentSectionId);
+    if (parent.isNotEmpty) return parent.first.name;
+  }
+  return assigned.isEmpty ? '' : assigned.first.name;
+}
+
+Future<void> _showPosProductDetails({
+  required BuildContext context,
+  required MenuProduct product,
+  required List<MenuSection> sections,
+  required String currencyCode,
+  required Future<void> Function() onAdd,
+}) async {
+  final sectionNames = sections
+      .where((section) => product.sectionIds.contains(section.id))
+      .map((section) => section.name)
+      .join(' · ');
+  final add = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(product.name),
+      content: SingleChildScrollView(
+        child: ListBody(
+          children: [
+            Text(
+              'Price: ${formatMoney(product.priceMinor, currencyCode: currencyCode)}',
+            ),
+            Text('Categories: ${sectionNames.isEmpty ? 'None' : sectionNames}'),
+            Text('Production: ${product.productionArea.label}'),
+            Text('Tax: ${product.taxRateLabel}'),
+            Text(
+              product.showOnOrderFlow
+                  ? 'Shown on order flow'
+                  : 'Excluded from order flow',
+            ),
+            if (product.variants.isNotEmpty)
+              Text(
+                'Variants: ${product.variants.map((item) => item.name).join(', ')}',
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Close'),
+        ),
+        FilledButton.icon(
+          onPressed: () => Navigator.pop(context, true),
+          icon: const Icon(Icons.add_shopping_cart_rounded),
+          label: const Text('Configure and add'),
+        ),
+      ],
+    ),
+  );
+  if (add == true) await onAdd();
 }
 
 String _formatStock(double quantity) {
@@ -1919,6 +2039,22 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                     label: const Text('Split'),
                   ),
                 ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: hasUnsentLines
+                        ? () => _showPendingOrderItems(
+                            context,
+                            order: order,
+                            currencyCode: widget.currencyCode,
+                          )
+                        : null,
+                    icon: const Icon(Icons.pending_actions_rounded),
+                    label: Text(
+                      'Pending (${order.lines.where((line) => !line.isSentToProduction).fold<int>(0, (total, line) => total + line.quantity)})',
+                    ),
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -2048,6 +2184,52 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
       ),
     );
   }
+}
+
+Future<void> _showPendingOrderItems(
+  BuildContext context, {
+  required PosOrder order,
+  required String currencyCode,
+}) {
+  final pending = order.lines
+      .where((line) => !line.isSentToProduction)
+      .toList(growable: false);
+  return showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(
+        'Pending items · ${pending.length} line${pending.length == 1 ? '' : 's'}',
+      ),
+      content: SizedBox(
+        width: 520,
+        child: ListView.separated(
+          shrinkWrap: true,
+          itemCount: pending.length,
+          separatorBuilder: (_, _) => const Divider(),
+          itemBuilder: (context, index) {
+            final line = pending[index];
+            return ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: CircleAvatar(child: Text('${line.quantity}')),
+              title: Text(line.productName),
+              subtitle: line.productionDetails.isEmpty
+                  ? null
+                  : Text(line.productionDetails.join(' · ')),
+              trailing: Text(
+                formatMoney(line.totalMinor, currencyCode: currencyCode),
+              ),
+            );
+          },
+        ),
+      ),
+      actions: [
+        FilledButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Order checked'),
+        ),
+      ],
+    ),
+  );
 }
 
 Future<void> _showCheckoutSheet(

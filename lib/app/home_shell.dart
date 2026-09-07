@@ -92,7 +92,9 @@ class HomeShell extends ConsumerWidget {
         profileOverride ?? ref.watch(tenantProfileProvider);
     final wide = MediaQuery.sizeOf(context).width >= 840;
     final immersiveCompactPosMenu =
-        !wide && visibleSection == HomeSection.pos && compactPosTab == 1;
+        !wide &&
+        visibleSection == HomeSection.pos &&
+        (compactPosTab == 1 || compactPosTab == 2);
     final destinations = [
       const _Destination(HomeSection.pos, Icons.point_of_sale_rounded, 'POS'),
       const _Destination(

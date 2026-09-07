@@ -630,6 +630,82 @@ async function manageMenuConfigurationFor(caller, rawData) {
     return {documentId: venueId, updated: true};
   }
 
+  if (operation === "bulkUpdate") {
+    if (resource !== "product" || documentId != null) {
+      throw new HttpsError("invalid-argument", "Only products can be changed in bulk.");
+    }
+    const productIds = requiredDocumentIdArray(values.productIds, "productIds", 200);
+    if (productIds.length === 0 || new Set(productIds).size !== productIds.length) {
+      throw new HttpsError("invalid-argument", "Select between one and 200 unique products.");
+    }
+    const updates = {};
+    const linkedRefs = [];
+    if (values.sectionIds != null) {
+      const sectionIds = requiredDocumentIdArray(values.sectionIds, "sectionIds", 20);
+      if (sectionIds.length === 0) {
+        throw new HttpsError("invalid-argument", "A product must remain in at least one menu section.");
+      }
+      updates.sectionIds = sectionIds;
+      linkedRefs.push(...sectionIds.map((id) =>
+        db.doc(`tenants/${tenantId}/menuSections/${id}`)));
+    }
+    if (values.modifierGroupIds != null) {
+      const modifierGroupIds = requiredDocumentIdArray(
+        values.modifierGroupIds, "modifierGroupIds", 20,
+      );
+      updates.modifierGroupIds = modifierGroupIds;
+      linkedRefs.push(...modifierGroupIds.map((id) =>
+        db.doc(`tenants/${tenantId}/modifierGroups/${id}`)));
+    }
+    if (values.productionArea != null) {
+      const productionArea = requiredText(values, "productionArea", 32);
+      if (!["bar", "kitchen", "dessert"].includes(productionArea)) {
+        throw new HttpsError("invalid-argument", "The product production area is invalid.");
+      }
+      updates.productionArea = productionArea;
+    }
+    if (values.showOnOrderFlow != null) {
+      if (typeof values.showOnOrderFlow !== "boolean") {
+        throw new HttpsError("invalid-argument", "showOnOrderFlow must be true or false.");
+      }
+      updates.showOnOrderFlow = values.showOnOrderFlow;
+    }
+    if (values.targetMarginBasisPoints != null) {
+      updates.targetMarginBasisPoints = requiredNonNegativeInteger(
+        values.targetMarginBasisPoints, "targetMarginBasisPoints", 10000,
+      );
+    }
+    const changeKeys = Object.keys(updates);
+    if (changeKeys.length === 0) {
+      throw new HttpsError("invalid-argument", "Choose at least one product field to change.");
+    }
+    const [products, linked] = await Promise.all([
+      db.getAll(...productIds.map((id) => collection.doc(id))),
+      linkedRefs.length === 0 ? Promise.resolve([]) : db.getAll(...linkedRefs),
+    ]);
+    if (products.some((item) => !item.exists || item.data().venueId !== venueId ||
+        item.data().archived === true)) {
+      throw new HttpsError("failed-precondition", "Every selected product must be active at this venue.");
+    }
+    if (linked.some((item) => !item.exists || item.data().venueId !== venueId)) {
+      throw new HttpsError("failed-precondition", "A selected section or option group is unavailable.");
+    }
+    const batch = db.batch();
+    for (const product of products) {
+      batch.update(product.ref, {
+        ...updates,
+        updatedAt: FieldValue.serverTimestamp(),
+        updatedByActor: actor,
+      });
+    }
+    batch.create(db.collection(`tenants/${tenantId}/auditEvents`).doc(), {
+      action: "bulkUpdateMenuProducts", venueId, productIds, changeKeys, actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+    return {updated: productIds.length};
+  }
+
   if (operation === "delete") {
     if (documentId == null) {
       throw new HttpsError("invalid-argument", "documentId is required for deletion.");
