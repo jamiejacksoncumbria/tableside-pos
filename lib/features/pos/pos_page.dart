@@ -652,6 +652,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
   final ScrollController _subsectionScrollController = ScrollController();
   bool _menuControlsCollapsed = false;
   bool _compactLayout = false;
+  bool _tileCategoryOpen = false;
 
   String get currencyCode => widget.currencyCode;
 
@@ -674,7 +675,12 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
   }
 
   void _searchChanged() {
-    setState(() => _menuControlsCollapsed = false);
+    setState(() {
+      _menuControlsCollapsed = false;
+      if (_searchController.text.trim().isEmpty) {
+        _tileCategoryOpen = false;
+      }
+    });
     if (_productScrollController.hasClients) {
       _productScrollController.jumpTo(0);
     }
@@ -698,6 +704,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
 
   Future<void> _changeCategoryView(VenueScope? scope, String preference) async {
     final previous = ref.read(posCategoryViewPreferenceProvider);
+    _tileCategoryOpen = false;
     ref.read(posCategoryViewPreferenceProvider.notifier).apply(preference);
     if (scope == null) return;
     try {
@@ -853,6 +860,8 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
             ...subsections.map((section) => section.id),
           };
     final searchQuery = _searchController.text.trim().toLowerCase();
+    final showTileCategoryBrowser =
+        useCategoryTiles && searchQuery.isEmpty && !_tileCategoryOpen;
     final products = catalog.where((product) {
       if (searchQuery.isNotEmpty) {
         return productMatchesMenuSearch(product, sections, searchQuery);
@@ -916,182 +925,110 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
       }
     }
 
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            AnimatedSize(
-              duration: const Duration(milliseconds: 180),
-              curve: Curves.easeOut,
-              child: _compactLayout && _menuControlsCollapsed
-                  ? const SizedBox.shrink()
-                  : Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                'New order',
-                                style: Theme.of(context).textTheme.titleLarge,
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              flex: 2,
-                              child: TextField(
-                                controller: _searchController,
-                                textInputAction: TextInputAction.search,
-                                decoration: InputDecoration(
-                                  isDense: true,
-                                  labelText: 'Quick product search',
-                                  hintText: 'Search products or categories',
-                                  prefixIcon: const Icon(Icons.search_rounded),
-                                  suffixIcon: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        tooltip: 'Open touch keyboard',
-                                        onPressed: _showSearchTouchKeyboard,
-                                        icon: const Icon(
-                                          Icons.keyboard_alt_outlined,
-                                        ),
-                                      ),
-                                      if (searchQuery.isNotEmpty)
-                                        IconButton(
-                                          tooltip: 'Clear search',
-                                          onPressed: _searchController.clear,
-                                          icon: const Icon(Icons.close_rounded),
-                                        ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: useCategoryTiles
-                                  ? 'Use scrolling category bars'
-                                  : 'Use category tiles',
-                              onPressed: () => _changeCategoryView(
-                                scope,
-                                useCategoryTiles ? 'bars' : 'tiles',
-                              ),
-                              icon: Icon(
-                                useCategoryTiles
-                                    ? Icons.view_stream_outlined
-                                    : Icons.grid_view_rounded,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 14),
-                        if (useCategoryTiles)
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
+    return PopScope<Object?>(
+      canPop: !useCategoryTiles || (searchQuery.isEmpty && !_tileCategoryOpen),
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        setState(() {
+          _searchController.clear();
+          _tileCategoryOpen = false;
+        });
+      },
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AnimatedSize(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOut,
+                child: _compactLayout && _menuControlsCollapsed
+                    ? const SizedBox.shrink()
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
                             children: [
-                              _CategoryTile(
-                                icon: Icons.local_fire_department_rounded,
-                                label: 'Popular',
-                                selected: showPopular,
-                                onTap: () {
-                                  ref
-                                      .read(activeSectionProvider.notifier)
-                                      .select(popularMenuSectionId);
-                                  ref
-                                      .read(activeSubsectionProvider.notifier)
-                                      .select(null);
-                                },
-                              ),
-                              _CategoryTile(
-                                icon: Icons.apps_rounded,
-                                label: 'All',
-                                selected:
-                                    !showPopular && effectiveSection == null,
-                                onTap: () {
-                                  ref
-                                      .read(activeSectionProvider.notifier)
-                                      .select(null);
-                                  ref
-                                      .read(activeSubsectionProvider.notifier)
-                                      .select(null);
-                                },
-                              ),
-                              for (final item in topLevelSections)
-                                _CategoryTile(
-                                  textIcon: item.icon,
-                                  label: item.name,
-                                  selected: item.id == effectiveSection,
-                                  onTap: () {
-                                    ref
-                                        .read(activeSectionProvider.notifier)
-                                        .select(item.id);
-                                    ref
-                                        .read(activeSubsectionProvider.notifier)
-                                        .select(null);
-                                  },
+                              Flexible(
+                                child: Text(
+                                  'New order',
+                                  style: Theme.of(context).textTheme.titleLarge,
                                 ),
-                            ],
-                          )
-                        else
-                          _HorizontalMenuScroller(
-                            controller: _sectionScrollController,
-                            child: Row(
-                              children: [
-                                Padding(
-                                  padding: const EdgeInsets.only(right: 8),
-                                  child: ChoiceChip(
-                                    avatar: const Icon(
-                                      Icons.local_fire_department_rounded,
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                flex: 2,
+                                child: TextField(
+                                  controller: _searchController,
+                                  textInputAction: TextInputAction.search,
+                                  decoration: InputDecoration(
+                                    isDense: true,
+                                    labelText: 'Quick product search',
+                                    hintText: 'Search products or categories',
+                                    prefixIcon: const Icon(
+                                      Icons.search_rounded,
                                     ),
-                                    label: const Text('Popular'),
-                                    selected: showPopular,
-                                    onSelected: (_) {
-                                      ref
-                                          .read(activeSectionProvider.notifier)
-                                          .select(popularMenuSectionId);
-                                      ref
-                                          .read(
-                                            activeSubsectionProvider.notifier,
-                                          )
-                                          .select(null);
-                                    },
+                                    suffixIcon: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        IconButton(
+                                          tooltip: 'Open touch keyboard',
+                                          onPressed: _showSearchTouchKeyboard,
+                                          icon: const Icon(
+                                            Icons.keyboard_alt_outlined,
+                                          ),
+                                        ),
+                                        if (searchQuery.isNotEmpty)
+                                          IconButton(
+                                            tooltip: 'Clear search',
+                                            onPressed: _searchController.clear,
+                                            icon: const Icon(
+                                              Icons.close_rounded,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
                                   ),
                                 ),
-                                Padding(
-                                  padding: const EdgeInsets.only(right: 8),
-                                  child: ChoiceChip(
-                                    label: const Text('All'),
-                                    selected:
-                                        !showPopular &&
-                                        effectiveSection == null,
-                                    onSelected: (_) {
-                                      ref
-                                          .read(activeSectionProvider.notifier)
-                                          .select(null);
-                                      ref
-                                          .read(
-                                            activeSubsectionProvider.notifier,
-                                          )
-                                          .select(null);
-                                    },
-                                  ),
+                              ),
+                              IconButton(
+                                tooltip: useCategoryTiles
+                                    ? 'Use scrolling category bars'
+                                    : 'Use category tiles',
+                                onPressed: () => _changeCategoryView(
+                                  scope,
+                                  useCategoryTiles ? 'bars' : 'tiles',
                                 ),
-                                for (final item in topLevelSections)
+                                icon: Icon(
+                                  useCategoryTiles
+                                      ? Icons.view_stream_outlined
+                                      : Icons.grid_view_rounded,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 14),
+                          if (!useCategoryTiles)
+                            _HorizontalMenuScroller(
+                              controller: _sectionScrollController,
+                              child: Row(
+                                children: [
                                   Padding(
                                     padding: const EdgeInsets.only(right: 8),
                                     child: ChoiceChip(
-                                      label: Text('${item.icon} ${item.name}'),
-                                      selected: item.id == effectiveSection,
+                                      avatar: const Icon(
+                                        Icons.local_fire_department_rounded,
+                                      ),
+                                      label: const Text('Popular'),
+                                      selected: showPopular,
                                       onSelected: (_) {
                                         ref
                                             .read(
                                               activeSectionProvider.notifier,
                                             )
-                                            .select(item.id);
+                                            .select(popularMenuSectionId);
                                         ref
                                             .read(
                                               activeSubsectionProvider.notifier,
@@ -1100,34 +1037,55 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                                       },
                                     ),
                                   ),
-                              ],
-                            ),
-                          ),
-                        if (subsections.isNotEmpty) ...[
-                          const SizedBox(height: 10),
-                          if (useCategoryTiles)
-                            _CategoryTilePanel(
-                              children: [
-                                _CategoryTile(
-                                  icon: Icons.apps_rounded,
-                                  label: 'All ${section?.name ?? ''}',
-                                  selected: effectiveSubsection == null,
-                                  onTap: () => ref
-                                      .read(activeSubsectionProvider.notifier)
-                                      .select(null),
-                                ),
-                                for (final item in subsections)
-                                  _CategoryTile(
-                                    textIcon: item.icon,
-                                    label: item.name,
-                                    selected: item.id == effectiveSubsection,
-                                    onTap: () => ref
-                                        .read(activeSubsectionProvider.notifier)
-                                        .select(item.id),
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 8),
+                                    child: ChoiceChip(
+                                      label: const Text('All'),
+                                      selected:
+                                          !showPopular &&
+                                          effectiveSection == null,
+                                      onSelected: (_) {
+                                        ref
+                                            .read(
+                                              activeSectionProvider.notifier,
+                                            )
+                                            .select(null);
+                                        ref
+                                            .read(
+                                              activeSubsectionProvider.notifier,
+                                            )
+                                            .select(null);
+                                      },
+                                    ),
                                   ),
-                              ],
-                            )
-                          else
+                                  for (final item in topLevelSections)
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 8),
+                                      child: ChoiceChip(
+                                        label: Text(
+                                          '${item.icon} ${item.name}',
+                                        ),
+                                        selected: item.id == effectiveSection,
+                                        onSelected: (_) {
+                                          ref
+                                              .read(
+                                                activeSectionProvider.notifier,
+                                              )
+                                              .select(item.id);
+                                          ref
+                                              .read(
+                                                activeSubsectionProvider
+                                                    .notifier,
+                                              )
+                                              .select(null);
+                                        },
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          if (!useCategoryTiles && subsections.isNotEmpty) ...[
+                            const SizedBox(height: 10),
                             _HorizontalMenuScroller(
                               controller: _subsectionScrollController,
                               child: Row(
@@ -1163,87 +1121,156 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                                 ],
                               ),
                             ),
+                          ],
+                          if (useCategoryTiles &&
+                              _tileCategoryOpen &&
+                              searchQuery.isEmpty)
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: TextButton.icon(
+                                onPressed: () =>
+                                    setState(() => _tileCategoryOpen = false),
+                                icon: const Icon(Icons.arrow_back_rounded),
+                                label: const Text('Categories'),
+                              ),
+                            ),
+                          if (!showTileCategoryBrowser) ...[
+                            const SizedBox(height: 14),
+                            Text(
+                              searchQuery.isNotEmpty
+                                  ? 'Search results for “${_searchController.text.trim()}”'
+                                  : effectiveSubsection == null
+                                  ? section?.name ?? 'All menu items'
+                                  : subsections
+                                        .firstWhere(
+                                          (item) =>
+                                              item.id == effectiveSubsection,
+                                        )
+                                        .name,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(height: 10),
+                          ],
                         ],
-                        const SizedBox(height: 14),
-                        Text(
-                          searchQuery.isNotEmpty
-                              ? 'Search results for “${_searchController.text.trim()}”'
-                              : effectiveSubsection == null
-                              ? section?.name ?? 'All menu items'
-                              : subsections
-                                    .firstWhere(
-                                      (item) => item.id == effectiveSubsection,
-                                    )
-                                    .name,
-                          style: Theme.of(context).textTheme.titleMedium,
+                      ),
+              ),
+              Expanded(
+                child: showTileCategoryBrowser
+                    ? SingleChildScrollView(
+                        child: Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
+                          children: [
+                            _CategoryTile(
+                              icon: Icons.local_fire_department_rounded,
+                              label: 'Popular',
+                              selected: showPopular,
+                              onTap: () => setState(() {
+                                ref
+                                    .read(activeSectionProvider.notifier)
+                                    .select(popularMenuSectionId);
+                                ref
+                                    .read(activeSubsectionProvider.notifier)
+                                    .select(null);
+                                _tileCategoryOpen = true;
+                              }),
+                            ),
+                            _CategoryTile(
+                              icon: Icons.apps_rounded,
+                              label: 'All',
+                              selected:
+                                  !showPopular && effectiveSection == null,
+                              onTap: () => setState(() {
+                                ref
+                                    .read(activeSectionProvider.notifier)
+                                    .select(null);
+                                ref
+                                    .read(activeSubsectionProvider.notifier)
+                                    .select(null);
+                                _tileCategoryOpen = true;
+                              }),
+                            ),
+                            for (final item in topLevelSections)
+                              _CategoryTile(
+                                textIcon: item.icon,
+                                label: item.name,
+                                selected: item.id == effectiveSection,
+                                onTap: () => setState(() {
+                                  ref
+                                      .read(activeSectionProvider.notifier)
+                                      .select(item.id);
+                                  ref
+                                      .read(activeSubsectionProvider.notifier)
+                                      .select(null);
+                                  _tileCategoryOpen = true;
+                                }),
+                              ),
+                          ],
                         ),
-                        const SizedBox(height: 10),
-                      ],
-                    ),
-            ),
-            Expanded(
-              child: loading
-                  ? const Center(child: CircularProgressIndicator())
-                  : menuError != null
-                  ? _MenuStateMessage(
-                      icon: Icons.cloud_off_rounded,
-                      title: 'Could not load this venue’s menu',
-                      detail: '$menuError',
-                    )
-                  : products.isEmpty
-                  ? const _MenuStateMessage(
-                      icon: Icons.menu_book_outlined,
-                      title: 'No menu items are available',
-                      detail:
-                          'Add a product in Menu management, or choose a different category.',
-                    )
-                  : LayoutBuilder(
-                      builder: (context, _) {
-                        return Scrollbar(
-                          controller: _productScrollController,
-                          thumbVisibility: true,
-                          child: GridView.builder(
+                      )
+                    : loading
+                    ? const Center(child: CircularProgressIndicator())
+                    : menuError != null
+                    ? _MenuStateMessage(
+                        icon: Icons.cloud_off_rounded,
+                        title: 'Could not load this venue’s menu',
+                        detail: '$menuError',
+                      )
+                    : products.isEmpty
+                    ? const _MenuStateMessage(
+                        icon: Icons.menu_book_outlined,
+                        title: 'No menu items are available',
+                        detail:
+                            'Add a product in Menu management, or choose a different category.',
+                      )
+                    : LayoutBuilder(
+                        builder: (context, _) {
+                          return Scrollbar(
                             controller: _productScrollController,
-                            primary: false,
-                            itemCount: products.length,
-                            gridDelegate:
-                                const SliverGridDelegateWithMaxCrossAxisExtent(
-                                  maxCrossAxisExtent: 180,
-                                  crossAxisSpacing: 12,
-                                  mainAxisSpacing: 12,
-                                  mainAxisExtent: 148,
-                                ),
-                            itemBuilder: (context, index) => _ProductTile(
-                              product: products[index],
-                              categoryLabel: _primaryCategoryLabel(
-                                products[index],
-                                sections,
-                              ),
-                              currencyCode: currencyCode,
-                              canAdd: activeOrder.canAddProduct(
-                                products[index],
-                              ),
-                              onTap: () => addSelectedProduct(
-                                products[index],
-                                forceConfiguration: false,
-                              ),
-                              onLongPress: () => _showPosProductDetails(
-                                context: context,
+                            thumbVisibility: true,
+                            child: GridView.builder(
+                              controller: _productScrollController,
+                              primary: false,
+                              itemCount: products.length,
+                              gridDelegate:
+                                  const SliverGridDelegateWithMaxCrossAxisExtent(
+                                    maxCrossAxisExtent: 180,
+                                    crossAxisSpacing: 12,
+                                    mainAxisSpacing: 12,
+                                    mainAxisExtent: 148,
+                                  ),
+                              itemBuilder: (context, index) => _ProductTile(
                                 product: products[index],
-                                sections: sections,
-                                currencyCode: currencyCode,
-                                onAdd: () => addSelectedProduct(
+                                categoryLabel: _primaryCategoryLabel(
                                   products[index],
-                                  forceConfiguration: true,
+                                  sections,
+                                ),
+                                currencyCode: currencyCode,
+                                canAdd: activeOrder.canAddProduct(
+                                  products[index],
+                                ),
+                                onTap: () => addSelectedProduct(
+                                  products[index],
+                                  forceConfiguration: false,
+                                ),
+                                onLongPress: () => _showPosProductDetails(
+                                  context: context,
+                                  product: products[index],
+                                  sections: sections,
+                                  currencyCode: currencyCode,
+                                  onAdd: () => addSelectedProduct(
+                                    products[index],
+                                    forceConfiguration: true,
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                        );
-                      },
-                    ),
-            ),
-          ],
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
         ),
       ),
     );
