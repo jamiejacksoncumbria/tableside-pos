@@ -272,7 +272,7 @@ class ProductionCommandRepository {
     });
   }
 
-  Future<String> manageMenuConfiguration({
+  Future<void> manageMenuConfiguration({
     required VenueScope scope,
     required String resource,
     required String operation,
@@ -288,11 +288,19 @@ class ProductionCommandRepository {
         'documentId': documentId,
       'values': values,
     });
+    if (operation == 'bulkUpdate') {
+      final updated = response['updated'];
+      if (updated is! int || updated < 1) {
+        throw StateError(
+          'The menu server returned an invalid bulk update result.',
+        );
+      }
+      return;
+    }
     final returnedId = response['documentId'];
     if (returnedId is! String || returnedId.isEmpty) {
       throw StateError('The menu server returned an invalid document ID.');
     }
-    return returnedId;
   }
 
   /// Performs manager-only supplier, purchasing and stock mutations. The
