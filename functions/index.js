@@ -327,22 +327,26 @@ function configuredProductVariants(productData) {
   });
 }
 
-function canonicalLineConfiguration({productData, modifierGroupsById, line}) {
+function canonicalLineConfiguration({
+  productData,
+  modifierGroupsById,
+  line,
+  allowStoredDraftVariantMismatch = false,
+}) {
   const variants = configuredProductVariants(productData);
   let variant = null;
   if (variants.length > 0) {
-    if (line.variantId == null) {
+    if (line.variantId == null && !allowStoredDraftVariantMismatch) {
       throw new HttpsError("failed-precondition", "Choose a variant for this product.");
     }
-    variant = variants.find((item) => item.id === line.variantId) ?? null;
-    if (variant == null || !variant.isAvailable) {
+    variant = line.variantId == null
+      ? null
+      : variants.find((item) => item.id === line.variantId) ?? null;
+    if (line.variantId != null && (variant == null || !variant.isAvailable)) {
       throw new HttpsError("failed-precondition", "The selected product variant is unavailable.");
     }
-  } else if (line.variantId != null) {
-    // A shared draft can outlive a menu edit that removes the product's final
-    // variant. Ignore that stale selection and rebuild the line from the
-    // current server-owned base product; never trust the old variant price.
-    variant = null;
+  } else if (line.variantId != null && !allowStoredDraftVariantMismatch) {
+    throw new HttpsError("failed-precondition", "This product does not have variants.");
   }
 
   const configuredGroupIds = configuredModifierGroupIds(productData);
@@ -5577,6 +5581,11 @@ async function sendOrderToProductionFor(caller, rawData) {
         productData: product,
         modifierGroupsById,
         line,
+        // These lines were previously validated and written by the server.
+        // A later menu edit must not strand an open order merely because its
+        // product gained or lost variants. New taps still use strict current
+        // configuration in addOrderDraftLineFor above.
+        allowStoredDraftVariantMismatch: true,
       });
       const unitPriceMinor = Number(product.priceMinor) + configuration.priceDeltaMinor;
       if (!Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0) {
