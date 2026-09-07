@@ -53,6 +53,7 @@ class StaffPinVerification {
     required this.roles,
     required this.themeModePreference,
     required this.posCategoryViewPreference,
+    required this.posProductSortPreference,
   });
 
   final String sessionId;
@@ -66,6 +67,7 @@ class StaffPinVerification {
   final List<String> roles;
   final String themeModePreference;
   final String posCategoryViewPreference;
+  final String posProductSortPreference;
 
   StaffPinVerification copyWith({DateTime? expiresAt}) => StaffPinVerification(
     sessionId: sessionId,
@@ -79,6 +81,7 @@ class StaffPinVerification {
     roles: roles,
     themeModePreference: themeModePreference,
     posCategoryViewPreference: posCategoryViewPreference,
+    posProductSortPreference: posProductSortPreference,
   );
 }
 
@@ -283,6 +286,17 @@ class ProductionCommandRepository {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'categoryView': categoryView,
+    });
+  }
+
+  Future<void> updateOwnPosProductSortPreference({
+    required VenueScope scope,
+    required String productSort,
+  }) {
+    return _call('updateOwnPosProductSortPreference', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'productSort': productSort,
     });
   }
 
@@ -515,6 +529,11 @@ class ProductionCommandRepository {
           : 'venue',
       posCategoryViewPreference:
           response['posCategoryViewPreference'] == 'tiles' ? 'tiles' : 'bars',
+      posProductSortPreference: switch (response['posProductSortPreference']) {
+        'priceAsc' ||
+        'priceDesc' => response['posProductSortPreference'] as String,
+        _ => 'alphabetical',
+      },
     );
   }
 

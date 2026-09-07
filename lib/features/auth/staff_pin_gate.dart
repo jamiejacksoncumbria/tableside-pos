@@ -22,12 +22,29 @@ final posCategoryViewPreferenceProvider =
       PosCategoryViewPreferenceController.new,
     );
 
+final posProductSortPreferenceProvider =
+    NotifierProvider<PosProductSortPreferenceController, String>(
+      PosProductSortPreferenceController.new,
+    );
+
 class PosCategoryViewPreferenceController extends Notifier<String> {
   @override
   String build() => 'bars';
 
   void apply(String preference) {
     state = preference == 'tiles' ? 'tiles' : 'bars';
+  }
+}
+
+class PosProductSortPreferenceController extends Notifier<String> {
+  @override
+  String build() => 'alphabetical';
+
+  void apply(String preference) {
+    state = switch (preference) {
+      'priceAsc' || 'priceDesc' => preference,
+      _ => 'alphabetical',
+    };
   }
 }
 
@@ -49,6 +66,9 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
     ref
         .read(posCategoryViewPreferenceProvider.notifier)
         .apply(session.posCategoryViewPreference);
+    ref
+        .read(posProductSortPreferenceProvider.notifier)
+        .apply(session.posProductSortPreference);
   }
 
   void lock() {
@@ -56,6 +76,7 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
     state = null;
     ref.read(appThemeControllerProvider.notifier).clearUserPreference();
     ref.read(posCategoryViewPreferenceProvider.notifier).apply('bars');
+    ref.read(posProductSortPreferenceProvider.notifier).apply('alphabetical');
   }
 
   void extendUntil(DateTime expiresAt) {

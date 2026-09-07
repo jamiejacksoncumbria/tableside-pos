@@ -728,6 +728,32 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     }
   }
 
+  Future<void> _changeProductSort(VenueScope? scope, String preference) async {
+    final previous = ref.read(posProductSortPreferenceProvider);
+    if (previous == preference) return;
+    ref.read(posProductSortPreferenceProvider.notifier).apply(preference);
+    if (scope == null) return;
+    try {
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .updateOwnPosProductSortPreference(
+            scope: scope,
+            productSort: preference,
+          );
+    } on Object catch (error, stackTrace) {
+      ref.read(posProductSortPreferenceProvider.notifier).apply(previous);
+      AppLogger.error('Save POS product sort preference', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Product sorting was not saved',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    }
+  }
+
   Future<void> _showSearchTouchKeyboard() async {
     const rows = <String>['QWERTYUIOP', 'ASDFGHJKL', 'ZXCVBNM'];
     await showDialog<void>(
@@ -798,6 +824,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     final activeOrder = ref.watch(activeOrderProvider);
     final categoryView = ref.watch(posCategoryViewPreferenceProvider);
     final useCategoryTiles = categoryView == 'tiles';
+    final productSort = ref.watch(posProductSortPreferenceProvider);
     final scope = ref.watch(activeVenueScopeProvider);
     final sectionsState = ref.watch(menuSectionsProvider);
     final catalogState = ref.watch(menuProductsProvider);
@@ -878,6 +905,23 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
         return popularity != 0
             ? popularity
             : first.name.toLowerCase().compareTo(second.name.toLowerCase());
+      });
+    } else {
+      products.sort((first, second) {
+        final byName = first.name.toLowerCase().compareTo(
+          second.name.toLowerCase(),
+        );
+        return switch (productSort) {
+          'priceAsc' =>
+            first.priceMinor.compareTo(second.priceMinor) == 0
+                ? byName
+                : first.priceMinor.compareTo(second.priceMinor),
+          'priceDesc' =>
+            second.priceMinor.compareTo(first.priceMinor) == 0
+                ? byName
+                : second.priceMinor.compareTo(first.priceMinor),
+          _ => byName,
+        };
       });
     }
     final section = effectiveSection == null
@@ -1013,6 +1057,33 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                                       ? Icons.view_stream_outlined
                                       : Icons.grid_view_rounded,
                                 ),
+                              ),
+                              PopupMenuButton<String>(
+                                tooltip: 'Sort products',
+                                initialValue: productSort,
+                                onSelected: (value) =>
+                                    _changeProductSort(scope, value),
+                                icon: Icon(
+                                  productSort == 'alphabetical'
+                                      ? Icons.sort_by_alpha_rounded
+                                      : productSort == 'priceDesc'
+                                      ? Icons.south_rounded
+                                      : Icons.north_rounded,
+                                ),
+                                itemBuilder: (_) => const [
+                                  PopupMenuItem(
+                                    value: 'alphabetical',
+                                    child: Text('Alphabetical (A–Z)'),
+                                  ),
+                                  PopupMenuItem(
+                                    value: 'priceAsc',
+                                    child: Text('Price: low to high'),
+                                  ),
+                                  PopupMenuItem(
+                                    value: 'priceDesc',
+                                    child: Text('Price: high to low'),
+                                  ),
+                                ],
                               ),
                             ],
                           ),

@@ -1766,6 +1766,31 @@ async function updateOwnPosCategoryViewPreferenceFor(caller, rawData) {
   return {updated: true, categoryView};
 }
 
+async function updateOwnPosProductSortPreferenceFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const productSort = requiredText(data, "productSort", 24);
+  if (!["alphabetical", "priceAsc", "priceDesc"].includes(productSort)) {
+    throw new HttpsError("invalid-argument", "The selected POS product sort is invalid.");
+  }
+  await requireTenantOperationalMember(caller, tenantId);
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  await db.doc(`userPreferences/${caller.uid}`).set({
+    posProductSort: productSort,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedFromTenantId: tenantId,
+    updatedFromVenueId: venueId,
+  }, {merge: true});
+  await writeAudit(caller.uid, "updateOwnPosProductSortPreference", caller.uid, {
+    tenantId, venueId, productSort,
+  });
+  return {updated: true, productSort};
+}
+
 async function unlockStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -2087,6 +2112,9 @@ async function verifyStaffPinFor(caller, rawData) {
     posCategoryViewPreference: userPreferences.data()?.posCategoryView === "tiles"
       ? "tiles"
       : "bars",
+    posProductSortPreference: ["priceAsc", "priceDesc"].includes(
+      userPreferences.data()?.posProductSort,
+    ) ? userPreferences.data().posProductSort : "alphabetical",
   };
 }
 
@@ -6702,6 +6730,8 @@ async function invokePosAction(action, caller, data) {
       return updateOwnThemePreferenceFor(actingCaller, data);
     case "updateOwnPosCategoryViewPreference":
       return updateOwnPosCategoryViewPreferenceFor(actingCaller, data);
+    case "updateOwnPosProductSortPreference":
+      return updateOwnPosProductSortPreferenceFor(actingCaller, data);
     case "verifyStaffPin":
       return verifyStaffPinFor(caller, data);
     case "refreshStaffPinSession":
