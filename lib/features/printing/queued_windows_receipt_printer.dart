@@ -350,10 +350,6 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
             WindowsPrintLine('Change', rightText: _money(change, currency)),
           );
         }
-        final source = value['exchangeRateSource'] as String?;
-        if (source?.trim().isNotEmpty == true) {
-          lines.add(WindowsPrintLine('Rate source: ${source!.trim()}'));
-        }
       }
     }
     final footer = business['receiptFooter'] as String? ?? '';

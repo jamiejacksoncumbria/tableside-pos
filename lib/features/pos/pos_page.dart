@@ -333,9 +333,7 @@ class _TablesPanel extends ConsumerWidget {
                               style: Theme.of(context).textTheme.labelMedium,
                             ),
                           ),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
+                          _CategoryTilePanel(
                             children: [
                               for (final tab in group.tabs)
                                 SizedBox(
@@ -696,6 +694,31 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     }
   }
 
+  Future<void> _changeCategoryView(VenueScope? scope, String preference) async {
+    final previous = ref.read(posCategoryViewPreferenceProvider);
+    ref.read(posCategoryViewPreferenceProvider.notifier).apply(preference);
+    if (scope == null) return;
+    try {
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .updateOwnPosCategoryViewPreference(
+            scope: scope,
+            categoryView: preference,
+          );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Save POS category view', error, stackTrace);
+      ref.read(posCategoryViewPreferenceProvider.notifier).apply(previous);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Category view was not saved',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    }
+  }
+
   Future<void> _showSearchTouchKeyboard() async {
     const rows = <String>['QWERTYUIOP', 'ASDFGHJKL', 'ZXCVBNM'];
     await showDialog<void>(
@@ -764,6 +787,8 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     final selectedSection = ref.watch(activeSectionProvider);
     final selectedSubsection = ref.watch(activeSubsectionProvider);
     final activeOrder = ref.watch(activeOrderProvider);
+    final categoryView = ref.watch(posCategoryViewPreferenceProvider);
+    final useCategoryTiles = categoryView == 'tiles';
     final scope = ref.watch(activeVenueScopeProvider);
     final sectionsState = ref.watch(menuSectionsProvider);
     final catalogState = ref.watch(menuProductsProvider);
@@ -944,57 +969,88 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                                 ),
                               ),
                             ),
+                            IconButton(
+                              tooltip: useCategoryTiles
+                                  ? 'Use scrolling category bars'
+                                  : 'Use category tiles',
+                              onPressed: () => _changeCategoryView(
+                                scope,
+                                useCategoryTiles ? 'bars' : 'tiles',
+                              ),
+                              icon: Icon(
+                                useCategoryTiles
+                                    ? Icons.view_stream_outlined
+                                    : Icons.grid_view_rounded,
+                              ),
+                            ),
                           ],
                         ),
                         const SizedBox(height: 14),
-                        _HorizontalMenuScroller(
-                          controller: _sectionScrollController,
-                          child: Row(
+                        if (useCategoryTiles)
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
                             children: [
-                              Padding(
-                                padding: const EdgeInsets.only(right: 8),
-                                child: ChoiceChip(
-                                  avatar: const Icon(
-                                    Icons.local_fire_department_rounded,
-                                  ),
-                                  label: const Text('Popular'),
-                                  selected: showPopular,
-                                  onSelected: (_) {
-                                    ref
-                                        .read(activeSectionProvider.notifier)
-                                        .select(popularMenuSectionId);
-                                    ref
-                                        .read(activeSubsectionProvider.notifier)
-                                        .select(null);
-                                  },
-                                ),
+                              _CategoryTile(
+                                icon: Icons.local_fire_department_rounded,
+                                label: 'Popular',
+                                selected: showPopular,
+                                onTap: () {
+                                  ref
+                                      .read(activeSectionProvider.notifier)
+                                      .select(popularMenuSectionId);
+                                  ref
+                                      .read(activeSubsectionProvider.notifier)
+                                      .select(null);
+                                },
                               ),
-                              Padding(
-                                padding: const EdgeInsets.only(right: 8),
-                                child: ChoiceChip(
-                                  label: const Text('All'),
-                                  selected:
-                                      !showPopular && effectiveSection == null,
-                                  onSelected: (_) {
-                                    ref
-                                        .read(activeSectionProvider.notifier)
-                                        .select(null);
-                                    ref
-                                        .read(activeSubsectionProvider.notifier)
-                                        .select(null);
-                                  },
-                                ),
+                              _CategoryTile(
+                                icon: Icons.apps_rounded,
+                                label: 'All',
+                                selected:
+                                    !showPopular && effectiveSection == null,
+                                onTap: () {
+                                  ref
+                                      .read(activeSectionProvider.notifier)
+                                      .select(null);
+                                  ref
+                                      .read(activeSubsectionProvider.notifier)
+                                      .select(null);
+                                },
                               ),
                               for (final item in topLevelSections)
+                                _CategoryTile(
+                                  textIcon: item.icon,
+                                  label: item.name,
+                                  selected: item.id == effectiveSection,
+                                  onTap: () {
+                                    ref
+                                        .read(activeSectionProvider.notifier)
+                                        .select(item.id);
+                                    ref
+                                        .read(activeSubsectionProvider.notifier)
+                                        .select(null);
+                                  },
+                                ),
+                            ],
+                          )
+                        else
+                          _HorizontalMenuScroller(
+                            controller: _sectionScrollController,
+                            child: Row(
+                              children: [
                                 Padding(
                                   padding: const EdgeInsets.only(right: 8),
                                   child: ChoiceChip(
-                                    label: Text('${item.icon} ${item.name}'),
-                                    selected: item.id == effectiveSection,
+                                    avatar: const Icon(
+                                      Icons.local_fire_department_rounded,
+                                    ),
+                                    label: const Text('Popular'),
+                                    selected: showPopular,
                                     onSelected: (_) {
                                       ref
                                           .read(activeSectionProvider.notifier)
-                                          .select(item.id);
+                                          .select(popularMenuSectionId);
                                       ref
                                           .read(
                                             activeSubsectionProvider.notifier,
@@ -1003,41 +1059,108 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                                     },
                                   ),
                                 ),
-                            ],
-                          ),
-                        ),
-                        if (subsections.isNotEmpty) ...[
-                          const SizedBox(height: 10),
-                          _HorizontalMenuScroller(
-                            controller: _subsectionScrollController,
-                            child: Row(
-                              children: [
                                 Padding(
                                   padding: const EdgeInsets.only(right: 8),
-                                  child: FilterChip(
-                                    label: Text('All ${section?.name ?? ''}'),
-                                    selected: effectiveSubsection == null,
-                                    onSelected: (_) => ref
-                                        .read(activeSubsectionProvider.notifier)
-                                        .select(null),
-                                  ),
-                                ),
-                                for (final item in subsections)
-                                  Padding(
-                                    padding: const EdgeInsets.only(right: 8),
-                                    child: FilterChip(
-                                      label: Text('${item.icon} ${item.name}'),
-                                      selected: item.id == effectiveSubsection,
-                                      onSelected: (_) => ref
+                                  child: ChoiceChip(
+                                    label: const Text('All'),
+                                    selected:
+                                        !showPopular &&
+                                        effectiveSection == null,
+                                    onSelected: (_) {
+                                      ref
+                                          .read(activeSectionProvider.notifier)
+                                          .select(null);
+                                      ref
                                           .read(
                                             activeSubsectionProvider.notifier,
                                           )
-                                          .select(item.id),
+                                          .select(null);
+                                    },
+                                  ),
+                                ),
+                                for (final item in topLevelSections)
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 8),
+                                    child: ChoiceChip(
+                                      label: Text('${item.icon} ${item.name}'),
+                                      selected: item.id == effectiveSection,
+                                      onSelected: (_) {
+                                        ref
+                                            .read(
+                                              activeSectionProvider.notifier,
+                                            )
+                                            .select(item.id);
+                                        ref
+                                            .read(
+                                              activeSubsectionProvider.notifier,
+                                            )
+                                            .select(null);
+                                      },
                                     ),
                                   ),
                               ],
                             ),
                           ),
+                        if (subsections.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          if (useCategoryTiles)
+                            _CategoryTilePanel(
+                              children: [
+                                _CategoryTile(
+                                  icon: Icons.apps_rounded,
+                                  label: 'All ${section?.name ?? ''}',
+                                  selected: effectiveSubsection == null,
+                                  onTap: () => ref
+                                      .read(activeSubsectionProvider.notifier)
+                                      .select(null),
+                                ),
+                                for (final item in subsections)
+                                  _CategoryTile(
+                                    textIcon: item.icon,
+                                    label: item.name,
+                                    selected: item.id == effectiveSubsection,
+                                    onTap: () => ref
+                                        .read(activeSubsectionProvider.notifier)
+                                        .select(item.id),
+                                  ),
+                              ],
+                            )
+                          else
+                            _HorizontalMenuScroller(
+                              controller: _subsectionScrollController,
+                              child: Row(
+                                children: [
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 8),
+                                    child: FilterChip(
+                                      label: Text('All ${section?.name ?? ''}'),
+                                      selected: effectiveSubsection == null,
+                                      onSelected: (_) => ref
+                                          .read(
+                                            activeSubsectionProvider.notifier,
+                                          )
+                                          .select(null),
+                                    ),
+                                  ),
+                                  for (final item in subsections)
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 8),
+                                      child: FilterChip(
+                                        label: Text(
+                                          '${item.icon} ${item.name}',
+                                        ),
+                                        selected:
+                                            item.id == effectiveSubsection,
+                                        onSelected: (_) => ref
+                                            .read(
+                                              activeSubsectionProvider.notifier,
+                                            )
+                                            .select(item.id),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
                         ],
                         const SizedBox(height: 14),
                         Text(
@@ -1123,6 +1246,75 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
       ),
     );
   }
+}
+
+class _CategoryTile extends StatelessWidget {
+  const _CategoryTile({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.icon,
+    this.textIcon,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final IconData? icon;
+  final String? textIcon;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return SizedBox(
+      width: 150,
+      height: 58,
+      child: Material(
+        color: selected ? scheme.primaryContainer : scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            child: Row(
+              children: [
+                if (textIcon != null)
+                  Text(textIcon!, style: const TextStyle(fontSize: 20))
+                else
+                  Icon(icon, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CategoryTilePanel extends StatelessWidget {
+  const _CategoryTilePanel({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => ConstrainedBox(
+    constraints: const BoxConstraints(maxHeight: 190),
+    child: SingleChildScrollView(
+      child: Wrap(spacing: 8, runSpacing: 8, children: children),
+    ),
+  );
 }
 
 class _HorizontalMenuScroller extends StatelessWidget {

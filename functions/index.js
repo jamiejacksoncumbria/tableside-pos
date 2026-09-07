@@ -1667,6 +1667,31 @@ async function updateOwnThemePreferenceFor(caller, rawData) {
   return {updated: true, themeMode};
 }
 
+async function updateOwnPosCategoryViewPreferenceFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const categoryView = requiredText(data, "categoryView", 16);
+  if (!["bars", "tiles"].includes(categoryView)) {
+    throw new HttpsError("invalid-argument", "The selected POS category view is invalid.");
+  }
+  await requireTenantOperationalMember(caller, tenantId);
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  await db.doc(`userPreferences/${caller.uid}`).set({
+    posCategoryView: categoryView,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedFromTenantId: tenantId,
+    updatedFromVenueId: venueId,
+  }, {merge: true});
+  await writeAudit(caller.uid, "updateOwnPosCategoryViewPreference", caller.uid, {
+    tenantId, venueId, categoryView,
+  });
+  return {updated: true, categoryView};
+}
+
 async function unlockStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -1985,6 +2010,9 @@ async function verifyStaffPinFor(caller, rawData) {
     themeModePreference: ["light", "dark"].includes(userPreferences.data()?.themeMode)
       ? userPreferences.data().themeMode
       : "venue",
+    posCategoryViewPreference: userPreferences.data()?.posCategoryView === "tiles"
+      ? "tiles"
+      : "bars",
   };
 }
 
@@ -6598,6 +6626,8 @@ async function invokePosAction(action, caller, data) {
       return changeOwnStaffPinFor(actingCaller, data);
     case "updateOwnThemePreference":
       return updateOwnThemePreferenceFor(actingCaller, data);
+    case "updateOwnPosCategoryViewPreference":
+      return updateOwnPosCategoryViewPreferenceFor(actingCaller, data);
     case "verifyStaffPin":
       return verifyStaffPinFor(caller, data);
     case "refreshStaffPinSession":

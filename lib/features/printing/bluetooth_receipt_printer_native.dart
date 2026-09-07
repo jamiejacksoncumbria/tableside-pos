@@ -332,10 +332,6 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
             ...generator.text(
               'Change: ${_money(payment.changeBaseMinor, payment.baseCurrencyCode ?? receipt.currencyCode)}',
             ),
-          if (payment.exchangeRateSource?.trim().isNotEmpty == true)
-            ...generator.text(
-              'Rate source: ${payment.exchangeRateSource!.trim()}',
-            ),
         ],
       ],
       if (receipt.receiptFooter.trim().isNotEmpty) ...[

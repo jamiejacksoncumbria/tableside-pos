@@ -52,6 +52,7 @@ class StaffPinVerification {
     required this.isPlatformAdmin,
     required this.roles,
     required this.themeModePreference,
+    required this.posCategoryViewPreference,
   });
 
   final String sessionId;
@@ -64,6 +65,7 @@ class StaffPinVerification {
   final bool isPlatformAdmin;
   final List<String> roles;
   final String themeModePreference;
+  final String posCategoryViewPreference;
 
   StaffPinVerification copyWith({DateTime? expiresAt}) => StaffPinVerification(
     sessionId: sessionId,
@@ -76,6 +78,7 @@ class StaffPinVerification {
     isPlatformAdmin: isPlatformAdmin,
     roles: roles,
     themeModePreference: themeModePreference,
+    posCategoryViewPreference: posCategoryViewPreference,
   );
 }
 
@@ -269,6 +272,17 @@ class ProductionCommandRepository {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'themeMode': themeMode,
+    });
+  }
+
+  Future<void> updateOwnPosCategoryViewPreference({
+    required VenueScope scope,
+    required String categoryView,
+  }) {
+    return _call('updateOwnPosCategoryViewPreference', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'categoryView': categoryView,
     });
   }
 
@@ -499,6 +513,8 @@ class ProductionCommandRepository {
               response['themeModePreference'] == 'light'
           ? response['themeModePreference'] as String
           : 'venue',
+      posCategoryViewPreference:
+          response['posCategoryViewPreference'] == 'tiles' ? 'tiles' : 'bars',
     );
   }
 

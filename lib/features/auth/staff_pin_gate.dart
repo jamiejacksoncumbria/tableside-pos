@@ -17,6 +17,20 @@ final activeStaffPinSessionProvider =
       ActiveStaffPinSessionController.new,
     );
 
+final posCategoryViewPreferenceProvider =
+    NotifierProvider<PosCategoryViewPreferenceController, String>(
+      PosCategoryViewPreferenceController.new,
+    );
+
+class PosCategoryViewPreferenceController extends Notifier<String> {
+  @override
+  String build() => 'bars';
+
+  void apply(String preference) {
+    state = preference == 'tiles' ? 'tiles' : 'bars';
+  }
+}
+
 class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
   @override
   StaffPinVerification? build() => null;
@@ -32,12 +46,16 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
     ref
         .read(appThemeControllerProvider.notifier)
         .applyUserPreference(session.themeModePreference);
+    ref
+        .read(posCategoryViewPreferenceProvider.notifier)
+        .apply(session.posCategoryViewPreference);
   }
 
   void lock() {
     StaffPinSessionStore.current = null;
     state = null;
     ref.read(appThemeControllerProvider.notifier).clearUserPreference();
+    ref.read(posCategoryViewPreferenceProvider.notifier).apply('bars');
   }
 
   void extendUntil(DateTime expiresAt) {
