@@ -109,6 +109,8 @@ class TenantProfileController extends Notifier<TenantProfile> {
   void update(TenantProfile profile) => state = profile;
 }
 
+const popularMenuSectionId = '__popular__';
+
 final activeSectionProvider =
     NotifierProvider<ActiveSectionController, String?>(
       ActiveSectionController.new,
@@ -116,7 +118,7 @@ final activeSectionProvider =
 
 class ActiveSectionController extends Notifier<String?> {
   @override
-  String? build() => null;
+  String? build() => popularMenuSectionId;
 
   void select(String? sectionId) => state = sectionId;
 }

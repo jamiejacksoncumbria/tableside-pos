@@ -339,7 +339,10 @@ function canonicalLineConfiguration({productData, modifierGroupsById, line}) {
       throw new HttpsError("failed-precondition", "The selected product variant is unavailable.");
     }
   } else if (line.variantId != null) {
-    throw new HttpsError("failed-precondition", "This product does not have variants.");
+    // A shared draft can outlive a menu edit that removes the product's final
+    // variant. Ignore that stale selection and rebuild the line from the
+    // current server-owned base product; never trust the old variant price.
+    variant = null;
   }
 
   const configuredGroupIds = configuredModifierGroupIds(productData);
@@ -4659,6 +4662,25 @@ async function closeOrderFor(caller, rawData) {
       closedByActor: actor,
       createdAt: FieldValue.serverTimestamp(),
     });
+    // Popularity is server-owned and only advances when a genuine bill closes.
+    // Aggregate repeated lines first so every product receives one atomic
+    // increment and retries remain safe through the deterministic bill ID.
+    const soldQuantityByProduct = new Map();
+    for (const line of receiptLines) {
+      if (typeof line.productId !== "string" || line.productId.length === 0) continue;
+      const quantity = Number(line.quantity);
+      if (!Number.isSafeInteger(quantity) || quantity <= 0) continue;
+      soldQuantityByProduct.set(
+        line.productId,
+        (soldQuantityByProduct.get(line.productId) ?? 0) + quantity,
+      );
+    }
+    for (const [productId, quantity] of soldQuantityByProduct) {
+      transaction.update(tenantRef.collection("products").doc(productId), {
+        soldQuantity: FieldValue.increment(quantity),
+        lastSoldAt: FieldValue.serverTimestamp(),
+      });
+    }
     if (receiptPrintQueued) {
       transaction.create(tenantRef.collection("printJobs").doc(receiptPrintJobId), {
         venueId,

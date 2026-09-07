@@ -500,6 +500,7 @@ class MenuProduct {
     this.stockComponents = const <ProductStockComponent>[],
     this.imageUrl,
     this.imageStoragePath,
+    this.soldQuantity = 0,
   });
 
   final String id;
@@ -533,6 +534,10 @@ class MenuProduct {
   final List<ProductStockComponent> stockComponents;
   final String? imageUrl;
   final String? imageStoragePath;
+
+  /// Server-maintained quantity from securely closed bills. Used only to
+  /// rank the automatic Popular menu; it never affects financial totals.
+  final int soldQuantity;
 
   double? get estimatedCostMinor {
     if (stockComponents.isNotEmpty) {

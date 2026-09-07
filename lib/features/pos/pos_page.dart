@@ -121,18 +121,43 @@ class _PosPageState extends ConsumerState<PosPage>
           padding: const EdgeInsets.all(12),
           child: Column(
             children: [
-              TabBar(
-                controller: _compactTabController,
-                onTap: (index) =>
-                    ref.read(posCompactTabProvider.notifier).select(index),
-                tabs: [
-                  Tab(
-                    icon: Icon(Icons.table_restaurant_rounded),
-                    text: 'Tables',
-                  ),
-                  Tab(icon: Icon(Icons.restaurant_menu_rounded), text: 'Menu'),
-                  Tab(icon: Icon(Icons.receipt_long_rounded), text: 'Order'),
-                ],
+              Builder(
+                builder: (context) {
+                  final order = ref.watch(activeOrderProvider);
+                  final pending = order.lines
+                      .where((line) => !line.isSentToProduction)
+                      .fold<int>(0, (total, line) => total + line.quantity);
+                  final sent = order.lines
+                      .where((line) => line.isSentToProduction)
+                      .fold<int>(0, (total, line) => total + line.quantity);
+                  final shownCount = pending > 0 ? pending : sent;
+                  final badgeColor = pending > 0 ? Colors.red : Colors.green;
+                  return TabBar(
+                    controller: _compactTabController,
+                    onTap: (index) =>
+                        ref.read(posCompactTabProvider.notifier).select(index),
+                    tabs: [
+                      const Tab(
+                        icon: Icon(Icons.table_restaurant_rounded),
+                        text: 'Tables',
+                      ),
+                      const Tab(
+                        icon: Icon(Icons.restaurant_menu_rounded),
+                        text: 'Menu',
+                      ),
+                      Tab(
+                        icon: shownCount == 0
+                            ? const Icon(Icons.receipt_long_rounded)
+                            : Badge.count(
+                                count: shownCount,
+                                backgroundColor: badgeColor,
+                                child: const Icon(Icons.receipt_long_rounded),
+                              ),
+                        text: 'Order',
+                      ),
+                    ],
+                  );
+                },
               ),
               const SizedBox(height: 12),
               Expanded(
@@ -780,6 +805,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     final topLevelSections = sections
         .where((section) => section.parentSectionId == null)
         .toList(growable: false);
+    final showPopular = selectedSection == popularMenuSectionId;
     final effectiveSection =
         topLevelSections.any((section) => section.id == selectedSection)
         ? selectedSection
@@ -800,18 +826,24 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
             ...subsections.map((section) => section.id),
           };
     final searchQuery = _searchController.text.trim().toLowerCase();
-    final products = catalog
-        .where((product) {
-          if (searchQuery.isNotEmpty) {
-            return productMatchesMenuSearch(product, sections, searchQuery);
-          }
-          if (effectiveSubsection != null) {
-            return product.sectionIds.contains(effectiveSubsection);
-          }
-          if (effectiveSection == null) return true;
-          return product.sectionIds.any(includedSectionIds.contains);
-        })
-        .toList(growable: false);
+    final products = catalog.where((product) {
+      if (searchQuery.isNotEmpty) {
+        return productMatchesMenuSearch(product, sections, searchQuery);
+      }
+      if (effectiveSubsection != null) {
+        return product.sectionIds.contains(effectiveSubsection);
+      }
+      if (showPopular || effectiveSection == null) return true;
+      return product.sectionIds.any(includedSectionIds.contains);
+    }).toList();
+    if (showPopular && searchQuery.isEmpty) {
+      products.sort((first, second) {
+        final popularity = second.soldQuantity.compareTo(first.soldQuantity);
+        return popularity != 0
+            ? popularity
+            : first.name.toLowerCase().compareTo(second.name.toLowerCase());
+      });
+    }
     final section = effectiveSection == null
         ? null
         : topLevelSections.firstWhere((item) => item.id == effectiveSection);
@@ -922,8 +954,27 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                               Padding(
                                 padding: const EdgeInsets.only(right: 8),
                                 child: ChoiceChip(
+                                  avatar: const Icon(
+                                    Icons.local_fire_department_rounded,
+                                  ),
+                                  label: const Text('Popular'),
+                                  selected: showPopular,
+                                  onSelected: (_) {
+                                    ref
+                                        .read(activeSectionProvider.notifier)
+                                        .select(popularMenuSectionId);
+                                    ref
+                                        .read(activeSubsectionProvider.notifier)
+                                        .select(null);
+                                  },
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.only(right: 8),
+                                child: ChoiceChip(
                                   label: const Text('All'),
-                                  selected: effectiveSection == null,
+                                  selected:
+                                      !showPopular && effectiveSection == null,
                                   onSelected: (_) {
                                     ref
                                         .read(activeSectionProvider.notifier)

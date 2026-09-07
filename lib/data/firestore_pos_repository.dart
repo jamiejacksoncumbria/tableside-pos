@@ -404,6 +404,7 @@ class FirestorePosRepository {
                 ),
                 taxRateId: data['taxRateId'] as String?,
                 taxRateName: data['taxRateName'] as String? ?? 'Zero rate',
+                soldQuantity: (data['soldQuantity'] as num?)?.toInt() ?? 0,
                 variants: _productVariants(data['variants'], productDataById),
                 modifierGroupIds: _stringIds(data['modifierGroupIds']),
                 stockComponents: _stockComponents(
