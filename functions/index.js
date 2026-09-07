@@ -595,6 +595,7 @@ async function manageMenuConfigurationFor(caller, rawData) {
     section: "menuSections",
     product: "products",
     modifierGroup: "modifierGroups",
+    variantSet: "variantSets",
     taxRate: "taxRates",
   };
   const collectionName = collectionNames[resource];
@@ -647,6 +648,7 @@ async function manageMenuConfigurationFor(caller, rawData) {
     }
     const updates = {};
     const linkedRefs = [];
+    let requestedBulkVariants = null;
     if (values.sectionIds != null) {
       const sectionIds = requiredDocumentIdArray(values.sectionIds, "sectionIds", 20);
       if (sectionIds.length === 0) {
@@ -682,13 +684,31 @@ async function manageMenuConfigurationFor(caller, rawData) {
         values.targetMarginBasisPoints, "targetMarginBasisPoints", 10000,
       );
     }
+    if (values.variants != null) {
+      requestedBulkVariants = validatedVariants(values.variants);
+      updates.variants = requestedBulkVariants;
+    }
     const changeKeys = Object.keys(updates);
     if (changeKeys.length === 0) {
       throw new HttpsError("invalid-argument", "Choose at least one product field to change.");
     }
-    const [products, linked] = await Promise.all([
+    const variantComponentIds = requestedBulkVariants == null
+      ? []
+      : [...new Set(requestedBulkVariants.flatMap((variant) =>
+          variant.stockComponents.map((component) => component.productId)))];
+    if (productIds.some((productId) => variantComponentIds.includes(productId))) {
+      throw new HttpsError(
+        "invalid-argument",
+        "A bulk variant set cannot make a selected product consume itself.",
+      );
+    }
+    const [products, linked, variantComponents] = await Promise.all([
       db.getAll(...productIds.map((id) => collection.doc(id))),
       linkedRefs.length === 0 ? Promise.resolve([]) : db.getAll(...linkedRefs),
+      variantComponentIds.length === 0
+        ? Promise.resolve([])
+        : db.getAll(...variantComponentIds.map((id) =>
+            db.doc(`tenants/${tenantId}/products/${id}`))),
     ]);
     if (products.some((item) => !item.exists || item.data().venueId !== venueId ||
         item.data().archived === true)) {
@@ -696,6 +716,25 @@ async function manageMenuConfigurationFor(caller, rawData) {
     }
     if (linked.some((item) => !item.exists || item.data().venueId !== venueId)) {
       throw new HttpsError("failed-precondition", "A selected section or option group is unavailable.");
+    }
+    if (variantComponents.some((item) => !item.exists ||
+        item.data().venueId !== venueId || item.data().trackStock !== true ||
+        item.data().archived === true)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Every variant stock item must be an active tracked product at this venue.",
+      );
+    }
+    if (requestedBulkVariants != null) {
+      const componentById = new Map(variantComponents.map((item) => [item.id, item.data()]));
+      updates.variants = requestedBulkVariants.map((variant) => ({
+        ...variant,
+        stockComponents: variant.stockComponents.map((component) => ({
+          ...component,
+          productName: componentById.get(component.productId).name,
+          stockUnit: componentById.get(component.productId).stockUnit ?? "each",
+        })),
+      }));
     }
     const batch = db.batch();
     for (const product of products) {
@@ -873,6 +912,41 @@ async function manageMenuConfigurationFor(caller, rawData) {
         ? {sortOrder: requiredNonNegativeInteger(values.sortOrder, "sortOrder", 100000)}
         : {}),
     };
+  } else if (resource === "variantSet") {
+    const name = catalogueTitleCase(requiredText(values, "name", 80));
+    const requestedVariants = validatedVariants(values.variants ?? []);
+    if (requestedVariants.length === 0) {
+      throw new HttpsError("invalid-argument", "A reusable variant set cannot be empty.");
+    }
+    const componentIds = [...new Set(requestedVariants.flatMap((variant) =>
+      variant.stockComponents.map((component) => component.productId)))];
+    const components = componentIds.length === 0
+      ? []
+      : await db.getAll(...componentIds.map((id) =>
+          db.doc(`tenants/${tenantId}/products/${id}`)));
+    if (components.some((item) => !item.exists || item.data().venueId !== venueId ||
+        item.data().trackStock !== true || item.data().archived === true)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Every reusable variant stock item must be active and tracked at this venue.",
+      );
+    }
+    const componentById = new Map(components.map((item) => [item.id, item.data()]));
+    const variants = requestedVariants.map((variant) => ({
+      ...variant,
+      stockComponents: variant.stockComponents.map((component) => ({
+        ...component,
+        productName: componentById.get(component.productId).name,
+        stockUnit: componentById.get(component.productId).stockUnit ?? "each",
+      })),
+    }));
+    const duplicates = await collection.get();
+    if (duplicates.docs.some((item) => item.id !== documentId &&
+        item.data().venueId === venueId &&
+        String(item.data().name ?? "").trim().toLowerCase() === name.toLowerCase())) {
+      throw new HttpsError("already-exists", "A variant set with this name already exists.");
+    }
+    cleaned = {name, variants};
   } else if (resource === "modifierGroup") {
     const requestedOptions = validatedModifierOptions(values.options);
     const componentIds = [...new Set(requestedOptions.flatMap((option) =>

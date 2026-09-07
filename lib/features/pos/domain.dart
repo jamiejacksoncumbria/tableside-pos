@@ -374,6 +374,20 @@ class MenuProductVariant {
   final List<ProductStockComponent> stockComponents;
 }
 
+/// A venue-level reusable variant recipe. Applying a set copies its validated
+/// variants into a product, so future set edits cannot rewrite existing sales.
+class MenuVariantSet {
+  const MenuVariantSet({
+    required this.id,
+    required this.name,
+    required this.variants,
+  });
+
+  final String id;
+  final String name;
+  final List<MenuProductVariant> variants;
+}
+
 /// A stock-tracked ingredient consumed when one sellable product is sent to
 /// production. Quantities use the component product's base unit (for example
 /// 50 ml vodka and 333 ml mixer).

@@ -948,6 +948,7 @@ class FirestorePosRepository {
     bool? showOnOrderFlow,
     List<String>? modifierGroupIds,
     int? targetMarginBasisPoints,
+    List<MenuProductVariant>? variants,
   }) async {
     await _commands.manageMenuConfiguration(
       scope: scope,
@@ -961,6 +962,7 @@ class FirestorePosRepository {
         if (modifierGroupIds != null) 'modifierGroupIds': modifierGroupIds,
         if (targetMarginBasisPoints != null)
           'targetMarginBasisPoints': targetMarginBasisPoints,
+        if (variants != null) 'variants': _variantsToMap(variants),
       },
     );
   }
@@ -1141,6 +1143,46 @@ class FirestorePosRepository {
               })
               .toList(growable: false),
         );
+  }
+
+  Stream<List<MenuVariantSet>> watchVariantSets(VenueScope scope) {
+    return _firestore
+        .collection('tenants/${scope.tenantId}/variantSets')
+        .where('venueId', isEqualTo: scope.venueId)
+        .snapshots()
+        .map((snapshot) {
+          final sets = snapshot.docs
+              .map((document) {
+                final data = document.data();
+                return MenuVariantSet(
+                  id: document.id,
+                  name: data['name'] as String? ?? 'Unnamed variant set',
+                  variants: _productVariants(
+                    data['variants'],
+                    const <String, Map<String, dynamic>>{},
+                  ),
+                );
+              })
+              .toList(growable: false);
+          sets.sort(
+            (first, second) =>
+                first.name.toLowerCase().compareTo(second.name.toLowerCase()),
+          );
+          return sets;
+        });
+  }
+
+  Future<void> saveVariantSet({
+    required VenueScope scope,
+    required String name,
+    required List<MenuProductVariant> variants,
+  }) async {
+    await _commands.manageMenuConfiguration(
+      scope: scope,
+      resource: 'variantSet',
+      operation: 'save',
+      values: {'name': name, 'variants': _variantsToMap(variants)},
+    );
   }
 
   Future<void> createModifierGroup({

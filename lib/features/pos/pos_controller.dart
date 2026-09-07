@@ -59,6 +59,12 @@ final menuModifierGroupsProvider = StreamProvider<List<MenuModifierGroup>>((
   return ref.watch(firestorePosRepositoryProvider).watchModifierGroups(scope);
 });
 
+final menuVariantSetsProvider = StreamProvider<List<MenuVariantSet>>((ref) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  if (scope == null) return Stream.value(const <MenuVariantSet>[]);
+  return ref.watch(firestorePosRepositoryProvider).watchVariantSets(scope);
+});
+
 /// Each open table tile listens to its own server-owned order. This keeps the
 /// amount shown on the floor view current across all signed-in devices without
 /// duplicating a financial total onto the table record.

@@ -49,6 +49,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
     final taxRatesValue = ref.watch(taxRatesProvider);
     final defaultTaxRateIdValue = ref.watch(defaultTaxRateIdProvider);
     final modifierGroupsValue = ref.watch(menuModifierGroupsProvider);
+    final variantSetsValue = ref.watch(menuVariantSetsProvider);
     final sections = sectionsValue.when(
       data: (items) => items,
       loading: () => scope == null ? demoSections : const <MenuSection>[],
@@ -74,6 +75,11 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
       data: (items) => items,
       loading: () => const <MenuModifierGroup>[],
       error: (_, _) => const <MenuModifierGroup>[],
+    );
+    final variantSets = variantSetsValue.when(
+      data: (items) => items,
+      loading: () => const <MenuVariantSet>[],
+      error: (_, _) => const <MenuVariantSet>[],
     );
     final configuredDefaultTaxRateId = defaultTaxRateIdValue.value;
     final defaultTaxRateId =
@@ -204,6 +210,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                           sections: sections,
                           taxRates: [TaxRate.zero, ...taxRates],
                           modifierGroups: modifierGroups,
+                          variantSets: variantSets,
                           allProducts: products,
                           currencyCode: widget.currencyCode,
                           defaultTaxRateId: defaultTaxRateId,
@@ -517,6 +524,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                             scope: scope,
                             sections: sections,
                             modifierGroups: modifierGroups,
+                            variantSets: variantSets,
                           ),
                     icon: const Icon(Icons.edit_note_rounded),
                     label: const Text('Bulk change'),
@@ -571,6 +579,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                             sections: sections,
                             taxRates: [TaxRate.zero, ...taxRates],
                             modifierGroups: modifierGroups,
+                            variantSets: variantSets,
                             allProducts: products,
                             currencyCode: widget.currencyCode,
                             defaultTaxRateId: defaultTaxRateId,
@@ -660,11 +669,14 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
     required VenueScope scope,
     required List<MenuSection> sections,
     required List<MenuModifierGroup> modifierGroups,
+    required List<MenuVariantSet> variantSets,
   }) async {
     var replaceSections = false;
     var replaceOptions = false;
     var changeProductionArea = false;
     var changeMargin = false;
+    var replaceVariants = false;
+    MenuVariantSet? selectedVariantSet;
     var orderFlowChoice = 'unchanged';
     var productionArea = ProductionArea.kitchen;
     final selectedSections = <String>{};
@@ -708,6 +720,36 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                             }),
                           ),
                       ],
+                    ),
+                  const Divider(height: 28),
+                  CheckboxListTile(
+                    value: replaceVariants,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Apply reusable variant set'),
+                    subtitle: const Text(
+                      'Copies the selected variants and stock rules to every selected product.',
+                    ),
+                    onChanged: variantSets.isEmpty
+                        ? null
+                        : (value) => setDialogState(
+                            () => replaceVariants = value ?? false,
+                          ),
+                  ),
+                  if (replaceVariants)
+                    DropdownButtonFormField<MenuVariantSet>(
+                      initialValue: selectedVariantSet,
+                      decoration: const InputDecoration(
+                        labelText: 'Reusable variant set',
+                      ),
+                      items: [
+                        for (final set in variantSets)
+                          DropdownMenuItem(
+                            value: set,
+                            child: Text('${set.name} (${set.variants.length})'),
+                          ),
+                      ],
+                      onChanged: (value) =>
+                          setDialogState(() => selectedVariantSet = value),
                     ),
                   const Divider(height: 28),
                   CheckboxListTile(
@@ -842,6 +884,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                 }
                 if (!replaceSections &&
                     !replaceOptions &&
+                    !replaceVariants &&
                     !changeProductionArea &&
                     !changeMargin &&
                     orderFlowChoice == 'unchanged') {
@@ -850,6 +893,16 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                     ref: ref,
                     title: 'Choose something to change',
                     message: 'No product fields have been selected.',
+                    level: AppNotificationLevel.warning,
+                  );
+                  return;
+                }
+                if (replaceVariants && selectedVariantSet == null) {
+                  showAppNotification(
+                    context,
+                    ref: ref,
+                    title: 'Choose a variant set',
+                    message: 'Select the reusable variants to apply.',
                     level: AppNotificationLevel.warning,
                   );
                   return;
@@ -872,6 +925,9 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                     targetMarginBasisPoints: marginPercent == null
                         ? null
                         : (marginPercent * 100).round(),
+                    variants: replaceVariants
+                        ? selectedVariantSet!.variants
+                        : null,
                   ),
                 );
               },
@@ -916,6 +972,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
             showOnOrderFlow: changes.showOnOrderFlow,
             modifierGroupIds: changes.modifierGroupIds,
             targetMarginBasisPoints: changes.targetMarginBasisPoints,
+            variants: changes.variants,
           );
       if (!mounted) return;
       setState(_selectedProductIds.clear);
@@ -1259,6 +1316,7 @@ class _BulkProductChanges {
     this.showOnOrderFlow,
     this.modifierGroupIds,
     this.targetMarginBasisPoints,
+    this.variants,
   });
 
   final List<String>? sectionIds;
@@ -1266,6 +1324,7 @@ class _BulkProductChanges {
   final bool? showOnOrderFlow;
   final List<String>? modifierGroupIds;
   final int? targetMarginBasisPoints;
+  final List<MenuProductVariant>? variants;
 }
 
 class _ProductTile extends StatelessWidget {
@@ -1843,6 +1902,7 @@ Future<void> _showProductDialog({
   required List<MenuSection> sections,
   required List<TaxRate> taxRates,
   required List<MenuModifierGroup> modifierGroups,
+  required List<MenuVariantSet> variantSets,
   required List<MenuProduct> allProducts,
   required String currencyCode,
   required String defaultTaxRateId,
@@ -2104,6 +2164,34 @@ Future<void> _showProductDialog({
                           : '${variants.length} variant${variants.length == 1 ? '' : 's'} configured. Customers must choose one.',
                     ),
                     const SizedBox(height: 8),
+                    if (variantSets.isNotEmpty) ...[
+                      DropdownButtonFormField<MenuVariantSet>(
+                        decoration: const InputDecoration(
+                          labelText: 'Use a saved variant set',
+                          helperText:
+                              'Copies its prices and stock usage into this product.',
+                        ),
+                        items: [
+                          for (final set in variantSets)
+                            DropdownMenuItem(
+                              value: set,
+                              child: Text(
+                                '${set.name} (${set.variants.length})',
+                              ),
+                            ),
+                        ],
+                        onChanged: (set) {
+                          if (set != null) {
+                            setDialogState(
+                              () => variants = List<MenuProductVariant>.from(
+                                set.variants,
+                              ),
+                            );
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                    ],
                     OutlinedButton.icon(
                       onPressed: () async {
                         final next = await _showVariantsDialog(
@@ -2126,6 +2214,76 @@ Future<void> _showProductDialog({
                         variants.isEmpty ? 'Add variants' : 'Edit variants',
                       ),
                     ),
+                    if (variants.isNotEmpty)
+                      TextButton.icon(
+                        onPressed: () async {
+                          final controller = TextEditingController();
+                          final setName = await showDialog<String>(
+                            context: dialogContext,
+                            builder: (nameContext) => AlertDialog(
+                              title: const Text('Save reusable variant set'),
+                              content: TextField(
+                                controller: controller,
+                                autofocus: true,
+                                textCapitalization: TextCapitalization.words,
+                                decoration: const InputDecoration(
+                                  labelText: 'Set name',
+                                  hintText: 'For example: Glass sizes',
+                                ),
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(nameContext),
+                                  child: const Text('Cancel'),
+                                ),
+                                FilledButton(
+                                  onPressed: () => Navigator.pop(
+                                    nameContext,
+                                    controller.text.trim(),
+                                  ),
+                                  child: const Text('Save set'),
+                                ),
+                              ],
+                            ),
+                          );
+                          controller.dispose();
+                          if (setName == null || setName.trim().isEmpty) return;
+                          try {
+                            await ref
+                                .read(firestorePosRepositoryProvider)
+                                .saveVariantSet(
+                                  scope: scope,
+                                  name: setName,
+                                  variants: variants,
+                                );
+                            if (!dialogContext.mounted) return;
+                            showAppNotification(
+                              dialogContext,
+                              ref: ref,
+                              title: 'Variant set saved',
+                              message:
+                                  '$setName can now be reused on other products.',
+                              level: AppNotificationLevel.success,
+                            );
+                          } on Object catch (error, stackTrace) {
+                            AppLogger.error(
+                              'Save reusable variant set',
+                              error,
+                              stackTrace,
+                            );
+                            if (!dialogContext.mounted) return;
+                            showAppNotification(
+                              dialogContext,
+                              ref: ref,
+                              title: 'Variant set was not saved',
+                              message: '$error',
+                              level: AppNotificationLevel.error,
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.bookmark_add_outlined),
+                        label: const Text('Save current variants as a set'),
+                      ),
                     const SizedBox(height: 18),
                     Text(
                       'Product options',
