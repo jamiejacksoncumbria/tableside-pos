@@ -929,9 +929,16 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
       canPop: !useCategoryTiles || (searchQuery.isEmpty && !_tileCategoryOpen),
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        setState(() {
+        if (searchQuery.isNotEmpty) {
           _searchController.clear();
-          _tileCategoryOpen = false;
+          return;
+        }
+        setState(() {
+          if (effectiveSubsection != null) {
+            ref.read(activeSubsectionProvider.notifier).select(null);
+          } else {
+            _tileCategoryOpen = false;
+          }
         });
       },
       child: Card(
@@ -1124,14 +1131,50 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                           ],
                           if (useCategoryTiles &&
                               _tileCategoryOpen &&
+                              searchQuery.isEmpty &&
+                              effectiveSubsection == null &&
+                              subsections.isNotEmpty) ...[
+                            const SizedBox(height: 10),
+                            Text(
+                              'Subcategories',
+                              style: Theme.of(context).textTheme.labelLarge,
+                            ),
+                            const SizedBox(height: 6),
+                            _CategoryTilePanel(
+                              children: [
+                                for (final item in subsections)
+                                  _CategoryTile(
+                                    textIcon: item.icon,
+                                    label: item.name,
+                                    selected: false,
+                                    onTap: () => ref
+                                        .read(activeSubsectionProvider.notifier)
+                                        .select(item.id),
+                                  ),
+                              ],
+                            ),
+                          ],
+                          if (useCategoryTiles &&
+                              _tileCategoryOpen &&
                               searchQuery.isEmpty)
                             Align(
                               alignment: Alignment.centerLeft,
                               child: TextButton.icon(
-                                onPressed: () =>
-                                    setState(() => _tileCategoryOpen = false),
+                                onPressed: () => setState(() {
+                                  if (effectiveSubsection != null) {
+                                    ref
+                                        .read(activeSubsectionProvider.notifier)
+                                        .select(null);
+                                  } else {
+                                    _tileCategoryOpen = false;
+                                  }
+                                }),
                                 icon: const Icon(Icons.arrow_back_rounded),
-                                label: const Text('Categories'),
+                                label: Text(
+                                  effectiveSubsection != null
+                                      ? section?.name ?? 'Category'
+                                      : 'Categories',
+                                ),
                               ),
                             ),
                           if (!showTileCategoryBrowser) ...[
