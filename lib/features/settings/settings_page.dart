@@ -16,8 +16,10 @@ import '../printing/venue_printer_routing_page.dart';
 import '../printing/windows_printer_setup_page.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
+import '../refunds/refunds_page.dart';
 import '../stock/stock_management_page.dart';
 import '../tables/table_management_page.dart';
+import '../training/training_mode_page.dart';
 import '../vouchers/voucher_management_page.dart';
 import 'audit_trail_page.dart';
 import 'diagnostics_page.dart';
@@ -634,6 +636,35 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ),
               ),
               if (canManageVenue) ...[
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.school_outlined),
+                  title: const Text('Training mode'),
+                  subtitle: const Text(
+                    'Run isolated practice orders with no live sales, stock or payments.',
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const TrainingModePage(),
+                    ),
+                  ),
+                ),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.currency_exchange_rounded),
+                  title: const Text('Refunds & corrections'),
+                  subtitle: const Text(
+                    'Find closed bills and securely refund full or selected items.',
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          RefundsPage(currencyCode: profile.currencyCode),
+                    ),
+                  ),
+                ),
                 const Divider(),
                 ListTile(
                   leading: const Icon(Icons.card_giftcard_rounded),

@@ -261,7 +261,9 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           styles: const PosStyles(align: PosAlign.center, bold: true),
         ),
       ...generator.text(
-        receipt.isPreReceipt
+        receipt.isRefund
+            ? 'REFUND RECEIPT'
+            : receipt.isPreReceipt
             ? 'PRE RECEIPT - NOT PAID'
             : receipt.isReprint
             ? 'REPRINT - PAID RECEIPT'
@@ -270,6 +272,11 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       ),
       ...generator.hr(),
       ...generator.text('Receipt: ${receipt.receiptNumber}'),
+      if (receipt.isRefund &&
+          receipt.originalReceiptNumber?.trim().isNotEmpty == true)
+        ...generator.text('Original: ${receipt.originalReceiptNumber!.trim()}'),
+      if (receipt.isRefund && receipt.refundReason?.trim().isNotEmpty == true)
+        ...generator.text('Reason: ${receipt.refundReason!.trim()}'),
       if (location != null) ...generator.text(location),
       if (receipt.businessDate?.trim().isNotEmpty == true)
         ...generator.text('Business date: ${receipt.businessDate}'),
@@ -305,7 +312,11 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           '${tax.name} (${_percentage(tax.basisPoints)}): ${_money(tax.taxMinor, receipt.currencyCode)}',
         ),
       ...generator.row([
-        PosColumn(text: 'TOTAL', width: 6, styles: const PosStyles(bold: true)),
+        PosColumn(
+          text: receipt.isRefund ? 'REFUND TOTAL' : 'TOTAL',
+          width: 6,
+          styles: const PosStyles(bold: true),
+        ),
         PosColumn(
           text: _money(receipt.totalMinor, receipt.currencyCode),
           width: 6,

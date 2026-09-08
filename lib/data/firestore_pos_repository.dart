@@ -656,7 +656,9 @@ class FirestorePosRepository {
     final openedAt = data['openedAt'];
     final lines = List<Object?>.from(data['lines'] as List? ?? const [])
         .whereType<Map>()
-        .map((raw) {
+        .indexed
+        .map((entry) {
+          final raw = entry.$2;
           final line = Map<String, Object?>.from(raw);
           return OrderLine(
             id: line['id'] as String? ?? '',
@@ -1489,6 +1491,25 @@ class FirestorePosRepository {
         );
   }
 
+  /// Streams server-created refund snapshots. They are kept separate from
+  /// bills so the original sale remains immutable and report arithmetic can
+  /// show gross sales and corrections independently.
+  Stream<List<SalesReportRefund>> watchSalesReportRefunds(VenueScope scope) {
+    return _firestore
+        .collection('tenants/${scope.tenantId}/refunds')
+        .where('venueId', isEqualTo: scope.venueId)
+        .limit(5000)
+        .snapshots()
+        .map(
+          (snapshot) =>
+              snapshot.docs
+                  .map(_salesReportRefundFromDocument)
+                  .whereType<SalesReportRefund>()
+                  .toList(growable: false)
+                ..sort((a, b) => b.businessDate.compareTo(a.businessDate)),
+        );
+  }
+
   Stream<List<PosOrder>> watchVenueOpenOrders(VenueScope scope) {
     return _firestore
         .collection('tenants/${scope.tenantId}/orders')
@@ -1504,6 +1525,13 @@ class FirestorePosRepository {
               .toList(growable: false),
         );
   }
+
+  DateTime? _dateTime(Object? value) => switch (value) {
+    Timestamp timestamp => timestamp.toDate(),
+    DateTime dateTime => dateTime,
+    String text => DateTime.tryParse(text),
+    _ => null,
+  };
 
   SalesReportBill? _salesReportBillFromDocument(
     QueryDocumentSnapshot<Map<String, dynamic>> document,
@@ -1550,12 +1578,17 @@ class FirestorePosRepository {
             .toList(growable: false);
     final lines = List<Object?>.from(data['lines'] as List? ?? const [])
         .whereType<Map>()
-        .map((raw) {
+        .indexed
+        .map((entry) {
+          final raw = entry.$2;
           final line = Map<String, Object?>.from(raw);
           final quantity = (line['quantity'] as num?)?.toInt() ?? 0;
           final lineTotal = (line['lineTotalMinor'] as num?)?.toInt();
           final unitPrice = (line['unitPriceMinor'] as num?)?.toInt() ?? 0;
           return SalesReportLine(
+            id: (line['id'] as String?)?.trim().isNotEmpty == true
+                ? line['id'] as String
+                : 'line-${entry.$1}',
             productId: line['productId'] as String? ?? '',
             productName: line['productName'] as String? ?? 'Menu item',
             quantity: quantity,
@@ -1580,6 +1613,89 @@ class FirestorePosRepository {
       lines: lines,
       taxBreakdown: taxBreakdown,
       closedByName: actor is Map
+          ? actor['displayName'] as String? ?? actor['email'] as String? ?? ''
+          : '',
+      tableLabel: data['tableLabel'] as String?,
+      tabName: data['tabName'] as String?,
+      closedAt: _dateTime(data['closedAt']),
+      refundedGrossMinor: (data['refundedGrossMinor'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  SalesReportRefund? _salesReportRefundFromDocument(
+    QueryDocumentSnapshot<Map<String, dynamic>> document,
+  ) {
+    final data = document.data();
+    final venueId = data['venueId'] as String?;
+    final businessDate = DateTime.tryParse(
+      data['businessDate'] as String? ?? '',
+    );
+    if (venueId == null || businessDate == null) return null;
+    final lines = List<Object?>.from(data['lines'] as List? ?? const [])
+        .whereType<Map>()
+        .map((raw) {
+          final line = Map<String, Object?>.from(raw);
+          return SalesReportLine(
+            id: line['lineId'] as String? ?? '',
+            productId: line['productId'] as String? ?? '',
+            productName: line['productName'] as String? ?? 'Menu item',
+            quantity: (line['quantity'] as num?)?.toInt() ?? 0,
+            grossMinor: (line['grossMinor'] as num?)?.toInt() ?? 0,
+          );
+        })
+        .toList(growable: false);
+    final payments =
+        List<Object?>.from(data['paymentAllocations'] as List? ?? const [])
+            .whereType<Map>()
+            .map((raw) {
+              final payment = Map<String, Object?>.from(raw);
+              return SalesReportPayment(
+                method: payment['method'] as String? ?? 'other',
+                currencyCode:
+                    payment['tenderedCurrencyCode'] as String? ??
+                    data['currencyCode'] as String? ??
+                    'GBP',
+                tenderedAmountMinor:
+                    (payment['tenderedAmountMinor'] as num?)?.toInt() ?? 0,
+                baseAmountMinor:
+                    (payment['baseAmountMinor'] as num?)?.toInt() ?? 0,
+                terminalLabel: payment['terminalLabel'] as String?,
+              );
+            })
+            .toList(growable: false);
+    final tax = List<Object?>.from(data['taxBreakdown'] as List? ?? const [])
+        .whereType<Map>()
+        .map((raw) {
+          final entry = Map<String, Object?>.from(raw);
+          return SalesReportTaxEntry(
+            name: entry['taxRateName'] as String? ?? 'Tax',
+            basisPoints: (entry['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
+            grossMinor: (entry['grossMinor'] as num?)?.toInt() ?? 0,
+            netMinor: (entry['netMinor'] as num?)?.toInt() ?? 0,
+            taxMinor: (entry['taxMinor'] as num?)?.toInt() ?? 0,
+          );
+        })
+        .toList(growable: false);
+    final actor = data['refundedByActor'];
+    return SalesReportRefund(
+      id: document.id,
+      billId: data['billId'] as String? ?? '',
+      refundNumber: data['refundNumber'] as String? ?? document.id,
+      originalReceiptNumber: data['originalReceiptNumber'] as String? ?? '',
+      venueId: venueId,
+      businessDate: businessDate,
+      currencyCode: data['currencyCode'] as String? ?? 'GBP',
+      grossMinor: (data['grossMinor'] as num?)?.toInt() ?? 0,
+      netMinor: (data['netMinor'] as num?)?.toInt() ?? 0,
+      taxMinor: (data['taxMinor'] as num?)?.toInt() ?? 0,
+      reason: data['reason'] as String? ?? '',
+      lines: lines,
+      payments: payments,
+      taxBreakdown: tax,
+      tableLabel: data['tableLabel'] as String?,
+      tabName: data['tabName'] as String?,
+      refundedAt: _dateTime(data['refundedAt']),
+      refundedByName: actor is Map
           ? actor['displayName'] as String? ?? actor['email'] as String? ?? ''
           : '',
     );

@@ -94,4 +94,71 @@ void main() {
     expect(product.estimatedMarginPercent, closeTo(60, 0.001));
     expect(product.isBelowTargetMargin, isTrue);
   });
+
+  test('decimal component quantities preserve measured stock recipes', () {
+    const product = MenuProduct(
+      id: 'measured-cocktail',
+      name: 'Measured Cocktail',
+      priceMinor: 900,
+      sectionIds: ['cocktails'],
+      productionArea: ProductionArea.bar,
+      stockComponents: [
+        ProductStockComponent(
+          productId: 'spirit',
+          productName: 'Spirit',
+          quantityPerSale: 2.5,
+          stockUnit: 'cl',
+          stockOnHand: 5,
+        ),
+      ],
+    );
+    final order = PosOrder(
+      id: 'order',
+      tenantId: 'tenant',
+      venueId: 'venue',
+      businessDate: DateTime(2026, 9, 8),
+      openedAt: DateTime(2026, 9, 8),
+      status: OrderStatus.open,
+      lines: const [
+        OrderLine(
+          id: 'line',
+          productId: 'measured-cocktail',
+          productName: 'Measured Cocktail',
+          quantity: 1,
+          unitPriceMinor: 900,
+          productionArea: ProductionArea.bar,
+          trackStock: false,
+          stockComponents: [
+            ProductStockComponent(
+              productId: 'spirit',
+              productName: 'Spirit',
+              quantityPerSale: 2.5,
+              stockUnit: 'cl',
+            ),
+          ],
+        ),
+      ],
+    );
+
+    expect(order.unsentStockReservedFor('spirit'), 2.5);
+    expect(order.canAddProduct(product), isTrue);
+  });
+
+  test('variant components can consume a separately stocked mixer', () {
+    const mixer = ProductStockComponent(
+      productId: 'cola-can',
+      productName: 'Cola Can',
+      quantityPerSale: 1,
+      stockUnit: 'each',
+      stockOnHand: 1,
+    );
+    const variant = MenuProductVariant(
+      id: 'with-cola',
+      name: 'With Cola',
+      stockComponents: [mixer],
+    );
+
+    expect(variant.stockComponents.single.productId, 'cola-can');
+    expect(variant.stockComponents.single.quantityPerSale, 1);
+  });
 }

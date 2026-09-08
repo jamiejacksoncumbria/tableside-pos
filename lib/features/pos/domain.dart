@@ -231,12 +231,14 @@ class SalesReportPayment {
 
 class SalesReportLine {
   const SalesReportLine({
+    this.id = '',
     required this.productId,
     required this.productName,
     required this.quantity,
     required this.grossMinor,
   });
 
+  final String id;
   final String productId;
   final String productName;
   final int quantity;
@@ -276,6 +278,10 @@ class SalesReportBill {
     required this.lines,
     required this.taxBreakdown,
     this.closedByName = '',
+    this.tableLabel,
+    this.tabName,
+    this.closedAt,
+    this.refundedGrossMinor = 0,
   });
 
   final String id;
@@ -290,6 +296,54 @@ class SalesReportBill {
   final List<SalesReportLine> lines;
   final List<SalesReportTaxEntry> taxBreakdown;
   final String closedByName;
+  final String? tableLabel;
+  final String? tabName;
+  final DateTime? closedAt;
+  final int refundedGrossMinor;
+}
+
+/// An immutable reversal of selected quantities from a closed bill. Values
+/// are positive here; reporting subtracts them from the original sale.
+class SalesReportRefund {
+  const SalesReportRefund({
+    required this.id,
+    required this.billId,
+    required this.refundNumber,
+    required this.originalReceiptNumber,
+    required this.venueId,
+    required this.businessDate,
+    required this.currencyCode,
+    required this.grossMinor,
+    required this.netMinor,
+    required this.taxMinor,
+    required this.reason,
+    required this.lines,
+    required this.payments,
+    required this.taxBreakdown,
+    this.tableLabel,
+    this.tabName,
+    this.refundedAt,
+    this.refundedByName = '',
+  });
+
+  final String id;
+  final String billId;
+  final String refundNumber;
+  final String originalReceiptNumber;
+  final String venueId;
+  final DateTime businessDate;
+  final String currencyCode;
+  final int grossMinor;
+  final int netMinor;
+  final int taxMinor;
+  final String reason;
+  final List<SalesReportLine> lines;
+  final List<SalesReportPayment> payments;
+  final List<SalesReportTaxEntry> taxBreakdown;
+  final String? tableLabel;
+  final String? tabName;
+  final DateTime? refundedAt;
+  final String refundedByName;
 }
 
 class TenantMembership {

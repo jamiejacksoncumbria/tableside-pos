@@ -23,7 +23,7 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
         'This registered printer device has no selected Bluetooth printer.',
       );
     }
-    if (payload['type'] == 'receipt') {
+    if (payload['type'] == 'receipt' || payload['type'] == 'refundReceipt') {
       await _printReceipt(
         selectedDevice: selectedDevice,
         payload: payload,
@@ -176,6 +176,9 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
         receiptFooter: business['receiptFooter'] as String? ?? '',
         isReprint: payload['isReprint'] as bool? ?? false,
         isPreReceipt: payload['isPreReceipt'] as bool? ?? false,
+        isRefund: payload['type'] == 'refundReceipt',
+        originalReceiptNumber: payload['originalReceiptNumber'] as String?,
+        refundReason: payload['refundReason'] as String?,
       ),
     );
   }

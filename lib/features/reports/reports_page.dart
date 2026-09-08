@@ -25,6 +25,16 @@ final salesReportBillsProvider = StreamProvider<List<SalesReportBill>>((ref) {
   return ref.watch(firestorePosRepositoryProvider).watchSalesReportBills(scope);
 });
 
+final salesReportRefundsProvider = StreamProvider<List<SalesReportRefund>>((
+  ref,
+) {
+  final scope = ref.watch(activeVenueScopeProvider);
+  if (scope == null) return Stream.value(const <SalesReportRefund>[]);
+  return ref
+      .watch(firestorePosRepositoryProvider)
+      .watchSalesReportRefunds(scope);
+});
+
 final openVenueOrdersReportProvider = StreamProvider<List<PosOrder>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <PosOrder>[]);
@@ -73,6 +83,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
       );
     }
     final report = ref.watch(salesReportBillsProvider);
+    final refundReport = ref.watch(salesReportRefundsProvider);
     final openOrders = ref.watch(openVenueOrdersReportProvider);
     if (openOrders.isLoading) {
       return const Center(child: CircularProgressIndicator());
@@ -95,11 +106,25 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
           ),
         );
       },
-      data: (bills) => _buildReport(bills, openOrders.value?.length ?? 0),
+      data: (bills) => refundReport.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, stackTrace) {
+          AppLogger.error('Display refund report', error, stackTrace);
+          return Center(
+            child: Text('Refund reporting could not be loaded: $error'),
+          );
+        },
+        data: (refunds) =>
+            _buildReport(bills, refunds, openOrders.value?.length ?? 0),
+      ),
     );
   }
 
-  Widget _buildReport(List<SalesReportBill> allBills, int openOrderCount) {
+  Widget _buildReport(
+    List<SalesReportBill> allBills,
+    List<SalesReportRefund> allRefunds,
+    int openOrderCount,
+  ) {
     final latestAnchor = allBills.isEmpty
         ? DateTime.now()
         : allBills
@@ -111,10 +136,25 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
           (bill) => _inPeriod(bill.businessDate, anchor, _period, _customRange),
         )
         .toList(growable: false);
-    final gross = bills.fold<int>(0, (sum, bill) => sum + bill.grossMinor);
-    final net = bills.fold<int>(0, (sum, bill) => sum + bill.netMinor);
-    final tax = bills.fold<int>(0, (sum, bill) => sum + bill.taxMinor);
-    final average = bills.isEmpty ? 0 : gross ~/ bills.length;
+    final refunds = allRefunds
+        .where(
+          (refund) =>
+              _inPeriod(refund.businessDate, anchor, _period, _customRange),
+        )
+        .toList(growable: false);
+    final grossSales = bills.fold<int>(0, (sum, bill) => sum + bill.grossMinor);
+    final refundGross = refunds.fold<int>(
+      0,
+      (sum, item) => sum + item.grossMinor,
+    );
+    final gross = grossSales - refundGross;
+    final net =
+        bills.fold<int>(0, (sum, bill) => sum + bill.netMinor) -
+        refunds.fold<int>(0, (sum, item) => sum + item.netMinor);
+    final tax =
+        bills.fold<int>(0, (sum, bill) => sum + bill.taxMinor) -
+        refunds.fold<int>(0, (sum, item) => sum + item.taxMinor);
+    final average = bills.isEmpty ? 0 : grossSales ~/ bills.length;
     final paymentTotals = <String, (String, int)>{};
     final productTotals = <String, (String, int, int)>{};
     final staffTotals = <String, int>{};
@@ -152,6 +192,40 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
           (existing?.$3 ?? 0) + tax.grossMinor,
           (existing?.$4 ?? 0) + tax.netMinor,
           (existing?.$5 ?? 0) + tax.taxMinor,
+        );
+      }
+    }
+    for (final refund in refunds) {
+      for (final payment in refund.payments) {
+        final method = payment.method == 'cardTerminal'
+            ? 'Card${payment.terminalLabel?.trim().isNotEmpty == true ? ' · ${payment.terminalLabel}' : ''}'
+            : payment.method == 'voucher'
+            ? 'Voucher · ${payment.currencyCode}'
+            : 'Cash · ${payment.currencyCode}';
+        final existing = paymentTotals[method];
+        paymentTotals[method] = (
+          payment.currencyCode,
+          (existing?.$2 ?? 0) - payment.tenderedAmountMinor,
+        );
+      }
+      for (final line in refund.lines) {
+        final key = line.productId.isEmpty ? line.productName : line.productId;
+        final existing = productTotals[key];
+        productTotals[key] = (
+          line.productName,
+          (existing?.$2 ?? 0) - line.quantity,
+          (existing?.$3 ?? 0) - line.grossMinor,
+        );
+      }
+      for (final refundTax in refund.taxBreakdown) {
+        final key = '${refundTax.name}_${refundTax.basisPoints}';
+        final existing = taxTotals[key];
+        taxTotals[key] = (
+          refundTax.name,
+          refundTax.basisPoints,
+          (existing?.$3 ?? 0) - refundTax.grossMinor,
+          (existing?.$4 ?? 0) - refundTax.netMinor,
+          (existing?.$5 ?? 0) - refundTax.taxMinor,
         );
       }
     }
@@ -254,6 +328,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                   ? null
                   : () => _exportCsv(
                       bills,
+                      refunds,
                       _periodBounds(anchor, _period, _customRange),
                     ),
               icon: const Icon(Icons.download_rounded),
@@ -264,6 +339,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
                   ? null
                   : () => _printSalesReport(
                       bills: bills,
+                      refunds: refunds,
                       openOrderCount: openOrderCount,
                       range: reportRange,
                       reportComplete: reportComplete,
@@ -290,15 +366,33 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
           spacing: 12,
           runSpacing: 12,
           children: [
-            _Metric('Gross sales', gross, widget.currencyCode),
+            _Metric('Gross sales', grossSales, widget.currencyCode),
+            _Metric('Refunds', -refundGross, widget.currencyCode),
+            _Metric('Sales after refunds', gross, widget.currencyCode),
             _Metric('Net sales', net, widget.currencyCode),
             _Metric('Tax', tax, widget.currencyCode),
             _Metric('Average bill', average, widget.currencyCode),
             _CountMetric('Closed bills', bills.length),
+            _CountMetric('Refund transactions', refunds.length),
             _CountMetric('Open bills', openOrderCount),
           ],
         ),
         const SizedBox(height: 18),
+        _BreakdownCard(
+          title: 'Refund audit',
+          rows: refunds
+              .map(
+                (refund) => (
+                  '${refund.refundNumber} · original ${refund.originalReceiptNumber} · ${refund.refundedByName.isEmpty ? 'Unknown manager' : refund.refundedByName}',
+                  formatMoney(
+                    -refund.grossMinor,
+                    currencyCode: refund.currencyCode,
+                  ),
+                ),
+              )
+              .toList(),
+        ),
+        const SizedBox(height: 12),
         _BreakdownCard(
           title: 'Payments',
           rows: paymentTotals.entries
@@ -441,12 +535,13 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
 
   Future<void> _exportCsv(
     List<SalesReportBill> bills,
+    List<SalesReportRefund> refunds,
     DateTimeRange range,
   ) async {
     if (_exporting) return;
     setState(() => _exporting = true);
     try {
-      final csv = buildSalesReportCsv(bills, widget.currencyCode);
+      final csv = buildSalesReportCsv(bills, widget.currencyCode, refunds);
       final fileName =
           'tableside-sales-${_dateLabel(range.start)}-to-${_dateLabel(range.end)}.csv';
       final path = await FilePicker.saveFile(
@@ -483,6 +578,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
 
   Future<void> _printSalesReport({
     required List<SalesReportBill> bills,
+    required List<SalesReportRefund> refunds,
     required int openOrderCount,
     required DateTimeRange range,
     required bool reportComplete,
@@ -493,6 +589,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
       final profile = ref.read(tenantProfileProvider);
       final lines = buildSalesReportPrintLines(
         bills: bills,
+        refunds: refunds,
         openOrderCount: openOrderCount,
         range: range,
         currencyCode: widget.currencyCode,
@@ -604,15 +701,25 @@ bool isSalesReportPeriodComplete(
 
 List<String> buildSalesReportPrintLines({
   required List<SalesReportBill> bills,
+  List<SalesReportRefund> refunds = const [],
   required int openOrderCount,
   required DateTimeRange range,
   required String currencyCode,
   required int cutoffMinutes,
   required bool reportComplete,
 }) {
-  final gross = bills.fold<int>(0, (sum, bill) => sum + bill.grossMinor);
-  final net = bills.fold<int>(0, (sum, bill) => sum + bill.netMinor);
-  final tax = bills.fold<int>(0, (sum, bill) => sum + bill.taxMinor);
+  final grossSales = bills.fold<int>(0, (sum, bill) => sum + bill.grossMinor);
+  final refundGross = refunds.fold<int>(
+    0,
+    (sum, item) => sum + item.grossMinor,
+  );
+  final gross = grossSales - refundGross;
+  final net =
+      bills.fold<int>(0, (sum, bill) => sum + bill.netMinor) -
+      refunds.fold<int>(0, (sum, item) => sum + item.netMinor);
+  final tax =
+      bills.fold<int>(0, (sum, bill) => sum + bill.taxMinor) -
+      refunds.fold<int>(0, (sum, item) => sum + item.taxMinor);
   final payments = <String, (String, int)>{};
   final products = <String, (String, int, int)>{};
   final staff = <String, int>{};
@@ -641,6 +748,29 @@ List<String> buildSalesReportPrintLines({
       );
     }
   }
+  for (final refund in refunds) {
+    for (final payment in refund.payments) {
+      final label = payment.method == 'cardTerminal'
+          ? 'Card${payment.terminalLabel?.trim().isNotEmpty == true ? ' - ${payment.terminalLabel!.trim()}' : ''}'
+          : payment.method == 'voucher'
+          ? 'Voucher ${payment.currencyCode}'
+          : 'Cash ${payment.currencyCode}';
+      final existing = payments[label];
+      payments[label] = (
+        payment.currencyCode,
+        (existing?.$2 ?? 0) - payment.tenderedAmountMinor,
+      );
+    }
+    for (final line in refund.lines) {
+      final key = line.productId.isEmpty ? line.productName : line.productId;
+      final existing = products[key];
+      products[key] = (
+        line.productName,
+        (existing?.$2 ?? 0) - line.quantity,
+        (existing?.$3 ?? 0) - line.grossMinor,
+      );
+    }
+  }
   final sortedProducts = products.values.toList()
     ..sort((left, right) => right.$3.compareTo(left.$3));
   return <String>[
@@ -649,10 +779,13 @@ List<String> buildSalesReportPrintLines({
     'Business day cut-off: ${_clockLabel(cutoffMinutes)}',
     'Closed bills only',
     '',
-    'Gross: ${formatMoney(gross, currencyCode: currencyCode)}',
+    'Gross sales: ${formatMoney(grossSales, currencyCode: currencyCode)}',
+    'Refunds: ${formatMoney(-refundGross, currencyCode: currencyCode)}',
+    'Sales after refunds: ${formatMoney(gross, currencyCode: currencyCode)}',
     'Net: ${formatMoney(net, currencyCode: currencyCode)}',
     'Tax: ${formatMoney(tax, currencyCode: currencyCode)}',
     'Closed bills: ${bills.length}',
+    'Refund transactions: ${refunds.length}',
     'Open bills: $openOrderCount',
     '',
     'PAYMENTS',
@@ -669,6 +802,11 @@ List<String> buildSalesReportPrintLines({
     if (staff.isEmpty) 'No closed staff sales',
     for (final entry in staff.entries)
       '${entry.key}: ${formatMoney(entry.value, currencyCode: currencyCode)}',
+    '',
+    'REFUNDS',
+    if (refunds.isEmpty) 'No refunds',
+    for (final refund in refunds)
+      '${refund.refundNumber} / ${refund.originalReceiptNumber}: ${formatMoney(-refund.grossMinor, currencyCode: refund.currencyCode)} - ${refund.reason}',
     '',
     'Printed: ${formatAppDateTime(DateTime.now())}',
   ];
@@ -694,8 +832,9 @@ DateTimeRange _periodBounds(
 
 String buildSalesReportCsv(
   List<SalesReportBill> bills,
-  String baseCurrencyCode,
-) {
+  String baseCurrencyCode, [
+  List<SalesReportRefund> refunds = const [],
+]) {
   const headers = <String>[
     'record_type',
     'business_date',
@@ -719,6 +858,8 @@ String buildSalesReportCsv(
     'tax_rate_gross_amount',
     'tax_rate_net_amount',
     'tax_rate_tax_amount',
+    'original_receipt_number',
+    'reason',
   ];
   final rows = <List<Object?>>[headers];
   for (final bill in bills) {
@@ -789,6 +930,81 @@ String buildSalesReportCsv(
           'tax_rate_tax_amount': _decimalAmount(
             tax.taxMinor,
             bill.currencyCode,
+          ),
+        }),
+      );
+    }
+  }
+  for (final refund in refunds) {
+    final common = <String, Object?>{
+      'business_date': _dateLabel(refund.businessDate),
+      'receipt_number': refund.refundNumber,
+      'original_receipt_number': refund.originalReceiptNumber,
+      'reason': refund.reason,
+      'closed_by': refund.refundedByName,
+      'currency': refund.currencyCode,
+    };
+    rows.add(
+      _csvRow(headers, {
+        ...common,
+        'record_type': 'REFUND',
+        'gross_amount': _decimalAmount(-refund.grossMinor, refund.currencyCode),
+        'net_amount': _decimalAmount(-refund.netMinor, refund.currencyCode),
+        'tax_amount': _decimalAmount(-refund.taxMinor, refund.currencyCode),
+      }),
+    );
+    for (final payment in refund.payments) {
+      rows.add(
+        _csvRow(headers, {
+          ...common,
+          'record_type': 'REFUND_PAYMENT',
+          'payment_method': payment.method,
+          'payment_currency': payment.currencyCode,
+          'payment_tendered_amount': _decimalAmount(
+            -payment.tenderedAmountMinor,
+            payment.currencyCode,
+          ),
+          'payment_base_amount': _decimalAmount(
+            -payment.baseAmountMinor,
+            baseCurrencyCode,
+          ),
+          'terminal': payment.terminalLabel,
+        }),
+      );
+    }
+    for (final line in refund.lines) {
+      rows.add(
+        _csvRow(headers, {
+          ...common,
+          'record_type': 'REFUND_ITEM',
+          'product_id': line.productId,
+          'product_name': line.productName,
+          'quantity': -line.quantity,
+          'line_gross_amount': _decimalAmount(
+            -line.grossMinor,
+            refund.currencyCode,
+          ),
+        }),
+      );
+    }
+    for (final taxEntry in refund.taxBreakdown) {
+      rows.add(
+        _csvRow(headers, {
+          ...common,
+          'record_type': 'REFUND_TAX',
+          'tax_rate_name': taxEntry.name,
+          'tax_rate_percent': (taxEntry.basisPoints / 100).toStringAsFixed(2),
+          'tax_rate_gross_amount': _decimalAmount(
+            -taxEntry.grossMinor,
+            refund.currencyCode,
+          ),
+          'tax_rate_net_amount': _decimalAmount(
+            -taxEntry.netMinor,
+            refund.currencyCode,
+          ),
+          'tax_rate_tax_amount': _decimalAmount(
+            -taxEntry.taxMinor,
+            refund.currencyCode,
           ),
         }),
       );

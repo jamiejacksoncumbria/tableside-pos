@@ -27,7 +27,9 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         'This registered Windows device has no selected print queue.',
       );
     }
-    final isReceipt = payload['type'] == 'receipt';
+    final isReceipt =
+        payload['type'] == 'receipt' || payload['type'] == 'refundReceipt';
+    final isRefund = payload['type'] == 'refundReceipt';
     final isVoucher = payload['type'] == 'giftVoucher';
     final lines = isReceipt
         ? _receiptLines(payload, idempotencyKey, selectedPrinter.paperWidth)
@@ -37,7 +39,9 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     await _printer.printText(
       printer: selectedPrinter,
       title: isReceipt
-          ? 'TableSide paid receipt'
+          ? isRefund
+                ? 'TableSide refund receipt'
+                : 'TableSide paid receipt'
           : isVoucher
           ? 'TableSide gift voucher'
           : 'TableSide production ticket',
@@ -87,10 +91,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
   List<WindowsPrintLine> _voucherQrLines(String code) {
     if (code.isEmpty) return const [];
     final image = QrImage(
-      QrCode.fromData(
-        data: code,
-        errorCorrectLevel: QrErrorCorrectLevel.M,
-      ),
+      QrCode.fromData(data: code, errorCorrectLevel: QrErrorCorrectLevel.M),
     );
     const quiet = 4;
     final size = image.moduleCount + quiet * 2;
@@ -106,7 +107,15 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       for (var column = 0; column < size; column++) {
         final top = dark(row, column);
         final bottom = row + 1 < size && dark(row + 1, column);
-        buffer.write(top && bottom ? '██' : top ? '▀▀' : bottom ? '▄▄' : '  ');
+        buffer.write(
+          top && bottom
+              ? '██'
+              : top
+              ? '▀▀'
+              : bottom
+              ? '▄▄'
+              : '  ',
+        );
       }
       result.add(
         WindowsPrintLine(
@@ -145,6 +154,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     final area = switch (payload['productionArea']) {
       'bar' => 'BAR',
       'dessert' => 'DESSERT',
+      'training' => 'TRAINING - NOT A REAL ORDER',
       _ => 'KITCHEN',
     };
     final isReprint = payload['isReprint'] == true;
@@ -253,7 +263,9 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
             ),
           ),
       WindowsPrintLine(
-        payload['isPreReceipt'] == true
+        payload['type'] == 'refundReceipt'
+            ? 'REFUND RECEIPT'
+            : payload['isPreReceipt'] == true
             ? 'PRE RECEIPT - NOT PAID'
             : payload['isReprint'] == true
             ? 'REPRINT - PAID RECEIPT'
@@ -265,6 +277,17 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       WindowsPrintLine(
         'Receipt: ${payload['receiptNumber'] as String? ?? idempotencyKey}',
       ),
+      if (payload['type'] == 'refundReceipt' &&
+          (payload['originalReceiptNumber'] as String?)?.trim().isNotEmpty ==
+              true)
+        WindowsPrintLine(
+          'Original: ${(payload['originalReceiptNumber'] as String).trim()}',
+        ),
+      if (payload['type'] == 'refundReceipt' &&
+          (payload['refundReason'] as String?)?.trim().isNotEmpty == true)
+        WindowsPrintLine(
+          'Reason: ${(payload['refundReason'] as String).trim()}',
+        ),
       if (tabName?.trim().isNotEmpty == true)
         WindowsPrintLine('Tab: ${tabName!.trim()}'),
       if (tabName?.trim().isNotEmpty != true &&
@@ -299,7 +322,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     }
     lines.add(
       WindowsPrintLine(
-        'TOTAL',
+        payload['type'] == 'refundReceipt' ? 'REFUND TOTAL' : 'TOTAL',
         rightText: _money(
           (payload['totalMinor'] as num?)?.toInt() ?? 0,
           currency,

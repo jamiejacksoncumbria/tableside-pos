@@ -94,6 +94,9 @@ class BluetoothBillReceipt {
     this.receiptFooter = '',
     this.isReprint = false,
     this.isPreReceipt = false,
+    this.isRefund = false,
+    this.originalReceiptNumber,
+    this.refundReason,
     this.payments = const <BluetoothReceiptPayment>[],
     this.taxBreakdown = const <BluetoothReceiptTaxBreakdown>[],
   });
@@ -113,6 +116,9 @@ class BluetoothBillReceipt {
   final String receiptFooter;
   final bool isReprint;
   final bool isPreReceipt;
+  final bool isRefund;
+  final String? originalReceiptNumber;
+  final String? refundReason;
   final List<BluetoothReceiptPayment> payments;
   final List<BluetoothReceiptTaxBreakdown> taxBreakdown;
 }

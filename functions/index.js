@@ -2179,6 +2179,78 @@ async function actingCallerFromStaffSession(hostCaller, data) {
   return {...hostCaller, uid: actingUserId, hostUid: hostCaller.uid};
 }
 
+// Sensitive financial corrections must not rely only on the existing
+// 30-minute staff session. The acting manager re-enters their own PIN for
+// every refund; failures use the same three-attempt lock as normal sign-in.
+async function requireFreshManagerPin(caller, tenantId, venueId, rawPin) {
+  const pin = typeof rawPin === "string" ? rawPin.trim() : "";
+  if (!/^\d{6}$/.test(pin)) {
+    throw new HttpsError("invalid-argument", "Enter the manager's six-digit PIN.");
+  }
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "A manager or owner must approve this refund.");
+  }
+  const pinRef = db.doc(
+    `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`,
+  );
+  const result = await db.runTransaction(async (transaction) => {
+    const pinDocument = await transaction.get(pinRef);
+    if (!pinDocument.exists) {
+      throw new HttpsError("failed-precondition", "This manager has not configured a PIN.");
+    }
+    const pinData = pinDocument.data();
+    if (pinData.venueId !== venueId || pinData.locked === true) {
+      throw new HttpsError("resource-exhausted", "This manager PIN is locked.");
+    }
+    const expected = Buffer.from(String(pinData.pinHash ?? ""), "base64");
+    const supplied = Buffer.from(hashStaffPin(pin, pinData.salt), "base64");
+    const valid = expected.length === supplied.length && timingSafeEqual(expected, supplied);
+    if (!valid) {
+      const failedAttempts = (Number.isInteger(pinData.failedAttempts)
+        ? pinData.failedAttempts
+        : 0) + 1;
+      transaction.update(pinRef, {
+        failedAttempts,
+        locked: failedAttempts >= 3,
+        lastFailedAt: FieldValue.serverTimestamp(),
+      });
+      return {valid: false, failedAttempts};
+    }
+    transaction.update(pinRef, {
+      failedAttempts: 0,
+      lastSensitiveApprovalAt: FieldValue.serverTimestamp(),
+    });
+    return {valid: true, failedAttempts: 0};
+  });
+  if (!result.valid) {
+    await db.collection(`tenants/${tenantId}/securityAlerts`).add({
+      type: result.failedAttempts >= 3 ? "staffPinLocked" : "sensitivePinFailed",
+      venueId,
+      userId: caller.uid,
+      hostUserId: caller.hostUid ?? caller.uid,
+      failedAttempts: result.failedAttempts,
+      action: "refundBill",
+      requiresManagerAttention: result.failedAttempts >= 3,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    if (result.failedAttempts >= 3) {
+      await queueManagerSecurityAlert({
+        tenantId,
+        venueId,
+        userId: caller.uid,
+        hostUserId: caller.hostUid ?? caller.uid,
+      });
+    }
+    throw new HttpsError(
+      result.failedAttempts >= 3 ? "resource-exhausted" : "permission-denied",
+      result.failedAttempts >= 3
+        ? "This manager PIN is now locked after three failed attempts."
+        : `Incorrect manager PIN. ${3 - result.failedAttempts} attempt(s) remain.`,
+    );
+  }
+}
+
 function xmlElementText(xml, tagName) {
   const match = new RegExp(
     `<${tagName}\\b[^>]*>\\s*([^<]*?)\\s*</${tagName}>`,
@@ -4907,6 +4979,583 @@ async function closeOrderFor(caller, rawData) {
 /// Moves selected already-sent items into a separate payable child order. No
 /// stock movement or production ticket is created here: the food/drinks have
 /// already been released. Only the financially safe sale allocation changes.
+async function createRefundFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const billId = requiredDocumentId(data, "billId");
+  const requestId = requiredDocumentId(data, "requestId");
+  const reason = requiredText(data, "reason", 500);
+  const printReceipt = data.printReceipt !== false;
+  const cardRefundConfirmed = data.cardRefundConfirmed === true;
+  await requireFreshManagerPin(caller, tenantId, venueId, data.managerPin);
+
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const billRef = tenantRef.collection("bills").doc(billId);
+  const refundRef = tenantRef.collection("refunds").doc(requestId);
+  const receiptRouteRef = printReceipt
+    ? tenantRef.collection("printerRoutes").doc(`${venueId}_receipt`)
+    : null;
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const requestedLines = Array.isArray(data.lines) ? data.lines : [];
+  if (requestedLines.length > 200) {
+    throw new HttpsError("invalid-argument", "A refund cannot contain more than 200 lines.");
+  }
+
+  return db.runTransaction(async (transaction) => {
+    const priorRefundsQuery = tenantRef.collection("refunds").where("billId", "==", billId);
+    const [tenant, venue, bill, existingRefund, priorRefunds, receiptRoute] = await Promise.all([
+      transaction.get(tenantRef),
+      transaction.get(venueRef),
+      transaction.get(billRef),
+      transaction.get(refundRef),
+      transaction.get(priorRefundsQuery),
+      receiptRouteRef == null ? Promise.resolve(null) : transaction.get(receiptRouteRef),
+    ]);
+    if (!tenant.exists) throw new HttpsError("not-found", "The restaurant was not found.");
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (!bill.exists || bill.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "The closed bill was not found at this venue.");
+    }
+    if (existingRefund.exists) {
+      const existing = existingRefund.data();
+      if (existing.billId !== billId || existing.venueId !== venueId) {
+        throw new HttpsError("failed-precondition", "This refund request belongs to different sale data.");
+      }
+      return {
+        refundId: existingRefund.id,
+        refundNumber: existing.refundNumber,
+        totalMinor: existing.grossMinor,
+        currencyCode: existing.currencyCode,
+        receiptPrintQueued: existing.receiptPrintQueued === true,
+        alreadyRefunded: true,
+      };
+    }
+
+    const billData = bill.data();
+    const originalLines = Array.isArray(billData.lines) ? billData.lines : [];
+    const originalPayments = Array.isArray(billData.payments) ? billData.payments : [];
+    if (originalLines.length === 0 || originalPayments.length === 0) {
+      throw new HttpsError("failed-precondition", "This historic bill does not contain refundable snapshots.");
+    }
+    const priorDocuments = priorRefunds.docs.filter((document) =>
+      document.data().status !== "cancelled");
+    const refundedQuantityByLine = new Map();
+    const refundedPaymentByIndex = new Map();
+    for (const document of priorDocuments) {
+      const previous = document.data();
+      for (const line of Array.isArray(previous.lines) ? previous.lines : []) {
+        if (typeof line?.lineId !== "string") continue;
+        refundedQuantityByLine.set(
+          line.lineId,
+          (refundedQuantityByLine.get(line.lineId) ?? 0) + Number(line.quantity ?? 0),
+        );
+      }
+      for (const payment of Array.isArray(previous.paymentAllocations)
+        ? previous.paymentAllocations
+        : []) {
+        const index = Number(payment?.originalPaymentIndex);
+        if (!Number.isInteger(index)) continue;
+        refundedPaymentByIndex.set(
+          index,
+          (refundedPaymentByIndex.get(index) ?? 0) + Number(payment.baseAmountMinor ?? 0),
+        );
+      }
+    }
+
+    const requestedById = new Map();
+    for (const value of requestedLines) {
+      const selection = requireObject(value);
+      const lineId = requiredText(selection, "lineId", 300);
+      if (requestedById.has(lineId)) {
+        throw new HttpsError("invalid-argument", "Each bill line may be selected only once.");
+      }
+      requestedById.set(
+        lineId,
+        requiredPositiveInteger(selection.quantity, "refund line quantity", 100000),
+      );
+    }
+    const refundLines = [];
+    for (let index = 0; index < originalLines.length; index += 1) {
+      const original = originalLines[index] ?? {};
+      const lineId = typeof original.id === "string" && original.id.length > 0
+        ? original.id
+        : `line-${index}`;
+      const originalQuantity = Number(original.quantity);
+      const alreadyRefunded = refundedQuantityByLine.get(lineId) ?? 0;
+      const availableQuantity = originalQuantity - alreadyRefunded;
+      const requestedQuantity = requestedLines.length === 0
+        ? availableQuantity
+        : (requestedById.get(lineId) ?? 0);
+      if (requestedQuantity === 0) continue;
+      if (!Number.isSafeInteger(originalQuantity) || originalQuantity <= 0 ||
+          !Number.isSafeInteger(requestedQuantity) || requestedQuantity > availableQuantity) {
+        throw new HttpsError(
+          "failed-precondition",
+          `${original.productName ?? "An item"} does not have that refundable quantity remaining.`,
+        );
+      }
+      requestedById.delete(lineId);
+      const unitPriceMinor = Number(original.unitPriceMinor);
+      if (!Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0) {
+        throw new HttpsError("failed-precondition", "The original bill has invalid price data.");
+      }
+      const grossMinor = unitPriceMinor * requestedQuantity;
+      const originalTaxMinor = Number(original.taxMinor ?? 0);
+      const previouslyRefundedTax = priorDocuments.reduce((total, document) => {
+        const priorLine = (Array.isArray(document.data().lines) ? document.data().lines : [])
+          .find((line) => line?.lineId === lineId);
+        return total + Number(priorLine?.taxMinor ?? 0);
+      }, 0);
+      const taxMinor = requestedQuantity === availableQuantity
+        ? Math.max(0, originalTaxMinor - previouslyRefundedTax)
+        : inclusiveTaxMinor(grossMinor, validTaxRateBasisPoints(original.taxRateBasisPoints));
+      refundLines.push({
+        lineId,
+        originalLineIndex: index,
+        productId: typeof original.productId === "string" ? original.productId : "",
+        productName: typeof original.productName === "string" ? original.productName : "Menu item",
+        quantity: requestedQuantity,
+        unitPriceMinor,
+        grossMinor,
+        netMinor: grossMinor - taxMinor,
+        taxMinor,
+        taxRateId: typeof original.taxRateId === "string" ? original.taxRateId : null,
+        taxRateName: typeof original.taxRateName === "string" ? original.taxRateName : "Zero rate",
+        taxRateBasisPoints: validTaxRateBasisPoints(original.taxRateBasisPoints),
+        variantId: typeof original.variantId === "string" ? original.variantId : null,
+        variantName: typeof original.variantName === "string" ? original.variantName : null,
+        modifierSelections: Array.isArray(original.modifierSelections)
+          ? original.modifierSelections.map((selection) => ({...selection}))
+          : [],
+      });
+    }
+    if (requestedById.size > 0) {
+      throw new HttpsError("invalid-argument", "A selected item is not part of this bill.");
+    }
+    if (refundLines.length === 0) {
+      throw new HttpsError("failed-precondition", "This bill has no selected refundable items remaining.");
+    }
+    const grossMinor = refundLines.reduce((total, line) => total + line.grossMinor, 0);
+    const taxMinor = refundLines.reduce((total, line) => total + line.taxMinor, 0);
+    const netMinor = grossMinor - taxMinor;
+
+    let amountLeft = grossMinor;
+    const paymentAllocations = [];
+    for (let index = 0; index < originalPayments.length && amountLeft > 0; index += 1) {
+      const original = originalPayments[index] ?? {};
+      const originalBaseAmount = Number(original.baseAmountMinor ?? 0);
+      const available = originalBaseAmount - (refundedPaymentByIndex.get(index) ?? 0);
+      if (!Number.isSafeInteger(available) || available <= 0) continue;
+      const baseAmountMinor = Math.min(available, amountLeft);
+      const originalTendered = Number(original.tenderedAmountMinor ?? originalBaseAmount);
+      const tenderedAmountMinor = originalBaseAmount > 0
+        ? Math.round((baseAmountMinor * originalTendered) / originalBaseAmount)
+        : baseAmountMinor;
+      paymentAllocations.push({
+        originalPaymentIndex: index,
+        method: original.method,
+        baseAmountMinor,
+        tenderedAmountMinor,
+        tenderedCurrencyCode: original.tenderedCurrencyCode ?? billData.currencyCode,
+        exchangeRateToBase: original.exchangeRateToBase ?? "1",
+        exchangeRateSource: original.exchangeRateSource ?? null,
+        exchangeRatePublishedDate: original.exchangeRatePublishedDate ?? null,
+        exchangeRateFetchedAt: original.exchangeRateFetchedAt ?? null,
+        terminalLabel: original.terminalLabel ?? null,
+        voucherId: original.voucherId ?? null,
+        voucherCodeSuffix: original.voucherCodeSuffix ?? null,
+      });
+      amountLeft -= baseAmountMinor;
+    }
+    if (amountLeft !== 0) {
+      throw new HttpsError("failed-precondition", "The refundable payment balance is lower than the selected items.");
+    }
+    if (paymentAllocations.some((payment) => payment.method === "cardTerminal") &&
+        !cardRefundConfirmed) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Confirm the card refund on the original terminal before recording it in TableSide.",
+      );
+    }
+
+    const voucherIds = [...new Set(paymentAllocations
+      .filter((payment) => payment.method === "voucher" && typeof payment.voucherId === "string")
+      .map((payment) => payment.voucherId))];
+    const voucherDocuments = new Map();
+    for (const voucherId of voucherIds) {
+      const voucherDocument = await transaction.get(tenantRef.collection("vouchers").doc(voucherId));
+      if (!voucherDocument.exists) {
+        throw new HttpsError("failed-precondition", "The original gift voucher no longer exists.");
+      }
+      voucherDocuments.set(voucherId, voucherDocument);
+    }
+
+    const receiptTargetDeviceId = receiptRoute?.exists &&
+        typeof receiptRoute.data().primaryDeviceId === "string"
+      ? receiptRoute.data().primaryDeviceId
+      : null;
+    const receiptDeviceRef = receiptTargetDeviceId == null
+      ? null
+      : tenantRef.collection("devices").doc(receiptTargetDeviceId);
+    const receiptDevice = receiptDeviceRef == null
+      ? null
+      : await transaction.get(receiptDeviceRef);
+    const receiptPrintQueued = printReceipt && receiptTargetDeviceId != null &&
+      activeRouteDevice(receiptDevice, venueId, "receipt");
+    const refundNumber = `R-${String(billData.receiptNumber ?? billId)}-${requestId.slice(-4).toUpperCase()}`;
+    const printJobId = receiptPrintQueued
+      ? `refund_${requestId}_${receiptTargetDeviceId}`
+      : null;
+    const taxByRate = new Map();
+    for (const line of refundLines) {
+      const key = line.taxRateId ?? `${line.taxRateName}_${line.taxRateBasisPoints}`;
+      const current = taxByRate.get(key) ?? {
+        taxRateId: line.taxRateId,
+        taxRateName: line.taxRateName,
+        taxRateBasisPoints: line.taxRateBasisPoints,
+        grossMinor: 0, netMinor: 0, taxMinor: 0,
+      };
+      current.grossMinor += line.grossMinor;
+      current.netMinor += line.netMinor;
+      current.taxMinor += line.taxMinor;
+      taxByRate.set(key, current);
+    }
+    const taxBreakdown = [...taxByRate.values()];
+
+    for (const payment of paymentAllocations) {
+      if (payment.method !== "voucher" || typeof payment.voucherId !== "string") continue;
+      const voucherRef = tenantRef.collection("vouchers").doc(payment.voucherId);
+      const voucher = voucherDocuments.get(payment.voucherId).data();
+      const currentBalance = Number(voucher.remainingValueMinor ?? 0);
+      const originalValue = Number(voucher.originalValueMinor ?? currentBalance + payment.baseAmountMinor);
+      const nextBalance = currentBalance + payment.baseAmountMinor;
+      if (!Number.isSafeInteger(nextBalance) || nextBalance > originalValue) {
+        throw new HttpsError("failed-precondition", "The gift-voucher refund would exceed its original value.");
+      }
+      transaction.update(voucherRef, {
+        remainingValueMinor: nextBalance,
+        status: "active",
+        lastRefundedAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      transaction.create(tenantRef.collection("voucherTransactions").doc(`${requestId}_${payment.originalPaymentIndex}`), {
+        venueId,
+        voucherId: payment.voucherId,
+        billId,
+        refundId: refundRef.id,
+        type: "refundCredit",
+        amountMinor: payment.baseAmountMinor,
+        currencyCode: billData.currencyCode,
+        createdAt: FieldValue.serverTimestamp(),
+        createdByActor: actor,
+      });
+    }
+
+    transaction.create(refundRef, {
+      venueId,
+      billId,
+      orderId: billData.orderId ?? null,
+      originalReceiptNumber: billData.receiptNumber ?? billId,
+      refundNumber,
+      status: "completed",
+      reason,
+      currencyCode: billData.currencyCode,
+      businessDate: billData.businessDate,
+      venueTimeZone: billData.venueTimeZone ?? null,
+      grossMinor,
+      netMinor,
+      taxMinor,
+      taxBreakdown,
+      lines: refundLines,
+      paymentAllocations,
+      stockRestored: false,
+      stockAdjustmentRequired: refundLines.some((line) => line.productId.length > 0),
+      cardRefundConfirmed,
+      tableId: billData.tableId ?? null,
+      tableLabel: billData.tableLabel ?? null,
+      tabName: billData.tabName ?? null,
+      receiptBusiness: billData.receiptBusiness ?? receiptBusinessSnapshot(tenant.data(), venue.data()),
+      receiptPrintRequested: printReceipt,
+      receiptPrintQueued,
+      receiptPrintJobId: printJobId,
+      refundedAt: FieldValue.serverTimestamp(),
+      refundedByActor: actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    if (receiptPrintQueued) {
+      transaction.create(tenantRef.collection("printJobs").doc(printJobId), {
+        venueId,
+        targetDeviceId: receiptTargetDeviceId,
+        fallbackDeviceId: typeof receiptRoute.data().fallbackDeviceId === "string"
+          ? receiptRoute.data().fallbackDeviceId
+          : null,
+        orderId: billData.orderId ?? billId,
+        ticketId: `refund_${requestId}`,
+        productionArea: "receipt",
+        status: "queued",
+        attempts: 0,
+        idempotencyKey: printJobId,
+        payload: {
+          type: "refundReceipt",
+          receiptNumber: refundNumber,
+          originalReceiptNumber: billData.receiptNumber ?? billId,
+          restaurantName: billData.receiptBusiness?.name ?? venue.data().name,
+          business: billData.receiptBusiness ?? receiptBusinessSnapshot(tenant.data(), venue.data()),
+          currencyCode: billData.currencyCode,
+          businessDate: billData.businessDate,
+          tableLabel: billData.tableLabel ?? null,
+          tabName: billData.tabName ?? null,
+          totalMinor: grossMinor,
+          netTotalMinor: netMinor,
+          taxTotalMinor: taxMinor,
+          taxBreakdown,
+          lines: refundLines.map((line) => ({
+            productName: line.productName,
+            quantity: line.quantity,
+            lineTotalMinor: line.grossMinor,
+          })),
+          payments: paymentAllocations,
+          refundReason: reason,
+        },
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    }
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "refundBill",
+      venueId,
+      billId,
+      refundId: refundRef.id,
+      refundNumber,
+      reason,
+      grossMinor,
+      taxMinor,
+      currencyCode: billData.currencyCode,
+      lineCount: refundLines.length,
+      paymentMethods: paymentAllocations.map((payment) => payment.method),
+      receiptPrintRequested: printReceipt,
+      receiptPrintQueued,
+      stockRestored: false,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {
+      refundId: refundRef.id,
+      refundNumber,
+      totalMinor: grossMinor,
+      currencyCode: billData.currencyCode,
+      receiptPrintQueued,
+      alreadyRefunded: false,
+      stockAdjustmentRequired: refundLines.some((line) => line.productId.length > 0),
+    };
+  });
+}
+
+async function startTrainingModeFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const targetDeviceId = optionalText(data, "targetDeviceId", 1500) || null;
+  await requireFreshManagerPin(caller, tenantId, venueId, data.managerPin);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const deviceRef = targetDeviceId == null
+    ? null
+    : tenantRef.collection("devices").doc(targetDeviceId);
+  const [venue, device] = await Promise.all([
+    venueRef.get(),
+    deviceRef == null ? Promise.resolve(null) : deviceRef.get(),
+  ]);
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  if (targetDeviceId != null &&
+      (!device.exists || device.data().venueId !== venueId || device.data().status !== "active")) {
+    throw new HttpsError("failed-precondition", "The selected training printer is not active at this venue.");
+  }
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const sessionRef = tenantRef.collection("trainingSessions").doc();
+  await sessionRef.create({
+    venueId,
+    hostUserId: caller.hostUid ?? caller.uid,
+    activatedByUserId: caller.uid,
+    targetDeviceId,
+    restaurantName: typeof venue.data().name === "string"
+      ? venue.data().name
+      : "TABLESIDE POS",
+    status: "active",
+    startedAt: FieldValue.serverTimestamp(),
+    actor,
+  });
+  await tenantRef.collection("auditEvents").add({
+    action: "startTrainingMode",
+    venueId,
+    trainingSessionId: sessionRef.id,
+    targetDeviceId,
+    actor,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  return {trainingSessionId: sessionRef.id, targetDeviceId};
+}
+
+async function requireActiveTrainingSession(caller, tenantId, venueId, sessionId) {
+  const sessionRef = db.doc(`tenants/${tenantId}/trainingSessions/${sessionId}`);
+  const session = await sessionRef.get();
+  if (!session.exists || session.data().status !== "active" ||
+      session.data().venueId !== venueId ||
+      session.data().hostUserId !== (caller.hostUid ?? caller.uid) ||
+      session.data().activatedByUserId !== caller.uid) {
+    throw new HttpsError("failed-precondition", "Training mode is no longer active for this device session.");
+  }
+  return {sessionRef, session: session.data()};
+}
+
+async function recordTrainingOrderFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const sessionId = requiredDocumentId(data, "trainingSessionId");
+  const reference = requiredText(data, "reference", 120);
+  const locationLabel = requiredText(data, "locationLabel", 160);
+  const status = requiredText(data, "status", 40);
+  if (!["sent", "closed"].includes(status)) {
+    throw new HttpsError("invalid-argument", "Training order status is invalid.");
+  }
+  const {sessionRef, session} = await requireActiveTrainingSession(
+    caller, tenantId, venueId, sessionId,
+  );
+  const rawLines = Array.isArray(data.lines) ? data.lines : [];
+  if (rawLines.length === 0 || rawLines.length > 200) {
+    throw new HttpsError("invalid-argument", "A training order needs one to 200 items.");
+  }
+  const lines = rawLines.map((raw, index) => {
+    const line = requireObject(raw);
+    return {
+      productId: requiredText(line, "productId", 300),
+      productName: requiredText(line, "productName", 200),
+      quantity: requiredPositiveInteger(line.quantity, `lines[${index}].quantity`, 10000),
+      unitPriceMinor: requiredNonNegativeInteger(
+        line.unitPriceMinor, `lines[${index}].unitPriceMinor`, 100000000,
+      ),
+    };
+  });
+  const totalMinor = lines.reduce(
+    (sum, line) => sum + (line.quantity * line.unitPriceMinor), 0,
+  );
+  const orderId = optionalText(data, "trainingOrderId", 1500) || randomUUID();
+  if (orderId.includes("/") || Buffer.byteLength(orderId, "utf8") > 1500) {
+    throw new HttpsError("invalid-argument", "trainingOrderId is invalid.");
+  }
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const orderRef = tenantRef.collection("trainingOrders").doc(orderId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const batch = db.batch();
+  batch.set(orderRef, {
+    venueId,
+    trainingSessionId: sessionId,
+    reference,
+    locationLabel,
+    status,
+    lines,
+    totalMinor,
+    training: true,
+    updatedAt: FieldValue.serverTimestamp(),
+    updatedByActor: actor,
+    createdAt: FieldValue.serverTimestamp(),
+  }, {merge: true});
+  batch.update(sessionRef, {lastActivityAt: FieldValue.serverTimestamp()});
+  if (session.targetDeviceId != null && status === "sent") {
+    const printJobId = `training_${sessionId}_${orderId}`;
+    batch.set(tenantRef.collection("printJobs").doc(printJobId), {
+      venueId,
+      targetDeviceId: session.targetDeviceId,
+      fallbackDeviceId: null,
+      orderId,
+      ticketId: `training_${orderId}`,
+      productionArea: "training",
+      status: "queued",
+      attempts: 0,
+      idempotencyKey: printJobId,
+      payload: {
+        type: "trainingTicket",
+        restaurantName: session.restaurantName ?? "TABLESIDE POS",
+        productionArea: "training",
+        reference,
+        tableLabel: locationLabel,
+        lines: lines.map((line) => ({
+          name: line.productName,
+          quantity: line.quantity,
+          details: ["TRAINING - NOT A REAL ORDER"],
+        })),
+      },
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  }
+  batch.set(tenantRef.collection("auditEvents").doc(), {
+    action: status === "closed" ? "closeTrainingOrder" : "sendTrainingOrder",
+    venueId,
+    trainingSessionId: sessionId,
+    trainingOrderId: orderId,
+    totalMinor,
+    actor,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  await batch.commit();
+  return {trainingOrderId: orderId, totalMinor};
+}
+
+async function endTrainingModeFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const sessionId = requiredDocumentId(data, "trainingSessionId");
+  const {sessionRef} = await requireActiveTrainingSession(
+    caller, tenantId, venueId, sessionId,
+  );
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const batch = db.batch();
+  batch.update(sessionRef, {
+    status: "ended",
+    endedAt: FieldValue.serverTimestamp(),
+    endedByActor: actor,
+  });
+  batch.set(db.collection(`tenants/${tenantId}/auditEvents`).doc(), {
+    action: "endTrainingMode",
+    venueId,
+    trainingSessionId: sessionId,
+    actor,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  await batch.commit();
+  return {ended: true};
+}
+
+async function clearTrainingDataFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  await requireFreshManagerPin(caller, tenantId, venueId, data.managerPin);
+  // Reserve one write in the batch for the audit event (Firestore permits a
+  // maximum of 500 writes per batch).
+  const snapshot = await db.collection(`tenants/${tenantId}/trainingOrders`)
+    .where("venueId", "==", venueId).limit(499).get();
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const batch = db.batch();
+  for (const document of snapshot.docs) batch.delete(document.ref);
+  batch.set(db.collection(`tenants/${tenantId}/auditEvents`).doc(), {
+    action: "clearTrainingData",
+    venueId,
+    deletedCount: snapshot.size,
+    actor,
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  await batch.commit();
+  return {deletedCount: snapshot.size, moreRemaining: snapshot.size === 500};
+}
+
 async function splitOrderFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -6784,6 +7433,16 @@ async function invokePosAction(action, caller, data) {
       return sendOrderToProductionFor(actingCaller, data);
     case "closeOrder":
       return closeOrderFor(actingCaller, data);
+    case "createRefund":
+      return createRefundFor(actingCaller, data);
+    case "startTrainingMode":
+      return startTrainingModeFor(actingCaller, data);
+    case "recordTrainingOrder":
+      return recordTrainingOrderFor(actingCaller, data);
+    case "endTrainingMode":
+      return endTrainingModeFor(actingCaller, data);
+    case "clearTrainingData":
+      return clearTrainingDataFor(actingCaller, data);
     case "printPreReceipt":
       return printPreReceiptFor(actingCaller, data);
     case "splitOrder":

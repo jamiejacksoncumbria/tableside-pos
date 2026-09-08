@@ -10,6 +10,7 @@ import '../../core/app_theme_controller.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/order_flow_display_mode.dart';
 import '../../core/staff_pin_session_store.dart';
+import '../../core/training_mode.dart';
 import '../../data/production_command_repository.dart';
 
 final activeStaffPinSessionProvider =
@@ -74,6 +75,7 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
   void lock() {
     StaffPinSessionStore.current = null;
     state = null;
+    ref.read(trainingModeProvider.notifier).clear();
     ref.read(appThemeControllerProvider.notifier).clearUserPreference();
     ref.read(posCategoryViewPreferenceProvider.notifier).apply('bars');
     ref.read(posProductSortPreferenceProvider.notifier).apply('alphabetical');

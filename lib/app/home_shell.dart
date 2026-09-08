@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/app_logger.dart';
 import '../core/app_theme_controller.dart';
 import '../core/tenant_scope.dart';
+import '../core/training_mode.dart';
 import '../data/production_command_repository.dart';
 import '../features/bookings/booking_calendar_page.dart';
 import '../features/order_flow/order_flow_page.dart';
@@ -23,6 +24,7 @@ import '../features/printing/queued_bluetooth_print_worker.dart';
 import '../features/printing/print_delivery_monitor.dart';
 import '../features/reports/reports_page.dart';
 import '../features/settings/settings_page.dart';
+import '../features/training/training_mode_page.dart';
 
 enum HomeSection {
   pos,
@@ -69,6 +71,7 @@ class HomeShell extends ConsumerWidget {
       appNotificationsProvider.select(unreadNotificationCount),
     );
     final staffSession = ref.watch(activeStaffPinSessionProvider);
+    final trainingModeActive = ref.watch(trainingModeProvider) != null;
     // Shared terminals use the verified PIN identity for authority. The
     // Firebase email account only keeps the device online; it must never grant
     // platform tools to a different selected member.
@@ -82,9 +85,10 @@ class HomeShell extends ConsumerWidget {
         section == HomeSection.menu ||
         section == HomeSection.reports ||
         section == HomeSection.settings;
-    final visibleSection =
-        (section == HomeSection.platformAdmin && !canOpenPlatformTools) ||
-            (protectedVenueSection && !canManageVenue)
+    final visibleSection = trainingModeActive
+        ? HomeSection.pos
+        : (section == HomeSection.platformAdmin && !canOpenPlatformTools) ||
+              (protectedVenueSection && !canManageVenue)
         ? HomeSection.pos
         : section;
     final compactPosTab = ref.watch(posCompactTabProvider);
@@ -97,35 +101,37 @@ class HomeShell extends ConsumerWidget {
         (compactPosTab == 1 || compactPosTab == 2);
     final destinations = [
       const _Destination(HomeSection.pos, Icons.point_of_sale_rounded, 'POS'),
-      const _Destination(
-        HomeSection.bookings,
-        Icons.event_note_rounded,
-        'Bookings',
-      ),
-      const _Destination(
-        HomeSection.orderFlow,
-        Icons.monitor_heart_outlined,
-        'Order flow',
-      ),
-      if (canManageVenue)
+      if (!trainingModeActive)
+        const _Destination(
+          HomeSection.bookings,
+          Icons.event_note_rounded,
+          'Bookings',
+        ),
+      if (!trainingModeActive)
+        const _Destination(
+          HomeSection.orderFlow,
+          Icons.monitor_heart_outlined,
+          'Order flow',
+        ),
+      if (canManageVenue && !trainingModeActive)
         const _Destination(
           HomeSection.menu,
           Icons.restaurant_menu_rounded,
           'Menu',
         ),
-      if (canManageVenue)
+      if (canManageVenue && !trainingModeActive)
         const _Destination(
           HomeSection.reports,
           Icons.bar_chart_rounded,
           'Reports',
         ),
-      if (canManageVenue)
+      if (canManageVenue && !trainingModeActive)
         const _Destination(
           HomeSection.settings,
           Icons.settings_outlined,
           'Settings',
         ),
-      if (canOpenPlatformTools)
+      if (canOpenPlatformTools && !trainingModeActive)
         const _Destination(
           HomeSection.platformAdmin,
           Icons.admin_panel_settings_outlined,
@@ -184,6 +190,16 @@ class HomeShell extends ConsumerWidget {
                 ],
               ),
               actions: [
+                if (trainingModeActive)
+                  IconButton(
+                    tooltip: 'End or manage training mode',
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const TrainingModePage(),
+                      ),
+                    ),
+                    icon: const Icon(Icons.school_rounded),
+                  ),
                 if (onSwitchVenue != null)
                   wide
                       ? TextButton.icon(
@@ -291,7 +307,33 @@ class HomeShell extends ConsumerWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                Positioned.fill(child: _buildBody(visibleSection, profile)),
+                Positioned.fill(
+                  child: Column(
+                    children: [
+                      if (trainingModeActive)
+                        Container(
+                          width: double.infinity,
+                          color: Colors.red.shade800,
+                          padding: const EdgeInsets.symmetric(vertical: 8),
+                          child: const Text(
+                            'TRAINING MODE · NO REAL SALES OR STOCK',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      Expanded(
+                        child: _buildBody(
+                          visibleSection,
+                          profile,
+                          trainingModeActive,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
                 // A browser is an order-entry client, never a printer agent.
                 // Jobs created here are delivered by an enrolled Android or
                 // Windows device through the shared Firebase queue.
@@ -335,8 +377,12 @@ class HomeShell extends ConsumerWidget {
   Widget _buildBody(
     HomeSection section,
     TenantProfile profile,
+    bool trainingModeActive,
   ) => switch (section) {
-    HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
+    HomeSection.pos =>
+      trainingModeActive
+          ? TrainingPosPage(currencyCode: profile.currencyCode)
+          : PosPage(currencyCode: profile.currencyCode),
     HomeSection.bookings => BookingCalendarPage(
       defaultDurationMinutes:
           venueOverride?.defaultBookingDurationMinutes ?? 120,

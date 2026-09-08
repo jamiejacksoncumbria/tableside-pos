@@ -269,6 +269,28 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // Refunds are immutable financial corrections linked to the untouched
+      // original bill. Only a currently PIN-authorized manager may read them;
+      // creation and voucher/payment effects are server-only and audited.
+      match /refunds/{refundId} {
+        allow read: if managesVenueWithActivePin(
+          tenantId,
+          resource.data.venueId
+        );
+        allow create, update, delete: if false;
+      }
+
+      // Training records never participate in live orders, stock, vouchers,
+      // payments or reports. They remain server-managed so a modified client
+      // cannot disguise a real transaction as training data.
+      match /trainingOrders/{trainingOrderId} {
+        allow read: if managesVenueWithActivePin(
+          tenantId,
+          resource.data.venueId
+        );
+        allow create, update, delete: if false;
+      }
+
       // Immutable operational history is visible only while a manager or
       // owner has a current PIN-authorized session. Events are always written
       // by trusted server commands and can never be edited by the client.

@@ -108,6 +108,33 @@ class BillCloseResult {
   final bool receiptPrintQueued;
 }
 
+class RefundResult {
+  const RefundResult({
+    required this.refundId,
+    required this.refundNumber,
+    required this.totalMinor,
+    required this.currencyCode,
+    required this.receiptPrintQueued,
+    required this.alreadyRefunded,
+    required this.stockAdjustmentRequired,
+  });
+
+  final String refundId;
+  final String refundNumber;
+  final int totalMinor;
+  final String currencyCode;
+  final bool receiptPrintQueued;
+  final bool alreadyRefunded;
+  final bool stockAdjustmentRequired;
+}
+
+class TrainingModeResult {
+  const TrainingModeResult({required this.sessionId, this.targetDeviceId});
+
+  final String sessionId;
+  final String? targetDeviceId;
+}
+
 /// The server-created child order resulting from an item/quantity bill split.
 /// Its total is derived from the already-sent source-line snapshots, not from
 /// a client-supplied price.
@@ -972,6 +999,123 @@ class ProductionCommandRepository {
       receiptPrintRequested: response['receiptPrintRequested'] == true,
       receiptPrintQueued: response['receiptPrintQueued'] == true,
     );
+  }
+
+  Future<RefundResult> createRefund({
+    required VenueScope scope,
+    required String billId,
+    required String managerPin,
+    required String reason,
+    required Map<String, int> lineQuantities,
+    required bool cardRefundConfirmed,
+    required bool printReceipt,
+  }) async {
+    final response = await _call('createRefund', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'billId': billId,
+      'requestId': 'refund-${DateTime.now().microsecondsSinceEpoch}',
+      'managerPin': managerPin,
+      'reason': reason,
+      'lines': lineQuantities.entries
+          .where((entry) => entry.value > 0)
+          .map(
+            (entry) => <String, Object?>{
+              'lineId': entry.key,
+              'quantity': entry.value,
+            },
+          )
+          .toList(growable: false),
+      'cardRefundConfirmed': cardRefundConfirmed,
+      'printReceipt': printReceipt,
+    });
+    final refundId = response['refundId'];
+    final refundNumber = response['refundNumber'];
+    final totalMinor = response['totalMinor'];
+    final currencyCode = response['currencyCode'];
+    if (refundId is! String ||
+        refundNumber is! String ||
+        totalMinor is! int ||
+        currencyCode is! String) {
+      throw StateError('The server did not return a valid refund record.');
+    }
+    return RefundResult(
+      refundId: refundId,
+      refundNumber: refundNumber,
+      totalMinor: totalMinor,
+      currencyCode: currencyCode,
+      receiptPrintQueued: response['receiptPrintQueued'] == true,
+      alreadyRefunded: response['alreadyRefunded'] == true,
+      stockAdjustmentRequired: response['stockAdjustmentRequired'] == true,
+    );
+  }
+
+  Future<TrainingModeResult> startTrainingMode({
+    required VenueScope scope,
+    required String managerPin,
+    String? targetDeviceId,
+  }) async {
+    final response = await _call('startTrainingMode', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'managerPin': managerPin,
+      if (targetDeviceId != null) 'targetDeviceId': targetDeviceId,
+    });
+    final sessionId = response['trainingSessionId'];
+    if (sessionId is! String) {
+      throw StateError('The server did not start a valid training session.');
+    }
+    return TrainingModeResult(
+      sessionId: sessionId,
+      targetDeviceId: response['targetDeviceId'] as String?,
+    );
+  }
+
+  Future<String> recordTrainingOrder({
+    required VenueScope scope,
+    required String trainingSessionId,
+    required String trainingOrderId,
+    required String reference,
+    required String locationLabel,
+    required String status,
+    required List<Map<String, Object?>> lines,
+  }) async {
+    final response = await _call('recordTrainingOrder', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'trainingSessionId': trainingSessionId,
+      'trainingOrderId': trainingOrderId,
+      'reference': reference,
+      'locationLabel': locationLabel,
+      'status': status,
+      'lines': lines,
+    });
+    final result = response['trainingOrderId'];
+    if (result is! String) {
+      throw StateError('The server did not save the training order.');
+    }
+    return result;
+  }
+
+  Future<void> endTrainingMode({
+    required VenueScope scope,
+    required String trainingSessionId,
+  }) => _call('endTrainingMode', {
+    'tenantId': scope.tenantId,
+    'venueId': scope.venueId,
+    'trainingSessionId': trainingSessionId,
+  });
+
+  Future<int> clearTrainingData({
+    required VenueScope scope,
+    required String managerPin,
+  }) async {
+    final response = await _call('clearTrainingData', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'managerPin': managerPin,
+    });
+    return response['deletedCount'] as int? ?? 0;
   }
 
   Future<bool> printPreReceipt({
