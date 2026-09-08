@@ -47,6 +47,8 @@ class WindowsPrintLine {
     this.alignment = WindowsPrintTextAlignment.left,
     this.bold = false,
     this.fontSizeDelta = 0,
+    this.qrRows,
+    this.qrSizeMillimetres,
   });
 
   final String text;
@@ -54,6 +56,11 @@ class WindowsPrintLine {
   final WindowsPrintTextAlignment alignment;
   final bool bold;
   final int fontSizeDelta;
+  /// A validated square QR matrix encoded as rows of `0` and `1` characters.
+  /// The native Windows layer draws this as graphics so printer font metrics
+  /// cannot stretch or wrap the code.
+  final List<String>? qrRows;
+  final int? qrSizeMillimetres;
 
   Map<String, Object?> toMessage() => {
     'text': text,
@@ -61,6 +68,9 @@ class WindowsPrintLine {
     'alignment': alignment.name,
     'bold': bold,
     'fontSizeDelta': fontSizeDelta,
+    if (qrRows != null) 'qrRows': qrRows,
+    if (qrSizeMillimetres != null)
+      'qrSizeMillimetres': qrSizeMillimetres,
   };
 }
 

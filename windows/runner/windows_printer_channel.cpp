@@ -86,6 +86,8 @@ struct PrintLine {
   PrintAlignment alignment = PrintAlignment::kLeft;
   bool bold = false;
   int font_size_delta = 0;
+  std::vector<std::string> qr_rows;
+  int qr_size_mm = 0;
 };
 
 std::optional<std::vector<PrintLine>> TextLinesArgument(
@@ -139,6 +141,37 @@ std::optional<std::vector<PrintLine>> TextLinesArgument(
       } else if (const auto delta64 = std::get_if<int64_t>(size_value);
                  delta64 != nullptr) {
         parsed.font_size_delta = std::clamp(static_cast<int>(*delta64), -2, 6);
+      } else {
+        return std::nullopt;
+      }
+    }
+    if (const EncodableValue* qr_value = FindArgument(*map, "qrRows");
+        qr_value != nullptr) {
+      const auto qr_rows = std::get_if<EncodableList>(qr_value);
+      if (qr_rows == nullptr || qr_rows->size() < 21 ||
+          qr_rows->size() > 177) {
+        return std::nullopt;
+      }
+      const size_t matrix_size = qr_rows->size();
+      parsed.qr_rows.reserve(matrix_size);
+      for (const EncodableValue& row_value : *qr_rows) {
+        const auto row = std::get_if<std::string>(&row_value);
+        if (row == nullptr || row->size() != matrix_size ||
+            row->find_first_not_of("01") != std::string::npos) {
+          return std::nullopt;
+        }
+        parsed.qr_rows.push_back(*row);
+      }
+      const EncodableValue* qr_size_value =
+          FindArgument(*map, "qrSizeMillimetres");
+      if (qr_size_value == nullptr) return std::nullopt;
+      if (const auto size = std::get_if<int32_t>(qr_size_value);
+          size != nullptr) {
+        parsed.qr_size_mm = std::clamp(static_cast<int>(*size), 15, 45);
+      } else if (const auto size64 = std::get_if<int64_t>(qr_size_value);
+                 size64 != nullptr) {
+        parsed.qr_size_mm =
+            std::clamp(static_cast<int>(*size64), 15, 45);
       } else {
         return std::nullopt;
       }
@@ -238,6 +271,7 @@ bool PrintText(const std::wstring& printer_name, const std::wstring& title,
   }
 
   const int dpi_y = std::max(72, GetDeviceCaps(printer_dc, LOGPIXELSY));
+  const int dpi_x = std::max(72, GetDeviceCaps(printer_dc, LOGPIXELSX));
   const int base_point_size = paper_width_mm == 58 ? 8 : 10;
   const int left = std::max(8, GetDeviceCaps(printer_dc, PHYSICALOFFSETX) + 8);
   const int top = std::max(8, GetDeviceCaps(printer_dc, PHYSICALOFFSETY) + 8);
@@ -250,6 +284,38 @@ bool PrintText(const std::wstring& printer_name, const std::wstring& title,
   int y = top;
 
   for (const PrintLine& line : lines) {
+    if (!line.qr_rows.empty()) {
+      const int qr_width =
+          std::max(1, MulDiv(line.qr_size_mm, dpi_x, 254) * 10);
+      const int qr_height =
+          std::max(1, MulDiv(line.qr_size_mm, dpi_y, 254) * 10);
+      if (y + qr_height > page_bottom) {
+        if (EndPage(printer_dc) <= 0 || StartPage(printer_dc) <= 0) {
+          *error = "Windows could not continue the voucher print job: " +
+                   WindowsError(GetLastError());
+          abort_document();
+          return false;
+        }
+        y = top;
+      }
+      const int qr_left = left + std::max(0, (right - left - qr_width) / 2);
+      const int matrix_size = static_cast<int>(line.qr_rows.size());
+      HBRUSH black_brush = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+      for (int row = 0; row < matrix_size; ++row) {
+        const int cell_top = y + MulDiv(row, qr_height, matrix_size);
+        const int cell_bottom =
+            y + MulDiv(row + 1, qr_height, matrix_size);
+        for (int column = 0; column < matrix_size; ++column) {
+          if (line.qr_rows[row][column] != '1') continue;
+          RECT cell = {
+              qr_left + MulDiv(column, qr_width, matrix_size), cell_top,
+              qr_left + MulDiv(column + 1, qr_width, matrix_size), cell_bottom};
+          FillRect(printer_dc, &cell, black_brush);
+        }
+      }
+      y += qr_height + std::max(8, dpi_y / 16);
+      continue;
+    }
     const int point_size = std::clamp(
         base_point_size + line.font_size_delta, 6, 22);
     HFONT font = CreateFontW(-MulDiv(point_size, dpi_y, 72), 0, 0, 0,

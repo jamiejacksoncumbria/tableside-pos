@@ -34,7 +34,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     final lines = isReceipt
         ? _receiptLines(payload, idempotencyKey, selectedPrinter.paperWidth)
         : isVoucher
-        ? _voucherLines(payload)
+        ? _voucherLines(payload, selectedPrinter.paperWidth)
         : _productionLines(payload, idempotencyKey);
     await _printer.printText(
       printer: selectedPrinter,
@@ -49,7 +49,10 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     );
   }
 
-  List<WindowsPrintLine> _voucherLines(Map<String, Object?> payload) => [
+  List<WindowsPrintLine> _voucherLines(
+    Map<String, Object?> payload,
+    ReceiptPaperWidth paperWidth,
+  ) => [
     WindowsPrintLine(
       payload['restaurantName'] as String? ?? 'TABLESIDE POS',
       alignment: WindowsPrintTextAlignment.center,
@@ -71,7 +74,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       fontSizeDelta: 2,
     ),
     const WindowsPrintLine(''),
-    ..._voucherQrLines(payload['code'] as String? ?? ''),
+    ..._voucherQrLines(payload['code'] as String? ?? '', paperWidth),
     WindowsPrintLine(
       payload['code'] as String? ?? '',
       alignment: WindowsPrintTextAlignment.center,
@@ -88,7 +91,10 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     ),
   ];
 
-  List<WindowsPrintLine> _voucherQrLines(String code) {
+  List<WindowsPrintLine> _voucherQrLines(
+    String code,
+    ReceiptPaperWidth paperWidth,
+  ) {
     if (code.isEmpty) return const [];
     final image = QrImage(
       QrCode.fromData(data: code, errorCorrectLevel: QrErrorCorrectLevel.M),
@@ -101,30 +107,22 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         row < quiet + image.moduleCount &&
         column < quiet + image.moduleCount &&
         image.isDark(row - quiet, column - quiet);
-    final result = <WindowsPrintLine>[];
-    for (var row = 0; row < size; row += 2) {
+    final rows = <String>[];
+    for (var row = 0; row < size; row++) {
       final buffer = StringBuffer();
       for (var column = 0; column < size; column++) {
-        final top = dark(row, column);
-        final bottom = row + 1 < size && dark(row + 1, column);
-        buffer.write(
-          top && bottom
-              ? '██'
-              : top
-              ? '▀▀'
-              : bottom
-              ? '▄▄'
-              : '  ',
-        );
+        buffer.write(dark(row, column) ? '1' : '0');
       }
-      result.add(
-        WindowsPrintLine(
-          buffer.toString(),
-          alignment: WindowsPrintTextAlignment.center,
-        ),
-      );
+      rows.add(buffer.toString());
     }
-    return result;
+    return [
+      WindowsPrintLine(
+        '',
+        alignment: WindowsPrintTextAlignment.center,
+        qrRows: rows,
+        qrSizeMillimetres: paperWidth.isNarrow ? 28 : 32,
+      ),
+    ];
   }
 
   List<WindowsPrintLine> _productionLines(
