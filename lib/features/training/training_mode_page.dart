@@ -148,6 +148,16 @@ class _TrainingModePageState extends ConsumerState<TrainingModePage> {
                 icon: const Icon(Icons.delete_sweep_outlined),
                 label: const Text('Clear training orders'),
               ),
+              const SizedBox(height: 24),
+              Text(
+                'Recent training records',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              _TrainingRecordList(
+                scope: scope,
+                currencyCode: ref.watch(tenantProfileProvider).currencyCode,
+              ),
             ],
           );
         },
@@ -259,6 +269,109 @@ class _TrainingModePageState extends ConsumerState<TrainingModePage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+}
+
+class _TrainingRecordList extends StatelessWidget {
+  const _TrainingRecordList({required this.scope, required this.currencyCode});
+
+  final VenueScope scope;
+  final String currencyCode;
+
+  @override
+  Widget build(BuildContext context) =>
+      StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: FirebaseFirestore.instance
+            .collection('tenants/${scope.tenantId}/trainingOrders')
+            .where('venueId', isEqualTo: scope.venueId)
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Text(
+              'Training records could not be loaded: ${snapshot.error}',
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            );
+          }
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          final documents = snapshot.data!.docs.toList(growable: false)
+            ..sort((left, right) {
+              final leftTime =
+                  (left.data()['updatedAt'] as Timestamp?)
+                      ?.millisecondsSinceEpoch ??
+                  0;
+              final rightTime =
+                  (right.data()['updatedAt'] as Timestamp?)
+                      ?.millisecondsSinceEpoch ??
+                  0;
+              return rightTime.compareTo(leftTime);
+            });
+          if (documents.isEmpty) {
+            return const Card(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('No training orders have been saved yet.'),
+              ),
+            );
+          }
+          return Column(
+            children: [
+              for (final document in documents.take(100))
+                _TrainingRecordCard(
+                  data: document.data(),
+                  currencyCode: currencyCode,
+                ),
+            ],
+          );
+        },
+      );
+}
+
+class _TrainingRecordCard extends StatelessWidget {
+  const _TrainingRecordCard({required this.data, required this.currencyCode});
+
+  final Map<String, dynamic> data;
+  final String currencyCode;
+
+  @override
+  Widget build(BuildContext context) {
+    final rawLines = data['lines'] as List? ?? const [];
+    final lines = rawLines.whereType<Map>().toList(growable: false);
+    final status = (data['status'] as String? ?? 'saved').toUpperCase();
+    final location = data['locationLabel'] as String? ?? 'Training order';
+    final totalMinor = data['totalMinor'] as int? ?? 0;
+    return Card(
+      child: ExpansionTile(
+        leading: const Icon(Icons.school_rounded),
+        title: Text(location),
+        subtitle: Text('$status · ${lines.length} item line(s)'),
+        trailing: Text(
+          formatMoney(totalMinor, currencyCode: currencyCode),
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        children: [
+          for (final rawLine in lines)
+            Builder(
+              builder: (context) {
+                final line = Map<String, dynamic>.from(rawLine);
+                final details = (line['details'] as List? ?? const [])
+                    .whereType<String>()
+                    .where((value) => value.trim().isNotEmpty)
+                    .join(' · ');
+                return ListTile(
+                  dense: true,
+                  leading: CircleAvatar(
+                    child: Text('${line['quantity'] as int? ?? 0}'),
+                  ),
+                  title: Text(line['productName'] as String? ?? 'Menu item'),
+                  subtitle: details.isEmpty ? null : Text(details),
+                );
+              },
+            ),
+        ],
+      ),
+    );
   }
 }
 

@@ -2128,16 +2128,25 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     final splitOrdersValue = order.isSplitOrder || isTraining
         ? null
         : ref.watch(openSplitOrdersProvider(order.id));
-    final openSplitOrders =
-        splitOrdersValue?.when(
-          data: (orders) => orders,
-          loading: () => const <PosOrder>[],
-          error: (error, stackTrace) {
-            AppLogger.error('Display open split bills', error, stackTrace);
-            return const <PosOrder>[];
-          },
-        ) ??
-        const <PosOrder>[];
+    final openSplitOrders = isTraining && !order.isSplitOrder
+        ? ref
+              .watch(trainingOpenOrdersProvider)
+              .values
+              .where((item) => item.splitFromOrderId == order.id)
+              .toList(growable: false)
+        : splitOrdersValue?.when(
+                data: (orders) => orders,
+                loading: () => const <PosOrder>[],
+                error: (error, stackTrace) {
+                  AppLogger.error(
+                    'Display open split bills',
+                    error,
+                    stackTrace,
+                  );
+                  return const <PosOrder>[];
+                },
+              ) ??
+              const <PosOrder>[];
     _showLatestLines(order);
     final hasUnsentLines = order.lines.any((line) => !line.isSentToProduction);
     final tableId = order.tableId ?? ref.watch(selectedTableProvider) ?? '';
@@ -2456,8 +2465,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed:
-                        isTraining ||
-                            order.isSplitOrder ||
+                        order.isSplitOrder ||
                             order.lines.isEmpty ||
                             hasUnsentLines
                         ? null
@@ -2494,7 +2502,8 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: isTraining || order.lines.isEmpty || hasUnsentLines
+                    onPressed:
+                        isTraining || order.lines.isEmpty || hasUnsentLines
                         ? null
                         : () async {
                             try {

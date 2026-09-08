@@ -799,6 +799,21 @@ class ActiveOrderController extends Notifier<PosOrder> {
         receiptPrintQueued: false,
       );
       ref.read(trainingOpenOrdersProvider.notifier).remove(order.id);
+      if (order.isSplitOrder && order.splitFromOrderId != null) {
+        final parent = ref.read(
+          trainingOpenOrdersProvider,
+        )[order.splitFromOrderId!];
+        if (parent != null) {
+          final updatedParent = parent.copyWith(
+            openSplitOrderIds: parent.openSplitOrderIds
+                .where((id) => id != order.id)
+                .toList(growable: false),
+          );
+          ref.read(trainingOpenOrdersProvider.notifier).save(updatedParent);
+          state = updatedParent;
+          return result;
+        }
+      }
       _resetOrder(scope);
       return result;
     }
@@ -880,9 +895,6 @@ class ActiveOrderController extends Notifier<PosOrder> {
       throw StateError('Sign in to split a live restaurant bill.');
     }
     _requireValidLiveOrderLocation();
-    if (ref.read(trainingModeProvider) != null) {
-      throw StateError('Bill splitting is not yet available in training mode.');
-    }
     final sourceOrder = state;
     if (sourceOrder.isSplitOrder) {
       throw StateError(
@@ -917,6 +929,42 @@ class ActiveOrderController extends Notifier<PosOrder> {
         : sourceOrder.id;
     final splitOrderId =
         'split-$sourceToken-${DateTime.now().microsecondsSinceEpoch}';
+    if (ref.read(trainingModeProvider) != null) {
+      final remainingLines = <OrderLine>[];
+      for (final line in sourceOrder.lines) {
+        final remaining = line.quantity - (lineQuantities[line.id] ?? 0);
+        if (remaining > 0) {
+          remainingLines.add(line.copyWith(quantity: remaining));
+        }
+      }
+      final updatedParent = sourceOrder.copyWith(
+        lines: remainingLines,
+        openSplitOrderIds: [...sourceOrder.openSplitOrderIds, splitOrderId],
+      );
+      final splitOrder = PosOrder(
+        id: splitOrderId,
+        tenantId: sourceOrder.tenantId,
+        venueId: sourceOrder.venueId,
+        tableId: sourceOrder.tableId,
+        tabName: sourceOrder.tabName,
+        businessDate: sourceOrder.businessDate,
+        openedAt: DateTime.now(),
+        status: OrderStatus.sent,
+        lines: selectedLines,
+        splitFromOrderId: sourceOrder.id,
+        splitSequence: sourceOrder.openSplitOrderIds.length + 1,
+      );
+      ref.read(trainingOpenOrdersProvider.notifier)
+        ..save(updatedParent)
+        ..save(splitOrder);
+      state = splitOrder;
+      return OrderSplitResult(
+        splitOrderId: splitOrderId,
+        splitTotalMinor: splitOrder.totalMinor,
+        remainingTotalMinor: updatedParent.totalMinor,
+        alreadySplit: false,
+      );
+    }
     final result = await ref
         .read(productionCommandRepositoryProvider)
         .splitOrder(
@@ -946,7 +994,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
       );
     }
     state = order;
-    _selectPersistedOrder(order.id);
+    if (ref.read(trainingModeProvider) == null) {
+      _selectPersistedOrder(order.id);
+    }
     AppLogger.info('Opened unpaid split bill ${order.id}.');
   }
 
