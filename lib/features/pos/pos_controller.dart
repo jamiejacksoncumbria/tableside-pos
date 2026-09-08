@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
+import '../../core/training_mode.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
 import '../printing/bluetooth_production_print_service.dart';
@@ -170,6 +171,28 @@ final activeOrderProvider = NotifierProvider<ActiveOrderController, PosOrder>(
   ActiveOrderController.new,
 );
 
+/// Device-local open training bills. They deliberately never use the live
+/// table registry, but retaining them here makes the genuine POS table/tab
+/// workflow available during a training session.
+final trainingOpenOrdersProvider =
+    NotifierProvider<TrainingOpenOrdersController, Map<String, PosOrder>>(
+      TrainingOpenOrdersController.new,
+    );
+
+class TrainingOpenOrdersController extends Notifier<Map<String, PosOrder>> {
+  @override
+  Map<String, PosOrder> build() => const {};
+
+  void save(PosOrder order) => state = {...state, order.id: order};
+
+  void remove(String orderId) {
+    final next = {...state}..remove(orderId);
+    state = next;
+  }
+
+  void clear() => state = const {};
+}
+
 class ActiveOrderController extends Notifier<PosOrder> {
   var _pendingDraftMutations = 0;
   final _pendingDraftQuantities = <String, int>{};
@@ -179,33 +202,38 @@ class ActiveOrderController extends Notifier<PosOrder> {
   @override
   PosOrder build() {
     final scope = ref.watch(activeVenueScopeProvider);
+    final trainingSession = ref.watch(trainingModeProvider);
     ref.listen<VenueScope?>(activeVenueScopeProvider, (previous, next) {
       if (previous == next) return;
       AppLogger.info('Venue changed; clearing the active table/tab selection.');
       ref.read(activePersistedOrderIdProvider.notifier).select(null);
       ref.read(selectedTableProvider.notifier).select('');
     });
-    ref.listen<AsyncValue<PosOrder?>>(activeOrderStreamProvider, (_, next) {
-      next.when(
-        data: _applyLiveOrder,
-        loading: () {},
-        error: (error, stackTrace) =>
-            AppLogger.error('Live active order', error, stackTrace),
-      );
-    });
+    if (trainingSession == null) {
+      ref.listen<AsyncValue<PosOrder?>>(activeOrderStreamProvider, (_, next) {
+        next.when(
+          data: _applyLiveOrder,
+          loading: () {},
+          error: (error, stackTrace) =>
+              AppLogger.error('Live active order', error, stackTrace),
+        );
+      });
+    }
     // A venue deliberately opens with no selected table. Picking the first
     // table automatically can attach a waiter to the wrong guest's bill.
     final tableId = ref.read(selectedTableProvider);
     final now = DateTime.now();
     return PosOrder(
-      id: 'order-1024',
+      id: trainingSession == null
+          ? 'order-1024'
+          : 'training-${DateTime.now().microsecondsSinceEpoch}',
       tenantId: scope?.tenantId ?? demoTenant.id,
       venueId: scope?.venueId ?? demoVenue.id,
       tableId: tableId.isEmpty ? null : tableId,
       businessDate: DateTime(now.year, now.month, now.day),
       openedAt: now,
       status: OrderStatus.open,
-      lines: scope == null ? _demoLines : const [],
+      lines: scope == null && trainingSession == null ? _demoLines : const [],
     );
   }
 
@@ -284,6 +312,10 @@ class ActiveOrderController extends Notifier<PosOrder> {
           ? OrderStatus.sent
           : OrderStatus.open,
     );
+    if (ref.read(trainingModeProvider) != null) {
+      ref.read(trainingOpenOrdersProvider.notifier).save(state);
+      return;
+    }
     if (scope == null) return;
 
     _pendingDraftMutations++;
@@ -376,6 +408,14 @@ class ActiveOrderController extends Notifier<PosOrder> {
     }
     state = state.copyWith(lines: updatedLines);
     final scope = ref.read(activeVenueScopeProvider);
+    if (ref.read(trainingModeProvider) != null) {
+      if (state.lines.isEmpty) {
+        ref.read(trainingOpenOrdersProvider.notifier).remove(state.id);
+      } else {
+        ref.read(trainingOpenOrdersProvider.notifier).save(state);
+      }
+      return;
+    }
     if (scope == null) return;
     _requireValidLiveOrderLocation();
 
@@ -420,6 +460,41 @@ class ActiveOrderController extends Notifier<PosOrder> {
     final scope = ref.read(activeVenueScopeProvider);
     if (scope == null) throw StateError('Select a venue first.');
     _requireValidLiveOrderLocation();
+    if (ref.read(trainingModeProvider) != null) {
+      final target = state.lines.where((line) => line.id == lineId).firstOrNull;
+      if (target == null) return;
+      if (operation == 'remove') {
+        state = state.copyWith(
+          lines: state.lines.where((line) => line.id != lineId).toList(),
+        );
+        if (state.lines.isEmpty) {
+          ref.read(trainingOpenOrdersProvider.notifier).remove(state.id);
+        } else {
+          ref.read(trainingOpenOrdersProvider.notifier).save(state);
+        }
+        return;
+      }
+      if ((operation == 'setUnitPrice' || operation == 'discountUnitAmount') &&
+          valueMinor != null) {
+        final nextPrice = operation == 'setUnitPrice'
+            ? valueMinor
+            : target.unitPriceMinor - valueMinor;
+        if (nextPrice < 0)
+          throw StateError('The training price cannot be negative.');
+        state = state.copyWith(
+          lines: state.lines
+              .map(
+                (line) => line.id == lineId
+                    ? _copyTrainingLine(line, unitPriceMinor: nextPrice)
+                    : line,
+              )
+              .toList(growable: false),
+        );
+        ref.read(trainingOpenOrdersProvider.notifier).save(state);
+        return;
+      }
+      throw StateError('That training adjustment is not supported.');
+    }
     await ref
         .read(productionCommandRepositoryProvider)
         .adjustOrderLine(
@@ -448,7 +523,19 @@ class ActiveOrderController extends Notifier<PosOrder> {
       );
     }
     final scope = ref.read(activeVenueScopeProvider);
-    final existing = scope == null
+    final isTraining = ref.read(trainingModeProvider) != null;
+    if (isTraining) {
+      final existing = ref
+          .read(trainingOpenOrdersProvider)
+          .values
+          .where((order) => order.tableId == tableId)
+          .firstOrNull;
+      if (existing != null) {
+        state = existing;
+        return;
+      }
+    }
+    final existing = scope == null || isTraining
         ? null
         : await ref
               .read(firestorePosRepositoryProvider)
@@ -484,6 +571,33 @@ class ActiveOrderController extends Notifier<PosOrder> {
       );
     }
     final scope = ref.read(activeVenueScopeProvider);
+    if (ref.read(trainingModeProvider) != null) {
+      final existing = ref
+          .read(trainingOpenOrdersProvider)
+          .values
+          .where(
+            (order) =>
+                order.tabName?.trim().toLowerCase() ==
+                cleanedName.toLowerCase(),
+          )
+          .firstOrNull;
+      if (existing != null) {
+        state = existing;
+        return;
+      }
+      final now = DateTime.now();
+      state = PosOrder(
+        id: 'training-${now.microsecondsSinceEpoch}',
+        tenantId: scope?.tenantId ?? demoTenant.id,
+        venueId: scope?.venueId ?? demoVenue.id,
+        tabName: cleanedName,
+        businessDate: DateTime(now.year, now.month, now.day),
+        openedAt: now,
+        status: OrderStatus.open,
+        lines: const [],
+      );
+      return;
+    }
     if (scope == null) {
       final now = DateTime.now();
       state = PosOrder(
@@ -525,6 +639,35 @@ class ActiveOrderController extends Notifier<PosOrder> {
     final unsentLines = state.lines
         .where((line) => !line.isSentToProduction)
         .toList(growable: false);
+    final trainingSession = ref.read(trainingModeProvider);
+    if (trainingSession != null) {
+      if (scope == null) throw StateError('Select a venue first.');
+      if (unsentLines.isEmpty)
+        throw StateError('There are no new training items to send.');
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .recordTrainingOrder(
+            scope: scope,
+            trainingSessionId: trainingSession.id,
+            trainingOrderId: state.id,
+            reference: state.id.split('-').last,
+            locationLabel: _tableLabelFor(state).trim().isNotEmpty
+                ? _tableLabelFor(state)
+                : (state.tabName?.trim().isNotEmpty == true
+                      ? state.tabName!.trim()
+                      : 'Training order'),
+            status: 'sent',
+            lines: _trainingRequestLines(state.lines),
+          );
+      state = state.copyWith(
+        status: OrderStatus.sent,
+        lines: state.lines
+            .map((line) => line.copyWith(isSentToProduction: true))
+            .toList(growable: false),
+      );
+      ref.read(trainingOpenOrdersProvider.notifier).save(state);
+      return const BluetoothProductionPrintResult();
+    }
     var printResult = const BluetoothProductionPrintResult();
     if (scope != null) {
       final dispatch = await ref
@@ -585,6 +728,11 @@ class ActiveOrderController extends Notifier<PosOrder> {
   void clearSelectionAfterSend() {
     final scope = ref.read(activeVenueScopeProvider);
     if (scope == null) return;
+    if (ref.read(trainingModeProvider) != null) {
+      ref.read(trainingOpenOrdersProvider.notifier).save(state);
+      _resetOrder(scope);
+      return;
+    }
     _pendingDraftQuantities.clear();
     _selectPersistedOrder(null);
     ref.read(selectedTableProvider.notifier).select('');
@@ -622,6 +770,37 @@ class ActiveOrderController extends Notifier<PosOrder> {
       throw StateError(
         'Send or remove every draft item before taking payment.',
       );
+    }
+    final trainingSession = ref.read(trainingModeProvider);
+    if (trainingSession != null) {
+      final order = state;
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .recordTrainingOrder(
+            scope: scope,
+            trainingSessionId: trainingSession.id,
+            trainingOrderId: order.id,
+            reference: order.id.split('-').last,
+            locationLabel: _tableLabelFor(order).trim().isNotEmpty
+                ? _tableLabelFor(order)
+                : (order.tabName?.trim().isNotEmpty == true
+                      ? order.tabName!.trim()
+                      : 'Training order'),
+            status: 'closed',
+            lines: _trainingRequestLines(order.lines),
+          );
+      final result = BillCloseResult(
+        billId: order.id,
+        totalMinor: order.totalMinor,
+        currencyCode: ref.read(tenantProfileProvider).currencyCode,
+        receiptNumber: 'TRAINING-${order.id.split('-').last}',
+        alreadyClosed: false,
+        receiptPrintRequested: false,
+        receiptPrintQueued: false,
+      );
+      ref.read(trainingOpenOrdersProvider.notifier).remove(order.id);
+      _resetOrder(scope);
+      return result;
     }
     final order = state;
     final result = await ref
@@ -677,6 +856,11 @@ class ActiveOrderController extends Notifier<PosOrder> {
         'Send or remove every draft item before printing a pre receipt.',
       );
     }
+    if (ref.read(trainingModeProvider) != null) {
+      throw StateError(
+        'Training pre-receipts are disabled. Use Send to print a marked training ticket.',
+      );
+    }
     return ref
         .read(productionCommandRepositoryProvider)
         .printPreReceipt(scope: scope, order: state);
@@ -696,6 +880,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
       throw StateError('Sign in to split a live restaurant bill.');
     }
     _requireValidLiveOrderLocation();
+    if (ref.read(trainingModeProvider) != null) {
+      throw StateError('Bill splitting is not yet available in training mode.');
+    }
     final sourceOrder = state;
     if (sourceOrder.isSplitOrder) {
       throw StateError(
@@ -845,6 +1032,57 @@ class ActiveOrderController extends Notifier<PosOrder> {
     status: OrderStatus.pendingApproval,
     isCustomerOriginated: true,
   );
+
+  void _resetOrder(VenueScope scope) {
+    _pendingDraftQuantities.clear();
+    _selectPersistedOrder(null);
+    ref.read(selectedTableProvider.notifier).select('');
+    final now = DateTime.now();
+    state = PosOrder(
+      id: ref.read(trainingModeProvider) == null
+          ? 'order-${now.microsecondsSinceEpoch}'
+          : 'training-${now.microsecondsSinceEpoch}',
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      businessDate: DateTime(now.year, now.month, now.day),
+      openedAt: now,
+      status: OrderStatus.open,
+      lines: const [],
+    );
+  }
+
+  List<Map<String, Object?>> _trainingRequestLines(List<OrderLine> lines) => [
+    for (final line in lines)
+      {
+        'productId': line.productId,
+        'productName': line.productName,
+        'quantity': line.quantity,
+        'unitPriceMinor': line.unitPriceMinor,
+        'details': line.productionDetails,
+      },
+  ];
+
+  OrderLine _copyTrainingLine(OrderLine line, {required int unitPriceMinor}) =>
+      OrderLine(
+        id: line.id,
+        productId: line.productId,
+        productName: line.productName,
+        quantity: line.quantity,
+        unitPriceMinor: unitPriceMinor,
+        productionArea: line.productionArea,
+        trackStock: line.trackStock,
+        stockPerSale: line.stockPerSale,
+        isSentToProduction: line.isSentToProduction,
+        taxRateBasisPoints: line.taxRateBasisPoints,
+        taxRateId: line.taxRateId,
+        taxRateName: line.taxRateName,
+        variantId: line.variantId,
+        variantName: line.variantName,
+        variantPriceDeltaMinor: line.variantPriceDeltaMinor,
+        modifiers: line.modifiers,
+        itemNote: line.itemNote,
+        stockComponents: line.stockComponents,
+      );
 }
 
 const _demoLines = [

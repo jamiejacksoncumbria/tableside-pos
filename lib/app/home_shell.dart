@@ -71,7 +71,9 @@ class HomeShell extends ConsumerWidget {
       appNotificationsProvider.select(unreadNotificationCount),
     );
     final staffSession = ref.watch(activeStaffPinSessionProvider);
-    final trainingModeActive = ref.watch(trainingModeProvider) != null;
+    final trainingSession = ref.watch(trainingModeProvider);
+    final trainingModeActive = trainingSession != null;
+    final venueScope = ref.watch(activeVenueScopeProvider);
     // Shared terminals use the verified PIN identity for authority. The
     // Firebase email account only keeps the device online; it must never grant
     // platform tools to a different selected member.
@@ -314,23 +316,40 @@ class HomeShell extends ConsumerWidget {
                         Container(
                           width: double.infinity,
                           color: Colors.red.shade800,
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          child: const Text(
-                            'TRAINING MODE · NO REAL SALES OR STOCK',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                            ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Flexible(
+                                child: Text(
+                                  'TRAINING MODE · NO REAL SALES OR STOCK',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              FilledButton.tonalIcon(
+                                onPressed: venueScope == null
+                                    ? null
+                                    : () => _endTrainingFromWorkspace(
+                                        context: context,
+                                        ref: ref,
+                                        scope: venueScope,
+                                        session: trainingSession,
+                                      ),
+                                icon: const Icon(Icons.exit_to_app_rounded),
+                                label: const Text('Exit'),
+                              ),
+                            ],
                           ),
                         ),
-                      Expanded(
-                        child: _buildBody(
-                          visibleSection,
-                          profile,
-                          trainingModeActive,
-                        ),
-                      ),
+                      Expanded(child: _buildBody(visibleSection, profile)),
                     ],
                   ),
                 ),
@@ -377,12 +396,8 @@ class HomeShell extends ConsumerWidget {
   Widget _buildBody(
     HomeSection section,
     TenantProfile profile,
-    bool trainingModeActive,
   ) => switch (section) {
-    HomeSection.pos =>
-      trainingModeActive
-          ? TrainingPosPage(currencyCode: profile.currencyCode)
-          : PosPage(currencyCode: profile.currencyCode),
+    HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
     HomeSection.bookings => BookingCalendarPage(
       defaultDurationMinutes:
           venueOverride?.defaultBookingDurationMinutes ?? 120,
@@ -403,6 +418,40 @@ class HomeShell extends ConsumerWidget {
     ),
     HomeSection.platformAdmin => const PlatformAdminPage(),
   };
+}
+
+Future<void> _endTrainingFromWorkspace({
+  required BuildContext context,
+  required WidgetRef ref,
+  required VenueScope scope,
+  required TrainingModeSession session,
+}) async {
+  try {
+    await ref
+        .read(productionCommandRepositoryProvider)
+        .endTrainingMode(scope: scope, trainingSessionId: session.id);
+    ref.read(trainingModeProvider.notifier).clear();
+    ref.read(trainingOpenOrdersProvider.notifier).clear();
+    ref.read(homeSectionProvider.notifier).select(HomeSection.settings);
+    if (!context.mounted) return;
+    showAppNotification(
+      context,
+      ref: ref,
+      title: 'Training mode ended',
+      message: 'Returned to venue settings. No live sale data was changed.',
+      level: AppNotificationLevel.success,
+    );
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('End training mode from POS', error, stackTrace);
+    if (!context.mounted) return;
+    showAppNotification(
+      context,
+      ref: ref,
+      title: 'Could not end training mode',
+      message: '$error',
+      level: AppNotificationLevel.error,
+    );
+  }
 }
 
 Future<void> _changeOwnAppearance({

@@ -11,6 +11,7 @@ import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
+import '../../core/training_mode.dart';
 import '../../data/production_command_repository.dart';
 import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
@@ -202,6 +203,10 @@ class _TablesPanel extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final selectedTableId = ref.watch(selectedTableProvider);
     final activeOrder = ref.watch(activeOrderProvider);
+    final isTraining = ref.watch(trainingModeProvider) != null;
+    final trainingOrders = isTraining
+        ? ref.watch(trainingOpenOrdersProvider).values.toList(growable: false)
+        : const <PosOrder>[];
     final scope = ref.watch(activeVenueScopeProvider);
     final tables = ref
         .watch(diningTablesProvider)
@@ -210,16 +215,27 @@ class _TablesPanel extends ConsumerWidget {
           loading: () => scope == null ? demoTables : const [],
           error: (_, _) => scope == null ? demoTables : const [],
         );
-    final namedTabs = ref
-        .watch(openNamedTabsProvider)
-        .when(
-          data: (items) => items,
-          loading: () => const <OpenNamedTab>[],
-          error: (error, stackTrace) {
-            AppLogger.error('Load open named tabs', error, stackTrace);
-            return const <OpenNamedTab>[];
-          },
-        );
+    final namedTabs = isTraining
+        ? [
+            for (final order in trainingOrders)
+              if (order.tabName?.trim().isNotEmpty == true)
+                OpenNamedTab(
+                  id: order.id,
+                  orderId: order.id,
+                  name: order.tabName!.trim(),
+                  openedAt: order.openedAt,
+                ),
+          ]
+        : ref
+              .watch(openNamedTabsProvider)
+              .when(
+                data: (items) => items,
+                loading: () => const <OpenNamedTab>[],
+                error: (error, stackTrace) {
+                  AppLogger.error('Load open named tabs', error, stackTrace);
+                  return const <OpenNamedTab>[];
+                },
+              );
     final namedTabGroups = _groupOpenNamedTabs(namedTabs);
     final scheme = Theme.of(context).colorScheme;
     return Card(
@@ -292,6 +308,14 @@ class _TablesPanel extends ConsumerWidget {
                                   activeOrder.tabName == null &&
                                   table.id == selectedTableId,
                               compact: compact || !expanded,
+                              isTraining: isTraining,
+                              trainingOrder: isTraining
+                                  ? trainingOrders
+                                        .where(
+                                          (order) => order.tableId == table.id,
+                                        )
+                                        .firstOrNull
+                                  : null,
                               onTap: () async {
                                 try {
                                   await ref
@@ -403,6 +427,8 @@ class _TableButton extends ConsumerWidget {
     required this.currencyCode,
     required this.selected,
     required this.compact,
+    required this.isTraining,
+    this.trainingOrder,
     required this.onTap,
   });
 
@@ -411,20 +437,25 @@ class _TableButton extends ConsumerWidget {
   final String currencyCode;
   final bool selected;
   final bool compact;
+  final bool isTraining;
+  final PosOrder? trainingOrder;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
-    final openOrderValue = scope == null || table.currentOrderId == null
+    final openOrderValue =
+        isTraining || scope == null || table.currentOrderId == null
         ? null
         : ref.watch(tableOpenOrderProvider(table.currentOrderId!));
-    final amountDueMinor = openOrderValue?.when(
-      data: (order) => order?.totalMinor,
-      loading: () => null,
-      error: (_, _) => null,
-    );
-    final isOpen = table.hasOpenOrder;
+    final amountDueMinor = isTraining
+        ? trainingOrder?.totalMinor
+        : openOrderValue?.when(
+            data: (order) => order?.totalMinor,
+            loading: () => null,
+            error: (_, _) => null,
+          );
+    final isOpen = isTraining ? trainingOrder != null : table.hasOpenOrder;
     final openGreen = Theme.of(context).brightness == Brightness.dark
         ? Colors.green.shade700
         : Colors.green.shade600;
@@ -532,7 +563,12 @@ class _NamedTabButton extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final totalMinor = scope == null
+    final trainingOrder = ref.watch(trainingModeProvider) == null
+        ? null
+        : ref.watch(trainingOpenOrdersProvider)[tab.orderId];
+    final totalMinor = trainingOrder != null
+        ? trainingOrder.totalMinor
+        : scope == null
         ? null
         : ref
               .watch(tableOpenOrderProvider(tab.orderId))
@@ -2085,9 +2121,11 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
   @override
   Widget build(BuildContext context) {
     final order = ref.watch(activeOrderProvider);
+    final trainingSession = ref.watch(trainingModeProvider);
+    final isTraining = trainingSession != null;
     final currentLineIds = order.lines.map((line) => line.id).toSet();
     _selectedLineIds.removeWhere((id) => !currentLineIds.contains(id));
-    final splitOrdersValue = order.isSplitOrder
+    final splitOrdersValue = order.isSplitOrder || isTraining
         ? null
         : ref.watch(openSplitOrdersProvider(order.id));
     final openSplitOrders =
@@ -2418,7 +2456,8 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed:
-                        order.isSplitOrder ||
+                        isTraining ||
+                            order.isSplitOrder ||
                             order.lines.isEmpty ||
                             hasUnsentLines
                         ? null
@@ -2455,7 +2494,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: order.lines.isEmpty || hasUnsentLines
+                    onPressed: isTraining || order.lines.isEmpty || hasUnsentLines
                         ? null
                         : () async {
                             try {
@@ -2531,7 +2570,12 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                               .read(activeOrderProvider.notifier)
                               .sendToProduction(printRequired: printRequired);
                           if (!context.mounted) return;
-                          final message = !printRequired
+                          final message = isTraining
+                              ? (printRequired &&
+                                        trainingSession.targetDeviceId != null
+                                    ? 'Training order saved and a clearly marked training ticket was queued.'
+                                    : 'Training order saved without printing. No live order or stock was changed.')
+                              : !printRequired
                               ? 'New items sent to the Order Flow Board without printing.'
                               : printResult.ticketsPrinted > 0
                               ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
@@ -2539,7 +2583,9 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                           showAppNotification(
                             context,
                             ref: ref,
-                            title: 'Order sent',
+                            title: isTraining
+                                ? 'Training order sent'
+                                : 'Order sent',
                             message: message,
                             level: AppNotificationLevel.success,
                           );
@@ -2631,6 +2677,7 @@ Future<void> _showCheckoutSheet(
   required PosOrder order,
   required String currencyCode,
 }) async {
+  final isTraining = ref.read(trainingModeProvider) != null;
   final terminalController = TextEditingController();
   final voucherCodeController = TextEditingController();
   final baseCurrencyCode = currencyCode.trim().toUpperCase();
@@ -2651,7 +2698,7 @@ Future<void> _showCheckoutSheet(
       // Paid receipts are normally required in a restaurant. Staff can still
       // opt out for a particular payment, but the safe operational default is
       // to queue one to the venue's dedicated receipt printer.
-      var printReceipt = defaultPrintPaidReceipt;
+      var printReceipt = isTraining ? false : defaultPrintPaidReceipt;
       var loadingOfficialRate = false;
       ExchangeRateQuote? officialRateQuote;
       var voucherSuggestions = <String>[];
@@ -2718,7 +2765,7 @@ Future<void> _showCheckoutSheet(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
-                    'Take payment',
+                    isTraining ? 'Simulate payment' : 'Take payment',
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                   const SizedBox(height: 6),
@@ -2751,22 +2798,23 @@ Future<void> _showCheckoutSheet(
                   ),
                   const SizedBox(height: 12),
                   SegmentedButton<PaymentMethod>(
-                    segments: const [
-                      ButtonSegment(
+                    segments: [
+                      const ButtonSegment(
                         value: PaymentMethod.cash,
                         icon: Icon(Icons.payments_outlined),
                         label: Text('Cash'),
                       ),
-                      ButtonSegment(
+                      const ButtonSegment(
                         value: PaymentMethod.cardTerminal,
                         icon: Icon(Icons.credit_card_rounded),
                         label: Text('Card'),
                       ),
-                      ButtonSegment(
-                        value: PaymentMethod.voucher,
-                        icon: Icon(Icons.card_giftcard_rounded),
-                        label: Text('Voucher'),
-                      ),
+                      if (!isTraining)
+                        const ButtonSegment(
+                          value: PaymentMethod.voucher,
+                          icon: Icon(Icons.card_giftcard_rounded),
+                          label: Text('Voucher'),
+                        ),
                     ],
                     selected: {method},
                     onSelectionChanged: saving
@@ -3141,19 +3189,29 @@ Future<void> _showCheckoutSheet(
                       ),
                     ),
                   ],
-                  CheckboxListTile(
-                    value: printReceipt,
-                    contentPadding: EdgeInsets.zero,
-                    onChanged: saving
-                        ? null
-                        : (value) => setSheetState(
-                            () => printReceipt = value ?? false,
-                          ),
-                    title: const Text('Print paid receipt'),
-                    subtitle: const Text(
-                      'Queues the full bill to this venue’s dedicated receipt printer after payment is recorded.',
+                  if (!isTraining)
+                    CheckboxListTile(
+                      value: printReceipt,
+                      contentPadding: EdgeInsets.zero,
+                      onChanged: saving
+                          ? null
+                          : (value) => setSheetState(
+                              () => printReceipt = value ?? false,
+                            ),
+                      title: const Text('Print paid receipt'),
+                      subtitle: const Text(
+                        'Queues the full bill to this venue’s dedicated receipt printer after payment is recorded.',
+                      ),
+                    )
+                  else
+                    const ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.school_rounded),
+                      title: Text('Simulated payment only'),
+                      subtitle: Text(
+                        'No payment, voucher, deposit, receipt or sales record will be created.',
+                      ),
                     ),
-                  ),
                   const SizedBox(height: 12),
                   Text(
                     isForeignCash
@@ -3300,7 +3358,9 @@ Future<void> _showCheckoutSheet(
                                 showAppNotification(
                                   pageContext,
                                   ref: ref,
-                                  title: result.alreadyClosed
+                                  title: isTraining
+                                      ? 'Training payment simulated'
+                                      : result.alreadyClosed
                                       ? 'Bill was already closed'
                                       : 'Payment recorded',
                                   message:

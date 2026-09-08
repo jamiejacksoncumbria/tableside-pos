@@ -5373,7 +5373,7 @@ async function startTrainingModeFor(caller, rawData) {
     throw new HttpsError("failed-precondition", "The selected venue is not active.");
   }
   if (targetDeviceId != null &&
-      (!device.exists || device.data().venueId !== venueId || device.data().status !== "active")) {
+      (!device.exists || device.data().venueId !== venueId || device.data().active !== true)) {
     throw new HttpsError("failed-precondition", "The selected training printer is not active at this venue.");
   }
   const actor = actorSnapshot(await auth.getUser(caller.uid));
@@ -5433,6 +5433,14 @@ async function recordTrainingOrderFor(caller, rawData) {
   }
   const lines = rawLines.map((raw, index) => {
     const line = requireObject(raw);
+    const details = Array.isArray(line.details)
+      ? line.details
+          .filter((value) => typeof value === "string")
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0)
+          .slice(0, 20)
+          .map((value) => value.slice(0, 300))
+      : [];
     return {
       productId: requiredText(line, "productId", 300),
       productName: requiredText(line, "productName", 200),
@@ -5440,6 +5448,7 @@ async function recordTrainingOrderFor(caller, rawData) {
       unitPriceMinor: requiredNonNegativeInteger(
         line.unitPriceMinor, `lines[${index}].unitPriceMinor`, 100000000,
       ),
+      details,
     };
   });
   const totalMinor = lines.reduce(
@@ -5488,7 +5497,7 @@ async function recordTrainingOrderFor(caller, rawData) {
         lines: lines.map((line) => ({
           name: line.productName,
           quantity: line.quantity,
-          details: ["TRAINING - NOT A REAL ORDER"],
+          details: ["TRAINING - NOT A REAL ORDER", ...line.details],
         })),
       },
       createdAt: FieldValue.serverTimestamp(),

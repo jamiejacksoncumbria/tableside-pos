@@ -109,10 +109,25 @@ class _TrainingModePageState extends ConsumerState<TrainingModePage> {
                         ),
                       ] else ...[
                         const SizedBox(height: 16),
-                        FilledButton.icon(
-                          onPressed: _busy ? null : () => _end(scope, active),
-                          icon: const Icon(Icons.stop_circle_outlined),
-                          label: const Text('End training mode'),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => Navigator.pop(context),
+                              icon: const Icon(Icons.point_of_sale_rounded),
+                              label: const Text('Back to training POS'),
+                            ),
+                            FilledButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _end(scope, active),
+                              icon: const Icon(Icons.stop_circle_outlined),
+                              label: const Text('End and return to settings'),
+                            ),
+                          ],
                         ),
                       ],
                     ],
@@ -149,6 +164,9 @@ class _TrainingModePageState extends ConsumerState<TrainingModePage> {
         managerPin: _pin.text,
         targetDeviceId: _targetDeviceId,
       );
+      ref.read(activePersistedOrderIdProvider.notifier).select(null);
+      ref.read(selectedTableProvider.notifier).select('');
+      ref.read(trainingOpenOrdersProvider.notifier).clear();
       ref
           .read(trainingModeProvider.notifier)
           .start(
@@ -182,6 +200,9 @@ class _TrainingModePageState extends ConsumerState<TrainingModePage> {
         trainingSessionId: session.id,
       );
       ref.read(trainingModeProvider.notifier).clear();
+      ref.read(activePersistedOrderIdProvider.notifier).select(null);
+      ref.read(selectedTableProvider.notifier).select('');
+      ref.read(trainingOpenOrdersProvider.notifier).clear();
       if (mounted) Navigator.pop(context);
     } on Object catch (error, stack) {
       AppLogger.error('End training mode', error, stack);
