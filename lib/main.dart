@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app/pos_app.dart';
 import 'core/app_logger.dart';
+import 'offline/offline_event_ledger.dart';
 
 void main() {
   runZonedGuarded(
@@ -15,6 +16,12 @@ void main() {
       // zone-mismatch assertion in debug builds.
       WidgetsFlutterBinding.ensureInitialized();
       await AppLogger.initialize();
+      try {
+        await OfflineEventLedger.instance.initialize();
+      } catch (_) {
+        // Online Firebase operation remains available. Offline mode will fail
+        // closed until its encrypted durable store can be opened safely.
+      }
       FlutterError.onError = (details) {
         AppLogger.flutterError(details);
         FlutterError.presentError(details);

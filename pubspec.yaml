@@ -38,6 +38,13 @@ dependencies:
   # Windows and web. SystemSound is not implemented consistently by Android.
   audioplayers: ^6.5.1
   mobile_scanner: ^7.4.0
+  # Durable native event/outbox storage for the offline venue hub. Sensitive
+  # event bodies are encrypted before SQLite receives them; the installation
+  # key is kept in the operating-system credential store.
+  sqlite3: ^3.5.2
+  path_provider: ^2.1.5
+  cryptography: ^2.9.0
+  flutter_secure_storage: ^10.2.0
 
 dev_dependencies:
   flutter_test:

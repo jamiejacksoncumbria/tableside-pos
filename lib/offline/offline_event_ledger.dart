@@ -1,0 +1,89 @@
+import '../core/app_logger.dart';
+import 'offline_event.dart';
+import 'offline_event_store_base.dart';
+import 'offline_event_store_factory.dart';
+
+class OfflineEventLedger {
+  OfflineEventLedger._({OfflineEventStore? store})
+    : _store = store ?? createOfflineEventStore();
+
+  static final OfflineEventLedger instance = OfflineEventLedger._();
+
+  final OfflineEventStore _store;
+  bool _ready = false;
+  Object? _initializationError;
+
+  bool get isSupported => _store.isSupported;
+  bool get isReady => _ready;
+  Object? get initializationError => _initializationError;
+
+  Future<void> initialize() async {
+    if (_ready || !_store.isSupported) return;
+    try {
+      await _store.initialize();
+      _ready = true;
+      _initializationError = null;
+      AppLogger.info(
+        'Durable offline event ledger ready (encrypted SQLite, WAL, synchronous FULL).',
+      );
+    } catch (error, stackTrace) {
+      _initializationError = error;
+      AppLogger.error(
+        'Initialize durable offline event ledger',
+        error,
+        stackTrace,
+      );
+      rethrow;
+    }
+  }
+
+  Future<OfflineEvent> commit(
+    OfflineEventDraft draft, {
+    required int hubEpoch,
+  }) async {
+    _requireReady();
+    final event = await _store.append(draft, hubEpoch: hubEpoch);
+    AppLogger.info(
+      'Offline event committed: type=${event.type}, sequence=${event.sequence}, state=pending.',
+    );
+    return event;
+  }
+
+  Future<List<OfflineEvent>> pending({int limit = 250}) {
+    _requireReady();
+    return _store.pending(limit: limit);
+  }
+
+  Stream<List<OfflineEvent>> watchPending({int limit = 250}) {
+    _requireReady();
+    return _store.watchPending(limit: limit);
+  }
+
+  Future<void> markInFlight(String eventId) {
+    _requireReady();
+    return _store.markInFlight(eventId);
+  }
+
+  Future<void> markSynced(String eventId, DateTime acknowledgedAtUtc) {
+    _requireReady();
+    return _store.markSynced(eventId, acknowledgedAtUtc);
+  }
+
+  Future<void> quarantine(String eventId, String reason) {
+    _requireReady();
+    return _store.quarantine(eventId, reason);
+  }
+
+  void _requireReady() {
+    if (!_store.isSupported) {
+      throw StateError(
+        'Durable offline storage is unavailable on this platform.',
+      );
+    }
+    if (!_ready) {
+      throw StateError(
+        'Durable offline storage is not ready. No operation was accepted.',
+      );
+    }
+  }
+}
