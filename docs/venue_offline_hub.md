@@ -2,6 +2,13 @@
 
 Status: foundation in progress on `feature/venue-offline-hub`.
 
+## Known issues before release
+
+- The staff PIN-entry layout can overflow by approximately 35 pixels on a
+  medium-size tablet (`staff_pin_gate.dart`). Make the content vertically
+  adaptive/scrollable and verify keyboard-open, landscape and large-text
+  layouts before the offline hub is released.
+
 ## Safety invariants
 
 1. A device never reports an offline operation as saved until the primary hub
