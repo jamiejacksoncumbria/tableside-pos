@@ -36,10 +36,7 @@ void main() {
     expect(pending.single.sequence, 1);
     expect(pending.single.payload, {'orderId': 'order-a', 'quantity': 2});
     expect(pending.single.deviceObservedAtUtc, isNotNull);
-    expect(
-      pending.single.timeAuthority,
-      OfflineTimeAuthority.deviceUnverified,
-    );
+    expect(pending.single.timeAuthority, OfflineTimeAuthority.deviceUnverified);
     final raw = database.select(
       'SELECT cipher_text FROM offline_events WHERE event_id = ?',
       [saved.id],
@@ -89,6 +86,45 @@ void main() {
         payload: const {},
       ),
       throwsArgumentError,
+    );
+  });
+
+  test('venue snapshots are encrypted, scoped and versioned', () async {
+    final database = sqlite3.openInMemory();
+    final store = NativeOfflineEventStore(
+      database: database,
+      crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
+    );
+    addTearDown(store.close);
+    await store.initialize();
+    await store.saveSnapshot(
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+      kind: 'catalogue',
+      version: 2,
+      value: const {
+        'product-a': {'priceMinor': 1500},
+      },
+    );
+    final saved = await store.readSnapshot(
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+      kind: 'catalogue',
+    );
+    expect(saved!['version'], 2);
+    expect((saved['value'] as Map)['product-a'], {'priceMinor': 1500});
+    final raw = database.select('SELECT cipher_text FROM offline_snapshots');
+    expect(
+      String.fromCharCodes(raw.single['cipher_text'] as List<int>),
+      isNot(contains('product-a')),
+    );
+    expect(
+      await store.readSnapshot(
+        tenantId: 'tenant-a',
+        venueId: 'venue-b',
+        kind: 'catalogue',
+      ),
+      isNull,
     );
   });
 }

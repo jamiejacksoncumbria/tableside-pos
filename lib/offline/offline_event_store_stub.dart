@@ -26,6 +26,24 @@ class _UnsupportedOfflineEventStore implements OfflineEventStore {
       Stream.value(const []);
 
   @override
+  Future<void> saveSnapshot({
+    required String tenantId,
+    required String venueId,
+    required String kind,
+    required int version,
+    required Map<String, Object?> value,
+  }) => throw UnsupportedError(
+    'Durable venue-offline storage is currently supported on native devices.',
+  );
+
+  @override
+  Future<Map<String, Object?>?> readSnapshot({
+    required String tenantId,
+    required String venueId,
+    required String kind,
+  }) async => null;
+
+  @override
   Future<void> markInFlight(String eventId) async {}
 
   @override

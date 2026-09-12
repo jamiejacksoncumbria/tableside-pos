@@ -87,41 +87,21 @@ class VenueHubCommandProcessor {
         'The hub endpoint is not supported.',
       );
     }
-    final credential = credentials[envelope.credentialId];
-    if (credential == null || credential.deviceId != envelope.deviceId) {
-      throw const VenueHubCommandException(
-        'This device credential is not active at the venue.',
-      );
-    }
-    await _replayGuard.verify(
-      envelope: envelope,
-      body: body,
-      credentialPublicKey: credential.publicKey,
-      expectedTenantId: tenantId,
-      expectedVenueId: venueId,
-      expectedHubEpoch: hubEpoch,
-      trustedNowUtc: trustedNowUtc,
-    );
-    final grant = await _authorizeStaff(envelope.staffId);
-    if (grant == null ||
-        !grant.active ||
-        grant.staffId != envelope.staffId ||
-        !grant.expiresAtUtc.toUtc().isAfter(trustedNowUtc.toUtc()) ||
-        grant.pinVersion < 1 ||
-        grant.membershipVersion < 1) {
-      throw const VenueHubCommandException(
-        'The staff session is unavailable, expired, or revoked.',
-      );
-    }
     final eventType = body['eventType'];
     final permission = eventType is String
         ? _permissionByEvent[eventType]
         : null;
-    if (permission == null || !grant.permissions.contains(permission)) {
+    if (permission == null) {
       throw const VenueHubCommandException(
         'The staff member cannot perform this offline operation.',
       );
     }
+    await authenticate(
+      envelope: envelope,
+      body: body,
+      trustedNowUtc: trustedNowUtc,
+      requiredPermission: permission,
+    );
     final rawPayload = body['payload'];
     if (rawPayload is! Map) {
       throw const VenueHubCommandException(
@@ -161,6 +141,46 @@ class VenueHubCommandProcessor {
       eventHash: committed.eventHash,
       committedAtUtc: committed.createdAtUtc,
     );
+  }
+
+  Future<VenueHubStaffGrant> authenticate({
+    required VenueHubRequestEnvelope envelope,
+    required Map<String, Object?> body,
+    required DateTime trustedNowUtc,
+    required String requiredPermission,
+  }) async {
+    final credential = credentials[envelope.credentialId];
+    if (credential == null || credential.deviceId != envelope.deviceId) {
+      throw const VenueHubCommandException(
+        'This device credential is not active at the venue.',
+      );
+    }
+    await _replayGuard.verify(
+      envelope: envelope,
+      body: body,
+      credentialPublicKey: credential.publicKey,
+      expectedTenantId: tenantId,
+      expectedVenueId: venueId,
+      expectedHubEpoch: hubEpoch,
+      trustedNowUtc: trustedNowUtc,
+    );
+    final grant = await _authorizeStaff(envelope.staffId);
+    if (grant == null ||
+        !grant.active ||
+        grant.staffId != envelope.staffId ||
+        !grant.expiresAtUtc.toUtc().isAfter(trustedNowUtc.toUtc()) ||
+        grant.pinVersion < 1 ||
+        grant.membershipVersion < 1) {
+      throw const VenueHubCommandException(
+        'The staff session is unavailable, expired, or revoked.',
+      );
+    }
+    if (!grant.permissions.contains(requiredPermission)) {
+      throw const VenueHubCommandException(
+        'The staff member cannot perform this offline operation.',
+      );
+    }
+    return grant;
   }
 }
 

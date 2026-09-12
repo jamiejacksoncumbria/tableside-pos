@@ -109,8 +109,9 @@ cross-venue voucher redemption and subscription changes remain online-only.
    envelopes and cloud enrolment/rotation endpoints implemented; enrolment UI
    remains.**
 5. Authenticated local HTTPS API and real-time event stream. **Signed request,
-   replay prevention, active-staff permission and durable-command processing
-   boundary implemented; socket transport and live stream remain.**
+   replay prevention, active-staff permission, durable-command processing,
+   HTTPS transport and authenticated WebSocket broadcast foundations are
+   implemented; certificate provisioning and full POS wiring remain.**
 6. Primary hub lease/generation and explicit recovery takeover. **Cloud
    activation/deactivation generation and audit foundation implemented; local
    lease/health takeover remains.**
@@ -120,10 +121,10 @@ cross-venue voucher redemption and subscription changes remain online-only.
 10. Android foreground hub service and reboot recovery.
 11. Optional enrolled backup hub after split-brain testing.
 
-The local HTTPS/WebSocket transport and end-to-end offline POS command routing
-are not yet complete. The current code establishes the durable, temporal and
-deterministic safety primitives they will use; it must not yet be presented to
-a pilot venue as fully offline capable.
+End-to-end offline POS command routing is not yet complete. The current code
+establishes the durable, temporal, deterministic and secure transport safety
+primitives it will use; it must not yet be presented to a pilot venue as fully
+offline capable.
 
 ## Required failure tests
 

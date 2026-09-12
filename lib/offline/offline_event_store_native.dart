@@ -72,6 +72,19 @@ class NativeOfflineEventStore implements OfflineEventStore {
           CREATE INDEX IF NOT EXISTS offline_events_venue_sequence
           ON offline_events(venue_key, hub_epoch, sequence)
         ''')
+        ..execute('''
+          CREATE TABLE IF NOT EXISTS offline_snapshots (
+            snapshot_key TEXT PRIMARY KEY NOT NULL,
+            venue_key TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK(version > 0),
+            updated_at_utc_ms INTEGER NOT NULL,
+            nonce BLOB NOT NULL,
+            cipher_text BLOB NOT NULL CHECK(length(cipher_text) <= 8388608),
+            mac BLOB NOT NULL,
+            UNIQUE(venue_key, kind)
+          ) STRICT
+        ''')
         // An interrupted upload is safe to retry because cloud ingestion uses
         // event_id as its idempotency key.
         ..execute(
@@ -272,6 +285,107 @@ class NativeOfflineEventStore implements OfflineEventStore {
   }
 
   @override
+  Future<void> saveSnapshot({
+    required String tenantId,
+    required String venueId,
+    required String kind,
+    required int version,
+    required Map<String, Object?> value,
+  }) => _serial(() async {
+    if (version < 1) {
+      throw ArgumentError.value(version, 'version', 'Must be positive.');
+    }
+    final safeKind = _snapshotKind(kind);
+    await _initializeInternal();
+    final venueKey = await _crypto.venueKey(tenantId, venueId);
+    final snapshotKey = await _crypto.eventHash(
+      'snapshot\u0000$venueKey\u0000$safeKind',
+    );
+    final updatedAt = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final associatedData =
+        '$snapshotKey|$venueKey|$safeKind|$version|$updatedAt';
+    final clear = <String, Object?>{
+      'tenantId': tenantId,
+      'venueId': venueId,
+      'kind': safeKind,
+      'version': version,
+      'value': value,
+    };
+    final clearBytes = utf8.encode(jsonEncode(clear));
+    if (clearBytes.length > 4 * 1024 * 1024) {
+      throw StateError('The offline snapshot is too large to store safely.');
+    }
+    final encrypted = await _crypto.encryptJson(
+      clear,
+      associatedData: associatedData,
+    );
+    _database!.execute(
+      '''
+        INSERT INTO offline_snapshots (
+          snapshot_key, venue_key, kind, version, updated_at_utc_ms,
+          nonce, cipher_text, mac
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(snapshot_key) DO UPDATE SET
+          version = excluded.version,
+          updated_at_utc_ms = excluded.updated_at_utc_ms,
+          nonce = excluded.nonce,
+          cipher_text = excluded.cipher_text,
+          mac = excluded.mac
+        WHERE excluded.version >= offline_snapshots.version
+      ''',
+      [
+        snapshotKey,
+        venueKey,
+        safeKind,
+        version,
+        updatedAt,
+        encrypted.nonce,
+        encrypted.cipherText,
+        encrypted.mac,
+      ],
+    );
+  });
+
+  @override
+  Future<Map<String, Object?>?> readSnapshot({
+    required String tenantId,
+    required String venueId,
+    required String kind,
+  }) => _serial(() async {
+    final safeKind = _snapshotKind(kind);
+    await _initializeInternal();
+    final venueKey = await _crypto.venueKey(tenantId, venueId);
+    final rows = _database!.select(
+      'SELECT * FROM offline_snapshots WHERE venue_key = ? AND kind = ?',
+      [venueKey, safeKind],
+    );
+    if (rows.isEmpty) return null;
+    final row = rows.single;
+    final associatedData =
+        '${row['snapshot_key']}|$venueKey|$safeKind|${row['version']}|${row['updated_at_utc_ms']}';
+    final clear = await _crypto.decryptJson(
+      EncryptedOfflineEnvelope(
+        nonce: Uint8List.fromList(row['nonce'] as List<int>),
+        cipherText: Uint8List.fromList(row['cipher_text'] as List<int>),
+        mac: Uint8List.fromList(row['mac'] as List<int>),
+      ),
+      associatedData: associatedData,
+    );
+    if (clear['tenantId'] != tenantId ||
+        clear['venueId'] != venueId ||
+        clear['kind'] != safeKind ||
+        clear['version'] != row['version'] ||
+        clear['value'] is! Map) {
+      throw StateError('An offline snapshot failed its scope check.');
+    }
+    return {
+      'version': row['version'] as int,
+      'updatedAtUtcMillis': row['updated_at_utc_ms'] as int,
+      'value': Map<String, Object?>.from(clear['value'] as Map),
+    };
+  });
+
+  @override
   Future<void> markInFlight(String eventId) =>
       _setState(eventId, OfflineEventSyncState.inFlight);
 
@@ -408,6 +522,14 @@ class NativeOfflineEventStore implements OfflineEventStore {
     final trimmed = value.trim();
     if (!RegExp(r'^evt_[0-9]+_[a-f0-9]{32}$').hasMatch(trimmed)) {
       throw ArgumentError.value(value, 'eventId', 'Invalid offline event ID.');
+    }
+    return trimmed;
+  }
+
+  String _snapshotKind(String value) {
+    final trimmed = value.trim();
+    if (!RegExp(r'^[a-z][a-zA-Z0-9.]{0,63}$').hasMatch(trimmed)) {
+      throw ArgumentError.value(value, 'kind', 'Invalid snapshot kind.');
     }
     return trimmed;
   }

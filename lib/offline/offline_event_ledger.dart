@@ -59,6 +59,36 @@ class OfflineEventLedger {
     return _store.watchPending(limit: limit);
   }
 
+  Future<void> saveSnapshot({
+    required String tenantId,
+    required String venueId,
+    required String kind,
+    required int version,
+    required Map<String, Object?> value,
+  }) {
+    _requireReady();
+    return _store.saveSnapshot(
+      tenantId: tenantId,
+      venueId: venueId,
+      kind: kind,
+      version: version,
+      value: value,
+    );
+  }
+
+  Future<Map<String, Object?>?> readSnapshot({
+    required String tenantId,
+    required String venueId,
+    required String kind,
+  }) {
+    _requireReady();
+    return _store.readSnapshot(
+      tenantId: tenantId,
+      venueId: venueId,
+      kind: kind,
+    );
+  }
+
   Future<void> markInFlight(String eventId) {
     _requireReady();
     return _store.markInFlight(eventId);

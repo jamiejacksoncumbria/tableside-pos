@@ -32,6 +32,58 @@ class VenueHubRequestEnvelope {
   final String bodyHash;
   final String signature;
 
+  Map<String, Object?> toJson() => {
+    'credentialId': credentialId,
+    'tenantId': tenantId,
+    'venueId': venueId,
+    'deviceId': deviceId,
+    'staffId': staffId,
+    'method': method,
+    'path': path,
+    'hubEpoch': hubEpoch,
+    'sentAtUtcMillis': sentAtUtcMillis,
+    'nonce': nonce,
+    'bodyHash': bodyHash,
+    'signature': signature,
+  };
+
+  factory VenueHubRequestEnvelope.fromJson(Map<String, Object?> json) {
+    String text(String key, {int maximum = 256}) {
+      final value = json[key];
+      if (value is! String ||
+          value.trim().isEmpty ||
+          value.length > maximum ||
+          value.contains('\n')) {
+        throw const VenueHubProtocolException(
+          'The signed request envelope is invalid.',
+        );
+      }
+      return value;
+    }
+
+    final epoch = json['hubEpoch'];
+    final sentAt = json['sentAtUtcMillis'];
+    if (epoch is! int || epoch < 1 || sentAt is! int || sentAt <= 0) {
+      throw const VenueHubProtocolException(
+        'The signed request envelope is invalid.',
+      );
+    }
+    return VenueHubRequestEnvelope(
+      credentialId: text('credentialId'),
+      tenantId: text('tenantId'),
+      venueId: text('venueId'),
+      deviceId: text('deviceId'),
+      staffId: text('staffId'),
+      method: text('method', maximum: 12).toUpperCase(),
+      path: text('path', maximum: 128),
+      hubEpoch: epoch,
+      sentAtUtcMillis: sentAt,
+      nonce: text('nonce', maximum: 128),
+      bodyHash: text('bodyHash', maximum: 128),
+      signature: text('signature', maximum: 256),
+    );
+  }
+
   String get canonicalHeaders => [
     'v1',
     credentialId,
