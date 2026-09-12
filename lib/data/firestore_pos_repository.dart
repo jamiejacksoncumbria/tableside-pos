@@ -654,6 +654,9 @@ class FirestorePosRepository {
       return null;
     }
     final openedAt = data['openedAt'];
+    final orderOpenedAt = openedAt is Timestamp
+        ? openedAt.toDate()
+        : DateTime.now();
     final lines = List<Object?>.from(data['lines'] as List? ?? const [])
         .whereType<Map>()
         .indexed
@@ -683,11 +686,42 @@ class FirestorePosRepository {
               line['stockComponents'],
               const <String, Map<String, dynamic>>{},
             ),
+            addedAt:
+                _dateTime(line['addedAt']) ??
+                _dateTimeFromMillis(line['addedAtMillis']) ??
+                orderOpenedAt,
+            sentAt:
+                _dateTime(line['sentAt']) ??
+                _dateTimeFromMillis(line['sentAtMillis']),
           );
         })
         .where((line) => line.id.isNotEmpty && line.productId.isNotEmpty)
         .toList(growable: false);
-    final date = openedAt is Timestamp ? openedAt.toDate() : DateTime.now();
+    final payments = List<Object?>.from(data['payments'] as List? ?? const [])
+        .whereType<Map>()
+        .map((raw) {
+          final payment = Map<String, Object?>.from(raw);
+          return OrderPayment(
+            id: payment['id'] as String? ?? '',
+            method: payment['method'] as String? ?? 'other',
+            tenderedAmountMinor:
+                (payment['tenderedAmountMinor'] as num?)?.toInt() ?? 0,
+            tenderedCurrencyCode:
+                payment['tenderedCurrencyCode'] as String? ?? 'GBP',
+            baseAmountMinor: (payment['baseAmountMinor'] as num?)?.toInt() ?? 0,
+            exchangeRateToBase: payment['exchangeRateToBase'] as String? ?? '1',
+            recordedAt:
+                _dateTime(payment['recordedAt']) ??
+                _dateTimeFromMillis(payment['recordedAtMillis']) ??
+                orderOpenedAt,
+            terminalLabel: payment['terminalLabel'] as String?,
+            cashChangeBaseMinor:
+                (payment['cashChangeBaseMinor'] as num?)?.toInt() ?? 0,
+          );
+        })
+        .where((payment) => payment.id.isNotEmpty)
+        .toList(growable: false);
+    final date = orderOpenedAt;
     final status = switch (data['status']) {
       'open' => OrderStatus.open,
       'pendingApproval' => OrderStatus.pendingApproval,
@@ -707,7 +741,13 @@ class FirestorePosRepository {
       splitFromOrderId: data['splitFromOrderId'] as String?,
       splitSequence: (data['splitSequence'] as num?)?.toInt(),
       openSplitOrderIds: _stringIds(data['openSplitOrderIds']),
+      payments: payments,
     );
+  }
+
+  DateTime? _dateTimeFromMillis(Object? value) {
+    final millis = value is num ? value.toInt() : null;
+    return millis == null ? null : DateTime.fromMillisecondsSinceEpoch(millis);
   }
 
   /// Streams only active child bills for a parent table/name order. This lets

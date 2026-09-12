@@ -99,6 +99,9 @@ class BluetoothBillReceipt {
     this.refundReason,
     this.payments = const <BluetoothReceiptPayment>[],
     this.taxBreakdown = const <BluetoothReceiptTaxBreakdown>[],
+    this.isPartPayment = false,
+    this.paidTotalMinor,
+    this.balanceDueMinor,
   });
 
   final String receiptNumber;
@@ -121,6 +124,9 @@ class BluetoothBillReceipt {
   final String? refundReason;
   final List<BluetoothReceiptPayment> payments;
   final List<BluetoothReceiptTaxBreakdown> taxBreakdown;
+  final bool isPartPayment;
+  final int? paidTotalMinor;
+  final int? balanceDueMinor;
 }
 
 class BluetoothBillReceiptLine {
@@ -128,11 +134,13 @@ class BluetoothBillReceiptLine {
     required this.name,
     required this.quantity,
     required this.lineTotalMinor,
+    this.addedAt,
   });
 
   final String name;
   final int quantity;
   final int lineTotalMinor;
+  final DateTime? addedAt;
 }
 
 class BluetoothReceiptPayment {
@@ -146,6 +154,7 @@ class BluetoothReceiptPayment {
     this.changeBaseMinor = 0,
     this.terminalLabel,
     this.exchangeRateSource,
+    this.recordedAt,
   });
 
   final String method;
@@ -157,6 +166,7 @@ class BluetoothReceiptPayment {
   final int changeBaseMinor;
   final String? terminalLabel;
   final String? exchangeRateSource;
+  final DateTime? recordedAt;
 }
 
 class BluetoothReceiptTaxBreakdown {

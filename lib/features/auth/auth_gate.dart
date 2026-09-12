@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -13,6 +14,7 @@ import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
 import '../platform_admin/platform_admin_page.dart';
 import '../platform_admin/platform_admin_pin_gate.dart';
+import '../printing/queued_print_worker_host.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 import 'session_providers.dart';
@@ -439,38 +441,47 @@ class _TenantWorkspace extends ConsumerWidget {
       );
     }
     AppLogger.info('Venue workspace ready: ${venue.name}.');
-    return StaffPinGate(
-      scope: scope,
-      backgroundLockSeconds: venue.backgroundLockSeconds,
-      onSwitchVenue: () {
-        AppLogger.info(
-          'Returning to the company and venue picker from PIN screen.',
-        );
-        ref.read(activeStaffPinSessionProvider.notifier).lock();
-        ref.read(homeSectionProvider.notifier).select(HomeSection.pos);
-        ref.read(activeVenueScopeProvider.notifier).clear();
-      },
-      onSignOut: () {
-        ref.read(activeStaffPinSessionProvider.notifier).lock();
-        ref.read(activeVenueScopeProvider.notifier).clear();
-        ref.read(authRepositoryProvider).signOut();
-      },
-      child: HomeShell(
-        profileOverride: profile.requireValue,
-        venueOverride: venue,
-        persistCompanyProfile: true,
-        onSwitchVenue: () {
-          AppLogger.info('Returning to the company and venue picker.');
-          ref.read(activeStaffPinSessionProvider.notifier).lock();
-          ref.read(homeSectionProvider.notifier).select(HomeSection.pos);
-          ref.read(activeVenueScopeProvider.notifier).clear();
-        },
-        onSignOut: () {
-          ref.read(activeStaffPinSessionProvider.notifier).lock();
-          ref.read(activeVenueScopeProvider.notifier).clear();
-          ref.read(authRepositoryProvider).signOut();
-        },
-      ),
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // This zero-size service remains mounted on the PIN screen. Print
+        // claiming is authorised by the enrolled device credential, not by a
+        // staff session, so unattended kitchen/bar delivery keeps running.
+        if (!kIsWeb) const QueuedPrintWorkerHost(),
+        StaffPinGate(
+          scope: scope,
+          backgroundLockSeconds: venue.backgroundLockSeconds,
+          onSwitchVenue: () {
+            AppLogger.info(
+              'Returning to the company and venue picker from PIN screen.',
+            );
+            ref.read(activeStaffPinSessionProvider.notifier).lock();
+            ref.read(homeSectionProvider.notifier).select(HomeSection.pos);
+            ref.read(activeVenueScopeProvider.notifier).clear();
+          },
+          onSignOut: () {
+            ref.read(activeStaffPinSessionProvider.notifier).lock();
+            ref.read(activeVenueScopeProvider.notifier).clear();
+            ref.read(authRepositoryProvider).signOut();
+          },
+          child: HomeShell(
+            profileOverride: profile.requireValue,
+            venueOverride: venue,
+            persistCompanyProfile: true,
+            onSwitchVenue: () {
+              AppLogger.info('Returning to the company and venue picker.');
+              ref.read(activeStaffPinSessionProvider.notifier).lock();
+              ref.read(homeSectionProvider.notifier).select(HomeSection.pos);
+              ref.read(activeVenueScopeProvider.notifier).clear();
+            },
+            onSignOut: () {
+              ref.read(activeStaffPinSessionProvider.notifier).lock();
+              ref.read(activeVenueScopeProvider.notifier).clear();
+              ref.read(authRepositoryProvider).signOut();
+            },
+          ),
+        ),
+      ],
     );
   }
 }

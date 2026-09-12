@@ -6,11 +6,13 @@ class ReceiptLineSummary {
     required this.name,
     required this.quantity,
     required this.lineTotalMinor,
+    this.addedAtMillis,
   });
 
   final String name;
   final int quantity;
   final int lineTotalMinor;
+  final int? addedAtMillis;
 }
 
 List<ReceiptLineSummary> aggregateReceiptPayloadLines(Object? rawLines) {
@@ -36,6 +38,10 @@ List<ReceiptLineSummary> aggregateReceiptPayloadLines(Object? rawLines) {
         ? baseName
         : '$baseName\n${details.join('\n')}';
     final lineTotalMinor = (raw['lineTotalMinor'] as num?)?.toInt() ?? 0;
+    final addedAtMillis = (raw['addedAtMillis'] as num?)?.toInt();
+    final saleDateKey = addedAtMillis == null
+        ? ''
+        : _localDateKey(DateTime.fromMillisecondsSinceEpoch(addedAtMillis));
     // Do not merge lines which have a different sale price or tax snapshot.
     // It keeps a historic receipt auditable even when a product is sold at a
     // manager-approved price override later in the same bill.
@@ -45,10 +51,16 @@ List<ReceiptLineSummary> aggregateReceiptPayloadLines(Object? rawLines) {
       raw['unitPriceMinor']?.toString() ?? '',
       raw['taxRateId']?.toString() ?? '',
       raw['taxRateBasisPoints']?.toString() ?? '',
+      saleDateKey,
     ].join('|');
     final existing = grouped[key];
     if (existing == null) {
-      grouped[key] = _ReceiptLineTotal(name, quantity, lineTotalMinor);
+      grouped[key] = _ReceiptLineTotal(
+        name,
+        quantity,
+        lineTotalMinor,
+        addedAtMillis,
+      );
     } else {
       existing.quantity += quantity;
       existing.lineTotalMinor += lineTotalMinor;
@@ -60,15 +72,27 @@ List<ReceiptLineSummary> aggregateReceiptPayloadLines(Object? rawLines) {
           name: line.name,
           quantity: line.quantity,
           lineTotalMinor: line.lineTotalMinor,
+          addedAtMillis: line.addedAtMillis,
         ),
       )
       .toList(growable: false);
 }
 
+String _localDateKey(DateTime date) =>
+    '${date.year.toString().padLeft(4, '0')}-'
+    '${date.month.toString().padLeft(2, '0')}-'
+    '${date.day.toString().padLeft(2, '0')}';
+
 class _ReceiptLineTotal {
-  _ReceiptLineTotal(this.name, this.quantity, this.lineTotalMinor);
+  _ReceiptLineTotal(
+    this.name,
+    this.quantity,
+    this.lineTotalMinor,
+    this.addedAtMillis,
+  );
 
   final String name;
   int quantity;
   int lineTotalMinor;
+  final int? addedAtMillis;
 }

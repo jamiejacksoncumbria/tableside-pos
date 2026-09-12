@@ -97,6 +97,10 @@ class BillCloseResult {
     required this.alreadyClosed,
     required this.receiptPrintRequested,
     required this.receiptPrintQueued,
+    required this.orderClosed,
+    required this.paidThisTimeMinor,
+    required this.paidTotalMinor,
+    required this.balanceDueMinor,
   });
 
   final String billId;
@@ -106,6 +110,10 @@ class BillCloseResult {
   final bool alreadyClosed;
   final bool receiptPrintRequested;
   final bool receiptPrintQueued;
+  final bool orderClosed;
+  final int paidThisTimeMinor;
+  final int paidTotalMinor;
+  final int balanceDueMinor;
 }
 
 class RefundResult {
@@ -972,6 +980,7 @@ class ProductionCommandRepository {
     required PosOrder order,
     required List<BillPaymentInput> payments,
     required bool printReceipt,
+    required String requestId,
   }) async {
     final response = await _call('closeOrder', {
       'tenantId': scope.tenantId,
@@ -979,6 +988,7 @@ class ProductionCommandRepository {
       'orderId': order.id,
       'payments': payments.map((payment) => payment.toRequestData()).toList(),
       'printReceipt': printReceipt,
+      'requestId': requestId,
     });
     final billId = response['billId'];
     final totalMinor = response['totalMinor'];
@@ -988,7 +998,7 @@ class ProductionCommandRepository {
         totalMinor is! int ||
         resultCurrency is! String ||
         receiptNumber is! String) {
-      throw StateError('The server did not return a valid closed bill.');
+      throw StateError('The server did not return a valid payment result.');
     }
     return BillCloseResult(
       billId: billId,
@@ -998,6 +1008,10 @@ class ProductionCommandRepository {
       alreadyClosed: response['alreadyClosed'] == true,
       receiptPrintRequested: response['receiptPrintRequested'] == true,
       receiptPrintQueued: response['receiptPrintQueued'] == true,
+      orderClosed: response['orderClosed'] == true,
+      paidThisTimeMinor: response['paidThisTimeMinor'] as int? ?? 0,
+      paidTotalMinor: response['paidTotalMinor'] as int? ?? 0,
+      balanceDueMinor: response['balanceDueMinor'] as int? ?? 0,
     );
   }
 

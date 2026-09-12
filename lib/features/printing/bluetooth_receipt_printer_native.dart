@@ -237,6 +237,30 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         .where((number) => number.isNotEmpty)
         .take(3)
         .toList(growable: false);
+    final itemBytes = <int>[];
+    String? currentItemDate;
+    for (final line in receipt.lines) {
+      final itemDate = line.addedAt == null
+          ? null
+          : formatAppDate(line.addedAt!);
+      if (itemDate != null && itemDate != currentItemDate) {
+        currentItemDate = itemDate;
+        itemBytes.addAll(
+          generator.text(
+            'Items added $itemDate',
+            styles: const PosStyles(bold: true),
+          ),
+        );
+      }
+      itemBytes.addAll(
+        _receiptItemBytes(
+          generator: generator,
+          paperWidth: device.paperWidth,
+          description: '${line.name} x${line.quantity}',
+          price: _money(line.lineTotalMinor, receipt.currencyCode),
+        ),
+      );
+    }
     final bytes = <int>[
       ...generator.reset(),
       ...generator.text(
@@ -265,6 +289,8 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
             ? 'REFUND RECEIPT'
             : receipt.isPreReceipt
             ? 'PRE RECEIPT - NOT PAID'
+            : receipt.isPartPayment
+            ? 'PART PAYMENT - BALANCE DUE'
             : receipt.isReprint
             ? 'REPRINT - PAID RECEIPT'
             : 'PAID RECEIPT',
@@ -282,13 +308,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         ...generator.text('Business date: ${receipt.businessDate}'),
       ...generator.text('Printed: $printedAt'),
       ...generator.hr(),
-      for (final line in receipt.lines)
-        ..._receiptItemBytes(
-          generator: generator,
-          paperWidth: device.paperWidth,
-          description: '${line.name} x${line.quantity}',
-          price: _money(line.lineTotalMinor, receipt.currencyCode),
-        ),
+      ...itemBytes,
       ...generator.hr(),
       if (receipt.netTotalMinor != null)
         ...generator.row([
@@ -330,6 +350,10 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           ...generator.text(
             '${payment.method}${payment.terminalLabel?.trim().isNotEmpty == true ? ' (${payment.terminalLabel!.trim()})' : ''}: ${_money(payment.amountMinor, payment.currencyCode)}',
           ),
+          if (payment.recordedAt != null)
+            ...generator.text(
+              'Paid: ${formatAppDateTime(payment.recordedAt!)}',
+            ),
           if (payment.currencyCode != payment.baseCurrencyCode &&
               payment.baseAmountMinor != null) ...[
             ...generator.text(
@@ -344,6 +368,30 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
               'Change: ${_money(payment.changeBaseMinor, payment.baseCurrencyCode ?? receipt.currencyCode)}',
             ),
         ],
+      ],
+      if (receipt.paidTotalMinor != null) ...[
+        ...generator.row([
+          PosColumn(text: 'Paid to date', width: 6),
+          PosColumn(
+            text: _money(receipt.paidTotalMinor!, receipt.currencyCode),
+            width: 6,
+            styles: const PosStyles(align: PosAlign.right),
+          ),
+        ]),
+      ],
+      if (receipt.balanceDueMinor != null) ...[
+        ...generator.row([
+          PosColumn(
+            text: 'BALANCE DUE',
+            width: 6,
+            styles: const PosStyles(bold: true),
+          ),
+          PosColumn(
+            text: _money(receipt.balanceDueMinor!, receipt.currencyCode),
+            width: 6,
+            styles: const PosStyles(align: PosAlign.right, bold: true),
+          ),
+        ]),
       ],
       if (receipt.receiptFooter.trim().isNotEmpty) ...[
         ...generator.hr(),

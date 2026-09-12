@@ -95,6 +95,9 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
             name: line.name,
             quantity: line.quantity,
             lineTotalMinor: line.lineTotalMinor,
+            addedAt: line.addedAtMillis == null
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(line.addedAtMillis!),
           ),
         )
         .toList(growable: false);
@@ -127,6 +130,11 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
                       (payment['cashChangeBaseMinor'] as num?)?.toInt() ?? 0,
                   terminalLabel: payment['terminalLabel'] as String?,
                   exchangeRateSource: payment['exchangeRateSource'] as String?,
+                  recordedAt: (payment['recordedAtMillis'] as num?) == null
+                      ? null
+                      : DateTime.fromMillisecondsSinceEpoch(
+                          (payment['recordedAtMillis'] as num).toInt(),
+                        ),
                 ),
               )
               .toList(growable: false)
@@ -179,6 +187,9 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
         isRefund: payload['type'] == 'refundReceipt',
         originalReceiptNumber: payload['originalReceiptNumber'] as String?,
         refundReason: payload['refundReason'] as String?,
+        isPartPayment: payload['isPartPayment'] == true,
+        paidTotalMinor: (payload['paidTotalMinor'] as num?)?.toInt(),
+        balanceDueMinor: (payload['balanceDueMinor'] as num?)?.toInt(),
       ),
     );
   }

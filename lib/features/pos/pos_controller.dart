@@ -164,7 +164,7 @@ class PosCompactTabController extends Notifier<int> {
   @override
   int build() => 1;
 
-  void select(int index) => state = index.clamp(0, 2) as int;
+  void select(int index) => state = index.clamp(0, 2);
 }
 
 final activeOrderProvider = NotifierProvider<ActiveOrderController, PosOrder>(
@@ -196,6 +196,8 @@ class TrainingOpenOrdersController extends Notifier<Map<String, PosOrder>> {
 class ActiveOrderController extends Notifier<PosOrder> {
   var _pendingDraftMutations = 0;
   final _pendingDraftQuantities = <String, int>{};
+  String? _pendingPaymentRequestId;
+  String? _pendingPaymentFingerprint;
 
   bool get _isSavingDraft => _pendingDraftMutations > 0;
 
@@ -305,6 +307,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
       modifiers: selection.modifiers,
       itemNote: selection.itemNote.trim(),
       stockComponents: stockComponents,
+      addedAt: DateTime.now(),
     );
     state = state.copyWith(
       lines: [...state.lines, line],
@@ -479,8 +482,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
         final nextPrice = operation == 'setUnitPrice'
             ? valueMinor
             : target.unitPriceMinor - valueMinor;
-        if (nextPrice < 0)
+        if (nextPrice < 0) {
           throw StateError('The training price cannot be negative.');
+        }
         state = state.copyWith(
           lines: state.lines
               .map(
@@ -642,8 +646,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
     final trainingSession = ref.read(trainingModeProvider);
     if (trainingSession != null) {
       if (scope == null) throw StateError('Select a venue first.');
-      if (unsentLines.isEmpty)
+      if (unsentLines.isEmpty) {
         throw StateError('There are no new training items to send.');
+      }
       await ref
           .read(productionCommandRepositoryProvider)
           .recordTrainingOrder(
@@ -797,6 +802,10 @@ class ActiveOrderController extends Notifier<PosOrder> {
         alreadyClosed: false,
         receiptPrintRequested: false,
         receiptPrintQueued: false,
+        orderClosed: true,
+        paidThisTimeMinor: order.totalMinor,
+        paidTotalMinor: order.totalMinor,
+        balanceDueMinor: 0,
       );
       ref.read(trainingOpenOrdersProvider.notifier).remove(order.id);
       if (order.isSplitOrder && order.splitFromOrderId != null) {
@@ -818,6 +827,17 @@ class ActiveOrderController extends Notifier<PosOrder> {
       return result;
     }
     final order = state;
+    final paymentFingerprint = <Object?>[
+      order.id,
+      printReceipt,
+      for (final payment in payments) payment.toRequestData().toString(),
+    ].join('|');
+    if (_pendingPaymentFingerprint != paymentFingerprint ||
+        _pendingPaymentRequestId == null) {
+      _pendingPaymentFingerprint = paymentFingerprint;
+      _pendingPaymentRequestId =
+          'payment-${DateTime.now().microsecondsSinceEpoch}';
+    }
     final result = await ref
         .read(productionCommandRepositoryProvider)
         .closeOrder(
@@ -825,8 +845,21 @@ class ActiveOrderController extends Notifier<PosOrder> {
           order: order,
           payments: payments,
           printReceipt: printReceipt,
+          requestId: _pendingPaymentRequestId!,
         );
+    _pendingPaymentRequestId = null;
+    _pendingPaymentFingerprint = null;
     _pendingDraftQuantities.clear();
+    if (!result.orderClosed) {
+      final refreshed = await ref
+          .read(firestorePosRepositoryProvider)
+          .fetchOrder(scope: scope, orderId: order.id);
+      if (refreshed != null) state = refreshed;
+      AppLogger.info(
+        'Partial payment recorded for order ${order.id}; ${result.balanceDueMinor} minor units remain.',
+      );
+      return result;
+    }
     if (order.isSplitOrder && order.splitFromOrderId != null) {
       final parentOrder = await ref
           .read(firestorePosRepositoryProvider)
@@ -1132,6 +1165,8 @@ class ActiveOrderController extends Notifier<PosOrder> {
         modifiers: line.modifiers,
         itemNote: line.itemNote,
         stockComponents: line.stockComponents,
+        addedAt: line.addedAt,
+        sentAt: line.sentAt,
       );
 }
 

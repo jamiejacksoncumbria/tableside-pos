@@ -449,9 +449,9 @@ class _TableButton extends ConsumerWidget {
         ? null
         : ref.watch(tableOpenOrderProvider(table.currentOrderId!));
     final amountDueMinor = isTraining
-        ? trainingOrder?.totalMinor
+        ? trainingOrder?.balanceDueMinor
         : openOrderValue?.when(
-            data: (order) => order?.totalMinor,
+            data: (order) => order?.balanceDueMinor,
             loading: () => null,
             error: (_, _) => null,
           );
@@ -567,13 +567,13 @@ class _NamedTabButton extends ConsumerWidget {
         ? null
         : ref.watch(trainingOpenOrdersProvider)[tab.orderId];
     final totalMinor = trainingOrder != null
-        ? trainingOrder.totalMinor
+        ? trainingOrder.balanceDueMinor
         : scope == null
         ? null
         : ref
               .watch(tableOpenOrderProvider(tab.orderId))
               .when(
-                data: (order) => order?.totalMinor,
+                data: (order) => order?.balanceDueMinor,
                 loading: () => null,
                 error: (_, _) => null,
               );
@@ -2231,7 +2231,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                           ActionChip(
                             avatar: const Icon(Icons.receipt_long_rounded),
                             label: Text(
-                              'Bill ${splitOrder.splitSequence ?? ''} · ${formatMoney(splitOrder.totalMinor, currencyCode: widget.currencyCode)}',
+                              'Bill ${splitOrder.splitSequence ?? ''} · ${formatMoney(splitOrder.balanceDueMinor, currencyCode: widget.currencyCode)} due',
                             ),
                             onPressed: () {
                               try {
@@ -2402,6 +2402,13 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                               context,
                                             ).textTheme.labelSmall,
                                           ),
+                                        if (line.addedAt != null)
+                                          Text(
+                                            'Added ${formatAppDateTime(line.addedAt!)}',
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.labelSmall,
+                                          ),
                                       ],
                                     ),
                                   ),
@@ -2459,6 +2466,44 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 ),
               ],
             ),
+            if (order.paidMinor > 0) ...[
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  const Text('Payments received'),
+                  const Spacer(),
+                  Text(
+                    formatMoney(
+                      order.paidMinor,
+                      currencyCode: widget.currencyCode,
+                    ),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  Text(
+                    'Balance due',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const Spacer(),
+                  Text(
+                    formatMoney(
+                      order.balanceDueMinor,
+                      currencyCode: widget.currencyCode,
+                    ),
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+              for (final payment in order.payments)
+                Text(
+                  '${formatAppDateTime(payment.recordedAt)} · ${payment.method} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+            ],
             const SizedBox(height: 12),
             Row(
               children: [
@@ -2466,6 +2511,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                   child: OutlinedButton.icon(
                     onPressed:
                         order.isSplitOrder ||
+                            order.payments.isNotEmpty ||
                             order.lines.isEmpty ||
                             hasUnsentLines
                         ? null
@@ -2691,7 +2737,7 @@ Future<void> _showCheckoutSheet(
   final voucherCodeController = TextEditingController();
   final baseCurrencyCode = currencyCode.trim().toUpperCase();
   final tenderedAmountController = TextEditingController(
-    text: _moneyInputFromMinor(order.totalMinor, currencyCode),
+    text: _moneyInputFromMinor(order.balanceDueMinor, currencyCode),
   );
   final exchangeRateController = TextEditingController(text: '1');
   final currencyChoices = checkoutTenderCurrencies(baseCurrencyCode);
@@ -2730,7 +2776,7 @@ Future<void> _showCheckoutSheet(
             0,
             (total, payment) => total + payment.baseAmountMinor,
           );
-          final remainingBaseMinor = order.totalMinor - recordedBaseMinor;
+          final remainingBaseMinor = order.balanceDueMinor - recordedBaseMinor;
           final cashChangeBaseMinor =
               method == PaymentMethod.cash &&
                   convertedBaseMinor != null &&
@@ -2745,8 +2791,11 @@ Future<void> _showCheckoutSheet(
               appliedBaseMinor > 0 &&
               (method == PaymentMethod.cash ||
                   appliedBaseMinor <= remainingBaseMinor);
-          final paymentsComplete =
-              paymentEntries.isNotEmpty && remainingBaseMinor == 0;
+          final canRecordPayment =
+              paymentEntries.isNotEmpty &&
+              remainingBaseMinor >= 0 &&
+              (!isTraining || remainingBaseMinor == 0);
+          final willCloseBill = canRecordPayment && remainingBaseMinor == 0;
           final isForeignCash = tenderedCurrencyCode != baseCurrencyCode;
           final hasAmountInput = tenderedAmountController.text
               .trim()
@@ -2805,6 +2854,23 @@ Future<void> _showCheckoutSheet(
                       ),
                     ),
                   ),
+                  if (order.payments.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      'Earlier payments',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    for (final payment in order.payments)
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.check_circle_outline_rounded),
+                        title: Text(
+                          '${payment.method} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
+                        ),
+                        subtitle: Text(formatAppDateTime(payment.recordedAt)),
+                      ),
+                  ],
                   const SizedBox(height: 12),
                   SegmentedButton<PaymentMethod>(
                     segments: [
@@ -2837,7 +2903,7 @@ Future<void> _showCheckoutSheet(
                               exchangeRateController.text = '1';
                               tenderedAmountController.text =
                                   _moneyInputFromMinor(
-                                    order.totalMinor,
+                                    order.balanceDueMinor,
                                     currencyCode,
                                   );
                             }
@@ -3225,7 +3291,7 @@ Future<void> _showCheckoutSheet(
                   Text(
                     isForeignCash
                         ? 'Foreign cash retains its tender amount and rate for audit/reporting. Any overpayment is shown as change in the reporting currency.'
-                        : 'Add one or more payment allocations. The total must equal the remaining bill value.',
+                        : 'Add one or more allocations. You may record a partial payment and leave the remaining balance on this table or tab.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const SizedBox(height: 20),
@@ -3314,7 +3380,7 @@ Future<void> _showCheckoutSheet(
                                       ),
                                     );
                                     final nextRemaining =
-                                        order.totalMinor -
+                                        order.balanceDueMinor -
                                         paymentEntries.fold<int>(
                                           0,
                                           (total, payment) =>
@@ -3346,7 +3412,7 @@ Future<void> _showCheckoutSheet(
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton.icon(
-                      onPressed: saving || !paymentsComplete
+                      onPressed: saving || !canRecordPayment
                           ? null
                           : () async {
                               setSheetState(() => saving = true);
@@ -3371,9 +3437,11 @@ Future<void> _showCheckoutSheet(
                                       ? 'Training payment simulated'
                                       : result.alreadyClosed
                                       ? 'Bill was already closed'
-                                      : 'Payment recorded',
+                                      : result.orderClosed
+                                      ? 'Payment recorded · bill closed'
+                                      : 'Partial payment recorded',
                                   message:
-                                      'Receipt ${result.receiptNumber} closed at ${formatMoney(result.totalMinor, currencyCode: result.currencyCode)}.${result.receiptPrintRequested ? (result.receiptPrintQueued ? ' Printing has been queued.' : ' No dedicated receipt printer is configured.') : ''}',
+                                      '${result.orderClosed ? 'Receipt' : 'Payment receipt'} ${result.receiptNumber}. Paid now ${formatMoney(result.paidThisTimeMinor, currencyCode: result.currencyCode)}; balance ${formatMoney(result.balanceDueMinor, currencyCode: result.currencyCode)}.${result.receiptPrintRequested ? (result.receiptPrintQueued ? ' Printing has been queued.' : ' No dedicated receipt printer is configured.') : ''}',
                                   level: AppNotificationLevel.success,
                                 );
                               } on Object catch (error, stackTrace) {
@@ -3402,9 +3470,9 @@ Future<void> _showCheckoutSheet(
                       label: Text(
                         saving
                             ? 'Recording…'
-                            : paymentsComplete
+                            : willCloseBill
                             ? 'Close bill'
-                            : 'Add payment allocation',
+                            : 'Record partial payment',
                       ),
                     ),
                   ),

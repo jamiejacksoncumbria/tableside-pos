@@ -89,4 +89,30 @@ void main() {
     expect(lines.first.name, contains('Cooking: Medium rare'));
     expect(lines.last.name, contains('Cooking: Well done'));
   });
+
+  test('keeps the same product on different dates as separate lines', () {
+    final firstDay = DateTime(2026, 9, 10, 22).millisecondsSinceEpoch;
+    final secondDay = DateTime(2026, 9, 11, 1).millisecondsSinceEpoch;
+    final lines = aggregateReceiptPayloadLines([
+      {
+        'productId': 'efes',
+        'productName': 'Efes',
+        'quantity': 1,
+        'unitPriceMinor': 22000,
+        'lineTotalMinor': 22000,
+        'addedAtMillis': firstDay,
+      },
+      {
+        'productId': 'efes',
+        'productName': 'Efes',
+        'quantity': 1,
+        'unitPriceMinor': 22000,
+        'lineTotalMinor': 22000,
+        'addedAtMillis': secondDay,
+      },
+    ]);
+
+    expect(lines, hasLength(2));
+    expect(lines.map((line) => line.addedAtMillis), [firstDay, secondDay]);
+  });
 }

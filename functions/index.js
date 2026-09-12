@@ -3453,6 +3453,8 @@ async function addOrderDraftLineFor(caller, rawData) {
       modifierSelections: configuration.modifierSelections,
       itemNote: configuration.itemNote,
       isSentToProduction: false,
+      addedAtMillis: Date.now(),
+      addedByActor: actor,
     };
     const current = existingOrder.exists ? existingOrder.data() : null;
     const tableLabel = tableRef == null
@@ -3550,6 +3552,21 @@ async function updateOrderDraftLineFor(caller, rawData) {
     const nextLines = quantity === 0
       ? priorLines.filter((item) => item?.id !== lineId)
       : priorLines.map((item) => item?.id === lineId ? {...item, quantity} : item);
+    const paidMinor = Array.isArray(order.data().payments)
+      ? order.data().payments.reduce(
+          (total, payment) => total + Number(payment?.baseAmountMinor ?? 0), 0,
+        )
+      : 0;
+    const nextTotalMinor = nextLines.reduce(
+      (total, item) => total + Number(item?.quantity ?? 0) * Number(item?.unitPriceMinor ?? 0), 0,
+    );
+    if (!Number.isSafeInteger(paidMinor) || !Number.isSafeInteger(nextTotalMinor) ||
+        nextTotalMinor < paidMinor) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This change would reduce the bill below payments already received.",
+      );
+    }
     const hasSentLines = nextLines.some((item) => item?.isSentToProduction === true);
     if (nextLines.length === 0 && tableRef != null) {
       transaction.delete(orderRef);
@@ -4221,6 +4238,21 @@ async function adjustOrderLineFor(caller, rawData) {
     if (nextLines.length === 0) {
       throw new HttpsError("failed-precondition", "Keep at least one item on the order or cancel the whole order.");
     }
+    const alreadyPaidMinor = Array.isArray(order.data().payments)
+      ? order.data().payments.reduce(
+          (total, payment) => total + Number(payment?.baseAmountMinor ?? 0), 0,
+        )
+      : 0;
+    const adjustedTotalMinor = nextLines.reduce(
+      (total, item) => total + Number(item?.quantity ?? 0) * Number(item?.unitPriceMinor ?? 0), 0,
+    );
+    if (!Number.isSafeInteger(alreadyPaidMinor) || !Number.isSafeInteger(adjustedTotalMinor) ||
+        adjustedTotalMinor < alreadyPaidMinor) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This adjustment would reduce the bill below payments already received.",
+      );
+    }
     transaction.update(orderRef, {
       lines: nextLines, updatedAt: FieldValue.serverTimestamp(), updatedByActor: actor,
     });
@@ -4454,6 +4486,16 @@ async function printPreReceiptFor(caller, rawData) {
     });
     const totalMinor = receiptLines.reduce((sum, line) => sum + line.lineTotalMinor, 0);
     const taxTotalMinor = receiptLines.reduce((sum, line) => sum + line.taxMinor, 0);
+    const payments = Array.isArray(order.data().payments)
+      ? order.data().payments.map((payment) => ({...payment}))
+      : [];
+    const paidTotalMinor = payments.reduce(
+      (sum, payment) => sum + Number(payment.baseAmountMinor ?? 0), 0,
+    );
+    const balanceDueMinor = totalMinor - paidTotalMinor;
+    if (!Number.isSafeInteger(paidTotalMinor) || paidTotalMinor < 0 || balanceDueMinor < 0) {
+      throw new HttpsError("failed-precondition", "This order has invalid saved payment data.");
+    }
     const jobId = `pre_${orderId}_${requestId}`;
     transaction.create(tenantRef.collection("printJobs").doc(jobId), {
       venueId, targetDeviceId,
@@ -4468,7 +4510,8 @@ async function printPreReceiptFor(caller, rawData) {
         tableLabel: typeof order.data().tableLabel === "string" ? order.data().tableLabel : null,
         tabName: typeof order.data().tabName === "string" ? order.data().tabName : null,
         totalMinor, netTotalMinor: totalMinor - taxTotalMinor, taxTotalMinor,
-        taxBreakdown: [], lines: receiptLines, payments: [],
+        taxBreakdown: [], lines: receiptLines, payments,
+        paidTotalMinor, balanceDueMinor,
       },
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -4532,6 +4575,7 @@ async function closeOrderFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const orderId = requiredText(data, "orderId", 180);
+  const requestId = requiredDocumentId(data, "requestId");
   if (data.printReceipt != null && typeof data.printReceipt !== "boolean") {
     throw new HttpsError("invalid-argument", "printReceipt must be true or false.");
   }
@@ -4549,17 +4593,19 @@ async function closeOrderFor(caller, rawData) {
   const orderRef = tenantRef.collection("orders").doc(orderId);
   // A deterministic bill ID makes a lost HTTP response safe to retry.
   const billRef = tenantRef.collection("bills").doc(orderId);
+  const paymentRecordRef = tenantRef.collection("orderPayments").doc(requestId);
   const receiptRouteRef = printReceipt
     ? tenantRef.collection("printerRoutes").doc(`${venueId}_receipt`)
     : null;
   const actor = actorSnapshot(await auth.getUser(caller.uid));
 
   return db.runTransaction(async (transaction) => {
-    const [tenant, venue, order, existingBill, receiptRoute] = await Promise.all([
+    const [tenant, venue, order, existingBill, existingPaymentRecord, receiptRoute] = await Promise.all([
       transaction.get(tenantRef),
       transaction.get(venueRef),
       transaction.get(orderRef),
       transaction.get(billRef),
+      transaction.get(paymentRecordRef),
       receiptRouteRef == null ? Promise.resolve(null) : transaction.get(receiptRouteRef),
     ]);
     if (!tenant.exists) {
@@ -4567,6 +4613,25 @@ async function closeOrderFor(caller, rawData) {
     }
     if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (existingPaymentRecord.exists) {
+      const previous = existingPaymentRecord.data();
+      if (previous.venueId !== venueId || previous.orderId !== orderId) {
+        throw new HttpsError("failed-precondition", "This payment reference belongs to another order.");
+      }
+      return {
+        billId: typeof previous.billId === "string" ? previous.billId : orderId,
+        totalMinor: previous.totalMinor,
+        currencyCode: previous.currencyCode,
+        receiptNumber: previous.receiptNumber,
+        receiptPrintRequested: previous.receiptPrintRequested === true,
+        receiptPrintQueued: previous.receiptPrintQueued === true,
+        alreadyClosed: previous.orderClosed === true,
+        orderClosed: previous.orderClosed === true,
+        paidThisTimeMinor: previous.paidThisTimeMinor,
+        paidTotalMinor: previous.paidTotalMinor,
+        balanceDueMinor: previous.balanceDueMinor,
+      };
     }
     if (existingBill.exists) {
       const existing = existingBill.data();
@@ -4583,6 +4648,10 @@ async function closeOrderFor(caller, rawData) {
         receiptPrintRequested: existing.receiptPrintRequested === true,
         receiptPrintQueued: existing.receiptPrintQueued === true,
         alreadyClosed: true,
+        orderClosed: true,
+        paidThisTimeMinor: 0,
+        paidTotalMinor: existing.totalMinor,
+        balanceDueMinor: 0,
       };
     }
     if (!order.exists || order.data().venueId !== venueId || order.data().status === "closed") {
@@ -4651,6 +4720,12 @@ async function closeOrderFor(caller, rawData) {
               .map((selection) => ({...selection}))
           : [],
         itemNote: typeof line.itemNote === "string" ? line.itemNote : "",
+        addedAtMillis: Number.isSafeInteger(Number(line.addedAtMillis))
+          ? Number(line.addedAtMillis)
+          : (orderData.openedAt?.toMillis?.() ?? Date.now()),
+        sentAtMillis: Number.isSafeInteger(Number(line.sentAtMillis))
+          ? Number(line.sentAtMillis)
+          : null,
         stockPerSale: Number.isFinite(Number(line.stockPerSale))
           ? Number(line.stockPerSale)
           : 1,
@@ -4691,8 +4766,26 @@ async function closeOrderFor(caller, rawData) {
     const netTotalMinor = totalMinor - taxTotalMinor;
     const currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
     const receiptBusiness = receiptBusinessSnapshot(tenant.data(), venue.data());
-    const payments = rawPayments.map((payment, index) =>
-      validClosePayment(payment, index, currencyCode));
+    const paymentRecordedAtMillis = Date.now();
+    const payments = rawPayments.map((payment, index) => ({
+      ...validClosePayment(payment, index, currencyCode),
+      id: `${requestId}-${index}`,
+      recordedAtMillis: paymentRecordedAtMillis,
+    }));
+    const previousPayments = Array.isArray(orderData.payments)
+      ? orderData.payments.filter((payment) => payment != null && typeof payment === "object")
+          .map((payment) => ({...payment}))
+      : [];
+    const paidBeforeMinor = previousPayments.reduce((total, payment) => {
+      const amount = Number(payment.baseAmountMinor);
+      if (!Number.isSafeInteger(amount) || amount <= 0) {
+        throw new HttpsError("failed-precondition", "This order has invalid saved payment data.");
+      }
+      return total + amount;
+    }, 0);
+    if (!Number.isSafeInteger(paidBeforeMinor) || paidBeforeMinor < 0 || paidBeforeMinor >= totalMinor) {
+      throw new HttpsError("failed-precondition", "This order has an invalid existing paid balance.");
+    }
     const voucherPayments = payments.filter((payment) => payment.method === "voucher");
     const seenVoucherIds = new Set();
     const voucherRedemptions = [];
@@ -4730,13 +4823,20 @@ async function closeOrderFor(caller, rawData) {
         "A manager must enter or approve a foreign-currency exchange rate.",
       );
     }
-    const paidMinor = payments.reduce((total, payment) => total + payment.baseAmountMinor, 0);
-    if (paidMinor !== totalMinor) {
+    const paidThisTimeMinor = payments.reduce(
+      (total, payment) => total + payment.baseAmountMinor, 0,
+    );
+    const paidTotalMinor = paidBeforeMinor + paidThisTimeMinor;
+    if (!Number.isSafeInteger(paidThisTimeMinor) || paidThisTimeMinor <= 0 ||
+        !Number.isSafeInteger(paidTotalMinor) || paidTotalMinor > totalMinor) {
       throw new HttpsError(
         "failed-precondition",
-        "The payment amount must exactly equal the current bill total.",
+        "The payment amount is more than the current outstanding balance.",
       );
     }
+    const balanceDueMinor = totalMinor - paidTotalMinor;
+    const orderClosed = balanceDueMinor === 0;
+    const allPayments = [...previousPayments, ...payments];
 
     const tableId = typeof orderData.tableId === "string" ? orderData.tableId : null;
     const tabName = typeof orderData.tabName === "string" ? orderData.tabName : null;
@@ -4781,7 +4881,9 @@ async function closeOrderFor(caller, rawData) {
         activatePendingCutoff = true;
       }
     }
-    const receiptNumber = `${businessDate.replaceAll("-", "")}-${orderId.slice(-6).toUpperCase()}`;
+    const receiptNumber = orderClosed
+      ? `${businessDate.replaceAll("-", "")}-${orderId.slice(-6).toUpperCase()}`
+      : `PART-${businessDate.replaceAll("-", "")}-${requestId.slice(-6).toUpperCase()}`;
     const receiptLines = lines.map((line) => ({...line}));
     const receiptTargetDeviceId = receiptRoute?.exists &&
         typeof receiptRoute.data().primaryDeviceId === "string"
@@ -4817,7 +4919,9 @@ async function closeOrderFor(caller, rawData) {
       receiptTargetDeviceId != null &&
       activeRouteDevice(receiptDevice, venueId, "receipt");
     const receiptPrintJobId = receiptPrintQueued
-      ? `receipt_${orderId}_${receiptTargetDeviceId}`
+      ? orderClosed
+        ? `receipt_${orderId}_${receiptTargetDeviceId}`
+        : `payment_${requestId}_${receiptTargetDeviceId}`
       : null;
 
     for (const redemption of voucherRedemptions) {
@@ -4829,14 +4933,17 @@ async function closeOrderFor(caller, rawData) {
         lastRedeemedVenueId: venueId,
         updatedAt: FieldValue.serverTimestamp(),
       });
-      transaction.create(tenantRef.collection("voucherTransactions").doc(), {
-        venueId, voucherId: redemption.voucherId, billId: billRef.id,
+      transaction.create(
+        tenantRef.collection("voucherTransactions").doc(`${requestId}_${redemption.voucherId}`), {
+        venueId, voucherId: redemption.voucherId, billId: orderClosed ? billRef.id : null,
+        orderId, paymentRequestId: requestId,
         type: "redemption", amountMinor: -redemption.payment.baseAmountMinor,
         currencyCode, createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
       });
     }
 
-    transaction.create(billRef, {
+    if (orderClosed) {
+      transaction.create(billRef, {
       venueId,
       orderId,
       status: "closed",
@@ -4857,7 +4964,7 @@ async function closeOrderFor(caller, rawData) {
       netTotalMinor,
       taxTotalMinor,
       taxBreakdown,
-      payments,
+      payments: allPayments,
       receiptPrintRequested: printReceipt,
       receiptPrintQueued,
       receiptPrintJobId,
@@ -4867,7 +4974,7 @@ async function closeOrderFor(caller, rawData) {
       closedAt: FieldValue.serverTimestamp(),
       closedByActor: actor,
       createdAt: FieldValue.serverTimestamp(),
-    });
+      });
     // Popularity is server-owned and only advances when a genuine bill closes.
     // Aggregate repeated lines first so every product receives one atomic
     // increment and retries remain safe through the deterministic bill ID.
@@ -4887,6 +4994,7 @@ async function closeOrderFor(caller, rawData) {
         lastSoldAt: FieldValue.serverTimestamp(),
       });
     }
+    }
     if (receiptPrintQueued) {
       transaction.create(tenantRef.collection("printJobs").doc(receiptPrintJobId), {
         venueId,
@@ -4902,6 +5010,7 @@ async function closeOrderFor(caller, rawData) {
         idempotencyKey: receiptPrintJobId,
         payload: {
           type: "receipt",
+          isPartPayment: !orderClosed,
           receiptNumber,
           restaurantName: receiptBusiness.name,
           business: receiptBusiness,
@@ -4916,43 +5025,83 @@ async function closeOrderFor(caller, rawData) {
           taxTotalMinor,
           taxBreakdown,
           lines: receiptLines,
-          payments,
+          payments: allPayments,
+          paidThisTimeMinor,
+          paidTotalMinor,
+          balanceDueMinor,
         },
         createdAt: FieldValue.serverTimestamp(),
       });
     }
-    transaction.update(orderRef, {
-      status: "closed",
-      closedAt: FieldValue.serverTimestamp(),
-      closedByActor: actor,
-      billId: billRef.id,
-      businessDate,
-      updatedAt: FieldValue.serverTimestamp(),
-      updatedByActor: actor,
-    });
-    if (splitParentRef != null && splitParent?.exists) {
-      transaction.update(splitParentRef, {
-        openSplitOrderIds: FieldValue.arrayRemove(orderId),
+    if (orderClosed) {
+      transaction.update(orderRef, {
+        status: "closed",
+        payments: allPayments,
+        paidMinor: paidTotalMinor,
+        balanceDueMinor: 0,
+        closedAt: FieldValue.serverTimestamp(),
+        closedByActor: actor,
+        billId: billRef.id,
+        businessDate,
+        updatedAt: FieldValue.serverTimestamp(),
+        updatedByActor: actor,
+      });
+      if (splitParentRef != null && splitParent?.exists) {
+        transaction.update(splitParentRef, {
+          openSplitOrderIds: FieldValue.arrayRemove(orderId),
+          updatedAt: FieldValue.serverTimestamp(),
+          updatedByActor: actor,
+        });
+      }
+      if (tableRef != null && table?.exists && table.data().currentOrderId === orderId) {
+        transaction.update(tableRef, {
+          currentOrderId: FieldValue.delete(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+      if (tabRef != null && namedTab?.exists && namedTab.data().orderId === orderId) {
+        transaction.delete(tabRef);
+      }
+    } else {
+      transaction.update(orderRef, {
+        payments: allPayments,
+        paidMinor: paidTotalMinor,
+        balanceDueMinor,
+        lastPaymentAt: FieldValue.serverTimestamp(),
+        lastPaymentByActor: actor,
         updatedAt: FieldValue.serverTimestamp(),
         updatedByActor: actor,
       });
     }
-    if (tableRef != null && table?.exists && table.data().currentOrderId === orderId) {
-      transaction.update(tableRef, {
-        currentOrderId: FieldValue.delete(),
-        updatedAt: FieldValue.serverTimestamp(),
-      });
-    }
-    if (tabRef != null && namedTab?.exists && namedTab.data().orderId === orderId) {
-      transaction.delete(tabRef);
-    }
-    transaction.create(tenantRef.collection("auditEvents").doc(), {
-      action: "closeBill",
+    transaction.create(paymentRecordRef, {
       venueId,
       orderId,
-      billId: billRef.id,
+      billId: orderClosed ? billRef.id : null,
+      requestId,
+      totalMinor,
+      currencyCode,
+      receiptNumber,
+      paymentAllocations: payments,
+      paidThisTimeMinor,
+      paidTotalMinor,
+      balanceDueMinor,
+      orderClosed,
+      receiptPrintRequested: printReceipt,
+      receiptPrintQueued,
+      receiptPrintJobId,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: orderClosed ? "closeBill" : "recordPartialPayment",
+      venueId,
+      orderId,
+      billId: orderClosed ? billRef.id : null,
       receiptNumber,
       totalMinor,
+      paidThisTimeMinor,
+      paidTotalMinor,
+      balanceDueMinor,
       netTotalMinor,
       taxTotalMinor,
       receiptPrintRequested: printReceipt,
@@ -4972,6 +5121,10 @@ async function closeOrderFor(caller, rawData) {
       receiptPrintRequested: printReceipt,
       receiptPrintQueued,
       alreadyClosed: false,
+      orderClosed,
+      paidThisTimeMinor,
+      paidTotalMinor,
+      balanceDueMinor,
     };
   });
 }
@@ -5618,6 +5771,12 @@ async function splitOrderFor(caller, rawData) {
       );
     }
     const sourceData = sourceOrder.data();
+    if (Array.isArray(sourceData.payments) && sourceData.payments.length > 0) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Split the bill before taking its first partial payment.",
+      );
+    }
     const rawLines = Array.isArray(sourceData.lines) ? sourceData.lines : [];
     if (rawLines.length === 0) {
       throw new HttpsError("failed-precondition", "An empty order cannot be split.");
@@ -6509,6 +6668,11 @@ async function sendOrderToProductionFor(caller, rawData) {
       modifierSelections: line.modifierSelections,
       itemNote: line.itemNote,
       isSentToProduction: true,
+      addedAtMillis: Number.isSafeInteger(Number(line.addedAtMillis))
+        ? Number(line.addedAtMillis)
+        : Date.now(),
+      sentAtMillis: Date.now(),
+      addedByActor: line.addedByActor ?? actor,
     });
     // Draft lines already exist on the order so every device can see them.
     // Sending must promote those same lines to sent rather than treating them

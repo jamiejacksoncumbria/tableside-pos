@@ -206,14 +206,25 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
   ) {
     final currency = payload['currencyCode'] as String? ?? 'GBP';
     final summaries = aggregateReceiptPayloadLines(payload['lines']);
-    final itemLines = summaries
-        .map(
-          (line) => WindowsPrintLine(
-            '${line.name} x${line.quantity}',
-            rightText: _money(line.lineTotalMinor, currency),
-          ),
-        )
-        .toList(growable: false);
+    final itemLines = <WindowsPrintLine>[];
+    String? currentItemDate;
+    for (final line in summaries) {
+      final itemDate = line.addedAtMillis == null
+          ? null
+          : formatAppDate(
+              DateTime.fromMillisecondsSinceEpoch(line.addedAtMillis!),
+            );
+      if (itemDate != null && itemDate != currentItemDate) {
+        currentItemDate = itemDate;
+        itemLines.add(WindowsPrintLine('Items added $itemDate', bold: true));
+      }
+      itemLines.add(
+        WindowsPrintLine(
+          '${line.name} x${line.quantity}',
+          rightText: _money(line.lineTotalMinor, currency),
+        ),
+      );
+    }
     if (itemLines.isEmpty) {
       throw const WindowsPrintQueueException(
         'The queued paid receipt does not contain any bill lines.',
@@ -265,6 +276,8 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
             ? 'REFUND RECEIPT'
             : payload['isPreReceipt'] == true
             ? 'PRE RECEIPT - NOT PAID'
+            : payload['isPartPayment'] == true
+            ? 'PART PAYMENT - BALANCE DUE'
             : payload['isReprint'] == true
             ? 'REPRINT - PAID RECEIPT'
             : 'PAID RECEIPT',
@@ -345,6 +358,14 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
             rightText: _money(amount, paymentCurrency),
           ),
         );
+        final recordedAtMillis = (value['recordedAtMillis'] as num?)?.toInt();
+        if (recordedAtMillis != null) {
+          lines.add(
+            WindowsPrintLine(
+              'Paid: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch(recordedAtMillis))}',
+            ),
+          );
+        }
         final baseAmount = (value['baseAmountMinor'] as num?)?.toInt();
         final rate = value['exchangeRateToBase'] as String? ?? '1';
         final terminal = value['terminalLabel'] as String?;
@@ -372,6 +393,25 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
           );
         }
       }
+    }
+    final paidTotal = (payload['paidTotalMinor'] as num?)?.toInt();
+    if (paidTotal != null) {
+      lines.add(
+        WindowsPrintLine(
+          'Paid to date',
+          rightText: _money(paidTotal, currency),
+        ),
+      );
+    }
+    final balanceDue = (payload['balanceDueMinor'] as num?)?.toInt();
+    if (balanceDue != null) {
+      lines.add(
+        WindowsPrintLine(
+          'BALANCE DUE',
+          rightText: _money(balanceDue, currency),
+          bold: true,
+        ),
+      );
     }
     final footer = business['receiptFooter'] as String? ?? '';
     if (footer.trim().isNotEmpty) {

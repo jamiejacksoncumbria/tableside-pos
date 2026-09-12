@@ -713,6 +713,8 @@ class OrderLine {
     this.modifiers = const <OrderModifierSelection>[],
     this.itemNote = '',
     this.stockComponents = const <ProductStockComponent>[],
+    this.addedAt,
+    this.sentAt,
   });
 
   final String id;
@@ -733,6 +735,8 @@ class OrderLine {
   final List<OrderModifierSelection> modifiers;
   final String itemNote;
   final List<ProductStockComponent> stockComponents;
+  final DateTime? addedAt;
+  final DateTime? sentAt;
 
   int get totalMinor => quantity * unitPriceMinor;
 
@@ -766,7 +770,36 @@ class OrderLine {
     modifiers: modifiers,
     itemNote: itemNote,
     stockComponents: stockComponents,
+    addedAt: addedAt,
+    sentAt: sentAt,
   );
+}
+
+/// A server-recorded payment against an order. Open orders may contain one or
+/// more of these before their balance reaches zero. The timestamp and
+/// conversion snapshot are immutable and are carried onto the final bill.
+class OrderPayment {
+  const OrderPayment({
+    required this.id,
+    required this.method,
+    required this.tenderedAmountMinor,
+    required this.tenderedCurrencyCode,
+    required this.baseAmountMinor,
+    required this.exchangeRateToBase,
+    required this.recordedAt,
+    this.terminalLabel,
+    this.cashChangeBaseMinor = 0,
+  });
+
+  final String id;
+  final String method;
+  final int tenderedAmountMinor;
+  final String tenderedCurrencyCode;
+  final int baseAmountMinor;
+  final String exchangeRateToBase;
+  final DateTime recordedAt;
+  final String? terminalLabel;
+  final int cashChangeBaseMinor;
 }
 
 class PosOrder {
@@ -784,6 +817,7 @@ class PosOrder {
     this.splitFromOrderId,
     this.splitSequence,
     this.openSplitOrderIds = const <String>[],
+    this.payments = const <OrderPayment>[],
   });
 
   final String id;
@@ -805,10 +839,14 @@ class PosOrder {
   /// The parent order cannot close until these separately payable child bills
   /// have all been settled. This prevents a table being freed too early.
   final List<String> openSplitOrderIds;
+  final List<OrderPayment> payments;
 
   bool get isSplitOrder => splitFromOrderId?.trim().isNotEmpty == true;
 
   int get totalMinor => lines.fold(0, (total, line) => total + line.totalMinor);
+  int get paidMinor =>
+      payments.fold(0, (total, payment) => total + payment.baseAmountMinor);
+  int get balanceDueMinor => (totalMinor - paidMinor).clamp(0, totalMinor);
 
   /// Stock is reserved as soon as an item is added to this order, rather than
   /// waiting until the waiter presses Send.  This is deliberately limited to
@@ -866,6 +904,7 @@ class PosOrder {
     String? splitFromOrderId,
     int? splitSequence,
     List<String>? openSplitOrderIds,
+    List<OrderPayment>? payments,
   }) {
     return PosOrder(
       id: id ?? this.id,
@@ -881,6 +920,7 @@ class PosOrder {
       splitFromOrderId: splitFromOrderId ?? this.splitFromOrderId,
       splitSequence: splitSequence ?? this.splitSequence,
       openSplitOrderIds: openSplitOrderIds ?? this.openSplitOrderIds,
+      payments: payments ?? this.payments,
     );
   }
 }
