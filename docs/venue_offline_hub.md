@@ -108,7 +108,9 @@ cross-venue voucher redemption and subscription changes remain online-only.
    **Public-key credential generation, protected local storage, signed request
    envelopes and cloud enrolment/rotation endpoints implemented; enrolment UI
    remains.**
-5. Authenticated local HTTPS API and real-time event stream.
+5. Authenticated local HTTPS API and real-time event stream. **Signed request,
+   replay prevention, active-staff permission and durable-command processing
+   boundary implemented; socket transport and live stream remain.**
 6. Primary hub lease/generation and explicit recovery takeover. **Cloud
    activation/deactivation generation and audit foundation implemented; local
    lease/health takeover remains.**
