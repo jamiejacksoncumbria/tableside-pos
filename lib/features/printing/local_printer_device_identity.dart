@@ -1,5 +1,6 @@
 import 'dart:math';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/tenant_scope.dart';
@@ -12,6 +13,7 @@ class LocalPrinterDeviceIdentity {
   static const _credentialPreferenceKey = 'tableside.printDeviceCredential';
 
   final SharedPreferencesAsync _preferences = SharedPreferencesAsync();
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
 
   Future<String> getOrCreate() async {
     final existing = await _preferences.getString(_preferenceKey);
@@ -34,24 +36,60 @@ class LocalPrinterDeviceIdentity {
     return '$physicalId-${_scopeHash(scope)}';
   }
 
-  Future<String?> credential(VenueScope scope) =>
-      _preferences.getString(_credentialKey(scope));
+  Future<String?> credential(VenueScope scope) async {
+    final key = _credentialKey(scope);
+    final secured = await _secureStorage.read(key: key);
+    if (secured?.isNotEmpty == true) return secured;
+    // One-time migration from releases which incorrectly kept this bearer
+    // credential in ordinary preferences. Remove the clear-text copy only
+    // after the protected write succeeds.
+    final legacy = await _preferences.getString(key);
+    if (legacy?.isNotEmpty == true) {
+      await _secureStorage.write(key: key, value: legacy);
+      await _preferences.remove(key);
+      return legacy;
+    }
+    return null;
+  }
 
   /// Compatibility for a device configured before venue-scoped enrolment.
   /// New registrations never write this key. The worker can use it only until
   /// the manager registers this physical device for the relevant venue.
-  Future<String?> legacyCredential() =>
-      _preferences.getString(_credentialPreferenceKey);
+  Future<String?> legacyCredential() async {
+    final secured = await _secureStorage.read(key: _credentialPreferenceKey);
+    if (secured?.isNotEmpty == true) return secured;
+    final legacy = await _preferences.getString(_credentialPreferenceKey);
+    if (legacy?.isNotEmpty == true) {
+      await _secureStorage.write(key: _credentialPreferenceKey, value: legacy);
+      await _preferences.remove(_credentialPreferenceKey);
+      return legacy;
+    }
+    return null;
+  }
 
-  Future<void> saveCredential(VenueScope scope, String credential) =>
-      _preferences.setString(_credentialKey(scope), credential);
+  Future<void> saveCredential(VenueScope scope, String credential) async {
+    final key = _credentialKey(scope);
+    await _secureStorage.write(key: key, value: credential);
+    await _preferences.remove(key);
+  }
 
-  Future<void> clearCredential(VenueScope scope) =>
-      _preferences.remove(_credentialKey(scope));
+  Future<void> clearCredential(VenueScope scope) async {
+    final key = _credentialKey(scope);
+    await _secureStorage.delete(key: key);
+    await _preferences.remove(key);
+  }
 
   Future<void> reset() async {
     await _preferences.remove(_preferenceKey);
     await _preferences.remove(_credentialPreferenceKey);
+    final secured = await _secureStorage.readAll();
+    for (final key in secured.keys.where(
+      (key) =>
+          key == _credentialPreferenceKey ||
+          key.startsWith('$_credentialPreferenceKey.'),
+    )) {
+      await _secureStorage.delete(key: key);
+    }
   }
 
   String _credentialKey(VenueScope scope) =>

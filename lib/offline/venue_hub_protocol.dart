@@ -49,10 +49,10 @@ class VenueHubRequestEnvelope {
 }
 
 class VenueHubRequestSigner {
-  VenueHubRequestSigner(this._credentialKey);
+  VenueHubRequestSigner(this._credentialKeyPair);
 
-  final SecretKey _credentialKey;
-  final Hmac _hmac = Hmac.sha256();
+  final KeyPair _credentialKeyPair;
+  final Ed25519 _signatureAlgorithm = Ed25519();
   final Sha256 _sha256 = Sha256();
 
   Future<VenueHubRequestEnvelope> sign({
@@ -101,9 +101,9 @@ class VenueHubRequestSigner {
       bodyHash: bodyHash,
       signature: '',
     );
-    final signature = await _hmac.calculateMac(
+    final signature = await _signatureAlgorithm.sign(
       utf8.encode(unsigned.canonicalHeaders),
-      secretKey: _credentialKey,
+      keyPair: _credentialKeyPair,
     );
     return VenueHubRequestEnvelope(
       credentialId: unsigned.credentialId,
@@ -136,7 +136,7 @@ class VenueHubReplayGuard {
   Future<void> verify({
     required VenueHubRequestEnvelope envelope,
     required Map<String, Object?> body,
-    required SecretKey credentialKey,
+    required PublicKey credentialPublicKey,
     required String expectedTenantId,
     required String expectedVenueId,
     required int expectedHubEpoch,
@@ -171,22 +171,19 @@ class VenueHubReplayGuard {
         'The signed request body has been modified.',
       );
     }
-    final expectedMac = await Hmac.sha256().calculateMac(
-      utf8.encode(envelope.canonicalHeaders),
-      secretKey: credentialKey,
-    );
-    String suppliedSignature;
+    List<int> suppliedSignature;
     try {
-      suppliedSignature = base64UrlEncode(base64Url.decode(envelope.signature));
+      suppliedSignature = base64Url.decode(envelope.signature);
     } on FormatException {
       throw const VenueHubProtocolException(
         'The request signature is invalid.',
       );
     }
-    if (!_constantTimeEquals(
-      base64UrlEncode(expectedMac.bytes),
-      suppliedSignature,
-    )) {
+    final validSignature = await Ed25519().verify(
+      utf8.encode(envelope.canonicalHeaders),
+      signature: Signature(suppliedSignature, publicKey: credentialPublicKey),
+    );
+    if (!validSignature) {
       throw const VenueHubProtocolException(
         'The request signature is invalid.',
       );

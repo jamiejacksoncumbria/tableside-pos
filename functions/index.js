@@ -1401,6 +1401,158 @@ async function manageVenueConfigurationFor(caller, rawData) {
       updatedAt: FieldValue.serverTimestamp(),
       updatedByActor: actor,
     });
+  } else if (resource === "offlineHubDeviceCredential") {
+    const deviceId = requiredDocumentId(values, "deviceId");
+    const credentialId = requiredDocumentId(values, "credentialId");
+    const publicKeyBase64 = requiredText(values, "publicKeyBase64", 128);
+    if (!/^[-_A-Za-z0-9]{43}$/u.test(publicKeyBase64) ||
+        Buffer.from(publicKeyBase64, "base64url").length !== 32) {
+      throw new HttpsError("invalid-argument", "The device public key is invalid.");
+    }
+    const credentials = db.collection(`tenants/${tenantId}/offlineDeviceCredentials`);
+    const existingForDevice = await credentials
+      .where("venueId", "==", venueId)
+      .where("deviceId", "==", deviceId)
+      .get();
+    const credentialRef = credentials.doc(credentialId);
+    const existingCredential = await credentialRef.get();
+    if (existingCredential.exists &&
+        (existingCredential.data().venueId !== venueId ||
+          existingCredential.data().deviceId !== deviceId ||
+          existingCredential.data().publicKeyBase64 !== publicKeyBase64)) {
+      throw new HttpsError("already-exists", "That device credential ID is already in use.");
+    }
+    const batch = db.batch();
+    for (const current of existingForDevice.docs) {
+      if (current.id !== credentialId && current.data().active === true) {
+        batch.update(current.ref, {
+          active: false,
+          revokedAt: FieldValue.serverTimestamp(),
+          revokedByActor: actor,
+          revokeReason: "rotated",
+        });
+      }
+    }
+    batch.set(credentialRef, {
+      venueId,
+      deviceId,
+      algorithm: "Ed25519",
+      publicKeyBase64,
+      active: true,
+      enrolledAt: FieldValue.serverTimestamp(),
+      enrolledByActor: actor,
+      revokedAt: FieldValue.delete(),
+      revokedByActor: FieldValue.delete(),
+      revokeReason: FieldValue.delete(),
+    }, {merge: true});
+    batch.create(db.collection(`tenants/${tenantId}/auditEvents`).doc(), {
+      action: "enrollOfflineHubDeviceCredential",
+      venueId,
+      deviceId,
+      credentialId,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+    result = {saved: true, credentialId};
+  } else if (resource === "offlineCredentialRemoval") {
+    const credentialId = requiredDocumentId(values, "credentialId");
+    const credentialRef = db.doc(
+      `tenants/${tenantId}/offlineDeviceCredentials/${credentialId}`,
+    );
+    const credential = await credentialRef.get();
+    if (!credential.exists || credential.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "That offline device credential was not found.");
+    }
+    const batch = db.batch();
+    batch.update(credentialRef, {
+      active: false,
+      revokedAt: FieldValue.serverTimestamp(),
+      revokedByActor: actor,
+      revokeReason: optionalText(values, "reason", 200) || "managerRevoked",
+    });
+    batch.create(db.collection(`tenants/${tenantId}/auditEvents`).doc(), {
+      action: "revokeOfflineHubDeviceCredential",
+      venueId,
+      deviceId: credential.data().deviceId ?? null,
+      credentialId,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+    result = {saved: true, revoked: true};
+  } else if (resource === "offlineHubActivation") {
+    const deviceId = requiredDocumentId(values, "deviceId");
+    const credentialId = requiredDocumentId(values, "credentialId");
+    const credential = await db.doc(
+      `tenants/${tenantId}/offlineDeviceCredentials/${credentialId}`,
+    ).get();
+    if (!credential.exists || credential.data().active !== true ||
+        credential.data().venueId !== venueId ||
+        credential.data().deviceId !== deviceId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The selected device does not have an active offline credential.",
+      );
+    }
+    const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
+    const activation = await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(venueRef);
+      const currentEpoch = Number(current.data()?.offlineHub?.epoch ?? 0);
+      const epoch = Number.isSafeInteger(currentEpoch) && currentEpoch >= 0
+        ? currentEpoch + 1
+        : 1;
+      transaction.update(venueRef, {
+        offlineHub: {
+          enabled: true,
+          deviceId,
+          credentialId,
+          epoch,
+          activatedAt: FieldValue.serverTimestamp(),
+          activatedByActor: actor,
+        },
+      });
+      transaction.create(db.collection(`tenants/${tenantId}/auditEvents`).doc(), {
+        action: "activateOfflineVenueHub",
+        venueId,
+        deviceId,
+        credentialId,
+        hubEpoch: epoch,
+        actor,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+      return {epoch};
+    });
+    result = {saved: true, enabled: true, hubEpoch: activation.epoch};
+  } else if (resource === "offlineHubDeactivation") {
+    const reason = requiredText(values, "reason", 200);
+    const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
+    const deactivation = await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(venueRef);
+      const currentEpoch = Number(current.data()?.offlineHub?.epoch ?? 0);
+      const epoch = Number.isSafeInteger(currentEpoch) && currentEpoch >= 0
+        ? currentEpoch + 1
+        : 1;
+      transaction.update(venueRef, {
+        offlineHub: {
+          enabled: false,
+          epoch,
+          deactivatedAt: FieldValue.serverTimestamp(),
+          deactivatedByActor: actor,
+          deactivationReason: reason,
+        },
+      });
+      transaction.create(db.collection(`tenants/${tenantId}/auditEvents`).doc(), {
+        action: "deactivateOfflineVenueHub",
+        venueId,
+        hubEpoch: epoch,
+        reason,
+        actor,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+      return {epoch};
+    });
+    result = {saved: true, enabled: false, hubEpoch: deactivation.epoch};
   } else {
     throw new HttpsError("invalid-argument", "That venue configuration resource is not supported.");
   }
@@ -1440,6 +1592,38 @@ async function heartbeatPrinterDeviceFor(caller, rawData) {
   const device = await authenticatedPrinterDevice(caller, rawData);
   await device.deviceRef.update({lastHeartbeatAt: FieldValue.serverTimestamp()});
   return {online: true};
+}
+
+async function getOfflineHubBootstrapFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  await requireTenantHostMember(caller, tenantId);
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const rawHub = venue.data().offlineHub;
+  const hub = rawHub != null && typeof rawHub === "object" ? rawHub : {};
+  const credentialSnapshot = await db
+    .collection(`tenants/${tenantId}/offlineDeviceCredentials`)
+    .where("venueId", "==", venueId)
+    .where("active", "==", true)
+    .limit(250)
+    .get();
+  return {
+    enabled: hub.enabled === true,
+    hubDeviceId: typeof hub.deviceId === "string" ? hub.deviceId : null,
+    hubCredentialId: typeof hub.credentialId === "string" ? hub.credentialId : null,
+    hubEpoch: Number.isSafeInteger(Number(hub.epoch)) ? Number(hub.epoch) : 0,
+    credentials: credentialSnapshot.docs.map((credential) => ({
+      credentialId: credential.id,
+      deviceId: credential.data().deviceId,
+      algorithm: credential.data().algorithm,
+      publicKeyBase64: credential.data().publicKeyBase64,
+    })),
+    serverTimeMillis: Date.now(),
+  };
 }
 
 async function getTrustedTimeFor(caller, rawData) {
@@ -7647,7 +7831,7 @@ async function invokePosAction(action, caller, data) {
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
     "recoverOwnStaffPin",
     "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
-    "getTrustedTime",
+    "getTrustedTime", "getOfflineHubBootstrap",
   ]);
   const actingCaller = sessionBootstrapActions.has(action)
     ? caller
@@ -7677,6 +7861,8 @@ async function invokePosAction(action, caller, data) {
       return completeDevicePrintJobFor(caller, data);
     case "getTrustedTime":
       return getTrustedTimeFor(caller, data);
+    case "getOfflineHubBootstrap":
+      return getOfflineHubBootstrapFor(caller, data);
     case "unlockStaffPin":
       return unlockStaffPinFor(actingCaller, data);
     case "lockStaffPin":

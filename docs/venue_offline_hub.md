@@ -80,8 +80,10 @@ When the hub owns write authority:
   unavailable rather than creating a second order history.
 
 Browser delivery must include a trusted venue certificate, strict origin
-allow-listing, Private Network Access/CORS handling and encrypted device
-credentials. There will be no unauthenticated HTTP endpoint on the LAN.
+allow-listing and Private Network Access/CORS handling. Each physical device
+signs requests with an Ed25519 private key held in its operating-system
+credential store; Firebase and the hub retain only the public key. There will
+be no unauthenticated HTTP endpoint on the LAN.
 
 ## Initial offline scope
 
@@ -103,10 +105,13 @@ cross-venue voucher redemption and subscription changes remain online-only.
 3. Trusted Firebase/hub clock and fail-closed client routing policy.
    **Implemented foundation.**
 4. Manager-approved device enrolment and per-device credentials.
-   **Authenticated request-envelope foundation implemented; enrolment UI and
-   credential exchange remain.**
+   **Public-key credential generation, protected local storage, signed request
+   envelopes and cloud enrolment/rotation endpoints implemented; enrolment UI
+   remains.**
 5. Authenticated local HTTPS API and real-time event stream.
-6. Primary hub lease/generation and explicit recovery takeover.
+6. Primary hub lease/generation and explicit recovery takeover. **Cloud
+   activation/deactivation generation and audit foundation implemented; local
+   lease/health takeover remains.**
 7. Wire POS order/payment commands through the route and durable projector.
 8. LAN print routing with unknown-after-power-loss recovery.
 9. Server-validated Firebase ingestion and reconciliation UI.

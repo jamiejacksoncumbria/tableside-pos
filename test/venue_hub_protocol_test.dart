@@ -5,33 +5,41 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:tableside_pos/offline/venue_hub_protocol.dart';
 
 void main() {
-  final key = SecretKey(List<int>.generate(32, (index) => index));
+  late KeyPair keyPair;
   final now = DateTime.utc(2026, 9, 12, 12);
   const body = <String, Object?>{
     'orderId': 'order-a',
     'line': {'quantity': 2, 'productId': 'product-a'},
   };
 
-  Future<VenueHubRequestEnvelope> signed() => VenueHubRequestSigner(key).sign(
-    credentialId: 'credential-a',
-    tenantId: 'tenant-a',
-    venueId: 'venue-a',
-    deviceId: 'device-a',
-    staffId: 'staff-a',
-    method: 'POST',
-    path: '/v1/orders/events',
-    hubEpoch: 3,
-    sentAtUtc: now,
-    body: body,
-    nonce: base64UrlEncode(List<int>.generate(24, (index) => index)),
-  );
+  setUp(() async {
+    keyPair = await Ed25519().newKeyPairFromSeed(
+      List<int>.generate(32, (index) => index),
+    );
+  });
+
+  Future<VenueHubRequestEnvelope> signed() =>
+      VenueHubRequestSigner(keyPair).sign(
+        credentialId: 'credential-a',
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'device-a',
+        staffId: 'staff-a',
+        method: 'POST',
+        path: '/v1/orders/events',
+        hubEpoch: 3,
+        sentAtUtc: now,
+        body: body,
+        nonce: base64UrlEncode(List<int>.generate(24, (index) => index)),
+      );
 
   test('accepts one valid authenticated venue request', () async {
     final envelope = await signed();
+    final publicKey = await keyPair.extractPublicKey();
     await VenueHubReplayGuard().verify(
       envelope: envelope,
       body: body,
-      credentialKey: key,
+      credentialPublicKey: publicKey,
       expectedTenantId: 'tenant-a',
       expectedVenueId: 'venue-a',
       expectedHubEpoch: 3,
@@ -41,11 +49,12 @@ void main() {
 
   test('rejects replay, modified payload and stale hub generation', () async {
     final envelope = await signed();
+    final publicKey = await keyPair.extractPublicKey();
     final guard = VenueHubReplayGuard();
     await guard.verify(
       envelope: envelope,
       body: body,
-      credentialKey: key,
+      credentialPublicKey: publicKey,
       expectedTenantId: 'tenant-a',
       expectedVenueId: 'venue-a',
       expectedHubEpoch: 3,
@@ -55,7 +64,7 @@ void main() {
       guard.verify(
         envelope: envelope,
         body: body,
-        credentialKey: key,
+        credentialPublicKey: publicKey,
         expectedTenantId: 'tenant-a',
         expectedVenueId: 'venue-a',
         expectedHubEpoch: 3,
@@ -68,7 +77,7 @@ void main() {
       VenueHubReplayGuard().verify(
         envelope: envelope,
         body: const {'orderId': 'order-b'},
-        credentialKey: key,
+        credentialPublicKey: publicKey,
         expectedTenantId: 'tenant-a',
         expectedVenueId: 'venue-a',
         expectedHubEpoch: 3,
@@ -80,7 +89,7 @@ void main() {
       VenueHubReplayGuard().verify(
         envelope: envelope,
         body: body,
-        credentialKey: key,
+        credentialPublicKey: publicKey,
         expectedTenantId: 'tenant-a',
         expectedVenueId: 'venue-a',
         expectedHubEpoch: 4,
@@ -91,7 +100,7 @@ void main() {
   });
 
   test('canonical signing is independent of map insertion order', () async {
-    final signer = VenueHubRequestSigner(key);
+    final signer = VenueHubRequestSigner(keyPair);
     final first = await signer.sign(
       credentialId: 'credential-a',
       tenantId: 'tenant-a',

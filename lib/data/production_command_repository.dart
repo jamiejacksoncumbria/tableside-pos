@@ -435,6 +435,79 @@ class ProductionCommandRepository {
     });
   }
 
+  Future<void> enrollOfflineHubDeviceCredential({
+    required VenueScope scope,
+    required String deviceId,
+    required String credentialId,
+    required String publicKeyBase64,
+  }) {
+    return _call('manageVenueConfiguration', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'resource': 'offlineHubDeviceCredential',
+      'values': {
+        'deviceId': deviceId,
+        'credentialId': credentialId,
+        'publicKeyBase64': publicKeyBase64,
+      },
+    });
+  }
+
+  Future<void> revokeOfflineHubDeviceCredential({
+    required VenueScope scope,
+    required String credentialId,
+    required String reason,
+  }) {
+    return _call('manageVenueConfiguration', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'resource': 'offlineCredentialRemoval',
+      'values': {'credentialId': credentialId, 'reason': reason},
+    });
+  }
+
+  Future<int> activateOfflineVenueHub({
+    required VenueScope scope,
+    required String deviceId,
+    required String credentialId,
+  }) async {
+    final response = await _call('manageVenueConfiguration', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'resource': 'offlineHubActivation',
+      'values': {'deviceId': deviceId, 'credentialId': credentialId},
+    });
+    final epoch = response['hubEpoch'];
+    if (epoch is! int || epoch < 1) {
+      throw StateError('The server returned an invalid hub generation.');
+    }
+    return epoch;
+  }
+
+  Future<int> deactivateOfflineVenueHub({
+    required VenueScope scope,
+    required String reason,
+  }) async {
+    final response = await _call('manageVenueConfiguration', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'resource': 'offlineHubDeactivation',
+      'values': {'reason': reason},
+    });
+    final epoch = response['hubEpoch'];
+    if (epoch is! int || epoch < 1) {
+      throw StateError('The server returned an invalid hub generation.');
+    }
+    return epoch;
+  }
+
+  Future<Map<String, Object?>> fetchOfflineHubBootstrap({
+    required VenueScope scope,
+  }) => _call('getOfflineHubBootstrap', {
+    'tenantId': scope.tenantId,
+    'venueId': scope.venueId,
+  });
+
   Future<void> heartbeatPrinterDevice({
     required VenueScope scope,
     required String deviceId,
