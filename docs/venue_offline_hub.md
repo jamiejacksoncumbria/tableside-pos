@@ -1,140 +1,108 @@
-# Venue offline hub architecture
+# Venue offline hub
 
-Status: foundation in progress on `feature/venue-offline-hub`.
+Status: pilot implementation on `feature/venue-offline-hub`.
 
-## Known issues before release
+The venue hub lets native Android and Windows tills continue essential service
+when the venue Wi-Fi is working but its internet connection is unavailable. One
+manager-enrolled native device is the venue authority. Other enrolled native
+devices connect to it over authenticated local HTTPS.
 
-- The staff PIN-entry layout can overflow by approximately 35 pixels on a
-  medium-size tablet (`staff_pin_gate.dart`). Make the content vertically
-  adaptive/scrollable and verify keyboard-open, landscape and large-text
-  layouts before the offline hub is released.
+Web builds remain cloud-connected and read-only when a venue hub owns write
+authority. Browsers do not currently write through the LAN hub. This avoids
+browser certificate, private-network and split-brain behaviour that cannot be
+made reliable across every browser in the pilot.
 
-## Safety invariants
+## Pilot scope
 
-1. A device never reports an offline operation as saved until the primary hub
-   has committed it using SQLite `WAL` journaling and `synchronous=FULL`.
-2. Every client keeps its own durable outbox until that acknowledgement.
-3. Only one manager-enrolled primary hub generation may accept writes.
-4. Local-network location grants no trust. Users and devices authenticate on
-   every request and every object is checked against its tenant and venue.
-5. Financial state is derived from immutable events. Existing payments and
-   closed bills are corrected with new events, never overwritten.
-6. Cloud ingestion uses the local event ID as an idempotency key and validates
-   the entire event rather than trusting client-calculated totals.
-7. PINs, Firebase tokens, card details and cryptographic keys are never placed
-   in event payloads or diagnostic logs.
-8. Every event records the authoritative UTC time, the device-observed UTC
-   time, clock source and measured skew. A skew above two minutes is surfaced
-   to staff and retained for reconciliation rather than silently trusted.
-9. When a hub generation owns venue writes, any client that cannot reach that
-   hub is fail-closed. Cloud connectivity alone must not create a competing
-   order history.
+Available through the hub:
 
-## Durable event lifecycle
+- select a table or named tab and view live orders;
+- create orders, add/update draft lines and send new lines;
+- record partial cash or externally approved card payments;
+- close fully paid orders and request pre-receipts;
+- route kitchen, bar, dessert and receipt tickets to enrolled Android or
+  Windows printer devices;
+- retry the primary printer three times, then its configured fallback three
+  times;
+- reserve tracked stock and recipe components when lines are sent;
+- authenticate cached venue staff with six-digit PINs;
+- sync immutable events, stock movements, payments and audit records back to
+  Firebase after connectivity returns.
 
-`pending -> inFlight -> synced`
+Online-only in this pilot: split bills, line discounts/corrections, refunds,
+gift vouchers, bookings, menu/stock administration, platform administration,
+online payments and subscription changes. These actions fail closed while the
+hub is required and unreachable; they never create a competing cloud history.
 
-An invalid or conflicting event moves to `quarantined` and remains available
-for manager reconciliation. A process interruption resets `inFlight` events to
-`pending`; replay is safe because event IDs are idempotent.
+## Safety rules
 
-Each encrypted event records a device/staff identity, operation type, business
-timestamp, hub epoch, sequence number, previous hash and authenticated event
-hash. Tenant, venue and payload data live inside the encrypted envelope. The
-unencrypted venue lookup key is an HMAC pseudonym rather than its Firebase ID.
+1. A command is reported as saved only after the hub commits it to encrypted
+   SQLite with WAL journaling and `synchronous=FULL`.
+2. The hub assigns immutable IDs, trusted UTC timestamps, a strictly increasing
+   sequence, previous-event hash and authenticated event hash.
+3. Semantic command IDs make client retries safe after a lost acknowledgement.
+4. Only the current cloud-authorised hub generation accepts writes. A newer
+   generation stops the old hub as soon as it next reaches Firebase.
+5. Every LAN request is signed by an enrolled Ed25519 device credential and
+   checked for timestamp, nonce replay, tenant, venue and staff PIN session.
+6. Local-network access is never treated as authentication.
+7. Prices, tax, modifiers, variants, availability, stock and printer routes are
+   canonicalised from the signed venue snapshot; client values are not trusted.
+8. Financial history is append-only. Payments retain tender/base currencies,
+   exchange rate, change, UTC timestamp and venue business date.
+9. PIN failures are stored as immutable security events with staff, device,
+   venue, time, success and lock status.
+10. Secrets, PINs, Firebase tokens and card details are never written to the
+    event log or diagnostic output.
 
-Order state is rebuilt by a deterministic projector. It rejects cross-venue
-events, stale hub generations, missing/duplicate sequences, edits after close,
-duplicate payments, overpayment and closing with an outstanding balance. Cloud
-ingestion will run equivalent validation before acknowledging an event.
+## Setup
 
-## Trusted time
+1. Give the proposed hub and every native till/printer a stable LAN address.
+2. Generate a venue TLS certificate with
+   `tools/create-venue-hub-certificate.ps1`. Install its CA certificate as
+   trusted on every participating device.
+3. In **Settings > Venue offline hub**, enter the hub LAN address, import the
+   certificate and private key on the hub device, then choose **Make this the
+   hub**.
+4. On every other native device, open the same page and choose **Enrol this
+   till / printer** while internet is available.
+5. Configure venue printer devices and primary/fallback routes normally.
+6. Keep the hub app open. Automatic Android boot/foreground-service startup is
+   not part of this pilot, so a device restart requires reopening TableSide.
 
-- During normal online operation, a Firebase function supplies Google server
-  time and the venue timezone. The client estimates offset at the midpoint of
-  the request round trip; it never changes the device operating-system clock.
-- During an outage, the enrolled primary venue hub supplies the authoritative
-  time and its current hub generation.
-- Orders and payments retain server/hub time, device-observed time, measured
-  skew and venue-local display snapshots. Historic receipts therefore do not
-  change when a device timezone or clock is corrected later.
-- An unsynchronised device may not become an offline authority without a
-  manager-visible warning and a recorded recovery decision.
+A manager takeover is intentionally explicit and audited. Confirm the previous
+hub is stopped before replacing it. Cloud activation is refused while Firebase
+knows of open venue orders; an old isolated hub may still contain unsynchronised
+orders, so takeover always requires an operational reconciliation check.
 
-## Web clients and split-brain prevention
+## Data and power failure
 
-Firebase Hosting remains the normal online host. For offline browser use, the
-venue hub will serve/cache the signed web application over authenticated local
-HTTPS and expose an authenticated WebSocket/API on the venue LAN. Local-network
-location is never treated as authentication; device enrolment, staff PIN
-session, tenant and venue are checked on every mutation.
+Committed orders survive application, device and venue power loss in the hub's
+encrypted local database. Claimed-but-unconfirmed print jobs return to the
+queue after restart. Pending cloud uploads remain locally stored until
+acknowledged. Regular device backups are still required because loss of the
+physical hub and its protected encryption key is not recoverable from an
+ordinary database-file copy alone.
 
-When the hub owns write authority:
+## Required pilot tests
 
-- a web browser on the venue LAN writes through the hub;
-- Android, iOS and Windows clients on the LAN write through the same hub;
-- a browser on 3G or another network can continue to read cloud state but is
-  read-only until it can reach the hub or the hub has reconciled and released
-  authority;
-- if neither Firebase nor the hub is reachable, web mutation controls are
-  unavailable rather than creating a second order history.
-
-Browser delivery must include a trusted venue certificate, strict origin
-allow-listing and Private Network Access/CORS handling. Each physical device
-signs requests with an Ed25519 private key held in its operating-system
-credential store; Firebase and the hub retain only the public key. There will
-be no unauthenticated HTTP endpoint on the LAN.
-
-## Initial offline scope
-
-- Open tables and named tabs.
-- Draft, send, split and close orders.
-- Kitchen, bar and receipt printing over the venue LAN.
-- Cash payments and externally approved card-terminal payments.
-- Stock reservations and deductions derived from order events.
-- Locally cached staff PIN authentication and permission snapshots.
-
-Platform administration, role changes, staff creation, online payments,
-cross-venue voucher redemption and subscription changes remain online-only.
-
-## Delivery phases
-
-1. Encrypted local event ledger and client outbox. **Implemented foundation.**
-2. Deterministic order/payment projection from those events. **Implemented
-   foundation; full POS command wiring remains.**
-3. Trusted Firebase/hub clock and fail-closed client routing policy.
-   **Implemented foundation.**
-4. Manager-approved device enrolment and per-device credentials.
-   **Public-key credential generation, protected local storage, signed request
-   envelopes and cloud enrolment/rotation endpoints implemented; enrolment UI
-   remains.**
-5. Authenticated local HTTPS API and real-time event stream. **Signed request,
-   replay prevention, active-staff permission, durable-command processing,
-   HTTPS transport and authenticated WebSocket broadcast foundations are
-   implemented; certificate provisioning and full POS wiring remain.**
-6. Primary hub lease/generation and explicit recovery takeover. **Cloud
-   activation/deactivation generation and audit foundation implemented; local
-   lease/health takeover remains.**
-7. Wire POS order/payment commands through the route and durable projector.
-8. LAN print routing with unknown-after-power-loss recovery.
-9. Server-validated Firebase ingestion and reconciliation UI.
-10. Android foreground hub service and reboot recovery.
-11. Optional enrolled backup hub after split-brain testing.
-
-End-to-end offline POS command routing is not yet complete. The current code
-establishes the durable, temporal, deterministic and secure transport safety
-primitives it will use; it must not yet be presented to a pilot venue as fully
-offline capable.
-
-## Required failure tests
-
-- Remove internet during every order and payment transition.
-- Remove hub power before and after its durable acknowledgement.
-- Remove printer power before, during and after physical printing.
-- Restart while uploads are in flight.
-- Attempt replay, reordering, payload modification and cross-venue access.
-- Run an old hub after a manager takeover creates a newer generation.
-- Fill the disk and exhaust queue limits.
-- Roll the device clock backward and forward.
-- Revoke a device/staff account while a venue is offline, then reconnect.
-- Restore an encrypted backup onto approved replacement hardware.
+- Remove internet before, during and after draft, send, partial payment and
+  final payment operations.
+- Kill and restart the hub before and after its save confirmation.
+- Power off printers before, during and after printing; verify three retries,
+  fallback routing and recovery after restart.
+- Add products until tracked stock reaches zero and verify manager override.
+- Use two tills on the LAN and confirm order changes appear on both within two
+  seconds without duplicate lines/payments.
+- Set a client clock more than two minutes wrong and verify the retained skew
+  warning while hub time remains authoritative.
+- Revoke a staff member/device and change a PIN while online; verify refreshed
+  snapshots invalidate existing local sessions.
+- Attempt a replay, modified signature, stale hub generation and cross-venue
+  request; all must fail.
+- Restore power with pending events and confirm cloud orders, payments, stock
+  movements and audit events reconcile once and only once.
+- Verify web can read cloud data but cannot mutate while hub authority is
+  active.
+- Check the known medium-tablet PIN screen overflow separately; it is a UI
+  issue already recorded for the next responsive-layout pass.

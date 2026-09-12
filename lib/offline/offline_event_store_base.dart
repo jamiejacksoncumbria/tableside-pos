@@ -9,6 +9,13 @@ abstract interface class OfflineEventStore {
 
   Future<List<OfflineEvent>> pending({int limit = 250});
 
+  Future<List<OfflineEvent>> eventsForVenue({
+    required String tenantId,
+    required String venueId,
+    required int hubEpoch,
+    int limit = 10000,
+  });
+
   Stream<List<OfflineEvent>> watchPending({int limit = 250});
 
   Future<void> saveSnapshot({
@@ -26,6 +33,8 @@ abstract interface class OfflineEventStore {
   });
 
   Future<void> markInFlight(String eventId);
+
+  Future<void> markPending(String eventId);
 
   Future<void> markSynced(String eventId, DateTime acknowledgedAtUtc);
 

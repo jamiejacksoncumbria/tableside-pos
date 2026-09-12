@@ -21,9 +21,19 @@ class VenueHubStaffGrant {
 }
 
 typedef VenueHubStaffAuthorizer =
-    Future<VenueHubStaffGrant?> Function(String staffId);
+    Future<VenueHubStaffGrant?> Function(
+      String staffId,
+      String sessionId,
+      String sessionToken,
+    );
 typedef VenueHubEventCommitter =
     Future<OfflineEvent> Function(OfflineEventDraft draft, int hubEpoch);
+typedef VenueHubEventValidator =
+    Future<Map<String, Object?>> Function(
+      String eventType,
+      Map<String, Object?> payload,
+      VenueHubStaffGrant grant,
+    );
 
 class VenueHubCommandAcknowledgement {
   const VenueHubCommandAcknowledgement({
@@ -50,10 +60,12 @@ class VenueHubCommandProcessor {
     required Map<String, VenueHubPublicCredential> credentials,
     required VenueHubStaffAuthorizer authorizeStaff,
     required VenueHubEventCommitter commitEvent,
+    VenueHubEventValidator? validateEvent,
     VenueHubReplayGuard? replayGuard,
-  }) : credentials = Map.unmodifiable(credentials),
+  }) : credentials = Map<String, VenueHubPublicCredential>.from(credentials),
        _authorizeStaff = authorizeStaff,
        _commitEvent = commitEvent,
+       _validateEvent = validateEvent ?? _identityValidator,
        _replayGuard = replayGuard ?? VenueHubReplayGuard() {
     if (hubEpoch < 1) {
       throw ArgumentError.value(hubEpoch, 'hubEpoch', 'Must be positive.');
@@ -66,6 +78,7 @@ class VenueHubCommandProcessor {
   final Map<String, VenueHubPublicCredential> credentials;
   final VenueHubStaffAuthorizer _authorizeStaff;
   final VenueHubEventCommitter _commitEvent;
+  final VenueHubEventValidator _validateEvent;
   final VenueHubReplayGuard _replayGuard;
 
   static const _permissionByEvent = <String, String>{
@@ -75,6 +88,7 @@ class VenueHubCommandProcessor {
     'order.sent': 'order',
     'payment.recorded': 'payment',
     'order.closed': 'payment',
+    'receipt.requested': 'order',
   };
 
   Future<VenueHubCommandAcknowledgement> process({
@@ -87,16 +101,15 @@ class VenueHubCommandProcessor {
         'The hub endpoint is not supported.',
       );
     }
-    final eventType = body['eventType'];
-    final permission = eventType is String
-        ? _permissionByEvent[eventType]
-        : null;
-    if (permission == null) {
+    final rawEventType = body['eventType'];
+    final eventType = rawEventType is String ? rawEventType : null;
+    final permission = eventType == null ? null : _permissionByEvent[eventType];
+    if (eventType == null || permission == null) {
       throw const VenueHubCommandException(
         'The staff member cannot perform this offline operation.',
       );
     }
-    await authenticate(
+    final grant = await authenticate(
       envelope: envelope,
       body: body,
       trustedNowUtc: trustedNowUtc,
@@ -108,6 +121,11 @@ class VenueHubCommandProcessor {
         'The offline event payload is invalid.',
       );
     }
+    final canonicalPayload = await _validateEvent(
+      eventType,
+      Map<String, Object?>.from(rawPayload),
+      grant,
+    );
     DateTime? businessTimestamp;
     final rawTimestamp = body['businessTimestampUtc'];
     if (rawTimestamp != null) {
@@ -129,8 +147,8 @@ class VenueHubCommandProcessor {
         venueId: venueId,
         deviceId: envelope.deviceId,
         staffId: envelope.staffId,
-        type: eventType as String,
-        payload: Map<String, Object?>.from(rawPayload),
+        type: eventType,
+        payload: canonicalPayload,
         businessTimestamp: businessTimestamp,
       ),
       hubEpoch,
@@ -143,28 +161,48 @@ class VenueHubCommandProcessor {
     );
   }
 
+  static Future<Map<String, Object?>> _identityValidator(
+    String _,
+    Map<String, Object?> payload,
+    VenueHubStaffGrant _,
+  ) async => payload;
+
+  void installCredentials(
+    Map<String, VenueHubPublicCredential> currentCredentials,
+  ) {
+    credentials
+      ..clear()
+      ..addAll(currentCredentials);
+  }
+
   Future<VenueHubStaffGrant> authenticate({
     required VenueHubRequestEnvelope envelope,
     required Map<String, Object?> body,
     required DateTime trustedNowUtc,
     required String requiredPermission,
   }) async {
-    final credential = credentials[envelope.credentialId];
-    if (credential == null || credential.deviceId != envelope.deviceId) {
-      throw const VenueHubCommandException(
-        'This device credential is not active at the venue.',
-      );
-    }
-    await _replayGuard.verify(
+    await authenticateDevice(
       envelope: envelope,
       body: body,
-      credentialPublicKey: credential.publicKey,
-      expectedTenantId: tenantId,
-      expectedVenueId: venueId,
-      expectedHubEpoch: hubEpoch,
       trustedNowUtc: trustedNowUtc,
     );
-    final grant = await _authorizeStaff(envelope.staffId);
+    final sessionId = body['staffSessionId'];
+    final sessionToken = body['staffSessionToken'];
+    if (sessionId is! String ||
+        sessionId.isEmpty ||
+        sessionId.length > 160 ||
+        sessionToken is! String ||
+        sessionToken.length < 32 ||
+        sessionToken.length > 256) {
+      throw const VenueHubCommandException(
+        'A valid local staff session is required.',
+      );
+    }
+    final grant = await _authorizeStaff(
+      envelope.staffId,
+      sessionId,
+      sessionToken,
+    );
     if (grant == null ||
         !grant.active ||
         grant.staffId != envelope.staffId ||
@@ -181,6 +219,28 @@ class VenueHubCommandProcessor {
       );
     }
     return grant;
+  }
+
+  Future<void> authenticateDevice({
+    required VenueHubRequestEnvelope envelope,
+    required Map<String, Object?> body,
+    required DateTime trustedNowUtc,
+  }) async {
+    final credential = credentials[envelope.credentialId];
+    if (credential == null || credential.deviceId != envelope.deviceId) {
+      throw const VenueHubCommandException(
+        'This device credential is not active at the venue.',
+      );
+    }
+    await _replayGuard.verify(
+      envelope: envelope,
+      body: body,
+      credentialPublicKey: credential.publicKey,
+      expectedTenantId: tenantId,
+      expectedVenueId: venueId,
+      expectedHubEpoch: hubEpoch,
+      trustedNowUtc: trustedNowUtc,
+    );
   }
 }
 

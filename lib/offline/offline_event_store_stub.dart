@@ -22,6 +22,14 @@ class _UnsupportedOfflineEventStore implements OfflineEventStore {
   Future<List<OfflineEvent>> pending({int limit = 250}) async => const [];
 
   @override
+  Future<List<OfflineEvent>> eventsForVenue({
+    required String tenantId,
+    required String venueId,
+    required int hubEpoch,
+    int limit = 10000,
+  }) async => const [];
+
+  @override
   Stream<List<OfflineEvent>> watchPending({int limit = 250}) =>
       Stream.value(const []);
 
@@ -45,6 +53,9 @@ class _UnsupportedOfflineEventStore implements OfflineEventStore {
 
   @override
   Future<void> markInFlight(String eventId) async {}
+
+  @override
+  Future<void> markPending(String eventId) async {}
 
   @override
   Future<void> markSynced(String eventId, DateTime acknowledgedAtUtc) async {}

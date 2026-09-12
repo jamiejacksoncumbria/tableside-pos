@@ -57,6 +57,29 @@ void main() {
 
     expect(projection.balanceDueMinor, 1250);
     expect(projection.isClosed, isFalse);
+    expect(projection.payments.single.tenderedAmountMinor, 750);
+    expect(projection.payments.single.exchangeRateToBase, '1');
+  });
+
+  test('interleaved global ledger sequences remain valid per order', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(3, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 1000,
+      }),
+      _event(7, 'order.sent', {
+        'orderId': 'order-a',
+        'lineIds': ['line-a'],
+      }),
+    ]);
+
+    expect(projection.lastSequence, 7);
+    expect(projection.lines.values.single.sent, isTrue);
   });
 
   test('overpayment and stale hub generations fail closed', () {
@@ -78,7 +101,10 @@ void main() {
         'currencyCode': 'TRY',
       }),
     ];
-    expect(() => projectOfflineOrder(overpayment), throwsA(isA<OfflineProjectionException>()));
+    expect(
+      () => projectOfflineOrder(overpayment),
+      throwsA(isA<OfflineProjectionException>()),
+    );
 
     final stale = [
       _event(1, 'order.opened', {'orderId': 'order-a'}),
@@ -91,7 +117,10 @@ void main() {
         'unitPriceMinor': 1000,
       }, hubEpoch: 2),
     ];
-    expect(() => projectOfflineOrder(stale), throwsA(isA<OfflineProjectionException>()));
+    expect(
+      () => projectOfflineOrder(stale),
+      throwsA(isA<OfflineProjectionException>()),
+    );
   });
 
   test('events after closure and cross-venue events fail closed', () {
@@ -119,7 +148,10 @@ void main() {
         'quantity': 2,
       }),
     ];
-    expect(() => projectOfflineOrder(base), throwsA(isA<OfflineProjectionException>()));
+    expect(
+      () => projectOfflineOrder(base),
+      throwsA(isA<OfflineProjectionException>()),
+    );
 
     final crossVenue = [
       _event(1, 'order.opened', {'orderId': 'order-a'}),
@@ -132,7 +164,10 @@ void main() {
         'unitPriceMinor': 1000,
       }, venueId: 'venue-b'),
     ];
-    expect(() => projectOfflineOrder(crossVenue), throwsA(isA<OfflineProjectionException>()));
+    expect(
+      () => projectOfflineOrder(crossVenue),
+      throwsA(isA<OfflineProjectionException>()),
+    );
   });
 }
 

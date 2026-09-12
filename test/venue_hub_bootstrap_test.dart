@@ -16,6 +16,7 @@ void main() {
       'hubEpoch': 4,
       'hubDeviceId': 'device-a',
       'hubCredentialId': 'credential-a',
+      'hubEndpoint': 'https://192.168.1.20:8443',
       'serverTimeMillis': 1789214400000,
       'credentials': [credential],
     });

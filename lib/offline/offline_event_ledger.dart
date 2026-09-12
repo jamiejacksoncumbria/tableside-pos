@@ -54,6 +54,21 @@ class OfflineEventLedger {
     return _store.pending(limit: limit);
   }
 
+  Future<List<OfflineEvent>> eventsForVenue({
+    required String tenantId,
+    required String venueId,
+    required int hubEpoch,
+    int limit = 10000,
+  }) {
+    _requireReady();
+    return _store.eventsForVenue(
+      tenantId: tenantId,
+      venueId: venueId,
+      hubEpoch: hubEpoch,
+      limit: limit,
+    );
+  }
+
   Stream<List<OfflineEvent>> watchPending({int limit = 250}) {
     _requireReady();
     return _store.watchPending(limit: limit);
@@ -92,6 +107,11 @@ class OfflineEventLedger {
   Future<void> markInFlight(String eventId) {
     _requireReady();
     return _store.markInFlight(eventId);
+  }
+
+  Future<void> markPending(String eventId) {
+    _requireReady();
+    return _store.markPending(eventId);
   }
 
   Future<void> markSynced(String eventId, DateTime acknowledgedAtUtc) {

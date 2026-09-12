@@ -11,6 +11,10 @@ import '../core/firebase_bootstrap.dart';
 import '../core/staff_pin_session_store.dart';
 import '../firebase_options.dart';
 import '../features/pos/domain.dart';
+import '../offline/offline_event.dart';
+import '../offline/venue_hub_device_credential.dart';
+import '../offline/venue_hub_protocol.dart';
+import '../offline/venue_hub_client_registry.dart';
 
 class ProductionDispatchResult {
   const ProductionDispatchResult({
@@ -470,12 +474,21 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String deviceId,
     required String credentialId,
+    required String endpointHost,
+    int endpointPort = 8443,
+    String? takeoverReason,
   }) async {
     final response = await _call('manageVenueConfiguration', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'resource': 'offlineHubActivation',
-      'values': {'deviceId': deviceId, 'credentialId': credentialId},
+      'values': {
+        'deviceId': deviceId,
+        'credentialId': credentialId,
+        'endpointHost': endpointHost,
+        'endpointPort': endpointPort,
+        if (takeoverReason != null) 'takeoverReason': takeoverReason,
+      },
     });
     final epoch = response['hubEpoch'];
     if (epoch is! int || epoch < 1) {
@@ -507,6 +520,73 @@ class ProductionCommandRepository {
     'tenantId': scope.tenantId,
     'venueId': scope.venueId,
   });
+
+  Future<Set<String>> uploadOfflineHubEvents({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+    required List<OfflineEvent> events,
+  }) async {
+    if (events.isEmpty || events.length > 25) {
+      throw ArgumentError.value(
+        events.length,
+        'events',
+        'Upload between 1 and 25 events.',
+      );
+    }
+    final body = <String, Object?>{
+      'events': events
+          .map((event) => event.toCloudJson())
+          .toList(growable: false),
+    };
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: '/v1/cloud-sync',
+      hubEpoch: hubEpoch,
+      sentAtUtc: DateTime.now().toUtc(),
+      body: body,
+    );
+    final response = await _call('ingestOfflineHubEvents', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+    final rawIds = response['acknowledgedEventIds'];
+    if (rawIds is! List) {
+      throw StateError('The server returned an invalid hub acknowledgement.');
+    }
+    return rawIds.whereType<String>().toSet();
+  }
+
+  Future<Map<String, Object?>> fetchOfflineHubSnapshot({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+  }) async {
+    const body = <String, Object?>{'snapshotVersion': 1};
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: '/v1/snapshot',
+      hubEpoch: hubEpoch,
+      sentAtUtc: DateTime.now().toUtc(),
+      body: body,
+    );
+    return _call('getOfflineHubSnapshot', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+  }
 
   Future<void> heartbeatPrinterDevice({
     required VenueScope scope,
@@ -857,6 +937,16 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String tabName,
   }) async {
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      final orderId = 'order-${DateTime.now().microsecondsSinceEpoch}';
+      await hub.ensureOrderOpened(
+        scope: scope,
+        orderId: orderId,
+        tabName: tabName,
+      );
+      return orderId;
+    }
     final result = await _call('openNamedTab', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
@@ -876,8 +966,31 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required PosOrder order,
     required OrderLine line,
-  }) {
-    return _call('addOrderDraftLine', {
+  }) async {
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      await hub.ensureOrderOpened(
+        scope: scope,
+        orderId: order.id,
+        tableId: order.tableId,
+        tabName: order.tabName,
+      );
+      await hub.send(
+        scope: scope,
+        eventType: 'order.itemAdded',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'lineId': line.id,
+          'productId': line.productId,
+          'quantity': line.quantity,
+          if (line.variantId != null) 'variantId': line.variantId,
+          'modifierSelections': _modifierSelections(line),
+          'itemNote': line.itemNote,
+        },
+      );
+      return;
+    }
+    await _call('addOrderDraftLine', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'orderId': order.id,
@@ -902,8 +1015,21 @@ class ProductionCommandRepository {
     required PosOrder order,
     required String lineId,
     required int quantity,
-  }) {
-    return _call('updateOrderDraftLine', {
+  }) async {
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      await hub.send(
+        scope: scope,
+        eventType: 'order.itemQuantityChanged',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'lineId': lineId,
+          'quantity': quantity,
+        },
+      );
+      return;
+    }
+    await _call('updateOrderDraftLine', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'orderId': order.id,
@@ -922,6 +1048,11 @@ class ProductionCommandRepository {
     required String reason,
     int? valueMinor,
   }) {
+    if (VenueHubClientRegistry.instance.requiresHub(scope)) {
+      throw StateError(
+        'Item discounts and removals are unavailable while venue-hub routing is active.',
+      );
+    }
     return _call('adjustOrderLine', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
@@ -943,6 +1074,34 @@ class ProductionCommandRepository {
         .where((line) => !line.isSentToProduction)
         .toList(growable: false);
     if (unsentLines.isEmpty) return const ProductionDispatchResult();
+
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      await hub.ensureOrderOpened(
+        scope: scope,
+        orderId: order.id,
+        tableId: order.tableId,
+        tabName: order.tabName,
+      );
+      await hub.send(
+        scope: scope,
+        eventType: 'order.sent',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'lineIds': unsentLines.map((line) => line.id).toList(),
+          'printRequired': printRequired,
+          'stockOverride': stockOverride,
+        },
+      );
+      return ProductionDispatchResult(
+        queuedProductionAreas: printRequired
+            ? unsentLines
+                  .map((line) => line.productionArea.name)
+                  .toSet()
+                  .toList()
+            : const <String>[],
+      );
+    }
 
     final response = await _call('sendOrderToProduction', {
       'tenantId': scope.tenantId,
@@ -1071,6 +1230,66 @@ class ProductionCommandRepository {
     required bool printReceipt,
     required String requestId,
   }) async {
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      await hub.ensureOrderOpened(
+        scope: scope,
+        orderId: order.id,
+        tableId: order.tableId,
+        tabName: order.tabName,
+      );
+      var paidThisTime = 0;
+      for (var index = 0; index < payments.length; index++) {
+        final payment = payments[index];
+        final baseAmount = _baseAmountMinor(payment);
+        paidThisTime += baseAmount;
+        await hub.send(
+          scope: scope,
+          eventType: 'payment.recorded',
+          payload: <String, Object?>{
+            'orderId': order.id,
+            'paymentId': '$requestId-$index',
+            'method': payment.method.name,
+            'baseAmountMinor': baseAmount,
+            'tenderedAmountMinor': payment.tenderedAmountMinor,
+            'currencyCode': payment.tenderedCurrencyCode,
+            'exchangeRateToBase': payment.exchangeRateToBase,
+            if (payment.terminalLabel != null)
+              'terminalLabel': payment.terminalLabel,
+            'cashChangeBaseMinor': payment.cashChangeBaseMinor,
+          },
+        );
+      }
+      final paidTotal = order.paidMinor + paidThisTime;
+      final balance = (order.totalMinor - paidTotal).clamp(0, order.totalMinor);
+      final closed = balance == 0;
+      final receiptNumber =
+          'OFF-${hub.hubEpochFor(scope)}-${requestId.split('-').last}';
+      if (closed) {
+        await hub.send(
+          scope: scope,
+          eventType: 'order.closed',
+          payload: <String, Object?>{
+            'orderId': order.id,
+            'printReceipt': printReceipt,
+            'receiptNumber': receiptNumber,
+          },
+        );
+      }
+      return BillCloseResult(
+        billId: 'offline-${order.id}',
+        totalMinor: order.totalMinor,
+        currencyCode: payments.firstOrNull?.tenderedCurrencyCode ?? 'GBP',
+        receiptNumber: receiptNumber,
+        alreadyClosed: false,
+        receiptPrintRequested: printReceipt && closed,
+        receiptPrintQueued: printReceipt && closed,
+        orderClosed: closed,
+        paidThisTimeMinor: paidThisTime,
+        paidTotalMinor: paidTotal,
+        balanceDueMinor: balance,
+      );
+    }
     final response = await _call('closeOrder', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
@@ -1103,6 +1322,18 @@ class ProductionCommandRepository {
       paidTotalMinor: response['paidTotalMinor'] as int? ?? 0,
       balanceDueMinor: response['balanceDueMinor'] as int? ?? 0,
     );
+  }
+
+  int _baseAmountMinor(BillPaymentInput payment) {
+    final rate = double.tryParse(payment.exchangeRateToBase);
+    if (rate == null || !rate.isFinite || rate <= 0) {
+      throw StateError('The payment exchange rate is invalid.');
+    }
+    final result =
+        (payment.tenderedAmountMinor * rate).round() -
+        payment.cashChangeBaseMinor;
+    if (result <= 0) throw StateError('The payment amount is invalid.');
+    return result;
   }
 
   Future<RefundResult> createRefund({
@@ -1226,6 +1457,15 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required PosOrder order,
   }) async {
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      await hub.send(
+        scope: scope,
+        eventType: 'receipt.requested',
+        payload: <String, Object?>{'orderId': order.id},
+      );
+      return true;
+    }
     final response = await _call('printPreReceipt', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
@@ -1241,6 +1481,11 @@ class ProductionCommandRepository {
     required String splitOrderId,
     required Map<String, int> lineQuantities,
   }) async {
+    if (VenueHubClientRegistry.instance.requiresHub(scope)) {
+      throw StateError(
+        'Bill splitting is not yet available through the venue hub. Reconnect and deactivate hub routing before splitting.',
+      );
+    }
     final response = await _call('splitOrder', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,

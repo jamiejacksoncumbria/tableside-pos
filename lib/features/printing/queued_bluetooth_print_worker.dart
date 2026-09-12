@@ -12,6 +12,7 @@ import 'local_printer_device_identity.dart';
 import 'native_print_worker.dart';
 import 'queued_bluetooth_receipt_printer.dart';
 import 'queued_windows_receipt_printer.dart';
+import '../../offline/venue_hub_client_registry.dart';
 
 /// Runs only in a foreground native app session. Android boot/background
 /// services are a later device-agent step; this worker gives each registered
@@ -63,6 +64,7 @@ class QueuedNativePrintWorker {
       final user = FirebaseAuth.instance.currentUser;
       final requiredTransport = _requiredTransport;
       if (user == null || requiredTransport == null) return;
+      if (VenueHubPrinterClientRegistry.instance.requiresHub(scope)) return;
       var deviceId = await _identity.deviceIdForScope(scope);
       var deviceCredential = await _identity.credential(scope);
       if (deviceCredential == null || deviceCredential.isEmpty) {
@@ -103,6 +105,7 @@ class QueuedNativePrintWorker {
     }
     var deviceId = await _identity.deviceIdForScope(scope);
     var deviceCredential = await _identity.credential(scope);
+    final hubMode = VenueHubPrinterClientRegistry.instance.requiresHub(scope);
     if (deviceCredential == null || deviceCredential.isEmpty) {
       final legacyCredential = await _identity.legacyCredential();
       if (legacyCredential != null && legacyCredential.isNotEmpty) {
@@ -110,28 +113,36 @@ class QueuedNativePrintWorker {
         deviceCredential = legacyCredential;
       }
     }
-    if (deviceCredential == null || deviceCredential.isEmpty) {
+    if ((deviceCredential == null || deviceCredential.isEmpty) && !hubMode) {
       return PrintWorkerResult.noWork;
     }
-    final device = await _devices.getDevice(
-      tenantId: scope.tenantId,
-      deviceId: deviceId,
-    );
-    if (device == null ||
-        !device.active ||
-        device.venueId != scope.venueId ||
-        !device.transports.contains(requiredTransport)) {
+    if (deviceId.isEmpty) {
       return PrintWorkerResult.noWork;
+    }
+    if (hubMode) {
+      deviceCredential = 'venue-hub-device-credential';
+    } else {
+      final device = await _devices.getDevice(
+        tenantId: scope.tenantId,
+        deviceId: deviceId,
+      );
+      if (device == null ||
+          !device.active ||
+          device.venueId != scope.venueId ||
+          !device.transports.contains(requiredTransport)) {
+        return PrintWorkerResult.noWork;
+      }
     }
 
     final now = DateTime.now();
-    if (_heartbeatScope != scope ||
-        _lastHeartbeatAt == null ||
-        now.difference(_lastHeartbeatAt!) >= const Duration(seconds: 30)) {
+    if (!hubMode &&
+        (_heartbeatScope != scope ||
+            _lastHeartbeatAt == null ||
+            now.difference(_lastHeartbeatAt!) >= const Duration(seconds: 30))) {
       await _devices.heartbeat(
         scope: scope,
         deviceId: deviceId,
-        deviceCredential: deviceCredential,
+        deviceCredential: deviceCredential!,
       );
       _lastHeartbeatAt = now;
       _heartbeatScope = scope;
@@ -144,7 +155,7 @@ class QueuedNativePrintWorker {
       tenantId: scope.tenantId,
       venueId: scope.venueId,
       deviceId: deviceId,
-      deviceCredential: deviceCredential,
+      deviceCredential: deviceCredential!,
     );
     try {
       return await worker.processNext();

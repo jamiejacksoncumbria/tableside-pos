@@ -16,6 +16,7 @@ dependencies:
   # that reports a spurious MissingPluginException after successful work.
   cloud_firestore: ^6.9.0
   http: ^1.5.0
+  web_socket_channel: ^3.0.3
   # 6.6.0 aligns Android Auth with firebase_core's Kotlin implementation.
   # Earlier 6.5.x builds refer to a Java-only Core field and fail to compile
   # when resolved alongside firebase_core 4.14.0.

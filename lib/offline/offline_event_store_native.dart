@@ -277,6 +277,38 @@ class NativeOfflineEventStore implements OfflineEventStore {
   });
 
   @override
+  Future<List<OfflineEvent>> eventsForVenue({
+    required String tenantId,
+    required String venueId,
+    required int hubEpoch,
+    int limit = 10000,
+  }) => _serial(() async {
+    if (hubEpoch < 1) {
+      throw ArgumentError.value(hubEpoch, 'hubEpoch', 'Must be positive.');
+    }
+    await _initializeInternal();
+    final venueKey = await _crypto.venueKey(tenantId, venueId);
+    final rows = _database!.select(
+      '''
+        SELECT * FROM offline_events
+        WHERE venue_key = ? AND hub_epoch = ? AND sync_state != 3
+        ORDER BY sequence
+        LIMIT ?
+      ''',
+      [venueKey, hubEpoch, limit.clamp(1, 100000)],
+    );
+    final events = <OfflineEvent>[];
+    for (final row in rows) {
+      final event = await _decodeAndVerify(row);
+      if (event.tenantId != tenantId || event.venueId != venueId) {
+        throw StateError('An offline event failed its venue scope check.');
+      }
+      events.add(event);
+    }
+    return events;
+  });
+
+  @override
   Stream<List<OfflineEvent>> watchPending({int limit = 250}) async* {
     yield await pending(limit: limit);
     await for (final _ in _changes.stream) {
@@ -390,6 +422,24 @@ class NativeOfflineEventStore implements OfflineEventStore {
       _setState(eventId, OfflineEventSyncState.inFlight);
 
   @override
+  Future<void> markPending(String eventId) => _serial(() async {
+    await _initializeInternal();
+    _database!.execute(
+      'UPDATE offline_events SET sync_state = 0 WHERE event_id = ? AND sync_state = 1',
+      [_eventId(eventId)],
+    );
+    if (_database!.updatedRows == 0) {
+      final current = _database!.select(
+        'SELECT sync_state FROM offline_events WHERE event_id = ?',
+        [_eventId(eventId)],
+      );
+      if (current.length == 1 && current.single['sync_state'] == 0) return;
+    }
+    _requireChanged(eventId);
+    _notifyChanged();
+  });
+
+  @override
   Future<void> markSynced(String eventId, DateTime acknowledgedAtUtc) =>
       _serial(() async {
         await _initializeInternal();
@@ -437,6 +487,16 @@ class NativeOfflineEventStore implements OfflineEventStore {
       'UPDATE offline_events SET sync_state = ? WHERE event_id = ? AND sync_state = 0',
       [state.index, _eventId(eventId)],
     );
+    if (_database!.updatedRows == 0 &&
+        state == OfflineEventSyncState.inFlight) {
+      final current = _database!.select(
+        'SELECT sync_state FROM offline_events WHERE event_id = ?',
+        [_eventId(eventId)],
+      );
+      if (current.length == 1 && current.single['sync_state'] == state.index) {
+        return;
+      }
+    }
     _requireChanged(eventId);
     _notifyChanged();
   });

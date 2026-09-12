@@ -24,6 +24,7 @@ import '../vouchers/voucher_management_page.dart';
 import 'audit_trail_page.dart';
 import 'diagnostics_page.dart';
 import 'staff_pin_management_page.dart';
+import 'venue_offline_hub_page.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({
@@ -720,6 +721,20 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
                       builder: (_) => const DiagnosticsPage(),
+                    ),
+                  ),
+                ),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.hub_outlined),
+                  title: const Text('Venue offline hub'),
+                  subtitle: const Text(
+                    'Securely enrol this device, cache venue data and monitor offline recovery.',
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => VenueOfflineHubPage(scope: venueScope),
                     ),
                   ),
                 ),

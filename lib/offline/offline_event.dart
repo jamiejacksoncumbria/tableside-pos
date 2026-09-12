@@ -90,4 +90,25 @@ class OfflineEvent {
   final OfflineEventSyncState syncState;
   final DateTime? cloudAcknowledgedAtUtc;
   final String? quarantineReason;
+
+  Map<String, Object?> toCloudJson() => <String, Object?>{
+    'id': id,
+    'tenantId': tenantId,
+    'venueId': venueId,
+    'deviceId': deviceId,
+    'staffId': staffId,
+    if (managerApprovalStaffId != null)
+      'managerApprovalStaffId': managerApprovalStaffId,
+    'type': type,
+    'payload': payload,
+    'createdAtUtc': createdAtUtc.toUtc().toIso8601String(),
+    'deviceObservedAtUtc': deviceObservedAtUtc.toUtc().toIso8601String(),
+    'timeAuthority': timeAuthority.name,
+    'clockSkewMillis': clockSkewMillis,
+    'businessTimestampUtc': businessTimestampUtc.toUtc().toIso8601String(),
+    'sequence': sequence,
+    'hubEpoch': hubEpoch,
+    'previousHash': previousHash,
+    'eventHash': eventHash,
+  };
 }

@@ -7,6 +7,7 @@ import '../core/trusted_clock.dart';
 import 'venue_hub_command_processor.dart';
 import 'venue_hub_protocol.dart';
 import 'venue_hub_server.dart';
+import 'venue_hub_offline_pin.dart';
 
 VenueHubServer createVenueHubServer() => NativeVenueHubServer();
 
@@ -99,8 +100,116 @@ class NativeVenueHubServer implements VenueHubServer {
       }
       if (request.uri.path == '/v1/stream' &&
           WebSocketTransformer.isUpgradeRequest(request)) {
-        _requireAllowedOrigin(request);
+        _requireAllowedOrigin(request, allowNoOrigin: true);
         await _upgradeStream(request);
+        return;
+      }
+      if (request.uri.path == '/v1/login' && request.method == 'POST') {
+        _requireAllowedOrigin(request, allowNoOrigin: true);
+        final payload = await _readJson(request);
+        final envelope = _envelope(payload['envelope']);
+        final body = _map(payload['body'], 'The login body is invalid.');
+        if (envelope.path != '/v1/login' || envelope.method != 'POST') {
+          throw const VenueHubProtocolException('Invalid login endpoint.');
+        }
+        await _configuration!.processor.authenticateDevice(
+          envelope: envelope,
+          body: body,
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+        );
+        final pin = body['pin'];
+        if (pin is! String || !RegExp(r'^\d{6}$').hasMatch(pin)) {
+          throw const VenueHubCommandException('The staff PIN is invalid.');
+        }
+        final session = await _configuration!.authenticatePin(
+          envelope.deviceId,
+          envelope.staffId,
+          pin,
+        );
+        _json(response, HttpStatus.ok, {
+          'sessionId': session.sessionId,
+          'sessionToken': session.sessionToken,
+          'staffId': session.grant.staffId,
+          'permissions': session.grant.permissions.toList()..sort(),
+          'expiresAtUtc': session.grant.expiresAtUtc.toIso8601String(),
+        });
+        return;
+      }
+      if ((request.uri.path == '/v1/print/claim' ||
+              request.uri.path == '/v1/print/complete') &&
+          request.method == 'POST') {
+        _requireAllowedOrigin(request, allowNoOrigin: true);
+        final payload = await _readJson(request);
+        final envelope = _envelope(payload['envelope']);
+        final body = _map(payload['body'], 'The print request is invalid.');
+        if (envelope.path != request.uri.path || envelope.method != 'POST') {
+          throw const VenueHubProtocolException('Invalid print endpoint.');
+        }
+        await _configuration!.processor.authenticateDevice(
+          envelope: envelope,
+          body: body,
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+        );
+        if (request.uri.path == '/v1/print/claim') {
+          final job = await _configuration!.claimPrintJob(envelope.deviceId);
+          _json(response, HttpStatus.ok, {'job': job});
+        } else {
+          final jobId = body['jobId'];
+          final printed = body['printed'];
+          final failureReason = body['failureReason'];
+          if (jobId is! String ||
+              jobId.isEmpty ||
+              printed is! bool ||
+              (failureReason != null && failureReason is! String)) {
+            throw const FormatException('The print completion is invalid.');
+          }
+          await _configuration!.completePrintJob(
+            envelope.deviceId,
+            jobId,
+            printed,
+            failureReason as String?,
+          );
+          _json(response, HttpStatus.ok, {'completed': true});
+        }
+        return;
+      }
+      if (request.uri.path == '/v1/catalogue' && request.method == 'POST') {
+        _requireAllowedOrigin(request, allowNoOrigin: true);
+        final payload = await _readJson(request);
+        final envelope = _envelope(payload['envelope']);
+        final body = _map(payload['body'], 'The catalogue request is invalid.');
+        if (envelope.path != '/v1/catalogue' || envelope.method != 'POST') {
+          throw const VenueHubProtocolException('Invalid catalogue endpoint.');
+        }
+        await _configuration!.processor.authenticateDevice(
+          envelope: envelope,
+          body: body,
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+        );
+        _json(
+          response,
+          HttpStatus.ok,
+          await _configuration!.readClientSnapshot(),
+        );
+        return;
+      }
+      if (request.uri.path == '/v1/orders' && request.method == 'POST') {
+        _requireAllowedOrigin(request, allowNoOrigin: true);
+        final payload = await _readJson(request);
+        final envelope = _envelope(payload['envelope']);
+        final body = _map(payload['body'], 'The order request is invalid.');
+        if (envelope.path != '/v1/orders' || envelope.method != 'POST') {
+          throw const VenueHubProtocolException('Invalid order endpoint.');
+        }
+        await _configuration!.processor.authenticate(
+          envelope: envelope,
+          body: body,
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+          requiredPermission: 'order',
+        );
+        _json(response, HttpStatus.ok, {
+          'orders': await _configuration!.readOrders(),
+        });
         return;
       }
       if (request.uri.path != '/v1/events' || request.method != 'POST') {
@@ -124,13 +233,20 @@ class NativeVenueHubServer implements VenueHubServer {
         'committedAtUtc': acknowledgement.committedAtUtc.toIso8601String(),
       };
       _json(response, HttpStatus.created, result);
-      _broadcast({'type': 'event.committed', ...result});
+      _broadcast({
+        'type': 'orders.changed',
+        ...result,
+        'orders': await _configuration!.readOrders(),
+      });
     } on VenueHubProtocolException catch (error, stackTrace) {
       AppLogger.error('Reject venue hub protocol request', error, stackTrace);
       _json(response, HttpStatus.unauthorized, {'error': 'unauthorized'});
     } on VenueHubCommandException catch (error, stackTrace) {
       AppLogger.error('Reject venue hub command', error, stackTrace);
       _json(response, HttpStatus.forbidden, {'error': 'forbidden'});
+    } on VenueHubOfflinePinException catch (error, stackTrace) {
+      AppLogger.error('Reject venue hub PIN', error, stackTrace);
+      _json(response, HttpStatus.unauthorized, {'error': 'invalid_pin'});
     } on FormatException catch (error, stackTrace) {
       AppLogger.error('Reject malformed venue hub request', error, stackTrace);
       _json(response, HttpStatus.badRequest, {'error': 'invalid_request'});

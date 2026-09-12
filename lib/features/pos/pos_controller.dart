@@ -1,4 +1,5 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
@@ -6,24 +7,39 @@ import '../../core/tenant_scope.dart';
 import '../../core/training_mode.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
+import '../../offline/venue_hub_client_registry.dart';
+import '../../offline/venue_hub_offline_view.dart';
 import '../printing/bluetooth_production_print_service.dart';
 import 'domain.dart';
 
 final menuSectionsProvider = StreamProvider<List<MenuSection>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoSections);
+  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+    return Stream.value(VenueHubOfflineView.instance.sections);
+  }
   return ref.watch(firestorePosRepositoryProvider).watchMenuSections(scope);
 });
 
 final menuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoProducts);
+  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+    return Stream.value(
+      VenueHubOfflineView.instance.products
+          .where((product) => !product.isArchived)
+          .toList(growable: false),
+    );
+  }
   return ref.watch(firestorePosRepositoryProvider).watchProducts(scope);
 });
 
 final allMenuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoProducts);
+  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+    return Stream.value(VenueHubOfflineView.instance.products);
+  }
   return ref
       .watch(firestorePosRepositoryProvider)
       .watchProducts(scope, includeArchived: true);
@@ -32,12 +48,52 @@ final allMenuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
 final diningTablesProvider = StreamProvider<List<DiningTable>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoTables);
+  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+    final view = VenueHubOfflineView.instance;
+    return view.orderStream.map((orders) {
+      final openByTable = <String, PosOrder>{
+        for (final order in orders)
+          if (order.status != OrderStatus.closed && order.tableId != null)
+            order.tableId!: order,
+      };
+      return view.tables
+          .map((table) {
+            final order = openByTable[table.id];
+            return DiningTable(
+              id: table.id,
+              label: table.label,
+              seats: table.seats,
+              hasOpenOrder: order != null,
+              currentOrderId: order?.id,
+            );
+          })
+          .toList(growable: false);
+    });
+  }
   return ref.watch(firestorePosRepositoryProvider).watchTables(scope);
 });
 
 final openNamedTabsProvider = StreamProvider<List<OpenNamedTab>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const []);
+  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+    return VenueHubOfflineView.instance.orderStream.map(
+      (orders) => orders
+          .where(
+            (order) =>
+                order.status != OrderStatus.closed && order.tabName != null,
+          )
+          .map(
+            (order) => OpenNamedTab(
+              id: order.id,
+              orderId: order.id,
+              name: order.tabName!,
+              openedAt: order.openedAt,
+            ),
+          )
+          .toList(growable: false),
+    );
+  }
   return ref.watch(firestorePosRepositoryProvider).watchOpenNamedTabs(scope);
 });
 
@@ -57,6 +113,9 @@ final menuModifierGroupsProvider = StreamProvider<List<MenuModifierGroup>>((
 ) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <MenuModifierGroup>[]);
+  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+    return Stream.value(VenueHubOfflineView.instance.modifierGroups);
+  }
   return ref.watch(firestorePosRepositoryProvider).watchModifierGroups(scope);
 });
 
@@ -73,6 +132,11 @@ final tableOpenOrderProvider = StreamProvider.autoDispose
     .family<PosOrder?, String>((ref, orderId) {
       final scope = ref.watch(activeVenueScopeProvider);
       if (scope == null || orderId.trim().isEmpty) return Stream.value(null);
+      if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+        return VenueHubOfflineView.instance.orderStream.map(
+          (orders) => orders.where((order) => order.id == orderId).firstOrNull,
+        );
+      }
       return ref
           .watch(firestorePosRepositoryProvider)
           .watchOrder(scope: scope, orderId: orderId);
@@ -99,6 +163,11 @@ final activeOrderStreamProvider = StreamProvider<PosOrder?>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   final orderId = ref.watch(activePersistedOrderIdProvider);
   if (scope == null || orderId == null) return Stream.value(null);
+  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+    return VenueHubOfflineView.instance.orderStream.map(
+      (orders) => orders.where((order) => order.id == orderId).firstOrNull,
+    );
+  }
   return ref
       .watch(firestorePosRepositoryProvider)
       .watchOrder(scope: scope, orderId: orderId);
@@ -539,11 +608,22 @@ class ActiveOrderController extends Notifier<PosOrder> {
         return;
       }
     }
-    final existing = scope == null || isTraining
-        ? null
-        : await ref
-              .read(firestorePosRepositoryProvider)
-              .fetchOpenOrder(scope: scope, tableId: tableId);
+    PosOrder? existing;
+    if (scope != null && !isTraining) {
+      if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+        existing = VenueHubOfflineView.instance.currentOrders
+            .where(
+              (order) =>
+                  order.tableId == tableId &&
+                  order.status != OrderStatus.closed,
+            )
+            .firstOrNull;
+      } else {
+        existing = await ref
+            .read(firestorePosRepositoryProvider)
+            .fetchOpenOrder(scope: scope, tableId: tableId);
+      }
+    }
     if (existing != null) {
       state = existing;
       _selectPersistedOrder(existing.id);
@@ -620,6 +700,21 @@ class ActiveOrderController extends Notifier<PosOrder> {
     final orderId = await ref
         .read(productionCommandRepositoryProvider)
         .openNamedTab(scope: scope, tabName: cleanedName);
+    if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+      final now = DateTime.now();
+      state = PosOrder(
+        id: orderId,
+        tenantId: scope.tenantId,
+        venueId: scope.venueId,
+        tabName: cleanedName,
+        businessDate: DateTime(now.year, now.month, now.day),
+        openedAt: now,
+        status: OrderStatus.open,
+        lines: const [],
+      );
+      _selectPersistedOrder(orderId);
+      return;
+    }
     final order = await ref
         .read(firestorePosRepositoryProvider)
         .fetchOrder(scope: scope, orderId: orderId);
@@ -851,10 +946,32 @@ class ActiveOrderController extends Notifier<PosOrder> {
     _pendingPaymentFingerprint = null;
     _pendingDraftQuantities.clear();
     if (!result.orderClosed) {
-      final refreshed = await ref
-          .read(firestorePosRepositoryProvider)
-          .fetchOrder(scope: scope, orderId: order.id);
-      if (refreshed != null) state = refreshed;
+      if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+        final first = payments.first;
+        state = state.copyWith(
+          payments: <OrderPayment>[
+            ...state.payments,
+            OrderPayment(
+              id:
+                  _pendingPaymentRequestId ??
+                  'offline-payment-${DateTime.now().microsecondsSinceEpoch}',
+              method: first.method.name,
+              tenderedAmountMinor: first.tenderedAmountMinor,
+              tenderedCurrencyCode: first.tenderedCurrencyCode,
+              baseAmountMinor: result.paidThisTimeMinor,
+              exchangeRateToBase: first.exchangeRateToBase,
+              recordedAt: DateTime.now(),
+              terminalLabel: first.terminalLabel,
+              cashChangeBaseMinor: first.cashChangeBaseMinor,
+            ),
+          ],
+        );
+      } else {
+        final refreshed = await ref
+            .read(firestorePosRepositoryProvider)
+            .fetchOrder(scope: scope, orderId: order.id);
+        if (refreshed != null) state = refreshed;
+      }
       AppLogger.info(
         'Partial payment recorded for order ${order.id}; ${result.balanceDueMinor} minor units remain.',
       );

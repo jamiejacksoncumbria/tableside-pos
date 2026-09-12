@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -12,6 +13,12 @@ import '../../core/order_flow_display_mode.dart';
 import '../../core/staff_pin_session_store.dart';
 import '../../core/training_mode.dart';
 import '../../data/production_command_repository.dart';
+import '../../features/printing/local_printer_device_identity.dart';
+import '../../offline/venue_hub_bootstrap.dart';
+import '../../offline/venue_hub_client_registry.dart';
+import '../../offline/venue_hub_client_cache.dart';
+import '../../offline/venue_hub_client.dart';
+import '../../offline/venue_hub_device_credential.dart';
 
 final activeStaffPinSessionProvider =
     NotifierProvider<ActiveStaffPinSessionController, StaffPinVerification?>(
@@ -74,6 +81,7 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
 
   void lock() {
     StaffPinSessionStore.current = null;
+    VenueHubClientRegistry.instance.clear();
     state = null;
     ref.read(trainingModeProvider.notifier).clear();
     ref.read(appThemeControllerProvider.notifier).clearUserPreference();
@@ -184,6 +192,7 @@ class StaffPinGate extends ConsumerStatefulWidget {
 class _StaffPinGateState extends ConsumerState<StaffPinGate>
     with WidgetsBindingObserver {
   final ProductionCommandRepository _repository = ProductionCommandRepository();
+  final VenueHubClientCache _hubCache = VenueHubClientCache();
   List<VenuePinStaff>? _staff;
   String? _selectedUserId;
   bool _loading = true;
@@ -250,6 +259,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     });
     try {
       final staff = await _repository.listVenuePinStaff(widget.scope);
+      await _hubCache.saveStaff(widget.scope, staff);
       if (!mounted) return;
       final currentUserId = FirebaseAuth.instance.currentUser?.uid;
       setState(() {
@@ -262,6 +272,17 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     } on Object catch (error, stackTrace) {
       AppLogger.error('Load venue PIN staff', error, stackTrace);
       if (!mounted) return;
+      final cached = await _hubCache.readStaff(widget.scope);
+      if (cached.isNotEmpty) {
+        setState(() {
+          _staff = cached;
+          _selectedUserId = cached.firstOrNull?.userId;
+          _loading = false;
+          _error =
+              'Cloud unavailable. Using the encrypted venue hub PIN service.';
+        });
+        return;
+      }
       setState(() {
         _loading = false;
         _error = '$error';
@@ -281,11 +302,99 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       );
       if (pin == null || !mounted) return;
       setState(() => _submitting = true);
-      final session = await _repository.verifyStaffPin(
-        scope: widget.scope,
-        userId: staff.userId,
-        pin: pin,
+      VenueHubBootstrap? bootstrap;
+      try {
+        final rawBootstrap = await _repository.fetchOfflineHubBootstrap(
+          scope: widget.scope,
+        );
+        bootstrap = VenueHubBootstrap.fromJson(rawBootstrap);
+        await _hubCache.saveBootstrap(widget.scope, bootstrap);
+      } catch (error, stackTrace) {
+        AppLogger.error('Refresh venue hub discovery', error, stackTrace);
+        bootstrap = await _hubCache.readBootstrap(widget.scope);
+      }
+      if (bootstrap == null) {
+        throw StateError(
+          'The cloud is unavailable and this device has no saved venue hub configuration.',
+        );
+      }
+      if (kIsWeb) {
+        // Browsers are intentionally read-only while hub authority is active:
+        // private device signing keys are not enrolled into web storage.
+        VenueHubClientRegistry.instance.rememberBootstrap(
+          widget.scope,
+          bootstrap,
+        );
+        final session = await _repository.verifyStaffPin(
+          scope: widget.scope,
+          userId: staff.userId,
+          pin: pin,
+        );
+        ref
+            .read(activeStaffPinSessionProvider.notifier)
+            .unlock(session, widget.scope);
+        _scheduleExpiryCheck();
+        return;
+      }
+      final deviceId = await LocalPrinterDeviceIdentity().deviceIdForScope(
+        widget.scope,
       );
+      final credential = await VenueHubDeviceCredentialStore().getOrCreate(
+        tenantId: widget.scope.tenantId,
+        venueId: widget.scope.venueId,
+        deviceId: deviceId,
+      );
+      VenueHubPrinterClientRegistry.instance.configure(
+        scope: widget.scope,
+        bootstrap: bootstrap,
+        deviceId: deviceId,
+        credential: credential,
+      );
+      VenueHubLoginResult? hubLogin;
+      if (bootstrap.enabled) {
+        hubLogin = await VenueHubClientRegistry.instance.configure(
+          scope: widget.scope,
+          bootstrap: bootstrap,
+          deviceId: deviceId,
+          staffId: staff.userId,
+          pin: pin,
+          credential: credential,
+        );
+      } else {
+        VenueHubClientRegistry.instance.rememberBootstrap(
+          widget.scope,
+          bootstrap,
+        );
+      }
+      StaffPinVerification session;
+      try {
+        session = await _repository.verifyStaffPin(
+          scope: widget.scope,
+          userId: staff.userId,
+          pin: pin,
+        );
+      } catch (error, stackTrace) {
+        if (!bootstrap.enabled || hubLogin == null) rethrow;
+        AppLogger.error(
+          'Cloud PIN verification unavailable; using venue hub grant',
+          error,
+          stackTrace,
+        );
+        session = StaffPinVerification(
+          sessionId: hubLogin.sessionId,
+          sessionToken: hubLogin.sessionToken,
+          expiresAt: hubLogin.expiresAtUtc,
+          tenantId: widget.scope.tenantId,
+          venueId: widget.scope.venueId,
+          userId: staff.userId,
+          displayName: staff.displayName,
+          isPlatformAdmin: false,
+          roles: staff.roles,
+          themeModePreference: 'system',
+          posCategoryViewPreference: 'bars',
+          posProductSortPreference: 'alphabetical',
+        );
+      }
       ref
           .read(activeStaffPinSessionProvider.notifier)
           .unlock(session, widget.scope);

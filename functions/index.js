@@ -1,4 +1,7 @@
-import {createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual} from "node:crypto";
+import {
+  createHash, createPublicKey, randomBytes, randomUUID, scryptSync,
+  pbkdf2Sync, timingSafeEqual, verify as verifySignature,
+} from "node:crypto";
 import {getApps, initializeApp} from "firebase-admin/app";
 import {getAppCheck} from "firebase-admin/app-check";
 import {getAuth} from "firebase-admin/auth";
@@ -1484,6 +1487,34 @@ async function manageVenueConfigurationFor(caller, rawData) {
   } else if (resource === "offlineHubActivation") {
     const deviceId = requiredDocumentId(values, "deviceId");
     const credentialId = requiredDocumentId(values, "credentialId");
+    const endpointHost = requiredText(values, "endpointHost", 253).toLowerCase();
+    const endpointPort = Number(values.endpointPort ?? 8443);
+    if (!/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|(?:\d{1,3}\.){3}\d{1,3})$/u
+      .test(endpointHost) || !Number.isInteger(endpointPort) ||
+      endpointPort < 1024 || endpointPort > 65535) {
+      throw new HttpsError("invalid-argument", "Enter a valid venue hub host and port.");
+    }
+    const hubEndpoint = `https://${endpointHost}:${endpointPort}`;
+    const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
+    const venueBeforeActivation = await venueRef.get();
+    const currentHub = venueBeforeActivation.data()?.offlineHub;
+    if (currentHub?.enabled === true && currentHub.deviceId === deviceId &&
+        currentHub.credentialId === credentialId && currentHub.endpoint === hubEndpoint &&
+        Number.isSafeInteger(Number(currentHub.epoch)) && Number(currentHub.epoch) > 0) {
+      result = {saved: true, enabled: true, hubEpoch: Number(currentHub.epoch)};
+    } else {
+    const takeoverReason = currentHub?.enabled === true
+      ? requiredText(values, "takeoverReason", 200) : null;
+    const existingOpenOrders = await db.collection(`tenants/${tenantId}/orders`)
+      .where("venueId", "==", venueId)
+      .get();
+    if (existingOpenOrders.docs.some((order) =>
+      ["open", "sent"].includes(order.data().status))) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Close all current tables and named tabs before first activating the offline hub.",
+      );
+    }
     const credential = await db.doc(
       `tenants/${tenantId}/offlineDeviceCredentials/${credentialId}`,
     ).get();
@@ -1495,7 +1526,6 @@ async function manageVenueConfigurationFor(caller, rawData) {
         "The selected device does not have an active offline credential.",
       );
     }
-    const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
     const activation = await db.runTransaction(async (transaction) => {
       const current = await transaction.get(venueRef);
       const currentEpoch = Number(current.data()?.offlineHub?.epoch ?? 0);
@@ -1507,6 +1537,7 @@ async function manageVenueConfigurationFor(caller, rawData) {
           enabled: true,
           deviceId,
           credentialId,
+          endpoint: hubEndpoint,
           epoch,
           activatedAt: FieldValue.serverTimestamp(),
           activatedByActor: actor,
@@ -1518,12 +1549,14 @@ async function manageVenueConfigurationFor(caller, rawData) {
         deviceId,
         credentialId,
         hubEpoch: epoch,
+        takeoverReason,
         actor,
         createdAt: FieldValue.serverTimestamp(),
       });
       return {epoch};
     });
     result = {saved: true, enabled: true, hubEpoch: activation.epoch};
+    }
   } else if (resource === "offlineHubDeactivation") {
     const reason = requiredText(values, "reason", 200);
     const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
@@ -1615,6 +1648,7 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
     enabled: hub.enabled === true,
     hubDeviceId: typeof hub.deviceId === "string" ? hub.deviceId : null,
     hubCredentialId: typeof hub.credentialId === "string" ? hub.credentialId : null,
+    hubEndpoint: typeof hub.endpoint === "string" ? hub.endpoint : null,
     hubEpoch: Number.isSafeInteger(Number(hub.epoch)) ? Number(hub.epoch) : 0,
     credentials: credentialSnapshot.docs.map((credential) => ({
       credentialId: credential.id,
@@ -1624,6 +1658,652 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
     })),
     serverTimeMillis: Date.now(),
   };
+}
+
+function canonicalJsonValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (value != null && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [
+      key, canonicalJsonValue(value[key]),
+    ]));
+  }
+  if (value == null || ["string", "number", "boolean"].includes(typeof value)) {
+    return value;
+  }
+  throw new HttpsError("invalid-argument", "The signed hub payload is invalid.");
+}
+
+function verifyEd25519RawPublicKey(publicKeyBase64, message, signatureBase64) {
+  try {
+    const raw = Buffer.from(publicKeyBase64, "base64url");
+    const signature = Buffer.from(signatureBase64, "base64url");
+    if (raw.length !== 32 || signature.length !== 64) return false;
+    const spki = Buffer.concat([
+      Buffer.from("302a300506032b6570032100", "hex"), raw,
+    ]);
+    const key = createPublicKey({key: spki, format: "der", type: "spki"});
+    return verifySignature(null, Buffer.from(message, "utf8"), key, signature);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function verifiedOfflineHubUpload(
+  caller, rawData, expectedPath = "/v1/cloud-sync",
+) {
+  const data = requireObject(rawData);
+  const envelope = requireObject(data.envelope);
+  const body = requireObject(data.body);
+  const tenantId = requiredText(envelope, "tenantId", 128);
+  const venueId = requiredText(envelope, "venueId", 128);
+  const credentialId = requiredDocumentId(envelope, "credentialId");
+  const deviceId = requiredDocumentId(envelope, "deviceId");
+  const staffId = requiredText(envelope, "staffId", 160);
+  const method = requiredText(envelope, "method", 12).toUpperCase();
+  const path = requiredText(envelope, "path", 128);
+  const nonce = requiredText(envelope, "nonce", 128);
+  const bodyHash = requiredText(envelope, "bodyHash", 128);
+  const signature = requiredText(envelope, "signature", 256);
+  const hubEpoch = Number(envelope.hubEpoch);
+  const sentAtUtcMillis = Number(envelope.sentAtUtcMillis);
+  if (method !== "POST" || path !== expectedPath ||
+      !Number.isSafeInteger(hubEpoch) || hubEpoch < 1 ||
+      !Number.isSafeInteger(sentAtUtcMillis) ||
+      Math.abs(Date.now() - sentAtUtcMillis) > 2 * 60 * 1000) {
+    throw new HttpsError("unauthenticated", "The signed hub upload is invalid or expired.");
+  }
+  await requireTenantHostMember(caller, tenantId);
+  const [venue, credential] = await Promise.all([
+    db.doc(`tenants/${tenantId}/venues/${venueId}`).get(),
+    db.doc(`tenants/${tenantId}/offlineDeviceCredentials/${credentialId}`).get(),
+  ]);
+  const hub = venue.data()?.offlineHub;
+  const credentialData = credential.data();
+  if (!venue.exists || hub?.enabled !== true || hub?.epoch !== hubEpoch ||
+      hub?.deviceId !== deviceId || hub?.credentialId !== credentialId ||
+      !credential.exists || credentialData.active !== true ||
+      credentialData.venueId !== venueId || credentialData.deviceId !== deviceId ||
+      credentialData.algorithm !== "Ed25519") {
+    throw new HttpsError("permission-denied", "This device is not the active venue hub.");
+  }
+  const encodedBody = JSON.stringify(canonicalJsonValue(body));
+  const expectedHash = createHash("sha256").update(encodedBody).digest("base64url");
+  if (expectedHash.length !== bodyHash.length ||
+      !timingSafeEqual(Buffer.from(expectedHash), Buffer.from(bodyHash))) {
+    throw new HttpsError("unauthenticated", "The signed hub upload was modified.");
+  }
+  const canonicalHeaders = [
+    "v1", credentialId, tenantId, venueId, deviceId, staffId, method, path,
+    hubEpoch, sentAtUtcMillis, nonce, bodyHash,
+  ].join("\n");
+  if (!verifyEd25519RawPublicKey(
+    credentialData.publicKeyBase64, canonicalHeaders, signature,
+  )) {
+    throw new HttpsError("unauthenticated", "The hub upload signature is invalid.");
+  }
+  return {body, tenantId, venueId, hubEpoch, credentialId, nonce};
+}
+
+function offlinePermissionsForRoles(roles) {
+  const permissions = new Set();
+  for (const role of roles) {
+    if (["owner", "manager", "waiter", "cashier"].includes(role)) {
+      permissions.add("order");
+      permissions.add("payment");
+    }
+    if (["owner", "manager", "kitchen"].includes(role)) {
+      permissions.add("production");
+    }
+    if (["owner", "manager"].includes(role)) permissions.add("manager");
+  }
+  return [...permissions].sort();
+}
+
+function offlineStockComponents(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => ({
+    productId: item?.productId ?? "",
+    productName: item?.productName ?? "",
+    quantityPerSale: Number(item?.quantityPerSale ?? 0),
+    stockUnit: item?.stockUnit ?? "each",
+  })).filter((item) => item.productId && item.quantityPerSale > 0);
+}
+
+function timeZoneOffsetMinutes(timeZone, now = new Date()) {
+  const part = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    timeZoneName: "longOffset",
+  }).formatToParts(now).find((value) => value.type === "timeZoneName")?.value ?? "GMT";
+  if (part === "GMT" || part === "UTC") return 0;
+  const match = /^GMT([+-])(\d{2}):(\d{2})$/u.exec(part);
+  if (match == null) {
+    throw new HttpsError("failed-precondition", "The venue time-zone offset is invalid.");
+  }
+  const minutes = (Number(match[2]) * 60) + Number(match[3]);
+  return match[1] === "-" ? -minutes : minutes;
+}
+
+async function getOfflineHubSnapshotFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/snapshot");
+  const tenantRef = db.doc(`tenants/${upload.tenantId}`);
+  const [tenant, venue, sections, products, modifierGroups, tables, members, pins, routes, syncState] =
+    await Promise.all([
+      tenantRef.get(),
+      tenantRef.collection("venues").doc(upload.venueId).get(),
+      tenantRef.collection("menuSections").where("venueId", "==", upload.venueId).get(),
+      tenantRef.collection("products").where("venueId", "==", upload.venueId).get(),
+      tenantRef.collection("modifierGroups").where("venueId", "==", upload.venueId).get(),
+      tenantRef.collection("tables").where("venueId", "==", upload.venueId).get(),
+      tenantRef.collection("members").where("active", "!=", false).get(),
+      tenantRef.collection("staffPins").where("venueId", "==", upload.venueId).get(),
+      tenantRef.collection("printerRoutes").where("venueId", "==", upload.venueId).get(),
+      tenantRef.collection("offlineHubSyncState").doc(upload.venueId).get(),
+    ]);
+  const pinByUser = new Map(pins.docs.map((pin) => [pin.data().userId, pin.data()]));
+  const staff = members.docs.map((member) => {
+    const roles = Array.isArray(member.data().roles) ? member.data().roles : [];
+    const pin = pinByUser.get(member.id);
+    if (pin == null || pin.locked === true ||
+        pin.offlinePinAlgorithm !== "PBKDF2-HMAC-SHA256" ||
+        typeof pin.offlinePinHash !== "string" ||
+        typeof pin.offlinePinSalt !== "string") return null;
+    return {
+      staffId: member.id,
+      displayName: member.data().displayName ?? member.id,
+      roles,
+      permissions: offlinePermissionsForRoles(roles),
+      pinVersion: Number(pin.pinVersion ?? 0),
+      membershipVersion: Number(member.data().membershipVersion ?? 1),
+      offlinePinAlgorithm: pin.offlinePinAlgorithm,
+      offlinePinIterations: Number(pin.offlinePinIterations),
+      offlinePinSalt: pin.offlinePinSalt,
+      offlinePinHash: pin.offlinePinHash,
+    };
+  }).filter(Boolean);
+  const productValues = products.docs.map((document) => {
+    const item = document.data();
+    return {
+      id: document.id,
+      name: item.name,
+      sectionIds: Array.isArray(item.sectionIds) ? item.sectionIds : [],
+      priceMinor: Number(item.priceMinor ?? 0),
+      taxRateId: item.taxRateId ?? "zero-rate",
+      taxRateName: item.taxRateName ?? "Zero Rate",
+      taxRateBasisPoints: Number(item.taxRateBasisPoints ?? 0),
+      productionArea: item.productionArea ?? "kitchen",
+      isAvailable: item.isAvailable === true,
+      isArchived: item.isArchived === true,
+      showOnOrderFlow: item.showOnOrderFlow !== false,
+      trackStock: item.trackStock === true,
+      stockOnHand: item.stockOnHand == null ? null : Number(item.stockOnHand),
+      stockUnit: item.stockUnit ?? "each",
+      latestUnitCostMinor: item.latestUnitCostMinor == null
+        ? null : Number(item.latestUnitCostMinor),
+      stockPerSale: Number(item.stockPerSale ?? 1),
+      stockComponents: offlineStockComponents(item.stockComponents),
+      modifierGroupIds: Array.isArray(item.modifierGroupIds) ? item.modifierGroupIds : [],
+      variants: (Array.isArray(item.variants) ? item.variants : []).map((variant) => ({
+        id: variant.id, name: variant.name,
+        priceDeltaMinor: Number(variant.priceDeltaMinor ?? 0),
+        isAvailable: variant.isAvailable !== false,
+        stockComponents: offlineStockComponents(variant.stockComponents),
+      })),
+    };
+  });
+  const groupValues = modifierGroups.docs.map((document) => {
+    const group = document.data();
+    return {
+      id: document.id, name: group.name,
+      minimumSelections: Number(group.minimumSelections ?? 0),
+      maximumSelections: Number(group.maximumSelections ?? 1),
+      isAvailable: group.isAvailable !== false,
+      options: (Array.isArray(group.options) ? group.options : []).map((option) => ({
+        id: option.id, name: option.name,
+        priceDeltaMinor: Number(option.priceDeltaMinor ?? 0),
+        isAvailable: option.isAvailable !== false,
+        stockComponents: offlineStockComponents(option.stockComponents),
+      })),
+    };
+  });
+  return {
+    version: Date.now(),
+    generatedAtUtc: new Date().toISOString(),
+    hubEpoch: upload.hubEpoch,
+    cloudLastSequence: syncState.exists && syncState.data().hubEpoch === upload.hubEpoch
+      ? Number(syncState.data().lastSequence ?? 0) : 0,
+    currencyCode: String(
+      venue.data()?.currencyCode ?? tenant.data()?.currencyCode ?? "GBP",
+    ).toUpperCase(),
+    tenantName: tenant.data()?.displayName ?? tenant.data()?.legalName ?? "",
+    venueName: venue.data()?.name ?? tenant.data()?.displayName ?? "",
+    venueTimeZone: venue.data()?.timeZone ?? "Europe/London",
+    venueUtcOffsetMinutes: timeZoneOffsetMinutes(
+      venue.data()?.timeZone ?? "Europe/London",
+    ),
+    businessDayCutoffMinutes: Number(venue.data()?.businessDayCutoffMinutes ?? 240),
+    tenantAddress: tenant.data()?.address ?? "",
+    tenantPhoneNumbers: Array.isArray(tenant.data()?.phoneNumbers)
+      ? tenant.data().phoneNumbers : [],
+    venueAddress: venue.data()?.address ?? "",
+    venuePhoneNumbers: Array.isArray(venue.data()?.phoneNumbers)
+      ? venue.data().phoneNumbers : [],
+    receiptFooter: venue.data()?.receiptFooter ?? tenant.data()?.receiptFooter ?? "",
+    sections: sections.docs.map((document) => ({
+      id: document.id,
+      name: document.data().name ?? "Menu section",
+      icon: document.data().icon ?? "🍽️",
+      parentSectionId: document.data().parentSectionId ?? null,
+      sortOrder: Number(document.data().sortOrder ?? 0),
+    })),
+    products: productValues,
+    modifierGroups: groupValues,
+    tables: tables.docs.map((table) => ({
+      id: table.id, label: table.data().label ?? table.id,
+      seats: Number(table.data().seats ?? 0), active: table.data().active !== false,
+    })),
+    printerRoutes: routes.docs.map((route) => ({
+      productionArea: route.data().productionArea ?? "kitchen",
+      primaryDeviceId: route.data().primaryDeviceId ?? null,
+      fallbackDeviceId: route.data().fallbackDeviceId ?? null,
+    })).filter((route) => typeof route.primaryDeviceId === "string"),
+    staff,
+  };
+}
+
+async function ingestOfflineHubEventsFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(caller, rawData);
+  const rawEvents = upload.body.events;
+  if (!Array.isArray(rawEvents) || rawEvents.length < 1 || rawEvents.length > 25) {
+    throw new HttpsError("invalid-argument", "Upload between 1 and 25 hub events.");
+  }
+  const events = rawEvents.map((raw) => {
+    const event = requireObject(raw);
+    const id = requiredDocumentId(event, "id");
+    const sequence = Number(event.sequence);
+    if (event.tenantId !== upload.tenantId || event.venueId !== upload.venueId ||
+        event.hubEpoch !== upload.hubEpoch || !Number.isSafeInteger(sequence) || sequence < 1 ||
+        typeof event.previousHash !== "string" || event.previousHash.length > 256 ||
+        typeof event.eventHash !== "string" || event.eventHash.length > 256 ||
+        typeof event.type !== "string" || event.type.length > 80 ||
+        event.payload == null || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+      throw new HttpsError("invalid-argument", "An offline event is invalid or out of scope.");
+    }
+    return {...event, id, sequence};
+  }).sort((a, b) => a.sequence - b.sequence);
+  const tenantRef = db.doc(`tenants/${upload.tenantId}`);
+  const stateRef = tenantRef.collection("offlineHubSyncState").doc(upload.venueId);
+  const venueRef = tenantRef.collection("venues").doc(upload.venueId);
+  const nonceId = createHash("sha256")
+    .update(`${upload.credentialId}\0${upload.nonce}`).digest("hex");
+  const nonceRef = tenantRef.collection("offlineHubUploadNonces").doc(nonceId);
+  const eventRefs = events.map((event) =>
+    tenantRef.collection("offlineHubEvents").doc(event.id));
+  const securityEventTypes = new Set(["security.pinAttempt"]);
+  const orderEvents = events.filter((event) => !securityEventTypes.has(event.type));
+  const orderIds = [...new Set(orderEvents.map((event) => event.payload.orderId))];
+  if (orderIds.some((id) => typeof id !== "string" || id.length < 1 || id.length > 180)) {
+    throw new HttpsError("invalid-argument", "An offline event order ID is invalid.");
+  }
+  const orderRefs = orderIds.map((id) => tenantRef.collection("orders").doc(id));
+  const acknowledgedEventIds = await db.runTransaction(async (transaction) => {
+    const reads = await Promise.all([
+      transaction.get(stateRef), transaction.get(nonceRef), transaction.get(venueRef),
+      ...eventRefs.map((ref) => transaction.get(ref)),
+      ...orderRefs.map((ref) => transaction.get(ref)),
+    ]);
+    const state = reads[0];
+    const priorNonce = reads[1];
+    const venue = reads[2];
+    const existing = reads.slice(3, 3 + eventRefs.length);
+    const orderSnapshots = reads.slice(3 + eventRefs.length);
+    if (priorNonce.exists) {
+      throw new HttpsError("already-exists", "This signed upload was already used.");
+    }
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    const venueTimeZone = typeof venue.data().timeZone === "string"
+      ? venue.data().timeZone : "Europe/London";
+    const rawCutoff = Number(venue.data().businessDayCutoffMinutes ?? 240);
+    const businessDayCutoffMinutes = Number.isInteger(rawCutoff) &&
+      rawCutoff >= 0 && rawCutoff < 1440 ? rawCutoff : 240;
+    const stateData = state.data() ?? {};
+    let lastSequence = stateData.hubEpoch === upload.hubEpoch
+      ? Number(stateData.lastSequence ?? 0) : 0;
+    let lastEventHash = stateData.hubEpoch === upload.hubEpoch
+      ? String(stateData.lastEventHash ?? "") : "";
+    const accepted = [];
+    const orderState = new Map(orderSnapshots.map((snapshot) => [
+      snapshot.id, snapshot.exists ? {...snapshot.data()} : null,
+    ]));
+    const dirtyOrderIds = new Set();
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index];
+      const current = existing[index];
+      if (current.exists) {
+        if (current.data().eventHash !== event.eventHash ||
+            current.data().hubEpoch !== event.hubEpoch ||
+            current.data().sequence !== event.sequence) {
+          throw new HttpsError("data-loss", "An event ID conflicts with cloud history.");
+        }
+        accepted.push(event.id);
+        continue;
+      }
+      const expectedPrevious = lastSequence === 0 ? event.previousHash : lastEventHash;
+      if (event.sequence !== lastSequence + 1 || event.previousHash !== expectedPrevious) {
+        throw new HttpsError("failed-precondition", "The hub event chain has a gap or conflict.");
+      }
+      transaction.create(eventRefs[index], {
+        ...event,
+        receivedAt: FieldValue.serverTimestamp(), source: "venueHub",
+      });
+      if (event.type === "security.pinAttempt") {
+        if (typeof event.payload.successful !== "boolean" ||
+            (event.payload.locked != null && typeof event.payload.locked !== "boolean")) {
+          throw new HttpsError("invalid-argument", "An offline security event is invalid.");
+        }
+        transaction.create(
+          tenantRef.collection("auditEvents").doc(`offline_${event.id}`),
+          {
+            action: "offlineStaffPinAttempt",
+            venueId: upload.venueId,
+            staffId: event.staffId,
+            deviceId: event.deviceId,
+            successful: event.payload.successful,
+            locked: event.payload.locked === true,
+            hubEpoch: upload.hubEpoch,
+            sourceEventId: event.id,
+            occurredAt: new Date(event.createdAtUtc),
+            createdAt: FieldValue.serverTimestamp(),
+          },
+        );
+      } else {
+        orderState.set(event.payload.orderId, applyOfflineEventToCloudOrder(
+          orderState.get(event.payload.orderId), event, upload.venueId,
+        ));
+        dirtyOrderIds.add(event.payload.orderId);
+      }
+      lastSequence = event.sequence;
+      lastEventHash = event.eventHash;
+      accepted.push(event.id);
+    }
+    transaction.set(stateRef, {
+      venueId: upload.venueId, hubEpoch: upload.hubEpoch,
+      lastSequence, lastEventHash, updatedAt: FieldValue.serverTimestamp(),
+    }, {merge: true});
+    for (const orderId of dirtyOrderIds) {
+      const projected = orderState.get(orderId);
+      transaction.set(tenantRef.collection("orders").doc(orderId), {
+        ...projected,
+        updatedAt: FieldValue.serverTimestamp(),
+        offlineHubEpoch: upload.hubEpoch,
+      }, {merge: false});
+      if (typeof projected.tableId === "string") {
+        transaction.set(tenantRef.collection("tables").doc(projected.tableId), {
+          currentOrderId: projected.status === "closed" ? null : orderId,
+          hasOpenOrder: projected.status !== "closed",
+          updatedAt: FieldValue.serverTimestamp(),
+        }, {merge: true});
+      }
+      if (typeof projected.tabName === "string") {
+        const tabRef = openTabRegistryRef(
+          upload.tenantId, upload.venueId, projected.tabName,
+        );
+        if (projected.status === "closed") transaction.delete(tabRef);
+        else transaction.set(tabRef, {
+          venueId: upload.venueId, tabName: projected.tabName,
+          tabNameKey: venueNameKey(projected.tabName), orderId,
+          createdAt: projected.openedAt,
+        }, {merge: true});
+      }
+      if (projected.status === "closed") {
+        transaction.set(tenantRef.collection("bills").doc(`offline-${orderId}`),
+          offlineBillFromProjectedOrder(
+            projected, orderId, upload, venueTimeZone, businessDayCutoffMinutes,
+          ), {merge: false});
+      }
+    }
+    transaction.create(nonceRef, {
+      credentialId: upload.credentialId,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return accepted;
+  });
+  await applyOfflineStockForEvents(tenantRef, upload.venueId, events);
+  await materializeOfflineProductionTickets(tenantRef, upload.venueId, events);
+  return {acknowledgedEventIds, serverTimeMillis: Date.now()};
+}
+
+async function applyOfflineStockForEvents(tenantRef, venueId, events) {
+  for (const event of events.filter((item) => item.type === "order.sent")) {
+    const order = await tenantRef.collection("orders").doc(event.payload.orderId).get();
+    if (!order.exists || order.data().venueId !== venueId) continue;
+    const ids = new Set(Array.isArray(event.payload.lineIds) ? event.payload.lineIds : []);
+    const totals = new Map();
+    for (const line of (Array.isArray(order.data().lines) ? order.data().lines : [])) {
+      if (!ids.has(line.id)) continue;
+      const components = Array.isArray(line.stockComponents) && line.stockComponents.length > 0
+        ? line.stockComponents
+        : line.trackStock === true
+          ? [{productId: line.productId, quantityPerSale: Number(line.stockPerSale ?? 1)}]
+          : [];
+      for (const component of components) {
+        const quantity = Number(line.quantity) * Number(component.quantityPerSale);
+        if (typeof component.productId !== "string" || !Number.isFinite(quantity) || quantity <= 0) {
+          throw new HttpsError("data-loss", "An offline stock recipe is invalid.");
+        }
+        totals.set(component.productId, (totals.get(component.productId) ?? 0) + quantity);
+      }
+    }
+    for (const [productId, quantity] of totals.entries()) {
+      const movementId = `offline_${event.id}_${productId}`;
+      const movementRef = tenantRef.collection("stockMovements").doc(movementId);
+      const productRef = tenantRef.collection("products").doc(productId);
+      await db.runTransaction(async (transaction) => {
+        const [movement, product] = await Promise.all([
+          transaction.get(movementRef), transaction.get(productRef),
+        ]);
+        if (movement.exists) return;
+        if (!product.exists || product.data().venueId !== venueId ||
+            product.data().trackStock !== true) {
+          throw new HttpsError("data-loss", "An offline stock item no longer exists.");
+        }
+        const onHand = Number(product.data().stockOnHand ?? 0);
+        if (onHand < quantity && event.payload.stockOverride !== true) {
+          throw new HttpsError(
+            "failed-precondition",
+            "Offline stock is insufficient. A manager stock correction is required.",
+          );
+        }
+        transaction.update(productRef, {
+          stockOnHand: FieldValue.increment(-quantity),
+          lastStockMovementAt: FieldValue.serverTimestamp(),
+        });
+        transaction.create(movementRef, {
+          venueId, orderId: event.payload.orderId,
+          ticketId: event.id, productId,
+          productName: product.data().name ?? "Stock item",
+          stockUnit: product.data().stockUnit ?? "each",
+          quantity: -quantity, reason: "offlineProductionTicketReleased",
+          sourceEventId: event.id, createdByStaffId: event.staffId,
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      });
+    }
+  }
+}
+
+async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
+  for (const event of events.filter((item) => item.type === "order.sent")) {
+    const order = await tenantRef.collection("orders").doc(event.payload.orderId).get();
+    if (!order.exists || order.data().venueId !== venueId) continue;
+    const ids = new Set(Array.isArray(event.payload.lineIds) ? event.payload.lineIds : []);
+    const grouped = new Map();
+    for (const line of (Array.isArray(order.data().lines) ? order.data().lines : [])) {
+      if (!ids.has(line.id)) continue;
+      const area = typeof line.productionArea === "string" ? line.productionArea : "kitchen";
+      const list = grouped.get(area) ?? [];
+      list.push(line);
+      grouped.set(area, list);
+    }
+    for (const [area, lines] of grouped.entries()) {
+      const ticketId = `offline_${event.id}_${area}`;
+      const ticketRef = tenantRef.collection("productionTickets").doc(ticketId);
+      const existing = await ticketRef.get();
+      if (existing.exists) continue;
+      await ticketRef.create({
+        venueId, orderId: event.payload.orderId,
+        reference: String(event.payload.orderId).split("-").at(-1),
+        tableLabel: order.data().tableLabel ?? order.data().tableId ?? null,
+        tabName: order.data().tabName ?? null,
+        productionArea: area,
+        printRequired: event.payload.printRequired === true,
+        flowStatus: "newOrder", ticketReleasedAt: new Date(event.createdAtUtc),
+        productionItems: lines.map((line) => ({
+          name: line.productName ?? "Menu item", quantity: Number(line.quantity),
+          details: productionLineDetails(line),
+        })),
+        orderFlowItems: lines.filter((line) => line.showOnOrderFlow !== false).map((line) => ({
+          name: line.productName ?? "Menu item", quantity: Number(line.quantity),
+          details: productionLineDetails(line),
+        })),
+        showOnOrderFlow: lines.some((line) => line.showOnOrderFlow !== false),
+        hasAllergyAlert: false, isDelayed: false,
+        source: "venueHub", sourceEventId: event.id,
+        createdByStaffId: event.staffId,
+        idempotencyKey: ticketId,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    }
+  }
+}
+
+function offlineBillFromProjectedOrder(
+  order, orderId, upload, venueTimeZone, businessDayCutoffMinutes,
+) {
+  const lines = order.lines.map((line) => {
+    const gross = Number(line.quantity) * Number(line.unitPriceMinor);
+    const basisPoints = Number(line.taxRateBasisPoints ?? 0);
+    const net = Math.round(gross * 10000 / (10000 + basisPoints));
+    return {...line, lineTotalMinor: gross, netMinor: net, taxMinor: gross - net};
+  });
+  const grossTotalMinor = lines.reduce((sum, line) => sum + line.lineTotalMinor, 0);
+  const netTotalMinor = lines.reduce((sum, line) => sum + line.netMinor, 0);
+  const closedAt = order.closedAt instanceof Date ? order.closedAt : new Date();
+  return {
+    venueId: upload.venueId, orderId,
+    receiptNumber: order.receiptNumber ??
+      `OFF-${upload.hubEpoch}-${String(closedAt.getTime()).slice(-8)}`,
+    currencyCode: lines[0]?.currencyCode ?? "GBP",
+    tableId: order.tableId ?? null, tableLabel: order.tableLabel ?? null,
+    tabName: order.tabName ?? null, lines, payments: order.payments,
+    grossTotalMinor, totalMinor: grossTotalMinor, netTotalMinor,
+    taxTotalMinor: grossTotalMinor - netTotalMinor,
+    businessDate: billBusinessDate(
+      venueTimeZone, businessDayCutoffMinutes, closedAt,
+    ),
+    venueTimeZone,
+    businessDayCutoffMinutes,
+    closedAt, source: "venueHub", offlineHubEpoch: upload.hubEpoch,
+    createdAt: FieldValue.serverTimestamp(),
+  };
+}
+
+function applyOfflineEventToCloudOrder(current, event, venueId) {
+  const payload = event.payload;
+  const eventTime = new Date(event.createdAtUtc);
+  if (!Number.isFinite(eventTime.getTime())) {
+    throw new HttpsError("invalid-argument", "An offline event timestamp is invalid.");
+  }
+  if (event.type === "order.opened") {
+    if (current != null) {
+      throw new HttpsError("already-exists", "The offline order already exists in cloud data.");
+    }
+    const tableId = typeof payload.tableId === "string" ? payload.tableId : null;
+    const tabName = typeof payload.tabName === "string" ? payload.tabName : null;
+    if ((tableId == null) === (tabName == null)) {
+      throw new HttpsError("invalid-argument", "An offline order needs one table or named tab.");
+    }
+    return {
+      venueId, tableId, tabName, status: "open", lines: [], payments: [],
+      openedAt: eventTime, openedOffline: true, createdByStaffId: event.staffId,
+    };
+  }
+  if (current == null || current.venueId !== venueId || current.status === "closed") {
+    throw new HttpsError("failed-precondition", "The offline order is unavailable in cloud data.");
+  }
+  const next = {...current};
+  const lines = Array.isArray(next.lines) ? next.lines.map((line) => ({...line})) : [];
+  const payments = Array.isArray(next.payments)
+    ? next.payments.map((payment) => ({...payment})) : [];
+  if (event.type === "order.itemAdded") {
+    if (lines.some((line) => line.id === payload.lineId)) {
+      throw new HttpsError("already-exists", "The offline order line already exists.");
+    }
+    lines.push({
+      ...payload, id: payload.lineId, isSentToProduction: false,
+      addedAt: eventTime, addedAtMillis: eventTime.getTime(),
+    });
+    next.lines = lines;
+    return next;
+  }
+  if (event.type === "order.itemQuantityChanged") {
+    const index = lines.findIndex((line) => line.id === payload.lineId &&
+      line.isSentToProduction !== true);
+    if (index < 0 || !Number.isInteger(payload.quantity) || payload.quantity < 0) {
+      throw new HttpsError("failed-precondition", "The offline line cannot be changed.");
+    }
+    if (payload.quantity === 0) lines.splice(index, 1);
+    else lines[index].quantity = payload.quantity;
+    next.lines = lines;
+    return next;
+  }
+  if (event.type === "order.sent") {
+    const ids = new Set(payload.lineIds);
+    if (ids.size < 1 || [...ids].some((id) => !lines.some((line) => line.id === id))) {
+      throw new HttpsError("failed-precondition", "The offline send contains an unknown line.");
+    }
+    next.lines = lines.map((line) => ids.has(line.id)
+      ? {...line, isSentToProduction: true, sentAt: eventTime,
+        sentAtMillis: eventTime.getTime()} : line);
+    next.status = "sent";
+    return next;
+  }
+  if (event.type === "payment.recorded") {
+    if (payments.some((payment) => payment.id === payload.paymentId)) {
+      throw new HttpsError("already-exists", "The offline payment already exists.");
+    }
+    payments.push({
+      id: payload.paymentId, method: payload.method,
+      tenderedAmountMinor: payload.tenderedAmountMinor ?? payload.baseAmountMinor,
+      tenderedCurrencyCode: payload.currencyCode,
+      baseAmountMinor: payload.baseAmountMinor,
+      exchangeRateToBase: payload.exchangeRateToBase ?? "1",
+      terminalLabel: payload.terminalLabel ?? null,
+      cashChangeBaseMinor: payload.cashChangeBaseMinor ?? 0,
+      recordedAt: eventTime, recordedAtMillis: eventTime.getTime(),
+    });
+    next.payments = payments;
+    return next;
+  }
+  if (event.type === "order.closed") {
+    const total = lines.reduce((sum, line) =>
+      sum + Number(line.quantity) * Number(line.unitPriceMinor), 0);
+    const paid = payments.reduce((sum, payment) =>
+      sum + Number(payment.baseAmountMinor), 0);
+    if (lines.length === 0 || total !== paid) {
+      throw new HttpsError("failed-precondition", "The offline bill is not fully paid.");
+    }
+    next.status = "closed";
+    next.closedAt = eventTime;
+    next.closedOffline = true;
+    next.receiptNumber = typeof payload.receiptNumber === "string"
+      ? payload.receiptNumber : null;
+    return next;
+  }
+  if (event.type === "receipt.requested") return next;
+  throw new HttpsError("invalid-argument", "That offline event type is not supported.");
 }
 
 async function getTrustedTimeFor(caller, rawData) {
@@ -1844,6 +2524,18 @@ function hashStaffPin(pin, salt) {
   return scryptSync(pin, salt, 32).toString("base64");
 }
 
+function offlinePinFields(pin) {
+  const offlinePinSalt = randomBytes(16).toString("base64url");
+  return {
+    offlinePinAlgorithm: "PBKDF2-HMAC-SHA256",
+    offlinePinIterations: 600000,
+    offlinePinSalt,
+    offlinePinHash: pbkdf2Sync(
+      pin, offlinePinSalt, 600000, 32, "sha256",
+    ).toString("base64url"),
+  };
+}
+
 async function listVenuePinStaffFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -1894,6 +2586,7 @@ async function setOwnStaffPinFor(caller, rawData) {
     venueId,
     salt,
     pinHash: hashStaffPin(pin, salt),
+    ...offlinePinFields(pin),
     pinVersion: FieldValue.increment(1),
     failedAttempts: 0,
     locked: false,
@@ -1923,6 +2616,7 @@ async function changeOwnStaffPinFor(caller, rawData) {
     venueId,
     salt,
     pinHash: hashStaffPin(pin, salt),
+    ...offlinePinFields(pin),
     pinVersion: FieldValue.increment(1),
     failedAttempts: 0,
     locked: false,
@@ -2135,6 +2829,7 @@ async function resetStaffPinFor(caller, rawData) {
     venueId,
     salt,
     pinHash: hashStaffPin(newPin, salt),
+    ...offlinePinFields(newPin),
     pinVersion: FieldValue.increment(1),
     failedAttempts: 0,
     locked: false,
@@ -2181,6 +2876,7 @@ async function recoverOwnStaffPinFor(caller, rawData) {
   const salt = randomBytes(16).toString("base64");
   await pinRef.update({
     pinHash: hashStaffPin(newPin, salt),
+    ...offlinePinFields(newPin),
     salt,
     pinVersion: FieldValue.increment(1),
     locked: false,
@@ -7831,7 +8527,8 @@ async function invokePosAction(action, caller, data) {
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
     "recoverOwnStaffPin",
     "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
-    "getTrustedTime", "getOfflineHubBootstrap",
+    "getTrustedTime", "getOfflineHubBootstrap", "ingestOfflineHubEvents",
+    "getOfflineHubSnapshot",
   ]);
   const actingCaller = sessionBootstrapActions.has(action)
     ? caller
@@ -7863,6 +8560,10 @@ async function invokePosAction(action, caller, data) {
       return getTrustedTimeFor(caller, data);
     case "getOfflineHubBootstrap":
       return getOfflineHubBootstrapFor(caller, data);
+    case "ingestOfflineHubEvents":
+      return ingestOfflineHubEventsFor(caller, data);
+    case "getOfflineHubSnapshot":
+      return getOfflineHubSnapshotFor(caller, data);
     case "unlockStaffPin":
       return unlockStaffPinFor(actingCaller, data);
     case "lockStaffPin":
@@ -8085,10 +8786,13 @@ async function deleteExpiredSecurityDocuments(collectionId) {
 export const cleanupExpiredSecuritySessions = onSchedule(
   {schedule: "every 24 hours", timeZone: "Etc/UTC"},
   async () => {
-    const [sessions, authorizations] = await Promise.all([
+    const [sessions, authorizations, offlineHubUploadNonces] = await Promise.all([
       deleteExpiredSecurityDocuments("staffPinSessions"),
       deleteExpiredSecurityDocuments("staffPinAuthorizations"),
+      deleteExpiredSecurityDocuments("offlineHubUploadNonces"),
     ]);
-    console.info("Expired security records removed.", {sessions, authorizations});
+    console.info("Expired security records removed.", {
+      sessions, authorizations, offlineHubUploadNonces,
+    });
   },
 );

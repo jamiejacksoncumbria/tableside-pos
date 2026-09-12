@@ -30,7 +30,6 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
   StreamSubscription<int>? _queuedJobsSubscription;
   VenueScope? _scope;
   bool _processing = false;
-  int _queuedJobCount = 0;
 
   @override
   void dispose() {
@@ -51,14 +50,12 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     _retryTimer?.cancel();
     _queuedJobsSubscription?.cancel();
     _scope = scope;
-    _queuedJobCount = 0;
     if (scope == null || Firebase.apps.isEmpty) return;
     final worker = _worker ??= QueuedNativePrintWorker();
     _queuedJobsSubscription = worker
         .watchQueuedJobCount(scope)
         .listen(
           (queuedCount) {
-            _queuedJobCount = queuedCount;
             AppLogger.info(
               'Queued printer stream: $queuedCount queued job(s) for this venue.',
             );
@@ -79,7 +76,9 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
         );
     _retryTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       unawaited(worker.maintainHeartbeat(scope));
-      if (_queuedJobCount > 0) unawaited(_processAvailable(scope));
+      // Hub-local jobs are not visible in the Firestore queue count. A cheap
+      // signed claim every ten seconds keeps printing live during an outage.
+      unawaited(_processAvailable(scope));
     });
     unawaited(worker.maintainHeartbeat(scope));
     unawaited(_processAvailable(scope));

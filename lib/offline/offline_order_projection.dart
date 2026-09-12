@@ -18,6 +18,10 @@ class OfflineProjectedLine {
     required this.name,
     required this.quantity,
     required this.unitPriceMinor,
+    required this.productionArea,
+    required this.details,
+    required this.taxRateBasisPoints,
+    required this.taxRateName,
     required this.sent,
   });
 
@@ -26,6 +30,10 @@ class OfflineProjectedLine {
   final String name;
   final int quantity;
   final int unitPriceMinor;
+  final String productionArea;
+  final List<String> details;
+  final int taxRateBasisPoints;
+  final String taxRateName;
   final bool sent;
 
   int get totalMinor => quantity * unitPriceMinor;
@@ -37,6 +45,10 @@ class OfflineProjectedLine {
         name: name,
         quantity: quantity ?? this.quantity,
         unitPriceMinor: unitPriceMinor,
+        productionArea: productionArea,
+        details: details,
+        taxRateBasisPoints: taxRateBasisPoints,
+        taxRateName: taxRateName,
         sent: sent ?? this.sent,
       );
 }
@@ -44,15 +56,25 @@ class OfflineProjectedLine {
 class OfflineProjectedPayment {
   const OfflineProjectedPayment({
     required this.id,
-    required this.amountMinor,
+    required this.baseAmountMinor,
+    required this.tenderedAmountMinor,
     required this.method,
     required this.currencyCode,
+    required this.exchangeRateToBase,
+    required this.recordedAtUtc,
+    this.terminalLabel,
+    this.cashChangeBaseMinor = 0,
   });
 
   final String id;
-  final int amountMinor;
+  final int baseAmountMinor;
+  final int tenderedAmountMinor;
   final String method;
   final String currencyCode;
+  final String exchangeRateToBase;
+  final DateTime recordedAtUtc;
+  final String? terminalLabel;
+  final int cashChangeBaseMinor;
 }
 
 class OfflineOrderProjection {
@@ -60,27 +82,79 @@ class OfflineOrderProjection {
     required this.tenantId,
     required this.venueId,
     required this.orderId,
+    required this.openedAtUtc,
+    this.tableId,
+    this.tabName,
     required this.hubEpoch,
     required this.lastSequence,
     required this.lines,
     required this.payments,
     required this.isClosed,
+    this.receiptNumber,
   });
 
   final String tenantId;
   final String venueId;
   final String orderId;
+  final DateTime openedAtUtc;
+  final String? tableId;
+  final String? tabName;
   final int hubEpoch;
   final int lastSequence;
   final Map<String, OfflineProjectedLine> lines;
   final List<OfflineProjectedPayment> payments;
   final bool isClosed;
+  final String? receiptNumber;
 
   int get totalMinor =>
       lines.values.fold(0, (sum, line) => sum + line.totalMinor);
   int get paidMinor =>
-      payments.fold(0, (sum, payment) => sum + payment.amountMinor);
+      payments.fold(0, (sum, payment) => sum + payment.baseAmountMinor);
   int get balanceDueMinor => totalMinor - paidMinor;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'tenantId': tenantId,
+    'venueId': venueId,
+    'orderId': orderId,
+    'hubEpoch': hubEpoch,
+    'lastSequence': lastSequence,
+    'openedAtUtc': openedAtUtc.toIso8601String(),
+    'tableId': tableId,
+    'tabName': tabName,
+    'isClosed': isClosed,
+    'receiptNumber': receiptNumber,
+    'lines': lines.values
+        .map(
+          (line) => <String, Object?>{
+            'id': line.id,
+            'productId': line.productId,
+            'name': line.name,
+            'quantity': line.quantity,
+            'unitPriceMinor': line.unitPriceMinor,
+            'productionArea': line.productionArea,
+            'details': line.details,
+            'taxRateBasisPoints': line.taxRateBasisPoints,
+            'taxRateName': line.taxRateName,
+            'sent': line.sent,
+          },
+        )
+        .toList(growable: false),
+    'payments': payments
+        .map(
+          (payment) => <String, Object?>{
+            'id': payment.id,
+            'baseAmountMinor': payment.baseAmountMinor,
+            'tenderedAmountMinor': payment.tenderedAmountMinor,
+            'method': payment.method,
+            'currencyCode': payment.currencyCode,
+            'exchangeRateToBase': payment.exchangeRateToBase,
+            'recordedAtUtc': payment.recordedAtUtc.toIso8601String(),
+            'terminalLabel': payment.terminalLabel,
+            'cashChangeBaseMinor': payment.cashChangeBaseMinor,
+          },
+        )
+        .toList(growable: false),
+  };
 }
 
 /// Rebuilds an order solely from its immutable venue-hub events. Validation is
@@ -95,9 +169,10 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
   final lines = <String, OfflineProjectedLine>{};
   final payments = <OfflineProjectedPayment>[];
   final paymentIds = <String>{};
-  var expectedSequence = first.sequence;
+  var lastSequence = 0;
   var opened = false;
   var closed = false;
+  String? receiptNumber;
 
   for (final event in events) {
     if (event.tenantId != first.tenantId || event.venueId != first.venueId) {
@@ -108,12 +183,12 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     if (event.hubEpoch != first.hubEpoch) {
       throw const OfflineProjectionException('A stale hub epoch was detected.');
     }
-    if (event.sequence != expectedSequence) {
+    if (event.sequence <= lastSequence) {
       throw const OfflineProjectionException(
-        'The event sequence is missing, duplicated, or out of order.',
+        'The event sequence is duplicated or out of order.',
       );
     }
-    expectedSequence++;
+    lastSequence = event.sequence;
     if (_requiredString(event.payload, 'orderId') != orderId) {
       throw const OfflineProjectionException(
         'An event belongs to a different order.',
@@ -143,16 +218,19 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           );
         }
         final quantity = _positiveInt(event.payload, 'quantity');
-        final unitPriceMinor = _nonNegativeInt(
-          event.payload,
-          'unitPriceMinor',
-        );
+        final unitPriceMinor = _nonNegativeInt(event.payload, 'unitPriceMinor');
         lines[lineId] = OfflineProjectedLine(
           id: lineId,
           productId: _requiredString(event.payload, 'productId'),
           name: _requiredString(event.payload, 'productName'),
           quantity: quantity,
           unitPriceMinor: unitPriceMinor,
+          productionArea:
+              event.payload['productionArea'] as String? ?? 'kitchen',
+          details: _productionDetails(event.payload),
+          taxRateBasisPoints:
+              (event.payload['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
+          taxRateName: event.payload['taxRateName'] as String? ?? 'Zero Rate',
           sent: false,
         );
         break;
@@ -204,7 +282,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         );
         final alreadyPaid = payments.fold<int>(
           0,
-          (sum, payment) => sum + payment.amountMinor,
+          (sum, payment) => sum + payment.baseAmountMinor,
         );
         if (alreadyPaid + amountMinor > total) {
           throw const OfflineProjectionException(
@@ -214,9 +292,18 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         payments.add(
           OfflineProjectedPayment(
             id: paymentId,
-            amountMinor: amountMinor,
+            baseAmountMinor: amountMinor,
+            tenderedAmountMinor:
+                (event.payload['tenderedAmountMinor'] as num?)?.toInt() ??
+                amountMinor,
             method: _requiredString(event.payload, 'method'),
             currencyCode: _requiredString(event.payload, 'currencyCode'),
+            exchangeRateToBase:
+                event.payload['exchangeRateToBase'] as String? ?? '1',
+            recordedAtUtc: event.createdAtUtc,
+            terminalLabel: event.payload['terminalLabel'] as String?,
+            cashChangeBaseMinor:
+                (event.payload['cashChangeBaseMinor'] as num?)?.toInt() ?? 0,
           ),
         );
         break;
@@ -228,7 +315,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         );
         final paid = payments.fold<int>(
           0,
-          (sum, payment) => sum + payment.amountMinor,
+          (sum, payment) => sum + payment.baseAmountMinor,
         );
         if (lines.isEmpty || paid != total) {
           throw const OfflineProjectionException(
@@ -236,6 +323,10 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           );
         }
         closed = true;
+        receiptNumber = event.payload['receiptNumber'] as String?;
+        break;
+      case 'receipt.requested':
+        _requireOpened(opened);
         break;
       default:
         throw OfflineProjectionException(
@@ -248,12 +339,37 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     tenantId: first.tenantId,
     venueId: first.venueId,
     orderId: orderId,
+    openedAtUtc: first.createdAtUtc,
+    tableId: first.payload['tableId'] as String?,
+    tabName: first.payload['tabName'] as String?,
     hubEpoch: first.hubEpoch,
-    lastSequence: expectedSequence - 1,
+    lastSequence: lastSequence,
     lines: UnmodifiableMapView(lines),
     payments: List.unmodifiable(payments),
     isClosed: closed,
+    receiptNumber: receiptNumber,
   );
+}
+
+List<String> _productionDetails(Map<String, Object?> payload) {
+  final details = <String>[];
+  final variantName = payload['variantName'];
+  if (variantName is String && variantName.trim().isNotEmpty) {
+    details.add(variantName.trim());
+  }
+  final modifiers = payload['modifierSelections'];
+  if (modifiers is List) {
+    for (final raw in modifiers) {
+      if (raw is Map && raw['optionName'] is String) {
+        details.add((raw['optionName'] as String).trim());
+      }
+    }
+  }
+  final note = payload['itemNote'];
+  if (note is String && note.trim().isNotEmpty) {
+    details.add('NOTE: ${note.trim()}');
+  }
+  return List.unmodifiable(details);
 }
 
 void _requireOpened(bool opened) {

@@ -23,12 +23,14 @@ class VenueHubRoutingInput {
 /// while the venue hub is accepting offline work on the restaurant LAN.
 VenueMutationRoute chooseVenueMutationRoute(VenueHubRoutingInput input) {
   if (input.hubOwnsAuthority) {
+    // Browser clients remain cloud read-only in the pilot. They deliberately
+    // do not keep native device credentials or write to the LAN authority.
+    if (input.platform == VenueClientPlatform.web) {
+      return input.cloudReachable
+          ? VenueMutationRoute.readOnly
+          : VenueMutationRoute.unavailable;
+    }
     if (input.hubReachable) {
-      if (input.platform == VenueClientPlatform.web &&
-          !input.webAppAvailableOffline &&
-          !input.cloudReachable) {
-        return VenueMutationRoute.unavailable;
-      }
       return VenueMutationRoute.venueHub;
     }
     return input.cloudReachable

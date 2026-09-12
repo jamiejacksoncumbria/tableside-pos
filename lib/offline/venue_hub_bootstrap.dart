@@ -22,14 +22,35 @@ class VenueHubBootstrap {
     required this.serverTimeMillis,
     this.hubDeviceId,
     this.hubCredentialId,
+    this.endpoint,
   });
 
   final bool enabled;
   final int hubEpoch;
   final String? hubDeviceId;
   final String? hubCredentialId;
+  final Uri? endpoint;
   final Map<String, VenueHubPublicCredential> credentials;
   final int serverTimeMillis;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'enabled': enabled,
+    'hubEpoch': hubEpoch,
+    'hubDeviceId': hubDeviceId,
+    'hubCredentialId': hubCredentialId,
+    'hubEndpoint': endpoint?.toString(),
+    'serverTimeMillis': serverTimeMillis,
+    'credentials': credentials.values
+        .map(
+          (credential) => <String, Object?>{
+            'credentialId': credential.id,
+            'deviceId': credential.deviceId,
+            'algorithm': 'Ed25519',
+            'publicKeyBase64': base64UrlEncode(credential.publicKey.bytes),
+          },
+        )
+        .toList(growable: false),
+  };
 
   factory VenueHubBootstrap.fromJson(Map<String, Object?> json) {
     final epoch = json['hubEpoch'];
@@ -74,6 +95,9 @@ class VenueHubBootstrap {
     final enabled = json['enabled'] == true;
     final hubDeviceId = json['hubDeviceId'] as String?;
     final hubCredentialId = json['hubCredentialId'] as String?;
+    final endpoint = json['hubEndpoint'] is String
+        ? Uri.tryParse(json['hubEndpoint'] as String)
+        : null;
     if (enabled &&
         (epoch < 1 ||
             hubDeviceId?.isNotEmpty != true ||
@@ -83,11 +107,21 @@ class VenueHubBootstrap {
         'The enabled venue hub does not have a valid authority credential.',
       );
     }
+    if (enabled &&
+        (endpoint == null ||
+            endpoint.scheme != 'https' ||
+            endpoint.host.isEmpty ||
+            endpoint.userInfo.isNotEmpty)) {
+      throw const FormatException(
+        'The enabled venue hub does not have a trusted HTTPS endpoint.',
+      );
+    }
     return VenueHubBootstrap(
       enabled: enabled,
       hubEpoch: epoch,
       hubDeviceId: hubDeviceId,
       hubCredentialId: hubCredentialId,
+      endpoint: endpoint,
       credentials: Map.unmodifiable(credentials),
       serverTimeMillis: serverTime,
     );

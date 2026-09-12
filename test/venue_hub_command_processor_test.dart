@@ -11,7 +11,7 @@ void main() {
   test('requires both device signature and active staff permission', () async {
     final algorithm = Ed25519();
     final keyPair = await algorithm.newKeyPairFromSeed(List<int>.filled(32, 4));
-    final publicKey = await keyPair.extractPublicKey() as SimplePublicKey;
+    final publicKey = await keyPair.extractPublicKey();
     final committedDrafts = <OfflineEventDraft>[];
     final processor = VenueHubCommandProcessor(
       tenantId: 'tenant-a',
@@ -24,19 +24,22 @@ void main() {
           publicKey: publicKey,
         ),
       },
-      authorizeStaff: (staffId) async => VenueHubStaffGrant(
-        staffId: staffId,
-        permissions: const {'order'},
-        expiresAtUtc: DateTime.utc(2026, 9, 12, 13),
-        pinVersion: 1,
-        membershipVersion: 1,
-      ),
+      authorizeStaff: (staffId, sessionId, sessionToken) async =>
+          VenueHubStaffGrant(
+            staffId: staffId,
+            permissions: const {'order'},
+            expiresAtUtc: DateTime.utc(2026, 9, 12, 13),
+            pinVersion: 1,
+            membershipVersion: 1,
+          ),
       commitEvent: (draft, epoch) async {
         committedDrafts.add(draft);
         return _event(draft, epoch);
       },
     );
     const body = <String, Object?>{
+      'staffSessionId': 'session-a',
+      'staffSessionToken': '01234567890123456789012345678901',
       'eventType': 'order.opened',
       'payload': {'orderId': 'order-a'},
     };
@@ -66,7 +69,7 @@ void main() {
   test('rejects payment without payment permission before commit', () async {
     final algorithm = Ed25519();
     final keyPair = await algorithm.newKeyPairFromSeed(List<int>.filled(32, 5));
-    final publicKey = await keyPair.extractPublicKey() as SimplePublicKey;
+    final publicKey = await keyPair.extractPublicKey();
     var committed = false;
     final processor = VenueHubCommandProcessor(
       tenantId: 'tenant-a',
@@ -79,19 +82,22 @@ void main() {
           publicKey: publicKey,
         ),
       },
-      authorizeStaff: (staffId) async => VenueHubStaffGrant(
-        staffId: staffId,
-        permissions: const {'order'},
-        expiresAtUtc: DateTime.utc(2026, 9, 12, 13),
-        pinVersion: 1,
-        membershipVersion: 1,
-      ),
+      authorizeStaff: (staffId, sessionId, sessionToken) async =>
+          VenueHubStaffGrant(
+            staffId: staffId,
+            permissions: const {'order'},
+            expiresAtUtc: DateTime.utc(2026, 9, 12, 13),
+            pinVersion: 1,
+            membershipVersion: 1,
+          ),
       commitEvent: (draft, epoch) async {
         committed = true;
         return _event(draft, epoch);
       },
     );
     const body = <String, Object?>{
+      'staffSessionId': 'session-a',
+      'staffSessionToken': '01234567890123456789012345678901',
       'eventType': 'payment.recorded',
       'payload': {'orderId': 'order-a', 'baseAmountMinor': 100},
     };
