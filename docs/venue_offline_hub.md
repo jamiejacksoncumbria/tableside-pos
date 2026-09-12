@@ -60,7 +60,8 @@ hub is required and unreachable; they never create a competing cloud history.
 1. Give the proposed hub and every native till/printer a stable LAN address.
 2. Generate a venue TLS certificate with
    `tools/create-venue-hub-certificate.ps1`. Install its CA certificate as
-   trusted on every participating device.
+   trusted on every participating device. Android must install the generated
+   `.cer` file as a CA certificate; iOS must additionally enable full trust.
 3. In **Settings > Venue offline hub**, enter the hub LAN address, import the
    certificate and private key on the hub device, then choose **Make this the
    hub**.
