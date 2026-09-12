@@ -448,6 +448,21 @@ class ProductionCommandRepository {
     });
   }
 
+  /// Returns an authenticated Firebase time sample without requiring a staff
+  /// PIN. It is safe on a locked shared terminal because it exposes no venue
+  /// data and performs no mutation.
+  Future<int> fetchTrustedTime({required VenueScope scope}) async {
+    final response = await _call('getTrustedTime', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+    });
+    final serverTimeMillis = response['serverTimeMillis'];
+    if (serverTimeMillis is! int || serverTimeMillis <= 0) {
+      throw StateError('The server returned an invalid trusted time sample.');
+    }
+    return serverTimeMillis;
+  }
+
   Future<Map<String, Object?>?> claimDevicePrintJob({
     required VenueScope scope,
     required String deviceId,
@@ -795,6 +810,7 @@ class ProductionCommandRepository {
       'orderId': order.id,
       'tableId': order.tableId,
       'tabName': order.tabName,
+      'clientObservedAtMillis': DateTime.now().toUtc().millisecondsSinceEpoch,
       'line': {
         'id': line.id,
         'productId': line.productId,
@@ -989,6 +1005,7 @@ class ProductionCommandRepository {
       'payments': payments.map((payment) => payment.toRequestData()).toList(),
       'printReceipt': printReceipt,
       'requestId': requestId,
+      'clientObservedAtMillis': DateTime.now().toUtc().millisecondsSinceEpoch,
     });
     final billId = response['billId'];
     final totalMinor = response['totalMinor'];

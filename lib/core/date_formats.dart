@@ -15,3 +15,20 @@ String formatAppTime(DateTime value) =>
 
 String formatAppDateTime(DateTime value) =>
     tablesideDateTimeFormat.format(value.toLocal());
+
+String formatVenueDateSnapshot(String value) {
+  final match = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$').firstMatch(value.trim());
+  return match == null
+      ? value
+      : '${match.group(3)}-${match.group(2)}-${match.group(1)}';
+}
+
+String formatVenueDateTimeSnapshot(String value) {
+  final match = RegExp(
+    r'^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::\d{2})?$',
+  ).firstMatch(value.trim());
+  return match == null
+      ? value
+      : '${match.group(3)}-${match.group(2)}-${match.group(1)} '
+            '${match.group(4)}:${match.group(5)}';
+}

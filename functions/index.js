@@ -128,6 +128,15 @@ function optionalText(data, name, maxLength = 500) {
   return value.trim();
 }
 
+function optionalClientTimeMillis(data) {
+  if (data.clientObservedAtMillis == null) return null;
+  const value = Number(data.clientObservedAtMillis);
+  if (!Number.isSafeInteger(value) || value < 946684800000 || value > 4102444800000) {
+    throw new HttpsError("invalid-argument", "clientObservedAtMillis is invalid.");
+  }
+  return value;
+}
+
 const catalogueAcronyms = new Set(["BBQ", "IPA", "KDV", "NFC", "QR", "SKU", "VAT"]);
 
 function catalogueTitleCase(value) {
@@ -1431,6 +1440,30 @@ async function heartbeatPrinterDeviceFor(caller, rawData) {
   const device = await authenticatedPrinterDevice(caller, rawData);
   await device.deviceRef.update({lastHeartbeatAt: FieldValue.serverTimestamp()});
   return {online: true};
+}
+
+async function getTrustedTimeFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  await requireTenantHostMember(caller, tenantId);
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const timeZone = typeof venue.data().timeZone === "string"
+    ? venue.data().timeZone
+    : "Europe/London";
+  const cutoff = Number(venue.data().businessDayCutoffMinutes ?? 240);
+  const cutoffMinutes = Number.isInteger(cutoff) && cutoff >= 0 && cutoff < 1440
+    ? cutoff
+    : 240;
+  const now = new Date();
+  return {
+    serverTimeMillis: now.getTime(),
+    venueTimeZone: timeZone,
+    businessDate: billBusinessDate(timeZone, cutoffMinutes, now),
+  };
 }
 
 async function claimDevicePrintJobFor(caller, rawData) {
@@ -3271,6 +3304,7 @@ async function openNamedTabFor(caller, rawData) {
 // harmless until sendOrderToProductionFor creates the ticket and stock move.
 async function addOrderDraftLineFor(caller, rawData) {
   const data = requireObject(rawData);
+  const clientObservedAtMillis = optionalClientTimeMillis(data);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const orderId = requiredText(data, "orderId", 180);
@@ -3432,6 +3466,17 @@ async function addOrderDraftLineFor(caller, rawData) {
     const taxRateBasisPoints = validTaxRateBasisPoints(
       productData.taxRateBasisPoints,
     );
+    const addedAtMillis = Date.now();
+    const venueTimeZone = typeof venue.data().timeZone === "string"
+      ? venue.data().timeZone
+      : "Europe/London";
+    const addedLocal = venueLocalDateTimeSnapshot(
+      venueTimeZone,
+      new Date(addedAtMillis),
+    );
+    const clockSkewMillis = clientObservedAtMillis == null
+      ? null
+      : addedAtMillis - clientObservedAtMillis;
     const canonicalLine = {
       id: line.id,
       productId: line.productId,
@@ -3453,7 +3498,12 @@ async function addOrderDraftLineFor(caller, rawData) {
       modifierSelections: configuration.modifierSelections,
       itemNote: configuration.itemNote,
       isSentToProduction: false,
-      addedAtMillis: Date.now(),
+      addedAtMillis,
+      addedLocalDate: addedLocal.localDate,
+      addedLocalDateTime: addedLocal.localDateTime,
+      venueTimeZone,
+      deviceObservedAtMillis: clientObservedAtMillis,
+      clockSkewMillis,
       addedByActor: actor,
     };
     const current = existingOrder.exists ? existingOrder.data() : null;
@@ -3487,6 +3537,10 @@ async function addOrderDraftLineFor(caller, rawData) {
       lineId: line.id,
       productId: line.productId,
       quantity: line.quantity,
+      serverObservedAtMillis: addedAtMillis,
+      deviceObservedAtMillis: clientObservedAtMillis,
+      clockSkewMillis,
+      venueTimeZone,
       actor,
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -4430,6 +4484,26 @@ function billBusinessDate(timeZone, cutoffMinutes, now = new Date()) {
   return localDate.toISOString().slice(0, 10);
 }
 
+function venueLocalDateTimeSnapshot(timeZone, now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const value = (type) => parts.find((part) => part.type === type)?.value;
+  const date = `${value("year")}-${value("month")}-${value("day")}`;
+  const time = `${value("hour")}:${value("minute")}:${value("second")}`;
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(date) || !/^\d{2}:\d{2}:\d{2}$/u.test(time)) {
+    throw new HttpsError("failed-precondition", "The venue local time could not be calculated.");
+  }
+  return {localDate: date, localDateTime: `${date} ${time}`, timeZone};
+}
+
 function nextIsoDate(isoDate) {
   const [year, month, day] = isoDate.split("-").map(Number);
   const date = new Date(Date.UTC(year, month - 1, day));
@@ -4572,6 +4646,7 @@ async function refreshStaffPinSessionFor(caller, rawData) {
 
 async function closeOrderFor(caller, rawData) {
   const data = requireObject(rawData);
+  const clientObservedAtMillis = optionalClientTimeMillis(data);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const orderId = requiredText(data, "orderId", 180);
@@ -4723,6 +4798,21 @@ async function closeOrderFor(caller, rawData) {
         addedAtMillis: Number.isSafeInteger(Number(line.addedAtMillis))
           ? Number(line.addedAtMillis)
           : (orderData.openedAt?.toMillis?.() ?? Date.now()),
+        addedLocalDate: typeof line.addedLocalDate === "string"
+          ? line.addedLocalDate
+          : null,
+        addedLocalDateTime: typeof line.addedLocalDateTime === "string"
+          ? line.addedLocalDateTime
+          : null,
+        venueTimeZone: typeof line.venueTimeZone === "string"
+          ? line.venueTimeZone
+          : null,
+        deviceObservedAtMillis: Number.isSafeInteger(Number(line.deviceObservedAtMillis))
+          ? Number(line.deviceObservedAtMillis)
+          : null,
+        clockSkewMillis: Number.isSafeInteger(Number(line.clockSkewMillis))
+          ? Number(line.clockSkewMillis)
+          : null,
         sentAtMillis: Number.isSafeInteger(Number(line.sentAtMillis))
           ? Number(line.sentAtMillis)
           : null,
@@ -4767,10 +4857,23 @@ async function closeOrderFor(caller, rawData) {
     const currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
     const receiptBusiness = receiptBusinessSnapshot(tenant.data(), venue.data());
     const paymentRecordedAtMillis = Date.now();
+    const paymentLocal = venueLocalDateTimeSnapshot(
+      typeof venue.data().timeZone === "string"
+        ? venue.data().timeZone
+        : "Europe/London",
+      new Date(paymentRecordedAtMillis),
+    );
+    const paymentClockSkewMillis = clientObservedAtMillis == null
+      ? null
+      : paymentRecordedAtMillis - clientObservedAtMillis;
     const payments = rawPayments.map((payment, index) => ({
       ...validClosePayment(payment, index, currencyCode),
       id: `${requestId}-${index}`,
       recordedAtMillis: paymentRecordedAtMillis,
+      recordedLocalDateTime: paymentLocal.localDateTime,
+      venueTimeZone: paymentLocal.timeZone,
+      deviceObservedAtMillis: clientObservedAtMillis,
+      clockSkewMillis: paymentClockSkewMillis,
     }));
     const previousPayments = Array.isArray(orderData.payments)
       ? orderData.payments.filter((payment) => payment != null && typeof payment === "object")
@@ -5090,6 +5193,10 @@ async function closeOrderFor(caller, rawData) {
       receiptPrintQueued,
       receiptPrintJobId,
       actor,
+      serverObservedAtMillis: paymentRecordedAtMillis,
+      deviceObservedAtMillis: clientObservedAtMillis,
+      clockSkewMillis: paymentClockSkewMillis,
+      venueTimeZone: paymentLocal.timeZone,
       createdAt: FieldValue.serverTimestamp(),
     });
     transaction.create(tenantRef.collection("auditEvents").doc(), {
@@ -5102,6 +5209,9 @@ async function closeOrderFor(caller, rawData) {
       paidThisTimeMinor,
       paidTotalMinor,
       balanceDueMinor,
+      serverObservedAtMillis: paymentRecordedAtMillis,
+      deviceObservedAtMillis: clientObservedAtMillis,
+      clockSkewMillis: paymentClockSkewMillis,
       netTotalMinor,
       taxTotalMinor,
       receiptPrintRequested: printReceipt,
@@ -7537,6 +7647,7 @@ async function invokePosAction(action, caller, data) {
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
     "recoverOwnStaffPin",
     "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
+    "getTrustedTime",
   ]);
   const actingCaller = sessionBootstrapActions.has(action)
     ? caller
@@ -7564,6 +7675,8 @@ async function invokePosAction(action, caller, data) {
       return claimDevicePrintJobFor(caller, data);
     case "completeDevicePrintJob":
       return completeDevicePrintJobFor(caller, data);
+    case "getTrustedTime":
+      return getTrustedTimeFor(caller, data);
     case "unlockStaffPin":
       return unlockStaffPinFor(actingCaller, data);
     case "lockStaffPin":

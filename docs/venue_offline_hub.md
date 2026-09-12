@@ -23,6 +23,12 @@ Status: foundation in progress on `feature/venue-offline-hub`.
    the entire event rather than trusting client-calculated totals.
 7. PINs, Firebase tokens, card details and cryptographic keys are never placed
    in event payloads or diagnostic logs.
+8. Every event records the authoritative UTC time, the device-observed UTC
+   time, clock source and measured skew. A skew above two minutes is surfaced
+   to staff and retained for reconciliation rather than silently trusted.
+9. When a hub generation owns venue writes, any client that cannot reach that
+   hub is fail-closed. Cloud connectivity alone must not create a competing
+   order history.
 
 ## Durable event lifecycle
 
@@ -36,6 +42,46 @@ Each encrypted event records a device/staff identity, operation type, business
 timestamp, hub epoch, sequence number, previous hash and authenticated event
 hash. Tenant, venue and payload data live inside the encrypted envelope. The
 unencrypted venue lookup key is an HMAC pseudonym rather than its Firebase ID.
+
+Order state is rebuilt by a deterministic projector. It rejects cross-venue
+events, stale hub generations, missing/duplicate sequences, edits after close,
+duplicate payments, overpayment and closing with an outstanding balance. Cloud
+ingestion will run equivalent validation before acknowledging an event.
+
+## Trusted time
+
+- During normal online operation, a Firebase function supplies Google server
+  time and the venue timezone. The client estimates offset at the midpoint of
+  the request round trip; it never changes the device operating-system clock.
+- During an outage, the enrolled primary venue hub supplies the authoritative
+  time and its current hub generation.
+- Orders and payments retain server/hub time, device-observed time, measured
+  skew and venue-local display snapshots. Historic receipts therefore do not
+  change when a device timezone or clock is corrected later.
+- An unsynchronised device may not become an offline authority without a
+  manager-visible warning and a recorded recovery decision.
+
+## Web clients and split-brain prevention
+
+Firebase Hosting remains the normal online host. For offline browser use, the
+venue hub will serve/cache the signed web application over authenticated local
+HTTPS and expose an authenticated WebSocket/API on the venue LAN. Local-network
+location is never treated as authentication; device enrolment, staff PIN
+session, tenant and venue are checked on every mutation.
+
+When the hub owns write authority:
+
+- a web browser on the venue LAN writes through the hub;
+- Android, iOS and Windows clients on the LAN write through the same hub;
+- a browser on 3G or another network can continue to read cloud state but is
+  read-only until it can reach the hub or the hub has reconciled and released
+  authority;
+- if neither Firebase nor the hub is reachable, web mutation controls are
+  unavailable rather than creating a second order history.
+
+Browser delivery must include a trusted venue certificate, strict origin
+allow-listing, Private Network Access/CORS handling and encrypted device
+credentials. There will be no unauthenticated HTTP endpoint on the LAN.
 
 ## Initial offline scope
 
@@ -51,15 +97,24 @@ cross-venue voucher redemption and subscription changes remain online-only.
 
 ## Delivery phases
 
-1. Encrypted local event ledger and client outbox.
-2. Deterministic order/payment projection from those events.
-3. Manager-approved device enrolment and per-device credentials.
-4. Authenticated local HTTPS API and real-time event stream.
-5. Primary hub lease/generation and explicit recovery takeover.
-6. LAN print routing with unknown-after-power-loss recovery.
-7. Server-validated Firebase ingestion and reconciliation UI.
-8. Android foreground hub service and reboot recovery.
-9. Optional enrolled backup hub after split-brain testing.
+1. Encrypted local event ledger and client outbox. **Implemented foundation.**
+2. Deterministic order/payment projection from those events. **Implemented
+   foundation; full POS command wiring remains.**
+3. Trusted Firebase/hub clock and fail-closed client routing policy.
+   **Implemented foundation.**
+4. Manager-approved device enrolment and per-device credentials.
+5. Authenticated local HTTPS API and real-time event stream.
+6. Primary hub lease/generation and explicit recovery takeover.
+7. Wire POS order/payment commands through the route and durable projector.
+8. LAN print routing with unknown-after-power-loss recovery.
+9. Server-validated Firebase ingestion and reconciliation UI.
+10. Android foreground hub service and reboot recovery.
+11. Optional enrolled backup hub after split-brain testing.
+
+The local HTTPS/WebSocket transport and end-to-end offline POS command routing
+are not yet complete. The current code establishes the durable, temporal and
+deterministic safety primitives they will use; it must not yet be presented to
+a pilot venue as fully offline capable.
 
 ## Required failure tests
 

@@ -35,6 +35,11 @@ void main() {
     expect(pending.single.id, saved.id);
     expect(pending.single.sequence, 1);
     expect(pending.single.payload, {'orderId': 'order-a', 'quantity': 2});
+    expect(pending.single.deviceObservedAtUtc, isNotNull);
+    expect(
+      pending.single.timeAuthority,
+      OfflineTimeAuthority.deviceUnverified,
+    );
     final raw = database.select(
       'SELECT cipher_text FROM offline_events WHERE event_id = ?',
       [saved.id],

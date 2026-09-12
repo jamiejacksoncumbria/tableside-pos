@@ -2402,7 +2402,17 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                               context,
                                             ).textTheme.labelSmall,
                                           ),
-                                        if (line.addedAt != null)
+                                        if (line.addedLocalDateTime
+                                                ?.trim()
+                                                .isNotEmpty ==
+                                            true)
+                                          Text(
+                                            'Added ${formatVenueDateTimeSnapshot(line.addedLocalDateTime!)}',
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.labelSmall,
+                                          )
+                                        else if (line.addedAt != null)
                                           Text(
                                             'Added ${formatAppDateTime(line.addedAt!)}',
                                             style: Theme.of(
@@ -2500,7 +2510,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
               ),
               for (final payment in order.payments)
                 Text(
-                  '${formatAppDateTime(payment.recordedAt)} · ${payment.method} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
+                  '${payment.recordedLocalDateTime?.trim().isNotEmpty == true ? formatVenueDateTimeSnapshot(payment.recordedLocalDateTime!) : formatAppDateTime(payment.recordedAt)} · ${payment.method} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
                   style: Theme.of(context).textTheme.labelSmall,
                 ),
             ],
@@ -2868,7 +2878,14 @@ Future<void> _showCheckoutSheet(
                         title: Text(
                           '${payment.method} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
                         ),
-                        subtitle: Text(formatAppDateTime(payment.recordedAt)),
+                        subtitle: Text(
+                          payment.recordedLocalDateTime?.trim().isNotEmpty ==
+                                  true
+                              ? formatVenueDateTimeSnapshot(
+                                  payment.recordedLocalDateTime!,
+                                )
+                              : formatAppDateTime(payment.recordedAt),
+                        ),
                       ),
                   ],
                   const SizedBox(height: 12),

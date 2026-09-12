@@ -715,6 +715,9 @@ class OrderLine {
     this.stockComponents = const <ProductStockComponent>[],
     this.addedAt,
     this.sentAt,
+    this.addedLocalDate,
+    this.addedLocalDateTime,
+    this.venueTimeZone,
   });
 
   final String id;
@@ -737,6 +740,9 @@ class OrderLine {
   final List<ProductStockComponent> stockComponents;
   final DateTime? addedAt;
   final DateTime? sentAt;
+  final String? addedLocalDate;
+  final String? addedLocalDateTime;
+  final String? venueTimeZone;
 
   int get totalMinor => quantity * unitPriceMinor;
 
@@ -772,6 +778,9 @@ class OrderLine {
     stockComponents: stockComponents,
     addedAt: addedAt,
     sentAt: sentAt,
+    addedLocalDate: addedLocalDate,
+    addedLocalDateTime: addedLocalDateTime,
+    venueTimeZone: venueTimeZone,
   );
 }
 
@@ -787,6 +796,8 @@ class OrderPayment {
     required this.baseAmountMinor,
     required this.exchangeRateToBase,
     required this.recordedAt,
+    this.recordedLocalDateTime,
+    this.venueTimeZone,
     this.terminalLabel,
     this.cashChangeBaseMinor = 0,
   });
@@ -798,6 +809,8 @@ class OrderPayment {
   final int baseAmountMinor;
   final String exchangeRateToBase;
   final DateTime recordedAt;
+  final String? recordedLocalDateTime;
+  final String? venueTimeZone;
   final String? terminalLabel;
   final int cashChangeBaseMinor;
 }

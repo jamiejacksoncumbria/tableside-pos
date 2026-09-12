@@ -240,7 +240,9 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
     final itemBytes = <int>[];
     String? currentItemDate;
     for (final line in receipt.lines) {
-      final itemDate = line.addedAt == null
+      final itemDate = line.addedLocalDate?.trim().isNotEmpty == true
+          ? formatVenueDateSnapshot(line.addedLocalDate!)
+          : line.addedAt == null
           ? null
           : formatAppDate(line.addedAt!);
       if (itemDate != null && itemDate != currentItemDate) {
@@ -350,7 +352,11 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           ...generator.text(
             '${payment.method}${payment.terminalLabel?.trim().isNotEmpty == true ? ' (${payment.terminalLabel!.trim()})' : ''}: ${_money(payment.amountMinor, payment.currencyCode)}',
           ),
-          if (payment.recordedAt != null)
+          if (payment.recordedLocalDateTime?.trim().isNotEmpty == true)
+            ...generator.text(
+              'Paid: ${formatVenueDateTimeSnapshot(payment.recordedLocalDateTime!)}',
+            )
+          else if (payment.recordedAt != null)
             ...generator.text(
               'Paid: ${formatAppDateTime(payment.recordedAt!)}',
             ),

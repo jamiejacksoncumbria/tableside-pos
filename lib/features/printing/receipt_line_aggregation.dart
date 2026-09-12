@@ -7,12 +7,14 @@ class ReceiptLineSummary {
     required this.quantity,
     required this.lineTotalMinor,
     this.addedAtMillis,
+    this.addedLocalDate,
   });
 
   final String name;
   final int quantity;
   final int lineTotalMinor;
   final int? addedAtMillis;
+  final String? addedLocalDate;
 }
 
 List<ReceiptLineSummary> aggregateReceiptPayloadLines(Object? rawLines) {
@@ -39,7 +41,10 @@ List<ReceiptLineSummary> aggregateReceiptPayloadLines(Object? rawLines) {
         : '$baseName\n${details.join('\n')}';
     final lineTotalMinor = (raw['lineTotalMinor'] as num?)?.toInt() ?? 0;
     final addedAtMillis = (raw['addedAtMillis'] as num?)?.toInt();
-    final saleDateKey = addedAtMillis == null
+    final addedLocalDate = raw['addedLocalDate'] as String?;
+    final saleDateKey = addedLocalDate?.trim().isNotEmpty == true
+        ? addedLocalDate!.trim()
+        : addedAtMillis == null
         ? ''
         : _localDateKey(DateTime.fromMillisecondsSinceEpoch(addedAtMillis));
     // Do not merge lines which have a different sale price or tax snapshot.
@@ -60,6 +65,7 @@ List<ReceiptLineSummary> aggregateReceiptPayloadLines(Object? rawLines) {
         quantity,
         lineTotalMinor,
         addedAtMillis,
+        addedLocalDate,
       );
     } else {
       existing.quantity += quantity;
@@ -73,6 +79,7 @@ List<ReceiptLineSummary> aggregateReceiptPayloadLines(Object? rawLines) {
           quantity: line.quantity,
           lineTotalMinor: line.lineTotalMinor,
           addedAtMillis: line.addedAtMillis,
+          addedLocalDate: line.addedLocalDate,
         ),
       )
       .toList(growable: false);
@@ -89,10 +96,12 @@ class _ReceiptLineTotal {
     this.quantity,
     this.lineTotalMinor,
     this.addedAtMillis,
+    this.addedLocalDate,
   );
 
   final String name;
   int quantity;
   int lineTotalMinor;
   final int? addedAtMillis;
+  final String? addedLocalDate;
 }

@@ -2,6 +2,8 @@ import 'dart:collection';
 
 enum OfflineEventSyncState { pending, inFlight, synced, quarantined }
 
+enum OfflineTimeAuthority { deviceUnverified, firebaseEstimate, venueHub }
+
 /// An operation that must be committed locally before the UI reports success.
 ///
 /// The payload must contain business inputs, never Firebase ID tokens, staff
@@ -54,6 +56,9 @@ class OfflineEvent {
     required this.type,
     required this.payload,
     required this.createdAtUtc,
+    required this.deviceObservedAtUtc,
+    required this.timeAuthority,
+    required this.clockSkewMillis,
     required this.businessTimestampUtc,
     required this.sequence,
     required this.hubEpoch,
@@ -74,6 +79,9 @@ class OfflineEvent {
   final String type;
   final Map<String, Object?> payload;
   final DateTime createdAtUtc;
+  final DateTime deviceObservedAtUtc;
+  final OfflineTimeAuthority timeAuthority;
+  final int clockSkewMillis;
   final DateTime businessTimestampUtc;
   final int sequence;
   final int hubEpoch;

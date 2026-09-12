@@ -1167,6 +1167,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
         stockComponents: line.stockComponents,
         addedAt: line.addedAt,
         sentAt: line.sentAt,
+        addedLocalDate: line.addedLocalDate,
+        addedLocalDateTime: line.addedLocalDateTime,
+        venueTimeZone: line.venueTimeZone,
       );
 }
 

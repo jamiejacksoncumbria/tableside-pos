@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart';
 
+import '../core/trusted_clock.dart';
 import 'offline_event.dart';
 import 'offline_event_crypto.dart';
 import 'offline_event_store_base.dart';
@@ -120,7 +121,11 @@ class NativeOfflineEventStore implements OfflineEventStore {
     final previousHash = tail.isEmpty
         ? 'GENESIS:$venueKey:$hubEpoch'
         : tail.first['event_hash'] as String;
-    final createdAt = DateTime.now().toUtc();
+    final deviceObservedAt = DateTime.now().toUtc();
+    final clock = TrustedClock.instance.snapshot;
+    final createdAt = clock.isSynchronised
+        ? clock.trustedNowUtc(deviceObservedAt)
+        : deviceObservedAt;
     final businessTimestamp = (draft.businessTimestamp ?? createdAt).toUtc();
     final eventId = _newEventId(createdAt);
     final associatedData = _associatedData(
@@ -140,6 +145,13 @@ class NativeOfflineEventStore implements OfflineEventStore {
       if (draft.managerApprovalStaffId != null)
         'managerApprovalStaffId': draft.managerApprovalStaffId,
       'type': draft.type,
+      'deviceObservedAtUtc': deviceObservedAt.toIso8601String(),
+      'timeAuthority': switch (clock.authority) {
+        TrustedClockAuthority.firebase => 'firebaseEstimate',
+        TrustedClockAuthority.venueHub => 'venueHub',
+        TrustedClockAuthority.unsynchronised => 'deviceUnverified',
+      },
+      'clockSkewMillis': clock.offset.inMilliseconds,
       'businessTimestampUtc': businessTimestamp.toIso8601String(),
       'payload': draft.payload,
     };
@@ -212,6 +224,14 @@ class NativeOfflineEventStore implements OfflineEventStore {
       type: draft.type,
       payload: draft.payload,
       createdAtUtc: createdAt,
+      deviceObservedAtUtc: deviceObservedAt,
+      timeAuthority: switch (clock.authority) {
+        TrustedClockAuthority.firebase => OfflineTimeAuthority.firebaseEstimate,
+        TrustedClockAuthority.venueHub => OfflineTimeAuthority.venueHub,
+        TrustedClockAuthority.unsynchronised =>
+          OfflineTimeAuthority.deviceUnverified,
+      },
+      clockSkewMillis: clock.offset.inMilliseconds,
       businessTimestampUtc: businessTimestamp,
       sequence: sequence,
       hubEpoch: hubEpoch,
@@ -336,6 +356,11 @@ class NativeOfflineEventStore implements OfflineEventStore {
     if (payload is! Map) {
       throw StateError('An offline event payload is invalid.');
     }
+    final createdAt = DateTime.fromMillisecondsSinceEpoch(
+      row['created_at_utc_ms'] as int,
+      isUtc: true,
+    );
+    final rawAuthority = clear['timeAuthority'] as String?;
     return OfflineEvent(
       id: row['event_id'] as String,
       tenantId: clear['tenantId'] as String,
@@ -345,10 +370,16 @@ class NativeOfflineEventStore implements OfflineEventStore {
       managerApprovalStaffId: clear['managerApprovalStaffId'] as String?,
       type: clear['type'] as String,
       payload: Map<String, Object?>.from(payload),
-      createdAtUtc: DateTime.fromMillisecondsSinceEpoch(
-        row['created_at_utc_ms'] as int,
-        isUtc: true,
-      ),
+      createdAtUtc: createdAt,
+      deviceObservedAtUtc: clear['deviceObservedAtUtc'] is String
+          ? DateTime.parse(clear['deviceObservedAtUtc'] as String).toUtc()
+          : createdAt,
+      timeAuthority: switch (rawAuthority) {
+        'firebaseEstimate' => OfflineTimeAuthority.firebaseEstimate,
+        'venueHub' => OfflineTimeAuthority.venueHub,
+        _ => OfflineTimeAuthority.deviceUnverified,
+      },
+      clockSkewMillis: (clear['clockSkewMillis'] as num?)?.toInt() ?? 0,
       businessTimestampUtc: DateTime.parse(
         clear['businessTimestampUtc'] as String,
       ).toUtc(),

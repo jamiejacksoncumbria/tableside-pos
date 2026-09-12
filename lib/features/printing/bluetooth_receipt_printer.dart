@@ -135,12 +135,14 @@ class BluetoothBillReceiptLine {
     required this.quantity,
     required this.lineTotalMinor,
     this.addedAt,
+    this.addedLocalDate,
   });
 
   final String name;
   final int quantity;
   final int lineTotalMinor;
   final DateTime? addedAt;
+  final String? addedLocalDate;
 }
 
 class BluetoothReceiptPayment {
@@ -155,6 +157,7 @@ class BluetoothReceiptPayment {
     this.terminalLabel,
     this.exchangeRateSource,
     this.recordedAt,
+    this.recordedLocalDateTime,
   });
 
   final String method;
@@ -167,6 +170,7 @@ class BluetoothReceiptPayment {
   final String? terminalLabel;
   final String? exchangeRateSource;
   final DateTime? recordedAt;
+  final String? recordedLocalDateTime;
 }
 
 class BluetoothReceiptTaxBreakdown {

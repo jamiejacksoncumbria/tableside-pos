@@ -693,6 +693,9 @@ class FirestorePosRepository {
             sentAt:
                 _dateTime(line['sentAt']) ??
                 _dateTimeFromMillis(line['sentAtMillis']),
+            addedLocalDate: line['addedLocalDate'] as String?,
+            addedLocalDateTime: line['addedLocalDateTime'] as String?,
+            venueTimeZone: line['venueTimeZone'] as String?,
           );
         })
         .where((line) => line.id.isNotEmpty && line.productId.isNotEmpty)
@@ -714,6 +717,9 @@ class FirestorePosRepository {
                 _dateTime(payment['recordedAt']) ??
                 _dateTimeFromMillis(payment['recordedAtMillis']) ??
                 orderOpenedAt,
+            recordedLocalDateTime:
+                payment['recordedLocalDateTime'] as String?,
+            venueTimeZone: payment['venueTimeZone'] as String?,
             terminalLabel: payment['terminalLabel'] as String?,
             cashChangeBaseMinor:
                 (payment['cashChangeBaseMinor'] as num?)?.toInt() ?? 0,

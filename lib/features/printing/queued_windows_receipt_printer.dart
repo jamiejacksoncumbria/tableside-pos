@@ -209,7 +209,9 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     final itemLines = <WindowsPrintLine>[];
     String? currentItemDate;
     for (final line in summaries) {
-      final itemDate = line.addedAtMillis == null
+      final itemDate = line.addedLocalDate?.trim().isNotEmpty == true
+          ? formatVenueDateSnapshot(line.addedLocalDate!)
+          : line.addedAtMillis == null
           ? null
           : formatAppDate(
               DateTime.fromMillisecondsSinceEpoch(line.addedAtMillis!),
@@ -358,8 +360,16 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
             rightText: _money(amount, paymentCurrency),
           ),
         );
+        final recordedLocalDateTime =
+            value['recordedLocalDateTime'] as String?;
         final recordedAtMillis = (value['recordedAtMillis'] as num?)?.toInt();
-        if (recordedAtMillis != null) {
+        if (recordedLocalDateTime?.trim().isNotEmpty == true) {
+          lines.add(
+            WindowsPrintLine(
+              'Paid: ${formatVenueDateTimeSnapshot(recordedLocalDateTime!)}',
+            ),
+          );
+        } else if (recordedAtMillis != null) {
           lines.add(
             WindowsPrintLine(
               'Paid: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch(recordedAtMillis))}',

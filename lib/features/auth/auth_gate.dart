@@ -10,6 +10,7 @@ import '../../core/app_logger.dart';
 import '../../core/app_theme_controller.dart';
 import '../../core/platform_admin_pin_session_store.dart';
 import '../../core/tenant_scope.dart';
+import '../../core/trusted_clock_host.dart';
 import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
 import '../platform_admin/platform_admin_page.dart';
@@ -448,6 +449,7 @@ class _TenantWorkspace extends ConsumerWidget {
         // claiming is authorised by the enrolled device credential, not by a
         // staff session, so unattended kitchen/bar delivery keeps running.
         if (!kIsWeb) const QueuedPrintWorkerHost(),
+        const TrustedClockHost(),
         StaffPinGate(
           scope: scope,
           backgroundLockSeconds: venue.backgroundLockSeconds,

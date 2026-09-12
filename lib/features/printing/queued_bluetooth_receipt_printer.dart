@@ -98,6 +98,7 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
             addedAt: line.addedAtMillis == null
                 ? null
                 : DateTime.fromMillisecondsSinceEpoch(line.addedAtMillis!),
+            addedLocalDate: line.addedLocalDate,
           ),
         )
         .toList(growable: false);
@@ -135,6 +136,8 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
                       : DateTime.fromMillisecondsSinceEpoch(
                           (payment['recordedAtMillis'] as num).toInt(),
                         ),
+                  recordedLocalDateTime:
+                      payment['recordedLocalDateTime'] as String?,
                 ),
               )
               .toList(growable: false)
