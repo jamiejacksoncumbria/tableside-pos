@@ -7,6 +7,103 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Join-DerBytes {
+  param([Parameter(Mandatory = $true)][object[]]$Parts)
+
+  $stream = New-Object System.IO.MemoryStream
+  try {
+    foreach ($part in $Parts) {
+      $bytes = [byte[]]$part
+      $stream.Write($bytes, 0, $bytes.Length)
+    }
+    return [byte[]]$stream.ToArray()
+  } finally {
+    $stream.Dispose()
+  }
+}
+
+function ConvertTo-DerLength {
+  param([Parameter(Mandatory = $true)][int]$Length)
+
+  if ($Length -lt 0) {
+    throw 'DER length cannot be negative.'
+  }
+  if ($Length -lt 128) {
+    return [byte[]]@($Length)
+  }
+
+  $lengthBytes = New-Object System.Collections.Generic.List[byte]
+  $remaining = $Length
+  while ($remaining -gt 0) {
+    $lengthBytes.Insert(0, [byte]($remaining -band 0xff))
+    $remaining = [math]::Floor($remaining / 256)
+  }
+  return [byte[]](@([byte](0x80 -bor $lengthBytes.Count)) + $lengthBytes.ToArray())
+}
+
+function New-DerElement {
+  param(
+    [Parameter(Mandatory = $true)][byte]$Tag,
+    [Parameter(Mandatory = $true)][byte[]]$Value
+  )
+
+  return [byte[]](Join-DerBytes @(
+    [byte[]]@($Tag),
+    [byte[]](ConvertTo-DerLength $Value.Length),
+    $Value
+  ))
+}
+
+function New-DerInteger {
+  param([Parameter(Mandatory = $true)][byte[]]$Value)
+
+  $firstNonZero = 0
+  while (($firstNonZero -lt ($Value.Length - 1)) -and ($Value[$firstNonZero] -eq 0)) {
+    $firstNonZero++
+  }
+  $unsignedValue = [byte[]]$Value[$firstNonZero..($Value.Length - 1)]
+  if (($unsignedValue[0] -band 0x80) -ne 0) {
+    $unsignedValue = [byte[]](@(0) + $unsignedValue)
+  }
+  return [byte[]](New-DerElement 0x02 $unsignedValue)
+}
+
+function Export-Pkcs8PrivateKeyPem {
+  param([Parameter(Mandatory = $true)][System.Security.Cryptography.RSA]$PrivateKey)
+
+  # Windows PowerShell 5.1 does not expose ExportPkcs8PrivateKeyPem(). Build
+  # the same PKCS#8 PrivateKeyInfo structure from portable RSA parameters.
+  $parameters = $PrivateKey.ExportParameters($true)
+  $rsaPrivateKey = New-DerElement 0x30 (Join-DerBytes @(
+    (New-DerInteger ([byte[]]@(0))),
+    (New-DerInteger $parameters.Modulus),
+    (New-DerInteger $parameters.Exponent),
+    (New-DerInteger $parameters.D),
+    (New-DerInteger $parameters.P),
+    (New-DerInteger $parameters.Q),
+    (New-DerInteger $parameters.DP),
+    (New-DerInteger $parameters.DQ),
+    (New-DerInteger $parameters.InverseQ)
+  ))
+
+  # rsaEncryption OID 1.2.840.113549.1.1.1 followed by NULL parameters.
+  $rsaAlgorithmIdentifier = [byte[]]@(
+    0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86,
+    0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00
+  )
+  $privateKeyInfo = New-DerElement 0x30 (Join-DerBytes @(
+    (New-DerInteger ([byte[]]@(0))),
+    $rsaAlgorithmIdentifier,
+    (New-DerElement 0x04 $rsaPrivateKey)
+  ))
+  $base64 = [Convert]::ToBase64String(
+    $privateKeyInfo,
+    [Base64FormattingOptions]::InsertLineBreaks
+  )
+  return "-----BEGIN PRIVATE KEY-----`r`n$base64`r`n-----END PRIVATE KEY-----`r`n"
+}
+
 $resolvedOutput = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $OutputDirectory))
 $workspace = [System.IO.Path]::GetFullPath((Get-Location).Path)
 if (-not $resolvedOutput.StartsWith($workspace, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -51,7 +148,7 @@ $certificateBase64 = [Convert]::ToBase64String($certificateBytes, [Base64Formatt
 $certificatePem = "-----BEGIN CERTIFICATE-----`r`n$certificateBase64`r`n-----END CERTIFICATE-----`r`n"
 $privateKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
 try {
-  $privateKeyPem = $privateKey.ExportPkcs8PrivateKeyPem()
+  $privateKeyPem = Export-Pkcs8PrivateKeyPem $privateKey
 } finally {
   $privateKey.Dispose()
 }
