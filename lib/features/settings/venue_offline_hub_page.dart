@@ -68,7 +68,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     final raw = await _repository.fetchOfflineHubBootstrap(scope: widget.scope);
     if (!mounted) return;
     final bootstrap = VenueHubBootstrap.fromJson(raw);
-    VenueHubPrinterClientRegistry.instance.configure(
+    await VenueHubPrinterClientRegistry.instance.configure(
       scope: widget.scope,
       bootstrap: bootstrap,
       deviceId: deviceId,
@@ -99,7 +99,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     );
     final raw = await _repository.fetchOfflineHubBootstrap(scope: widget.scope);
     final bootstrap = VenueHubBootstrap.fromJson(raw);
-    VenueHubPrinterClientRegistry.instance.configure(
+    await VenueHubPrinterClientRegistry.instance.configure(
       scope: widget.scope,
       bootstrap: bootstrap,
       deviceId: deviceId,
@@ -453,7 +453,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                         onPressed: _busy || kIsWeb
                             ? null
                             : () => _chooseTlsFile('certificate'),
-                        child: const Text('Choose certificate PEM'),
+                        child: const Text('Choose trusted certificate PEM'),
                       ),
                       OutlinedButton(
                         onPressed: _busy || kIsWeb

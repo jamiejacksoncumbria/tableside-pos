@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../core/trusted_clock.dart';
@@ -17,6 +19,7 @@ class VenueHubClientRegistry {
   VenueHubClientRegistry._();
 
   static final VenueHubClientRegistry instance = VenueHubClientRegistry._();
+  static const _secrets = FlutterSecureStorage();
 
   VenueScope? _scope;
   VenueHubBootstrap? _bootstrap;
@@ -111,6 +114,9 @@ class VenueHubClientRegistry {
         'Ask a manager to enrol it in Venue offline hub settings.',
       );
     }
+    final trustedCertificate = await _secrets.read(
+      key: _venueCertificateKey(scope),
+    );
     final loginClient = VenueHubClient(
       configuration: VenueHubClientConfiguration(
         endpoint: endpoint,
@@ -120,6 +126,7 @@ class VenueHubClientRegistry {
         staffId: staffId,
         hubEpoch: bootstrap.hubEpoch,
         credential: credential,
+        trustedCertificatePem: trustedCertificate,
       ),
     );
     try {
@@ -142,6 +149,7 @@ class VenueHubClientRegistry {
           staffSessionToken: login.sessionToken,
           hubEpoch: bootstrap.hubEpoch,
           credential: credential,
+          trustedCertificatePem: trustedCertificate,
         ),
       );
       _sessionExpiresAtUtc = login.expiresAtUtc;
@@ -215,6 +223,7 @@ class VenueHubPrinterClientRegistry {
 
   static final VenueHubPrinterClientRegistry instance =
       VenueHubPrinterClientRegistry._();
+  static const _secrets = FlutterSecureStorage();
 
   VenueScope? _scope;
   VenueHubBootstrap? _bootstrap;
@@ -224,12 +233,12 @@ class VenueHubPrinterClientRegistry {
   bool requiresHub(VenueScope scope) =>
       _scope == scope && _bootstrap?.enabled == true;
 
-  void configure({
+  Future<void> configure({
     required VenueScope scope,
     required VenueHubBootstrap bootstrap,
     required String deviceId,
     required VenueHubDeviceCredential credential,
-  }) {
+  }) async {
     clear();
     _scope = scope;
     _bootstrap = bootstrap;
@@ -237,6 +246,9 @@ class VenueHubPrinterClientRegistry {
     final endpoint = bootstrap.endpoint;
     final enrolled = bootstrap.credentials[credential.credentialId];
     if (endpoint == null || enrolled?.deviceId != deviceId) return;
+    final trustedCertificate = await _secrets.read(
+      key: _venueCertificateKey(scope),
+    );
     _client = VenueHubClient(
       configuration: VenueHubClientConfiguration(
         endpoint: endpoint,
@@ -246,6 +258,7 @@ class VenueHubPrinterClientRegistry {
         staffId: 'printer-device',
         hubEpoch: bootstrap.hubEpoch,
         credential: credential,
+        trustedCertificatePem: trustedCertificate,
       ),
     );
   }
@@ -292,3 +305,6 @@ class VenueHubPrinterClientRegistry {
     _bootstrap = null;
   }
 }
+
+String _venueCertificateKey(VenueScope scope) =>
+    'tableside.offlineHub.tls.${scope.tenantId}.${scope.venueId}.certificate';

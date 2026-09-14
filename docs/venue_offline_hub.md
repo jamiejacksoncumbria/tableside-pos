@@ -63,10 +63,14 @@ hub is required and unreachable; they never create a competing cloud history.
    trusted on every participating device. Android must install the generated
    `.cer` file as a CA certificate; iOS must additionally enable full trust.
 3. In **Settings > Venue offline hub**, enter the hub LAN address, import the
-   certificate and private key on the hub device, then choose **Make this the
-   hub**.
-4. On every other native device, open the same page and choose **Enrol this
-   till / printer** while internet is available.
+   public certificate PEM and private key PEM on the hub device, then choose
+   **Make this the hub**. TableSide pins this certificate for its HTTPS and
+   WebSocket connections instead of relying on inconsistent platform trust
+   stores.
+4. On every other native device, open the same page, import only the same
+   public certificate PEM with **Choose trusted certificate PEM**, and choose
+   **Enrol this till / printer** while internet is available. Never copy the
+   hub private key to a client device.
 5. Configure venue printer devices and primary/fallback routes normally.
 6. Keep the hub app open. Automatic Android boot/foreground-service startup is
    not part of this pilot, so a device restart requires reopening TableSide.

@@ -1,12 +1,11 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
-import 'package:web_socket_channel/web_socket_channel.dart';
-
 import '../core/app_logger.dart';
 import '../core/trusted_clock.dart';
 import 'venue_hub_device_credential.dart';
 import 'venue_hub_protocol.dart';
+import 'venue_hub_transport.dart';
 
 class VenueHubClientConfiguration {
   const VenueHubClientConfiguration({
@@ -19,6 +18,7 @@ class VenueHubClientConfiguration {
     this.staffSessionToken,
     required this.hubEpoch,
     required this.credential,
+    this.trustedCertificatePem,
   });
 
   final Uri endpoint;
@@ -30,6 +30,7 @@ class VenueHubClientConfiguration {
   final String? staffSessionToken;
   final int hubEpoch;
   final VenueHubDeviceCredential credential;
+  final String? trustedCertificatePem;
 }
 
 class VenueHubEventAcknowledgement {
@@ -67,7 +68,9 @@ class VenueHubClient {
     required this.configuration,
     http.Client? httpClient,
     this.timeout = const Duration(seconds: 8),
-  }) : _http = httpClient ?? http.Client() {
+  }) : _http =
+           httpClient ??
+           createVenueHubHttpClient(configuration.trustedCertificatePem) {
     if (configuration.endpoint.scheme != 'https' ||
         configuration.endpoint.host.isEmpty) {
       throw ArgumentError.value(
@@ -359,7 +362,11 @@ class VenueHubClient {
         .replace(
           scheme: configuration.endpoint.scheme == 'https' ? 'wss' : 'ws',
         );
-    final channel = WebSocketChannel.connect(uri);
+    final channel = connectVenueHubWebSocket(
+      uri,
+      configuration.trustedCertificatePem,
+      timeout,
+    );
     try {
       await channel.ready.timeout(timeout);
       channel.sink.add(

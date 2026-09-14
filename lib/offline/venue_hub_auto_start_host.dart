@@ -68,7 +68,7 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
         venueId: widget.scope.venueId,
         deviceId: deviceId,
       );
-      VenueHubPrinterClientRegistry.instance.configure(
+      await VenueHubPrinterClientRegistry.instance.configure(
         scope: widget.scope,
         bootstrap: bootstrap,
         deviceId: deviceId,
