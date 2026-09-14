@@ -246,7 +246,7 @@ class NativeVenueHubServer implements VenueHubServer {
       _json(response, HttpStatus.forbidden, {'error': 'forbidden'});
     } on VenueHubOfflinePinException catch (error, stackTrace) {
       AppLogger.error('Reject venue hub PIN', error, stackTrace);
-      _json(response, HttpStatus.unauthorized, {'error': 'invalid_pin'});
+      _json(response, HttpStatus.unauthorized, {'error': error.code});
     } on FormatException catch (error, stackTrace) {
       AppLogger.error('Reject malformed venue hub request', error, stackTrace);
       _json(response, HttpStatus.badRequest, {'error': 'invalid_request'});

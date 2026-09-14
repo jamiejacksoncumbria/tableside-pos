@@ -2951,14 +2951,21 @@ async function verifyStaffPinFor(caller, rawData) {
       });
       return {valid: false, failedAttempts};
     }
+    const offlineVerifierReady =
+      pinData.offlinePinAlgorithm === "PBKDF2-HMAC-SHA256" &&
+      Number.isInteger(pinData.offlinePinIterations) &&
+      typeof pinData.offlinePinSalt === "string" &&
+      typeof pinData.offlinePinHash === "string";
     transaction.update(pinRef, {
       failedAttempts: 0,
       lastVerifiedAt: FieldValue.serverTimestamp(),
+      ...(!offlineVerifierReady ? offlinePinFields(pin) : {}),
     });
     return {
       valid: true,
       failedAttempts: 0,
       pinVersion: Number.isInteger(pinData.pinVersion) ? pinData.pinVersion : 0,
+      offlineVerifierUpgraded: !offlineVerifierReady,
     };
   });
   if (!verification.valid) {
@@ -3019,7 +3026,11 @@ async function verifyStaffPinFor(caller, rawData) {
     updatedAt: FieldValue.serverTimestamp(),
   });
   await batch.commit();
-  await writeAudit(caller.uid, "verifyStaffPin", userId, {tenantId, venueId});
+  await writeAudit(caller.uid, "verifyStaffPin", userId, {
+    tenantId,
+    venueId,
+    offlineVerifierUpgraded: verification.offlineVerifierUpgraded === true,
+  });
   return {
     sessionId: sessionRef.id,
     sessionToken: token,

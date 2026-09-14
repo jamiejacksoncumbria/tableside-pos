@@ -56,6 +56,7 @@ class VenueHubRuntime {
       StreamController<VenueHubRuntimeStatus>.broadcast();
   VenueHubCloudSync? _sync;
   VenueHubPrintQueue? _printQueue;
+  Future<void> Function(Map<String, Object?> snapshot)? _installFreshSnapshot;
   StreamSubscription? _pendingSubscription;
   Timer? _authorityTimer;
   VenueHubRuntimeStatus _status = const VenueHubRuntimeStatus(
@@ -181,6 +182,29 @@ class VenueHubRuntime {
       await printQueue.initialize();
       _printQueue = printQueue;
       _activeScope = scope;
+      Future<void> installFreshSnapshot(Map<String, Object?> refreshed) async {
+        if (refreshed['hubEpoch'] != bootstrap.hubEpoch ||
+            refreshed['version'] is! int) {
+          throw StateError('The refreshed cloud venue snapshot is invalid.');
+        }
+        final refreshedCatalogue = VenueOfflineCatalogue.fromSnapshot(
+          refreshed,
+        );
+        await pins.installSnapshot(refreshed);
+        catalogue = refreshedCatalogue;
+        snapshot = Map<String, Object?>.from(refreshed);
+        printQueue.installSnapshot(snapshot);
+        VenueHubOfflineView.instance.install(snapshot);
+        await _ledger.saveSnapshot(
+          tenantId: scope.tenantId,
+          venueId: scope.venueId,
+          kind: _bootstrapSnapshotKind,
+          version: refreshed['version'] as int,
+          value: snapshot,
+        );
+      }
+
+      _installFreshSnapshot = installFreshSnapshot;
       final processor = VenueHubCommandProcessor(
         tenantId: scope.tenantId,
         venueId: scope.venueId,
@@ -356,21 +380,7 @@ class VenueHubRuntime {
           } catch (_) {
             return;
           }
-          final refreshedCatalogue = VenueOfflineCatalogue.fromSnapshot(
-            refreshed,
-          );
-          await pins.installSnapshot(refreshed);
-          catalogue = refreshedCatalogue;
-          snapshot = Map<String, Object?>.from(refreshed);
-          printQueue.installSnapshot(snapshot);
-          VenueHubOfflineView.instance.install(snapshot);
-          await _ledger.saveSnapshot(
-            tenantId: scope.tenantId,
-            venueId: scope.venueId,
-            kind: _bootstrapSnapshotKind,
-            version: refreshed['version'] as int,
-            value: snapshot,
-          );
+          await installFreshSnapshot(refreshed);
         } catch (error, stackTrace) {
           // Cloud loss is expected; continue with the last authenticated
           // encrypted snapshot until connectivity returns.
@@ -409,6 +419,7 @@ class VenueHubRuntime {
     _sync?.dispose();
     _sync = null;
     _printQueue = null;
+    _installFreshSnapshot = null;
     _activeScope = null;
     await _server.stop();
     _emit(
@@ -423,6 +434,16 @@ class VenueHubRuntime {
     final queue = _printQueue;
     if (queue == null) return Future.value(null);
     return queue.claim(deviceId);
+  }
+
+  Future<void> installFreshSnapshot(Map<String, Object?> snapshot) {
+    final install = _installFreshSnapshot;
+    if (install == null ||
+        (_status.state != VenueHubRuntimeState.ready &&
+            _status.state != VenueHubRuntimeState.degraded)) {
+      throw StateError('The venue hub is not ready to refresh staff access.');
+    }
+    return install(snapshot);
   }
 
   Future<void> completeLocalPrintJob({

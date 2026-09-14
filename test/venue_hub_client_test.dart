@@ -108,6 +108,45 @@ void main() {
       expect(client.lastHealthFailure, contains('192.168.1.20:8443'));
     },
   );
+
+  test('exposes only the specific legacy PIN migration response', () async {
+    final credential =
+        await VenueHubDeviceCredentialStore(
+          secrets: _MemorySecrets(),
+        ).getOrCreate(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'device-a',
+        );
+    final client = VenueHubClient(
+      configuration: VenueHubClientConfiguration(
+        endpoint: Uri.parse('https://hub.example.test:8443'),
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'device-a',
+        staffId: 'legacy-staff',
+        hubEpoch: 2,
+        credential: credential,
+      ),
+      httpClient: MockClient(
+        (_) async => http.Response(
+          jsonEncode({'error': 'offline_verifier_unavailable'}),
+          401,
+        ),
+      ),
+    );
+
+    await expectLater(
+      client.login('123456'),
+      throwsA(
+        isA<VenueHubClientException>().having(
+          (error) => error.code,
+          'code',
+          'offline_verifier_unavailable',
+        ),
+      ),
+    );
+  });
 }
 
 class _MemorySecrets implements VenueHubSecretStore {

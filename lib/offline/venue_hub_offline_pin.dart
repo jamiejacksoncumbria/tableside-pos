@@ -7,9 +7,10 @@ import 'venue_hub_staff_sessions.dart';
 import 'offline_event_ledger.dart';
 
 class VenueHubOfflinePinException implements Exception {
-  const VenueHubOfflinePinException(this.message);
+  const VenueHubOfflinePinException(this.message, {this.code = 'invalid_pin'});
 
   final String message;
+  final String code;
 
   @override
   String toString() => 'VenueHubOfflinePinException: $message';
@@ -168,7 +169,13 @@ class VenueHubOfflinePinAuthority {
   }) async {
     final now = (nowUtc ?? DateTime.now()).toUtc();
     final verifier = _verifiers[staffId];
-    if (verifier == null || !RegExp(r'^\d{6}$').hasMatch(pin)) {
+    if (verifier == null) {
+      throw const VenueHubOfflinePinException(
+        'This staff PIN needs a one-time online upgrade for offline use.',
+        code: 'offline_verifier_unavailable',
+      );
+    }
+    if (!RegExp(r'^\d{6}$').hasMatch(pin)) {
       throw const VenueHubOfflinePinException('The staff PIN is invalid.');
     }
     final lockedUntil = _lockedUntil[staffId];

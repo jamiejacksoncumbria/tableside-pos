@@ -246,8 +246,20 @@ class VenueHubClient {
         )
         .timeout(timeout);
     if (response.statusCode != 200) {
-      throw const VenueHubClientException(
-        'The venue hub rejected the staff PIN.',
+      var code = 'invalid_pin';
+      try {
+        final rejected = jsonDecode(response.body);
+        if (rejected is Map && rejected['error'] is String) {
+          code = rejected['error'] as String;
+        }
+      } on FormatException {
+        // Keep the deliberately generic invalid-PIN response.
+      }
+      throw VenueHubClientException(
+        code == 'offline_verifier_unavailable'
+            ? 'This staff PIN needs a one-time online upgrade for offline use.'
+            : 'The venue hub rejected the staff PIN.',
+        code: code,
       );
     }
     final decoded = jsonDecode(response.body);
@@ -437,9 +449,10 @@ class VenueHubClient {
 }
 
 class VenueHubClientException implements Exception {
-  const VenueHubClientException(this.message);
+  const VenueHubClientException(this.message, {this.code});
 
   final String message;
+  final String? code;
 
   @override
   String toString() => 'VenueHubClientException: $message';

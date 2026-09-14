@@ -19,6 +19,7 @@ import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_client_cache.dart';
 import '../../offline/venue_hub_client.dart';
 import '../../offline/venue_hub_device_credential.dart';
+import '../../offline/venue_hub_runtime.dart';
 
 final activeStaffPinSessionProvider =
     NotifierProvider<ActiveStaffPinSessionController, StaffPinVerification?>(
@@ -351,15 +352,49 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         credential: credential,
       );
       VenueHubLoginResult? hubLogin;
+      StaffPinVerification? migratedCloudSession;
       if (bootstrap.enabled) {
-        hubLogin = await VenueHubClientRegistry.instance.configure(
-          scope: widget.scope,
-          bootstrap: bootstrap,
-          deviceId: deviceId,
-          staffId: staff.userId,
-          pin: pin,
-          credential: credential,
-        );
+        try {
+          hubLogin = await VenueHubClientRegistry.instance.configure(
+            scope: widget.scope,
+            bootstrap: bootstrap,
+            deviceId: deviceId,
+            staffId: staff.userId,
+            pin: pin,
+            credential: credential,
+          );
+        } on VenueHubClientException catch (error) {
+          if (error.code != 'offline_verifier_unavailable') rethrow;
+          AppLogger.info(
+            'Upgrading a legacy staff PIN for encrypted offline verification.',
+          );
+          migratedCloudSession = await _repository.verifyStaffPin(
+            scope: widget.scope,
+            userId: staff.userId,
+            pin: pin,
+          );
+          if (VenueHubRuntime.instance.activeScope != widget.scope) {
+            throw StateError(
+              'The PIN was upgraded. Wait up to 30 seconds for the venue hub '
+              'to refresh, then enter it again.',
+            );
+          }
+          final refreshed = await _repository.fetchOfflineHubSnapshot(
+            scope: widget.scope,
+            deviceId: deviceId,
+            hubEpoch: bootstrap.hubEpoch,
+            credential: credential,
+          );
+          await VenueHubRuntime.instance.installFreshSnapshot(refreshed);
+          hubLogin = await VenueHubClientRegistry.instance.configure(
+            scope: widget.scope,
+            bootstrap: bootstrap,
+            deviceId: deviceId,
+            staffId: staff.userId,
+            pin: pin,
+            credential: credential,
+          );
+        }
       } else {
         VenueHubClientRegistry.instance.rememberBootstrap(
           widget.scope,
@@ -367,33 +402,37 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         );
       }
       StaffPinVerification session;
-      try {
-        session = await _repository.verifyStaffPin(
-          scope: widget.scope,
-          userId: staff.userId,
-          pin: pin,
-        );
-      } catch (error, stackTrace) {
-        if (!bootstrap.enabled || hubLogin == null) rethrow;
-        AppLogger.error(
-          'Cloud PIN verification unavailable; using venue hub grant',
-          error,
-          stackTrace,
-        );
-        session = StaffPinVerification(
-          sessionId: hubLogin.sessionId,
-          sessionToken: hubLogin.sessionToken,
-          expiresAt: hubLogin.expiresAtUtc,
-          tenantId: widget.scope.tenantId,
-          venueId: widget.scope.venueId,
-          userId: staff.userId,
-          displayName: staff.displayName,
-          isPlatformAdmin: false,
-          roles: staff.roles,
-          themeModePreference: 'system',
-          posCategoryViewPreference: 'bars',
-          posProductSortPreference: 'alphabetical',
-        );
+      if (migratedCloudSession != null) {
+        session = migratedCloudSession;
+      } else {
+        try {
+          session = await _repository.verifyStaffPin(
+            scope: widget.scope,
+            userId: staff.userId,
+            pin: pin,
+          );
+        } catch (error, stackTrace) {
+          if (!bootstrap.enabled || hubLogin == null) rethrow;
+          AppLogger.error(
+            'Cloud PIN verification unavailable; using venue hub grant',
+            error,
+            stackTrace,
+          );
+          session = StaffPinVerification(
+            sessionId: hubLogin.sessionId,
+            sessionToken: hubLogin.sessionToken,
+            expiresAt: hubLogin.expiresAtUtc,
+            tenantId: widget.scope.tenantId,
+            venueId: widget.scope.venueId,
+            userId: staff.userId,
+            displayName: staff.displayName,
+            isPlatformAdmin: false,
+            roles: staff.roles,
+            themeModePreference: 'system',
+            posCategoryViewPreference: 'bars',
+            posProductSortPreference: 'alphabetical',
+          );
+        }
       }
       ref
           .read(activeStaffPinSessionProvider.notifier)
@@ -433,7 +472,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       final firstPin = await showDialog<String>(
         context: context,
         builder: (context) => const _PinPadDialog(
-          title: const Text('Create your staff PIN'),
+          title: Text('Create your staff PIN'),
           message: 'Choose six digits. Do not share this PIN.',
           confirmLabel: 'Continue',
         ),
