@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -18,24 +17,16 @@ final platformAdminProvider = FutureProvider<bool>((ref) async {
   AppLogger.info(
     'Platform access check: custom admin claim present=$hasCustomClaim.',
   );
-  if (hasCustomClaim) return true;
-
-  // The matching Firestore rule permits this person to read only their own
-  // record. It is written exclusively by trusted server code and bridges the
-  // short period before Firebase Auth exposes a new custom claim on native
-  // clients.
-  try {
-    final record = await FirebaseFirestore.instance
-        .doc('platformAdmins/${user.uid}')
-        .get();
-    AppLogger.info(
-      'Platform access check: server admin record found=${record.exists}.',
-    );
-    return record.exists;
-  } on Object catch (error, stackTrace) {
-    AppLogger.error('Platform admin record check', error, stackTrace);
-    rethrow;
-  }
+  // The signed Firebase custom claim is the client-side authority for showing
+  // platform tools. Never probe the protected platformAdmins collection from
+  // an ordinary client: the intentional rule denial both leaks into logs and,
+  // more importantly, can prevent a native till reaching its cached venue and
+  // offline PIN screen when it cold-starts without internet.
+  //
+  // Platform bootstrap already forces an ID-token refresh before invalidating
+  // this provider, so a second Firestore fallback is neither necessary nor a
+  // safe dependency of normal sign-in.
+  return hasCustomClaim;
 });
 
 final platformAuthUsersProvider =
