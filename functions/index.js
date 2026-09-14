@@ -1407,11 +1407,17 @@ async function manageVenueConfigurationFor(caller, rawData) {
   } else if (resource === "offlineHubDeviceCredential") {
     const deviceId = requiredDocumentId(values, "deviceId");
     const credentialId = requiredDocumentId(values, "credentialId");
-    const publicKeyBase64 = requiredText(values, "publicKeyBase64", 128);
-    if (!/^[-_A-Za-z0-9]{43}$/u.test(publicKeyBase64) ||
-        Buffer.from(publicKeyBase64, "base64url").length !== 32) {
+    const suppliedPublicKeyBase64 = requiredText(
+      values, "publicKeyBase64", 128,
+    );
+    if (!/^[-_A-Za-z0-9]{43}=?$/u.test(suppliedPublicKeyBase64) ||
+        Buffer.from(suppliedPublicKeyBase64, "base64url").length !== 32) {
       throw new HttpsError("invalid-argument", "The device public key is invalid.");
     }
+    // Dart's Base64URL encoder includes one padding character for a 32-byte
+    // Ed25519 key. Persist the canonical unpadded representation while still
+    // accepting clients built immediately before this migration.
+    const publicKeyBase64 = suppliedPublicKeyBase64.replace(/=+$/u, "");
     const credentials = db.collection(`tenants/${tenantId}/offlineDeviceCredentials`);
     const existingForDevice = await credentials
       .where("venueId", "==", venueId)
@@ -1422,7 +1428,8 @@ async function manageVenueConfigurationFor(caller, rawData) {
     if (existingCredential.exists &&
         (existingCredential.data().venueId !== venueId ||
           existingCredential.data().deviceId !== deviceId ||
-          existingCredential.data().publicKeyBase64 !== publicKeyBase64)) {
+          String(existingCredential.data().publicKeyBase64 || "")
+            .replace(/=+$/u, "") !== publicKeyBase64)) {
       throw new HttpsError("already-exists", "That device credential ID is already in use.");
     }
     const batch = db.batch();

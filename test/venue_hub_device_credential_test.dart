@@ -23,6 +23,8 @@ void main() {
 
     expect(again.credentialId, first.credentialId);
     expect(again.publicKeyBase64, first.publicKeyBase64);
+    expect(first.publicKeyBase64, hasLength(43));
+    expect(first.publicKeyBase64, isNot(contains('=')));
     expect(otherVenue.credentialId, isNot(first.credentialId));
     expect(secrets.values, hasLength(2));
   });

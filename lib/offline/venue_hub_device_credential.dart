@@ -78,7 +78,7 @@ class VenueHubDeviceCredentialStore {
     }
     final keyPair = await _algorithm.newKeyPairFromSeed(seed);
     final publicKey = await keyPair.extractPublicKey();
-    final publicKeyBase64 = base64UrlEncode(publicKey.bytes);
+    final publicKeyBase64 = _base64UrlWithoutPadding(publicKey.bytes);
     final fingerprint = await Sha256().hash(publicKey.bytes);
     return VenueHubDeviceCredential(
       credentialId:
@@ -107,6 +107,9 @@ class VenueHubDeviceCredentialStore {
     return '$_prefix.${base64UrlEncode(digest.bytes)}';
   }
 }
+
+String _base64UrlWithoutPadding(List<int> bytes) =>
+    base64UrlEncode(bytes).replaceAll('=', '');
 
 void _requireId(String name, String value) {
   final trimmed = value.trim();

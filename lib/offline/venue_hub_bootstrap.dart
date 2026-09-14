@@ -46,7 +46,9 @@ class VenueHubBootstrap {
             'credentialId': credential.id,
             'deviceId': credential.deviceId,
             'algorithm': 'Ed25519',
-            'publicKeyBase64': base64UrlEncode(credential.publicKey.bytes),
+            'publicKeyBase64': base64UrlEncode(
+              credential.publicKey.bytes,
+            ).replaceAll('=', ''),
           },
         )
         .toList(growable: false),
