@@ -364,14 +364,19 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             credential: credential,
           );
         } on VenueHubClientException catch (error) {
-          if (error.code != 'offline_verifier_unavailable') rethrow;
+          final verifierMissing = error.code == 'offline_verifier_unavailable';
+          final verifierRejected = error.code == 'invalid_pin';
+          if (!verifierMissing && !verifierRejected) rethrow;
           AppLogger.info(
-            'Upgrading a legacy staff PIN for encrypted offline verification.',
+            verifierMissing
+                ? 'Upgrading a legacy staff PIN for encrypted offline verification.'
+                : 'Validating and repairing a rejected offline PIN verifier.',
           );
           migratedCloudSession = await _repository.verifyStaffPin(
             scope: widget.scope,
             userId: staff.userId,
             pin: pin,
+            repairOfflineVerifier: verifierRejected,
           );
           if (VenueHubRuntime.instance.activeScope != widget.scope) {
             throw StateError(

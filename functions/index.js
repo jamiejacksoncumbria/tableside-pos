@@ -2915,6 +2915,7 @@ async function verifyStaffPinFor(caller, rawData) {
   const venueId = requiredText(data, "venueId", 128);
   const userId = requiredText(data, "userId", 128);
   const pin = requiredSixDigitPin(data);
+  const repairOfflineVerifier = data.repairOfflineVerifier === true;
   await requireTenantHostMember(caller, tenantId);
   const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
   const memberRef = db.doc(`tenants/${tenantId}/members/${userId}`);
@@ -2960,16 +2961,18 @@ async function verifyStaffPinFor(caller, rawData) {
       Number.isInteger(pinData.offlinePinIterations) &&
       typeof pinData.offlinePinSalt === "string" &&
       typeof pinData.offlinePinHash === "string";
+    const rotateOfflineVerifier = repairOfflineVerifier || !offlineVerifierReady;
     transaction.update(pinRef, {
       failedAttempts: 0,
       lastVerifiedAt: FieldValue.serverTimestamp(),
-      ...(!offlineVerifierReady ? offlinePinFields(pin) : {}),
+      ...(rotateOfflineVerifier ? offlinePinFields(pin) : {}),
     });
     return {
       valid: true,
       failedAttempts: 0,
       pinVersion: Number.isInteger(pinData.pinVersion) ? pinData.pinVersion : 0,
-      offlineVerifierUpgraded: !offlineVerifierReady,
+      offlineVerifierUpgraded: rotateOfflineVerifier,
+      offlineVerifierRepaired: repairOfflineVerifier,
     };
   });
   if (!verification.valid) {
@@ -3034,6 +3037,7 @@ async function verifyStaffPinFor(caller, rawData) {
     tenantId,
     venueId,
     offlineVerifierUpgraded: verification.offlineVerifierUpgraded === true,
+    offlineVerifierRepaired: verification.offlineVerifierRepaired === true,
   });
   return {
     sessionId: sessionRef.id,

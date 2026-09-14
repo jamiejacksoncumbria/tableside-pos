@@ -708,12 +708,14 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String userId,
     required String pin,
+    bool repairOfflineVerifier = false,
   }) async {
     final response = await _call('verifyStaffPin', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'userId': userId,
       'pin': pin,
+      if (repairOfflineVerifier) 'repairOfflineVerifier': true,
     });
     return StaffPinVerification(
       sessionId: response['sessionId'] as String,

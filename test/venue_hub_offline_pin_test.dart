@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tableside_pos/offline/venue_hub_offline_pin.dart';
 import 'package:tableside_pos/offline/venue_hub_staff_sessions.dart';
@@ -64,5 +65,21 @@ void main() {
     });
 
     expect(pins.staff.single.staffId, 'staff-a');
+  });
+
+  test('derives the same PBKDF2 verifier as Node crypto', () async {
+    final salt = base64Url.decode(
+      base64Url.normalize('AAECAwQFBgcICQoLDA0ODw'),
+    );
+    final key = await Pbkdf2(
+      macAlgorithm: Hmac.sha256(),
+      iterations: 600000,
+      bits: 256,
+    ).deriveKeyFromPassword(password: '123456', nonce: salt);
+
+    expect(
+      base64UrlEncode(await key.extractBytes()).replaceAll('=', ''),
+      'k5IuOfF746yC7knkG2ibL4Jf_LmxjGRAY1DJK0-jxZw',
+    );
   });
 }
