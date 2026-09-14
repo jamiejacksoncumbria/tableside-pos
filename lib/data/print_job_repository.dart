@@ -63,18 +63,18 @@ class PrintJobRepository {
     required String deviceCredential,
   }) async {
     final scope = VenueScope(tenantId: tenantId, venueId: venueId);
+    final runtime = VenueHubRuntime.instance;
+    final localScope = runtime.activeScope;
+    if (localScope?.tenantId == tenantId && localScope?.venueId == venueId) {
+      final local = await runtime.claimLocalPrintJob(deviceId);
+      if (local != null) return _fromLocal(tenantId, venueId, deviceId, local);
+    }
     final hubPrinter = VenueHubPrinterClientRegistry.instance;
     if (hubPrinter.requiresHub(scope)) {
       final local = await hubPrinter.claim(scope);
       return local == null
           ? null
           : _fromLocal(tenantId, venueId, deviceId, local);
-    }
-    final runtime = VenueHubRuntime.instance;
-    final localScope = runtime.activeScope;
-    if (localScope?.tenantId == tenantId && localScope?.venueId == venueId) {
-      final local = await runtime.claimLocalPrintJob(deviceId);
-      if (local != null) return _fromLocal(tenantId, venueId, deviceId, local);
     }
     final data = await _commands.claimDevicePrintJob(
       scope: VenueScope(tenantId: tenantId, venueId: venueId),
@@ -114,20 +114,19 @@ class PrintJobRepository {
     String? failureReason,
   }) {
     final scope = VenueScope(tenantId: job.tenantId, venueId: job.venueId);
-    final hubPrinter = VenueHubPrinterClientRegistry.instance;
-    if (job.id.startsWith('offline-') && hubPrinter.requiresHub(scope)) {
-      return hubPrinter.complete(
-        scope: scope,
+    if (job.id.startsWith('offline-') &&
+        VenueHubRuntime.instance.activeScope == scope) {
+      return VenueHubRuntime.instance.completeLocalPrintJob(
+        deviceId: job.targetDeviceId,
         jobId: job.id,
         printed: printed,
         failureReason: failureReason,
       );
     }
-    if (job.id.startsWith('offline-') &&
-        VenueHubRuntime.instance.activeScope ==
-            VenueScope(tenantId: job.tenantId, venueId: job.venueId)) {
-      return VenueHubRuntime.instance.completeLocalPrintJob(
-        deviceId: job.targetDeviceId,
+    final hubPrinter = VenueHubPrinterClientRegistry.instance;
+    if (job.id.startsWith('offline-') && hubPrinter.requiresHub(scope)) {
+      return hubPrinter.complete(
+        scope: scope,
         jobId: job.id,
         printed: printed,
         failureReason: failureReason,

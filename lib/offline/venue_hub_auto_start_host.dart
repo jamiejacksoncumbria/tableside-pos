@@ -48,9 +48,10 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
     _started = true;
     try {
       final cache = VenueHubClientCache();
+      final repository = ProductionCommandRepository();
       VenueHubBootstrap? bootstrap;
       try {
-        final raw = await ProductionCommandRepository()
+        final raw = await repository
             .fetchOfflineHubBootstrap(scope: widget.scope)
             .timeout(const Duration(seconds: 8));
         bootstrap = VenueHubBootstrap.fromJson(raw);
@@ -80,6 +81,28 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
       final certificate = await _secrets.read(key: '$prefix.certificate');
       final privateKey = await _secrets.read(key: '$prefix.privateKey');
       if (certificate == null || privateKey == null) return;
+      Map<String, Object?>? freshSnapshot;
+      try {
+        freshSnapshot = await repository
+            .fetchOfflineHubSnapshot(
+              scope: widget.scope,
+              deviceId: deviceId,
+              hubEpoch: bootstrap.hubEpoch,
+              credential: credential,
+            )
+            .timeout(const Duration(seconds: 15));
+        AppLogger.info(
+          'Downloaded a fresh encrypted venue snapshot before hub auto-start.',
+        );
+      } catch (error, stackTrace) {
+        // An internet outage is expected here. Runtime startup will use the
+        // last authenticated encrypted snapshot when one is available.
+        AppLogger.error(
+          'Refresh venue snapshot before offline hub auto-start',
+          error,
+          stackTrace,
+        );
+      }
       await VenueHubRuntime.instance.stop();
       await VenueHubRuntime.instance.start(
         scope: widget.scope,
@@ -92,6 +115,7 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
           'https://table-pos.web.app',
           'https://table-pos.firebaseapp.com',
         },
+        freshSnapshot: freshSnapshot,
       );
       AppLogger.info('Venue offline hub auto-started for this venue.');
     } catch (error, stackTrace) {
