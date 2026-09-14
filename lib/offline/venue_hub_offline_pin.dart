@@ -126,8 +126,17 @@ class VenueHubOfflinePinAuthority {
         );
       }
       try {
-        final salt = base64Url.decode(json['offlinePinSalt'] as String);
-        final hash = base64Url.decode(json['offlinePinHash'] as String);
+        final encodedSalt = json['offlinePinSalt'] as String;
+        final encodedHash = json['offlinePinHash'] as String;
+        if (!RegExp(r'^[A-Za-z0-9_-]+={0,2}$').hasMatch(encodedSalt) ||
+            !RegExp(r'^[A-Za-z0-9_-]+={0,2}$').hasMatch(encodedHash)) {
+          throw const FormatException();
+        }
+        // Node's `base64url` encoder deliberately omits padding. Normalize
+        // both current unpadded snapshots and any older padded snapshots
+        // before decoding them in Dart.
+        final salt = base64Url.decode(base64Url.normalize(encodedSalt));
+        final hash = base64Url.decode(base64Url.normalize(encodedHash));
         if (salt.length < 16 || hash.length != 32)
           throw const FormatException();
         next[staffId] = _OfflineStaffVerifier(
