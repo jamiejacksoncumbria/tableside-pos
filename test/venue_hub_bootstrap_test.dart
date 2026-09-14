@@ -25,6 +25,32 @@ void main() {
     expect(bootstrap.credentials, contains('credential-a'));
   });
 
+  test('parses the canonical unpadded Ed25519 public key from Firebase', () {
+    final encodedKey = base64UrlEncode(
+      List<int>.generate(32, (index) => index),
+    ).replaceAll('=', '');
+    expect(encodedKey, hasLength(43));
+
+    final bootstrap = VenueHubBootstrap.fromJson({
+      'enabled': false,
+      'hubEpoch': 0,
+      'serverTimeMillis': 1789214400000,
+      'credentials': [
+        {
+          'credentialId': 'credential-a',
+          'deviceId': 'device-a',
+          'algorithm': 'Ed25519',
+          'publicKeyBase64': encodedKey,
+        },
+      ],
+    });
+
+    expect(
+      bootstrap.credentials['credential-a']!.publicKey.bytes,
+      hasLength(32),
+    );
+  });
+
   test('fails closed when enabled hub authority credential is absent', () {
     expect(
       () => VenueHubBootstrap.fromJson({

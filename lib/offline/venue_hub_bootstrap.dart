@@ -81,7 +81,12 @@ class VenueHubBootstrap {
       }
       late List<int> keyBytes;
       try {
-        keyBytes = base64Url.decode(encodedKey);
+        // Firebase stores the canonical unpadded Base64URL representation.
+        // Dart's decoder requires the missing padding to be normalized first.
+        if (!RegExp(r'^[A-Za-z0-9_-]{43}=?$').hasMatch(encodedKey)) {
+          throw const FormatException('Invalid Ed25519 key encoding.');
+        }
+        keyBytes = base64Url.decode(base64Url.normalize(encodedKey));
       } on FormatException {
         throw const FormatException('A venue hub public key is invalid.');
       }
