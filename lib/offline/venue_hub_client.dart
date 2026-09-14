@@ -68,6 +68,7 @@ class VenueHubClient {
     required this.configuration,
     http.Client? httpClient,
     this.timeout = const Duration(seconds: 8),
+    this.loginTimeout = const Duration(seconds: 20),
   }) : _http =
            httpClient ??
            createVenueHubHttpClient(configuration.trustedCertificatePem) {
@@ -90,6 +91,7 @@ class VenueHubClient {
 
   final VenueHubClientConfiguration configuration;
   final Duration timeout;
+  final Duration loginTimeout;
   final http.Client _http;
   String? _lastHealthFailure;
 
@@ -244,7 +246,7 @@ class VenueHubClient {
           headers: const {'Content-Type': 'application/json'},
           body: jsonEncode({'envelope': envelope.toJson(), 'body': body}),
         )
-        .timeout(timeout);
+        .timeout(loginTimeout);
     if (response.statusCode != 200) {
       var code = 'invalid_pin';
       try {

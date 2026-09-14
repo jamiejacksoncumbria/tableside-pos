@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 
 import 'package:cryptography/cryptography.dart';
 
@@ -120,6 +121,7 @@ class VenueHubOfflinePinAuthority {
           permissions is! List ||
           json['offlinePinAlgorithm'] != 'PBKDF2-HMAC-SHA256' ||
           json['offlinePinSaltEncoding'] != 'base64url-bytes-v1' ||
+          json['offlinePinProfile'] != 'interactive-v2' ||
           iterations is! int ||
           iterations < 200000 ||
           iterations > 2000000) {
@@ -207,12 +209,9 @@ class VenueHubOfflinePinAuthority {
         'This PIN is locked until ${lockedUntil.toIso8601String()}.',
       );
     }
-    final key = await Pbkdf2(
-      macAlgorithm: Hmac.sha256(),
-      iterations: verifier.iterations,
-      bits: 256,
-    ).deriveKeyFromPassword(password: pin, nonce: verifier.salt);
-    final supplied = await key.extractBytes();
+    final supplied = await Isolate.run(
+      () => _deriveOfflinePinHash(pin, verifier.salt, verifier.iterations),
+    );
     if (!_constantTimeEquals(verifier.hash, supplied)) {
       final failures = (_failures[staffId] ?? 0) + 1;
       _failures[staffId] = failures;
@@ -260,4 +259,17 @@ class VenueHubOfflinePinAuthority {
     }
     return difference == 0;
   }
+}
+
+Future<List<int>> _deriveOfflinePinHash(
+  String pin,
+  List<int> salt,
+  int iterations,
+) async {
+  final key = await Pbkdf2(
+    macAlgorithm: Hmac.sha256(),
+    iterations: iterations,
+    bits: 256,
+  ).deriveKeyFromPassword(password: pin, nonce: salt);
+  return key.extractBytes();
 }

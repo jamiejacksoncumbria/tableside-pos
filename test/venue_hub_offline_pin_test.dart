@@ -57,7 +57,8 @@ void main() {
           'membershipVersion': 1,
           'offlinePinAlgorithm': 'PBKDF2-HMAC-SHA256',
           'offlinePinSaltEncoding': 'base64url-bytes-v1',
-          'offlinePinIterations': 600000,
+          'offlinePinProfile': 'interactive-v2',
+          'offlinePinIterations': 250000,
           'offlinePinSalt': salt,
           'offlinePinHash': hash,
         },
@@ -73,13 +74,13 @@ void main() {
     );
     final key = await Pbkdf2(
       macAlgorithm: Hmac.sha256(),
-      iterations: 600000,
+      iterations: 250000,
       bits: 256,
     ).deriveKeyFromPassword(password: '123456', nonce: salt);
 
     expect(
       base64UrlEncode(await key.extractBytes()).replaceAll('=', ''),
-      'k5IuOfF746yC7knkG2ibL4Jf_LmxjGRAY1DJK0-jxZw',
+      'GO5r5Y6rYV80g2IRRnpuwT7c-SsafyXWJGSHkbjNjuI',
     );
   });
 }

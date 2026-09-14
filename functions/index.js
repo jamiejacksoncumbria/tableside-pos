@@ -1815,6 +1815,8 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
     if (pin == null || pin.locked === true ||
         pin.offlinePinAlgorithm !== "PBKDF2-HMAC-SHA256" ||
         pin.offlinePinSaltEncoding !== "base64url-bytes-v1" ||
+        pin.offlinePinProfile !== "interactive-v2" ||
+        pin.offlinePinIterations !== 250000 ||
         typeof pin.offlinePinHash !== "string" ||
         typeof pin.offlinePinSalt !== "string") return null;
     return {
@@ -1826,6 +1828,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       membershipVersion: Number(member.data().membershipVersion ?? 1),
       offlinePinAlgorithm: pin.offlinePinAlgorithm,
       offlinePinSaltEncoding: pin.offlinePinSaltEncoding,
+      offlinePinProfile: pin.offlinePinProfile,
       offlinePinIterations: Number(pin.offlinePinIterations),
       offlinePinSalt: pin.offlinePinSalt,
       offlinePinHash: pin.offlinePinHash,
@@ -2540,10 +2543,11 @@ function offlinePinFields(pin) {
   return {
     offlinePinAlgorithm: "PBKDF2-HMAC-SHA256",
     offlinePinSaltEncoding: "base64url-bytes-v1",
-    offlinePinIterations: 600000,
+    offlinePinProfile: "interactive-v2",
+    offlinePinIterations: 250000,
     offlinePinSalt: offlinePinSaltBytes.toString("base64url"),
     offlinePinHash: pbkdf2Sync(
-      pin, offlinePinSaltBytes, 600000, 32, "sha256",
+      pin, offlinePinSaltBytes, 250000, 32, "sha256",
     ).toString("base64url"),
   };
 }
@@ -2958,7 +2962,8 @@ async function verifyStaffPinFor(caller, rawData) {
     const offlineVerifierReady =
       pinData.offlinePinAlgorithm === "PBKDF2-HMAC-SHA256" &&
       pinData.offlinePinSaltEncoding === "base64url-bytes-v1" &&
-      Number.isInteger(pinData.offlinePinIterations) &&
+      pinData.offlinePinProfile === "interactive-v2" &&
+      pinData.offlinePinIterations === 250000 &&
       typeof pinData.offlinePinSalt === "string" &&
       typeof pinData.offlinePinHash === "string";
     const rotateOfflineVerifier = repairOfflineVerifier || !offlineVerifierReady;
