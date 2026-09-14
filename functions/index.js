@@ -1812,13 +1812,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   const staff = members.docs.map((member) => {
     const roles = Array.isArray(member.data().roles) ? member.data().roles : [];
     const pin = pinByUser.get(member.id);
-    if (pin == null || pin.locked === true ||
-        pin.offlinePinAlgorithm !== "PBKDF2-HMAC-SHA256" ||
-        pin.offlinePinSaltEncoding !== "base64url-bytes-v1" ||
-        pin.offlinePinProfile !== "interactive-v2" ||
-        pin.offlinePinIterations !== 250000 ||
-        typeof pin.offlinePinHash !== "string" ||
-        typeof pin.offlinePinSalt !== "string") return null;
+    if (pin == null || pin.locked === true || !offlinePinVerifierReady(pin)) return null;
     return {
       staffId: member.id,
       displayName: member.data().displayName ?? member.id,
@@ -2552,6 +2546,15 @@ function offlinePinFields(pin) {
   };
 }
 
+function offlinePinVerifierReady(pinData) {
+  return pinData?.offlinePinAlgorithm === "PBKDF2-HMAC-SHA256" &&
+    pinData?.offlinePinSaltEncoding === "base64url-bytes-v1" &&
+    pinData?.offlinePinProfile === "interactive-v2" &&
+    pinData?.offlinePinIterations === 250000 &&
+    typeof pinData?.offlinePinSalt === "string" &&
+    typeof pinData?.offlinePinHash === "string";
+}
+
 async function listVenuePinStaffFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -2577,6 +2580,7 @@ async function listVenuePinStaffFor(caller, rawData) {
       roles: Array.isArray(member.data().roles) ? member.data().roles : [],
       hasPin: pin.exists,
       pinLocked: pinData.locked === true,
+      offlineReady: pin.exists && offlinePinVerifierReady(pinData),
     };
   }));
   staff.sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -2959,13 +2963,7 @@ async function verifyStaffPinFor(caller, rawData) {
       });
       return {valid: false, failedAttempts};
     }
-    const offlineVerifierReady =
-      pinData.offlinePinAlgorithm === "PBKDF2-HMAC-SHA256" &&
-      pinData.offlinePinSaltEncoding === "base64url-bytes-v1" &&
-      pinData.offlinePinProfile === "interactive-v2" &&
-      pinData.offlinePinIterations === 250000 &&
-      typeof pinData.offlinePinSalt === "string" &&
-      typeof pinData.offlinePinHash === "string";
+    const offlineVerifierReady = offlinePinVerifierReady(pinData);
     const rotateOfflineVerifier = repairOfflineVerifier || !offlineVerifierReady;
     transaction.update(pinRef, {
       failedAttempts: 0,

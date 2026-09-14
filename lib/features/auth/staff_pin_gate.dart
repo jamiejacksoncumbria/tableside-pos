@@ -836,6 +836,8 @@ class _StaffTile extends StatelessWidget {
               Text(
                 staff.pinLocked
                     ? 'Locked'
+                    : staff.hasPin && !staff.offlineReady
+                    ? 'Online setup required'
                     : staff.hasPin
                     ? role
                     : 'PIN not set',

@@ -42,6 +42,7 @@ class _StaffPinManagementPageState
       if (!mounted) return;
       staff.sort((a, b) {
         if (a.pinLocked != b.pinLocked) return a.pinLocked ? -1 : 1;
+        if (a.offlineReady != b.offlineReady) return a.offlineReady ? 1 : -1;
         return a.displayName.toLowerCase().compareTo(
           b.displayName.toLowerCase(),
         );
@@ -257,7 +258,7 @@ class _StaffPinManagementPageState
             leading: Icon(Icons.security_rounded),
             title: Text('Manager-controlled PIN recovery'),
             subtitle: Text(
-              'Managers can lock, unlock, or securely replace staff PINs. Every action invalidates earlier sessions and creates an audit record. Only owners can manage another owner’s PIN.',
+              'Managers can lock, unlock, or securely replace staff PINs. Staff marked Offline setup required must enter their existing PIN online once, or a manager can set a replacement PIN here before an outage. Every action is audited.',
             ),
           ),
         ),
@@ -278,6 +279,8 @@ class _StaffPinManagementPageState
                   child: Icon(
                     member.pinLocked
                         ? Icons.lock_rounded
+                        : !member.offlineReady
+                        ? Icons.cloud_off_rounded
                         : member.hasPin
                         ? Icons.verified_user_outlined
                         : Icons.pin_outlined,
@@ -287,8 +290,10 @@ class _StaffPinManagementPageState
                 subtitle: Text(
                   member.pinLocked
                       ? 'PIN blocked after failed attempts'
+                      : member.hasPin && !member.offlineReady
+                      ? 'Offline setup required — use once online or set a replacement PIN'
                       : member.hasPin
-                      ? 'PIN active'
+                      ? 'PIN active · Offline ready'
                       : 'PIN has not been created',
                 ),
                 trailing: _busyUserId == member.userId
@@ -332,7 +337,7 @@ class _StaffPinManagementPageState
                             value: _PinAction.reset,
                             child: ListTile(
                               leading: Icon(Icons.pin_outlined),
-                              title: Text('Set replacement PIN'),
+                              title: Text('Set PIN and prepare offline access'),
                             ),
                           ),
                         ],

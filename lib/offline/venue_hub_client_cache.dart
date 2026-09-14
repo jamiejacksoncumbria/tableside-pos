@@ -45,6 +45,7 @@ class VenueHubClientCache {
                   'roles': item.roles,
                   'hasPin': item.hasPin,
                   'pinLocked': item.pinLocked,
+                  'offlineReady': item.offlineReady,
                 },
               )
               .toList(growable: false),
@@ -67,6 +68,7 @@ class VenueHubClientCache {
               roles: (value['roles'] as List).whereType<String>().toList(),
               hasPin: value['hasPin'] == true,
               pinLocked: value['pinLocked'] == true,
+              offlineReady: value['offlineReady'] == true,
             );
           })
           .toList(growable: false);

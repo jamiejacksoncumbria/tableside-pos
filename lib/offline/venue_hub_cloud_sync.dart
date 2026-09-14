@@ -26,6 +26,7 @@ class VenueHubCloudSync {
     OfflineEventLedger? ledger,
     this.batchSize = 25,
     this.retryDelay = const Duration(seconds: 10),
+    this.maximumRetryDelay = const Duration(minutes: 5),
   }) : _upload = upload,
        _ledger = ledger ?? OfflineEventLedger.instance;
 
@@ -33,12 +34,14 @@ class VenueHubCloudSync {
   final OfflineEventLedger _ledger;
   final int batchSize;
   final Duration retryDelay;
+  final Duration maximumRetryDelay;
   Timer? _retryTimer;
   bool _flushing = false;
   bool _disposed = false;
+  int _consecutiveFailures = 0;
 
   Future<int> flush() async {
-    if (_disposed || _flushing) return 0;
+    if (_disposed || _flushing || _retryTimer?.isActive == true) return 0;
     _flushing = true;
     var synced = 0;
     try {
@@ -51,13 +54,25 @@ class VenueHubCloudSync {
         VenueHubCloudUploadResult result;
         try {
           result = await _upload(pending);
-        } catch (error, stackTrace) {
+        } catch (_) {
           for (final event in pending) {
             await _ledger.markPending(event.id);
           }
-          AppLogger.error('Synchronise venue hub outbox', error, stackTrace);
+          _consecutiveFailures++;
+          if (_consecutiveFailures == 1) {
+            AppLogger.info(
+              'Venue hub is offline; cloud synchronisation is paused and '
+              'pending events remain safely stored on this device.',
+            );
+          }
           _scheduleRetry();
           break;
+        }
+        if (_consecutiveFailures > 0) {
+          AppLogger.info(
+            'Venue hub cloud connection restored; synchronising pending events.',
+          );
+          _consecutiveFailures = 0;
         }
         final now = DateTime.now().toUtc();
         for (final event in pending) {
@@ -90,7 +105,17 @@ class VenueHubCloudSync {
 
   void _scheduleRetry() {
     if (_disposed || _retryTimer?.isActive == true) return;
-    _retryTimer = Timer(retryDelay, flush);
+    final exponent = (_consecutiveFailures - 1).clamp(0, 8).toInt();
+    final proposedMilliseconds = retryDelay.inMilliseconds * (1 << exponent);
+    final delay = Duration(
+      milliseconds: proposedMilliseconds
+          .clamp(retryDelay.inMilliseconds, maximumRetryDelay.inMilliseconds)
+          .toInt(),
+    );
+    _retryTimer = Timer(delay, () {
+      _retryTimer = null;
+      unawaited(flush());
+    });
   }
 
   void dispose() {

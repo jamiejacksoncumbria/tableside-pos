@@ -35,6 +35,7 @@ class VenuePinStaff {
     required this.roles,
     required this.hasPin,
     required this.pinLocked,
+    required this.offlineReady,
   });
 
   final String userId;
@@ -42,6 +43,7 @@ class VenuePinStaff {
   final List<String> roles;
   final bool hasPin;
   final bool pinLocked;
+  final bool offlineReady;
 }
 
 class StaffPinVerification {
@@ -688,6 +690,7 @@ class ProductionCommandRepository {
             roles: List<String>.from(data['roles'] as List? ?? const []),
             hasPin: data['hasPin'] == true,
             pinLocked: data['pinLocked'] == true,
+            offlineReady: data['offlineReady'] == true,
           );
         })
         .toList(growable: false);
