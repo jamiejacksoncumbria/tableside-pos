@@ -107,6 +107,7 @@ class VenueHubOfflinePinAuthority {
       );
     }
     final next = <String, _OfflineStaffVerifier>{};
+    final rotatedVerifiers = <String>{};
     for (final raw in rawStaff.whereType<Map>()) {
       final json = Map<String, Object?>.from(raw);
       final staffId = json['staffId'];
@@ -140,7 +141,7 @@ class VenueHubOfflinePinAuthority {
         final hash = base64Url.decode(base64Url.normalize(encodedHash));
         if (salt.length < 16 || hash.length != 32)
           throw const FormatException();
-        next[staffId] = _OfflineStaffVerifier(
+        final verifier = _OfflineStaffVerifier(
           staffId: staffId,
           displayName: displayName,
           permissions: permissions.whereType<String>().toSet(),
@@ -150,6 +151,14 @@ class VenueHubOfflinePinAuthority {
           salt: salt,
           hash: hash,
         );
+        final previous = _verifiers[staffId];
+        if (previous != null &&
+            (previous.pinVersion != verifier.pinVersion ||
+                !_constantTimeEquals(previous.salt, verifier.salt) ||
+                !_constantTimeEquals(previous.hash, verifier.hash))) {
+          rotatedVerifiers.add(staffId);
+        }
+        next[staffId] = verifier;
       } on Object {
         throw const VenueHubOfflinePinException(
           'An offline staff verifier is invalid.',
@@ -161,6 +170,10 @@ class VenueHubOfflinePinAuthority {
       ..addAll(next);
     _failures.removeWhere((staffId, _) => !next.containsKey(staffId));
     _lockedUntil.removeWhere((staffId, _) => !next.containsKey(staffId));
+    for (final staffId in rotatedVerifiers) {
+      _failures.remove(staffId);
+      _lockedUntil.remove(staffId);
+    }
     _catalogueVersion = version;
     await _sessions.reconcileStaff({
       for (final verifier in next.values)
