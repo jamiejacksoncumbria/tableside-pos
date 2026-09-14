@@ -124,7 +124,10 @@ class VenueHubClientRegistry {
     );
     try {
       if (!await loginClient.isHealthy()) {
-        throw StateError('The venue hub is unavailable on the local network.');
+        throw StateError(
+          loginClient.lastHealthFailure ??
+              'The venue hub is unavailable on the local network.',
+        );
       }
       final login = await loginClient.login(pin);
       loginClient.close();
@@ -255,7 +258,10 @@ class VenueHubPrinterClientRegistry {
     if (!_clockReady) {
       _clockReady = await client.isHealthy();
       if (!_clockReady) {
-        throw StateError('The venue hub is unavailable on the local network.');
+        throw StateError(
+          client.lastHealthFailure ??
+              'The venue hub is unavailable on the local network.',
+        );
       }
     }
     return client.claimPrintJob();

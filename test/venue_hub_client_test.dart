@@ -78,6 +78,36 @@ void main() {
       throwsArgumentError,
     );
   });
+
+  test(
+    'retains the underlying secure health-check failure for diagnostics',
+    () async {
+      final credential =
+          await VenueHubDeviceCredentialStore(
+            secrets: _MemorySecrets(),
+          ).getOrCreate(
+            tenantId: 'tenant-a',
+            venueId: 'venue-a',
+            deviceId: 'device-a',
+          );
+      final client = VenueHubClient(
+        configuration: VenueHubClientConfiguration(
+          endpoint: Uri.parse('https://192.168.1.20:8443'),
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'device-a',
+          staffId: 'staff-a',
+          hubEpoch: 2,
+          credential: credential,
+        ),
+        httpClient: MockClient((_) async => throw StateError('TLS rejected')),
+      );
+
+      expect(await client.isHealthy(), isFalse);
+      expect(client.lastHealthFailure, contains('TLS rejected'));
+      expect(client.lastHealthFailure, contains('192.168.1.20:8443'));
+    },
+  );
 }
 
 class _MemorySecrets implements VenueHubSecretStore {

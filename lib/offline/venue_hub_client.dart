@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../core/app_logger.dart';
 import '../core/trusted_clock.dart';
 import 'venue_hub_device_credential.dart';
 import 'venue_hub_protocol.dart';
@@ -87,21 +88,35 @@ class VenueHubClient {
   final VenueHubClientConfiguration configuration;
   final Duration timeout;
   final http.Client _http;
+  String? _lastHealthFailure;
+
+  String? get lastHealthFailure => _lastHealthFailure;
 
   Future<bool> isHealthy() async {
     final started = DateTime.now().toUtc();
     try {
-      final response = await _http
-          .get(configuration.endpoint.resolve('/v1/health'))
-          .timeout(timeout);
-      if (response.statusCode != 200) return false;
+      final healthEndpoint = configuration.endpoint.resolve('/v1/health');
+      final response = await _http.get(healthEndpoint).timeout(timeout);
+      if (response.statusCode != 200) {
+        _lastHealthFailure =
+            'The hub health endpoint returned HTTP ${response.statusCode}.';
+        AppLogger.info(_lastHealthFailure!);
+        return false;
+      }
       final decoded = jsonDecode(response.body);
-      if (decoded is! Map || decoded['status'] != 'ready') return false;
+      if (decoded is! Map || decoded['status'] != 'ready') {
+        _lastHealthFailure = 'The hub health response was not ready.';
+        AppLogger.info(_lastHealthFailure!);
+        return false;
+      }
       final epoch = decoded['hubEpoch'];
       final serverTime = decoded['serverTimeMillis'];
       if (epoch != configuration.hubEpoch ||
           serverTime is! int ||
           serverTime <= 0) {
+        _lastHealthFailure =
+            'The hub health response belongs to a different hub generation.';
+        AppLogger.info(_lastHealthFailure!);
         return false;
       }
       TrustedClock.instance.acceptHubSample(
@@ -110,8 +125,12 @@ class VenueHubClient {
         responseReceivedUtc: DateTime.now().toUtc(),
         hubEpoch: configuration.hubEpoch,
       );
+      _lastHealthFailure = null;
       return true;
-    } catch (_) {
+    } catch (error, stackTrace) {
+      _lastHealthFailure =
+          'Could not connect securely to ${configuration.endpoint}: $error';
+      AppLogger.error('Check venue hub health', error, stackTrace);
       return false;
     }
   }

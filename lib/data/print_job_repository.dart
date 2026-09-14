@@ -67,7 +67,9 @@ class PrintJobRepository {
     final localScope = runtime.activeScope;
     if (localScope?.tenantId == tenantId && localScope?.venueId == venueId) {
       final local = await runtime.claimLocalPrintJob(deviceId);
-      if (local != null) return _fromLocal(tenantId, venueId, deviceId, local);
+      return local == null
+          ? null
+          : _fromLocal(tenantId, venueId, deviceId, local);
     }
     final hubPrinter = VenueHubPrinterClientRegistry.instance;
     if (hubPrinter.requiresHub(scope)) {
