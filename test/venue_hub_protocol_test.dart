@@ -35,6 +35,8 @@ void main() {
 
   test('accepts one valid authenticated venue request', () async {
     final envelope = await signed();
+    expect(envelope.bodyHash, hasLength(43));
+    expect(envelope.bodyHash, isNot(contains('=')));
     final publicKey = await keyPair.extractPublicKey();
     await VenueHubReplayGuard().verify(
       envelope: envelope,
@@ -46,6 +48,55 @@ void main() {
       trustedNowUtc: now.add(const Duration(seconds: 2)),
     );
   });
+
+  test(
+    'accepts a legacy padded body hash without weakening its signature',
+    () async {
+      final canonical = await signed();
+      final padded = VenueHubRequestEnvelope(
+        credentialId: canonical.credentialId,
+        tenantId: canonical.tenantId,
+        venueId: canonical.venueId,
+        deviceId: canonical.deviceId,
+        staffId: canonical.staffId,
+        method: canonical.method,
+        path: canonical.path,
+        hubEpoch: canonical.hubEpoch,
+        sentAtUtcMillis: canonical.sentAtUtcMillis,
+        nonce: canonical.nonce,
+        bodyHash: '${canonical.bodyHash}=',
+        signature: '',
+      );
+      final signature = await Ed25519().sign(
+        utf8.encode(padded.canonicalHeaders),
+        keyPair: keyPair,
+      );
+      final envelope = VenueHubRequestEnvelope(
+        credentialId: padded.credentialId,
+        tenantId: padded.tenantId,
+        venueId: padded.venueId,
+        deviceId: padded.deviceId,
+        staffId: padded.staffId,
+        method: padded.method,
+        path: padded.path,
+        hubEpoch: padded.hubEpoch,
+        sentAtUtcMillis: padded.sentAtUtcMillis,
+        nonce: padded.nonce,
+        bodyHash: padded.bodyHash,
+        signature: base64UrlEncode(signature.bytes),
+      );
+
+      await VenueHubReplayGuard().verify(
+        envelope: envelope,
+        body: body,
+        credentialPublicKey: await keyPair.extractPublicKey(),
+        expectedTenantId: 'tenant-a',
+        expectedVenueId: 'venue-a',
+        expectedHubEpoch: 3,
+        trustedNowUtc: now,
+      );
+    },
+  );
 
   test('rejects replay, modified payload and stale hub generation', () async {
     final envelope = await signed();

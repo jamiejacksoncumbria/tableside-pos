@@ -1735,8 +1735,10 @@ async function verifiedOfflineHubUpload(
   }
   const encodedBody = JSON.stringify(canonicalJsonValue(body));
   const expectedHash = createHash("sha256").update(encodedBody).digest("base64url");
-  if (expectedHash.length !== bodyHash.length ||
-      !timingSafeEqual(Buffer.from(expectedHash), Buffer.from(bodyHash))) {
+  const normalizedBodyHash = bodyHash.replace(/=+$/u, "");
+  if (!/^[-_A-Za-z0-9]{43}$/u.test(normalizedBodyHash) ||
+      expectedHash.length !== normalizedBodyHash.length ||
+      !timingSafeEqual(Buffer.from(expectedHash), Buffer.from(normalizedBodyHash))) {
     throw new HttpsError("unauthenticated", "The signed hub upload was modified.");
   }
   const canonicalHeaders = [

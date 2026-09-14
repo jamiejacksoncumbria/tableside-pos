@@ -136,7 +136,7 @@ class VenueHubRequestSigner {
     }
     final safeNonce = nonce ?? _newNonce();
     _requireText('nonce', safeNonce);
-    final bodyHash = base64UrlEncode(
+    final bodyHash = _base64UrlWithoutPadding(
       (await _sha256.hash(utf8.encode(_canonicalJson(body)))).bytes,
     );
     final unsigned = VenueHubRequestEnvelope(
@@ -215,10 +215,11 @@ class VenueHubReplayGuard {
         'The signed request timestamp is outside the allowed window.',
       );
     }
-    final expectedBodyHash = base64UrlEncode(
+    final expectedBodyHash = _base64UrlWithoutPadding(
       (await Sha256().hash(utf8.encode(_canonicalJson(body)))).bytes,
     );
-    if (!_constantTimeEquals(expectedBodyHash, envelope.bodyHash)) {
+    final suppliedBodyHash = envelope.bodyHash.replaceAll('=', '');
+    if (!_constantTimeEquals(expectedBodyHash, suppliedBodyHash)) {
       throw const VenueHubProtocolException(
         'The signed request body has been modified.',
       );
@@ -265,6 +266,9 @@ class VenueHubProtocolException implements Exception {
 }
 
 String _canonicalJson(Object? value) => jsonEncode(_canonicalValue(value));
+
+String _base64UrlWithoutPadding(List<int> bytes) =>
+    base64UrlEncode(bytes).replaceAll('=', '');
 
 Object? _canonicalValue(Object? value) {
   if (value is Map) {
