@@ -55,6 +55,7 @@ void main() {
           'pinVersion': 1,
           'membershipVersion': 1,
           'offlinePinAlgorithm': 'PBKDF2-HMAC-SHA256',
+          'offlinePinSaltEncoding': 'base64url-bytes-v1',
           'offlinePinIterations': 600000,
           'offlinePinSalt': salt,
           'offlinePinHash': hash,

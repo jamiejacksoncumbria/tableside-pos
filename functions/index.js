@@ -1814,6 +1814,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
     const pin = pinByUser.get(member.id);
     if (pin == null || pin.locked === true ||
         pin.offlinePinAlgorithm !== "PBKDF2-HMAC-SHA256" ||
+        pin.offlinePinSaltEncoding !== "base64url-bytes-v1" ||
         typeof pin.offlinePinHash !== "string" ||
         typeof pin.offlinePinSalt !== "string") return null;
     return {
@@ -1824,6 +1825,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       pinVersion: Number(pin.pinVersion ?? 0),
       membershipVersion: Number(member.data().membershipVersion ?? 1),
       offlinePinAlgorithm: pin.offlinePinAlgorithm,
+      offlinePinSaltEncoding: pin.offlinePinSaltEncoding,
       offlinePinIterations: Number(pin.offlinePinIterations),
       offlinePinSalt: pin.offlinePinSalt,
       offlinePinHash: pin.offlinePinHash,
@@ -2534,13 +2536,14 @@ function hashStaffPin(pin, salt) {
 }
 
 function offlinePinFields(pin) {
-  const offlinePinSalt = randomBytes(16).toString("base64url");
+  const offlinePinSaltBytes = randomBytes(16);
   return {
     offlinePinAlgorithm: "PBKDF2-HMAC-SHA256",
+    offlinePinSaltEncoding: "base64url-bytes-v1",
     offlinePinIterations: 600000,
-    offlinePinSalt,
+    offlinePinSalt: offlinePinSaltBytes.toString("base64url"),
     offlinePinHash: pbkdf2Sync(
-      pin, offlinePinSalt, 600000, 32, "sha256",
+      pin, offlinePinSaltBytes, 600000, 32, "sha256",
     ).toString("base64url"),
   };
 }
@@ -2953,6 +2956,7 @@ async function verifyStaffPinFor(caller, rawData) {
     }
     const offlineVerifierReady =
       pinData.offlinePinAlgorithm === "PBKDF2-HMAC-SHA256" &&
+      pinData.offlinePinSaltEncoding === "base64url-bytes-v1" &&
       Number.isInteger(pinData.offlinePinIterations) &&
       typeof pinData.offlinePinSalt === "string" &&
       typeof pinData.offlinePinHash === "string";

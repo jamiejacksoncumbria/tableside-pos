@@ -118,6 +118,7 @@ class VenueHubOfflinePinAuthority {
           displayName is! String ||
           permissions is! List ||
           json['offlinePinAlgorithm'] != 'PBKDF2-HMAC-SHA256' ||
+          json['offlinePinSaltEncoding'] != 'base64url-bytes-v1' ||
           iterations is! int ||
           iterations < 200000 ||
           iterations > 2000000) {
