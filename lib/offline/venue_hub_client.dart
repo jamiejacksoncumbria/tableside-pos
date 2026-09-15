@@ -71,7 +71,10 @@ class VenueHubClient {
     this.loginTimeout = const Duration(seconds: 20),
   }) : _http =
            httpClient ??
-           createVenueHubHttpClient(configuration.trustedCertificatePem) {
+           createVenueHubHttpClient(
+             configuration.trustedCertificatePem,
+             configuration.endpoint.host,
+           ) {
     if (configuration.endpoint.scheme != 'https' ||
         configuration.endpoint.host.isEmpty) {
       throw ArgumentError.value(
@@ -411,7 +414,7 @@ class VenueHubClient {
     final body = <String, Object?>{
       'jobId': jobId,
       'printed': printed,
-      if (failureReason != null) 'failureReason': failureReason,
+      'failureReason': ?failureReason,
     };
     final response = await _signedPost('/v1/print/complete', body);
     if (response.statusCode != 200) {
