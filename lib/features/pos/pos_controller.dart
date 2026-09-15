@@ -9,6 +9,7 @@ import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_offline_view.dart';
+import '../notifications/notification_centre.dart';
 import '../printing/bluetooth_production_print_service.dart';
 import 'domain.dart';
 
@@ -166,7 +167,7 @@ final activeOrderStreamProvider = StreamProvider<PosOrder?>((ref) {
   }
   return ref
       .watch(firestorePosRepositoryProvider)
-      .watchOrder(scope: scope, orderId: orderId);
+      .watchOrder(scope: scope, orderId: orderId, includeClosed: true);
 });
 
 final tenantProfileProvider =
@@ -263,6 +264,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
   final _pendingDraftQuantities = <String, int>{};
   String? _pendingPaymentRequestId;
   String? _pendingPaymentFingerprint;
+  String? _locallyClosingOrderId;
 
   bool get _isSavingDraft => _pendingDraftMutations > 0;
 
@@ -416,6 +418,32 @@ class ActiveOrderController extends Notifier<PosOrder> {
       return;
     }
     if (remoteOrder.id != state.id) return;
+    if (remoteOrder.status == OrderStatus.closed) {
+      if (_locallyClosingOrderId == remoteOrder.id) {
+        // The checkout call owns the local transition and may still need to
+        // return to a parent split bill. Do not race that code path.
+        return;
+      }
+      final location = state.tabName?.trim().isNotEmpty == true
+          ? state.tabName!.trim()
+          : _tableLabelFor(state);
+      final scope = ref.read(activeVenueScopeProvider);
+      if (scope == null) return;
+      _resetOrder(scope);
+      ref
+          .read(appNotificationsProvider.notifier)
+          .add(
+            title: 'Bill closed on another device',
+            message: location.trim().isEmpty
+                ? 'The open bill was closed and has been removed from this device.'
+                : '$location was closed and has been removed from this device.',
+            level: AppNotificationLevel.information,
+          );
+      AppLogger.info(
+        'Closed live order ${remoteOrder.id} was cleared from this device.',
+      );
+      return;
+    }
 
     // Do not lose a waiter’s locally added, unsent items if a Firestore
     // snapshot from another device arrives before this device sends them.
@@ -929,15 +957,22 @@ class ActiveOrderController extends Notifier<PosOrder> {
       _pendingPaymentRequestId =
           'payment-${DateTime.now().microsecondsSinceEpoch}';
     }
-    final result = await ref
-        .read(productionCommandRepositoryProvider)
-        .closeOrder(
-          scope: scope,
-          order: order,
-          payments: payments,
-          printReceipt: printReceipt,
-          requestId: _pendingPaymentRequestId!,
-        );
+    _locallyClosingOrderId = order.id;
+    late final BillCloseResult result;
+    try {
+      result = await ref
+          .read(productionCommandRepositoryProvider)
+          .closeOrder(
+            scope: scope,
+            order: order,
+            payments: payments,
+            printReceipt: printReceipt,
+            requestId: _pendingPaymentRequestId!,
+          );
+    } on Object {
+      _locallyClosingOrderId = null;
+      rethrow;
+    }
     _pendingPaymentRequestId = null;
     _pendingPaymentFingerprint = null;
     _pendingDraftQuantities.clear();
@@ -971,6 +1006,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
       AppLogger.info(
         'Partial payment recorded for order ${order.id}; ${result.balanceDueMinor} minor units remain.',
       );
+      _locallyClosingOrderId = null;
       return result;
     }
     if (order.isSplitOrder && order.splitFromOrderId != null) {
@@ -983,6 +1019,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
         AppLogger.info(
           'Closed split bill ${order.id}; returned to parent ${parentOrder.id}.',
         );
+        _locallyClosingOrderId = null;
         return result;
       }
       AppLogger.info(
@@ -1004,6 +1041,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
     AppLogger.info(
       'Bill ${result.billId} closed for order ${order.id}, receipt ${result.receiptNumber}.',
     );
+    _locallyClosingOrderId = null;
     return result;
   }
 

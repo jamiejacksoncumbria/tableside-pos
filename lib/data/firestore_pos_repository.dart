@@ -533,6 +533,7 @@ class FirestorePosRepository {
   Stream<PosOrder?> watchOrder({
     required VenueScope scope,
     required String orderId,
+    bool includeClosed = false,
   }) async* {
     AppLogger.info(
       'Watch active order: tenant=${scope.tenantId}, venue=${scope.venueId}, order=$orderId.',
@@ -542,7 +543,11 @@ class FirestorePosRepository {
           in _firestore
               .doc('tenants/${scope.tenantId}/orders/$orderId')
               .snapshots()) {
-        final order = _orderFromSnapshot(scope: scope, order: snapshot);
+        final order = _orderFromSnapshot(
+          scope: scope,
+          order: snapshot,
+          includeClosed: includeClosed,
+        );
         AppLogger.info(
           order == null
               ? 'Active order stream: $orderId is no longer open.'
@@ -646,11 +651,12 @@ class FirestorePosRepository {
   PosOrder? _orderFromSnapshot({
     required VenueScope scope,
     required DocumentSnapshot<Map<String, dynamic>> order,
+    bool includeClosed = false,
   }) {
     final data = order.data();
     if (data == null ||
         data['venueId'] != scope.venueId ||
-        data['status'] == 'closed') {
+        (!includeClosed && data['status'] == 'closed')) {
       return null;
     }
     final openedAt = data['openedAt'];
@@ -717,8 +723,7 @@ class FirestorePosRepository {
                 _dateTime(payment['recordedAt']) ??
                 _dateTimeFromMillis(payment['recordedAtMillis']) ??
                 orderOpenedAt,
-            recordedLocalDateTime:
-                payment['recordedLocalDateTime'] as String?,
+            recordedLocalDateTime: payment['recordedLocalDateTime'] as String?,
             venueTimeZone: payment['venueTimeZone'] as String?,
             terminalLabel: payment['terminalLabel'] as String?,
             cashChangeBaseMinor:
@@ -732,6 +737,7 @@ class FirestorePosRepository {
       'open' => OrderStatus.open,
       'pendingApproval' => OrderStatus.pendingApproval,
       'rolledOver' => OrderStatus.rolledOver,
+      'closed' => OrderStatus.closed,
       _ => OrderStatus.sent,
     };
     return PosOrder(
