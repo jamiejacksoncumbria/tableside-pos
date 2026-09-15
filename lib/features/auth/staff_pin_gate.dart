@@ -353,6 +353,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       );
       VenueHubLoginResult? hubLogin;
       StaffPinVerification? migratedCloudSession;
+      var hubConnectionUnavailable = false;
       if (bootstrap.enabled) {
         try {
           hubLogin = await VenueHubClientRegistry.instance.configure(
@@ -399,6 +400,18 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             pin: pin,
             credential: credential,
           );
+        } on StateError catch (error, stackTrace) {
+          // Certificate installation and device enrolment are managed from
+          // inside the authenticated Settings area. If Firebase is online,
+          // permit a cloud-verified manager to enter that recovery surface.
+          // The registry deliberately preserves hub authority, so orders and
+          // payments remain fail-closed until this local connection succeeds.
+          hubConnectionUnavailable = true;
+          AppLogger.error(
+            'Venue hub unavailable during online PIN recovery',
+            error,
+            stackTrace,
+          );
         }
       } else {
         VenueHubClientRegistry.instance.rememberBootstrap(
@@ -444,9 +457,11 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           .unlock(session, widget.scope);
       if (bootstrap.enabled && hubLogin == null && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Text(
-              'Signed in online. A manager must enrol this device in Venue offline hub settings before it can process orders offline.',
+              hubConnectionUnavailable
+                  ? 'Signed in online for recovery. Open Venue offline hub settings and install the trusted certificate; orders remain blocked until the hub connects.'
+                  : 'Signed in online. A manager must enrol this device in Venue offline hub settings before it can process orders offline.',
             ),
           ),
         );

@@ -25,6 +25,8 @@ class VenueHubClientRegistry {
   VenueHubBootstrap? _bootstrap;
   VenueHubClient? _client;
   DateTime? _sessionExpiresAtUtc;
+  bool _deviceEnrolled = false;
+  String? _connectionFailure;
   StreamSubscription<List<Map<String, Object?>>>? _orderSubscription;
   Timer? _orderReconnectTimer;
   int _streamGeneration = 0;
@@ -34,7 +36,17 @@ class VenueHubClientRegistry {
       _scope == scope && _bootstrap?.enabled == true;
 
   bool isDeviceEnrolled(VenueScope scope) =>
-      requiresHub(scope) && _client != null;
+      requiresHub(scope) && _deviceEnrolled;
+
+  String _unavailableMessage(VenueScope scope) {
+    if (!isDeviceEnrolled(scope)) {
+      return 'This device must be enrolled in Venue offline hub settings before it can process orders.';
+    }
+    if (_connectionFailure != null) {
+      return 'The venue hub connection is unavailable. Check the trusted certificate in Venue offline hub settings.';
+    }
+    return 'The venue hub session is unavailable. Re-enter your staff PIN.';
+  }
 
   bool hasUsableSession(VenueScope scope) =>
       requiresHub(scope) &&
@@ -55,11 +67,7 @@ class VenueHubClientRegistry {
     final client = clientFor(scope);
     if (client == null) {
       if (requiresHub(scope)) {
-        throw StateError(
-          isDeviceEnrolled(scope)
-              ? 'The venue hub session is unavailable. Re-enter your staff PIN.'
-              : 'This device must be enrolled in Venue offline hub settings before it can process orders.',
-        );
+        throw StateError(_unavailableMessage(scope));
       }
       return;
     }
@@ -85,9 +93,7 @@ class VenueHubClientRegistry {
     if (client == null) {
       throw StateError(
         requiresHub(scope)
-            ? isDeviceEnrolled(scope)
-                  ? 'The venue hub session is unavailable. Re-enter your staff PIN.'
-                  : 'This device must be enrolled in Venue offline hub settings before it can process orders.'
+            ? _unavailableMessage(scope)
             : 'Offline hub routing is not enabled for this venue.',
       );
     }
@@ -125,6 +131,7 @@ class VenueHubClientRegistry {
       );
       return null;
     }
+    _deviceEnrolled = true;
     final trustedCertificate = await _secrets.read(
       key: _venueCertificateKey(scope),
     );
@@ -167,9 +174,10 @@ class VenueHubClientRegistry {
       VenueHubOfflineView.instance.install(await _client!.fetchCatalogue());
       _startOrderStream();
       return login;
-    } catch (_) {
+    } catch (error) {
       loginClient.close();
-      clear();
+      _connectionFailure = error.toString();
+      _clearSession(preserveAuthority: true);
       rethrow;
     }
   }
@@ -181,6 +189,10 @@ class VenueHubClientRegistry {
   }
 
   void clear() {
+    _clearSession(preserveAuthority: false);
+  }
+
+  void _clearSession({required bool preserveAuthority}) {
     _streamGeneration++;
     _orderReconnectTimer?.cancel();
     _orderReconnectTimer = null;
@@ -188,8 +200,12 @@ class VenueHubClientRegistry {
     _orderSubscription = null;
     _client?.close();
     _client = null;
-    _scope = null;
-    _bootstrap = null;
+    if (!preserveAuthority) {
+      _scope = null;
+      _bootstrap = null;
+      _deviceEnrolled = false;
+      _connectionFailure = null;
+    }
     _sessionExpiresAtUtc = null;
     _openedOrderIds.clear();
     VenueHubOfflineView.instance.clear();
