@@ -73,6 +73,10 @@ class PrintJobRepository {
     }
     final hubPrinter = VenueHubPrinterClientRegistry.instance;
     if (hubPrinter.requiresHub(scope)) {
+      // An online-only till must not claim the hub's local queue and must not
+      // fall back to the cloud queue while hub authority is active. It can be
+      // enrolled later by a manager without generating false printer alarms.
+      if (!hubPrinter.isDeviceEnrolled(scope)) return null;
       final local = await hubPrinter.claim(scope);
       return local == null
           ? null

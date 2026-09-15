@@ -33,6 +33,9 @@ class VenueHubClientRegistry {
   bool requiresHub(VenueScope scope) =>
       _scope == scope && _bootstrap?.enabled == true;
 
+  bool isDeviceEnrolled(VenueScope scope) =>
+      requiresHub(scope) && _client != null;
+
   bool hasUsableSession(VenueScope scope) =>
       requiresHub(scope) &&
       _client != null &&
@@ -53,7 +56,9 @@ class VenueHubClientRegistry {
     if (client == null) {
       if (requiresHub(scope)) {
         throw StateError(
-          'The venue hub session is unavailable. Re-enter your staff PIN.',
+          isDeviceEnrolled(scope)
+              ? 'The venue hub session is unavailable. Re-enter your staff PIN.'
+              : 'This device must be enrolled in Venue offline hub settings before it can process orders.',
         );
       }
       return;
@@ -80,7 +85,9 @@ class VenueHubClientRegistry {
     if (client == null) {
       throw StateError(
         requiresHub(scope)
-            ? 'The venue hub session is unavailable. Re-enter your staff PIN.'
+            ? isDeviceEnrolled(scope)
+                  ? 'The venue hub session is unavailable. Re-enter your staff PIN.'
+                  : 'This device must be enrolled in Venue offline hub settings before it can process orders.'
             : 'Offline hub routing is not enabled for this venue.',
       );
     }
@@ -109,10 +116,14 @@ class VenueHubClientRegistry {
     }
     final enrolled = bootstrap.credentials[credential.credentialId];
     if (enrolled == null || enrolled.deviceId != deviceId) {
-      throw StateError(
-        'This device is not enrolled for offline use at this venue. '
-        'Ask a manager to enrol it in Venue offline hub settings.',
+      // Cloud PIN verification may still unlock an online manager so this
+      // device can be enrolled from Settings. Operational commands remain
+      // fail-closed because requiresHub(scope) stays true and no hub client is
+      // installed.
+      AppLogger.info(
+        'This device is online-only until a manager enrols it with the venue hub.',
       );
+      return null;
     }
     final trustedCertificate = await _secrets.read(
       key: _venueCertificateKey(scope),
@@ -232,6 +243,9 @@ class VenueHubPrinterClientRegistry {
 
   bool requiresHub(VenueScope scope) =>
       _scope == scope && _bootstrap?.enabled == true;
+
+  bool isDeviceEnrolled(VenueScope scope) =>
+      requiresHub(scope) && _client != null;
 
   Future<void> configure({
     required VenueScope scope,

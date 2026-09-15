@@ -442,6 +442,15 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       ref
           .read(activeStaffPinSessionProvider.notifier)
           .unlock(session, widget.scope);
+      if (bootstrap.enabled && hubLogin == null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Signed in online. A manager must enrol this device in Venue offline hub settings before it can process orders offline.',
+            ),
+          ),
+        );
+      }
       _scheduleExpiryCheck();
       AppLogger.info('Shared device unlocked for staff=${staff.userId}.');
     } on Object catch (error, stackTrace) {
