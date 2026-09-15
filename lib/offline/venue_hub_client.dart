@@ -187,10 +187,21 @@ class VenueHubClient {
         )
         .timeout(timeout);
     if (response.statusCode != 201) {
+      String? safeMessage;
+      try {
+        final errorBody = jsonDecode(response.body);
+        final message = errorBody is Map ? errorBody['message'] : null;
+        if (message is String && message.trim().isNotEmpty) {
+          safeMessage = message.trim();
+        }
+      } on Object {
+        // Use the status-based message below for malformed error responses.
+      }
       throw VenueHubClientException(
-        response.statusCode == 401 || response.statusCode == 403
-            ? 'The venue hub rejected this device or staff session.'
-            : 'The venue hub could not safely save this operation.',
+        safeMessage ??
+            (response.statusCode == 401 || response.statusCode == 403
+                ? 'The venue hub rejected this device or staff session.'
+                : 'The venue hub could not safely save this operation.'),
       );
     }
     final decoded = jsonDecode(response.body);

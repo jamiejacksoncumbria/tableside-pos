@@ -51,6 +51,22 @@ void main() {
     );
   });
 
+  test('empty optional item note is accepted as absent', () async {
+    final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
+    final payload = await catalogue.validateEvent('order.itemAdded', {
+      'orderId': 'order-a',
+      'lineId': 'line-a',
+      'productId': 'steak',
+      'quantity': 1,
+      'variantId': 'large',
+      'modifierSelections': [
+        {'groupId': 'cooking', 'optionId': 'medium'},
+      ],
+      'itemNote': '',
+    }, grant);
+    expect(payload['itemNote'], '');
+  });
+
   test('required printing fails closed without a matching route', () {
     final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
     final order = projectOfflineOrder([

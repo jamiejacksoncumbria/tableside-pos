@@ -359,7 +359,10 @@ class VenueOfflineCatalogue {
         'variantPriceDeltaMinor': variant.priceDeltaMinor,
       },
       'modifierSelections': canonicalSelections,
-      'itemNote': _optionalText(payload['itemNote']) ?? '',
+      // Older clients included an empty string for an absent note. Empty is
+      // semantically the same as omitted and must not reject an otherwise
+      // valid line; non-empty notes remain length/type validated.
+      'itemNote': _optionalNote(payload['itemNote']),
       'catalogueVersion': version,
     };
   }
@@ -518,6 +521,14 @@ String? _optionalText(Object? value) {
   if (value == null) return null;
   if (value is! String || value.trim().isEmpty || value.length > 500) {
     throw const VenueOfflineCatalogueException('A text value is invalid.');
+  }
+  return value.trim();
+}
+
+String _optionalNote(Object? value) {
+  if (value == null) return '';
+  if (value is! String || value.length > 500) {
+    throw const VenueOfflineCatalogueException('The item note is invalid.');
   }
   return value.trim();
 }

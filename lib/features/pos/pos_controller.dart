@@ -16,7 +16,7 @@ final menuSectionsProvider = StreamProvider<List<MenuSection>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoSections);
   if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
-    return Stream.value(VenueHubOfflineView.instance.sections);
+    return VenueHubOfflineView.instance.sectionStream;
   }
   return ref.watch(firestorePosRepositoryProvider).watchMenuSections(scope);
 });
@@ -25,11 +25,7 @@ final menuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoProducts);
   if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
-    return Stream.value(
-      VenueHubOfflineView.instance.products
-          .where((product) => !product.isArchived)
-          .toList(growable: false),
-    );
+    return VenueHubOfflineView.instance.productStream();
   }
   return ref.watch(firestorePosRepositoryProvider).watchProducts(scope);
 });
@@ -38,7 +34,7 @@ final allMenuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoProducts);
   if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
-    return Stream.value(VenueHubOfflineView.instance.products);
+    return VenueHubOfflineView.instance.productStream(includeArchived: true);
   }
   return ref
       .watch(firestorePosRepositoryProvider)
@@ -114,7 +110,7 @@ final menuModifierGroupsProvider = StreamProvider<List<MenuModifierGroup>>((
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <MenuModifierGroup>[]);
   if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
-    return Stream.value(VenueHubOfflineView.instance.modifierGroups);
+    return VenueHubOfflineView.instance.modifierGroupStream;
   }
   return ref.watch(firestorePosRepositoryProvider).watchModifierGroups(scope);
 });

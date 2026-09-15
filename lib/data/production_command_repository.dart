@@ -988,9 +988,10 @@ class ProductionCommandRepository {
           'lineId': line.id,
           'productId': line.productId,
           'quantity': line.quantity,
-          if (line.variantId != null) 'variantId': line.variantId,
+          if (line.variantId?.trim().isNotEmpty == true)
+            'variantId': line.variantId!.trim(),
           'modifierSelections': _modifierSelections(line),
-          'itemNote': line.itemNote,
+          if (line.itemNote.trim().isNotEmpty) 'itemNote': line.itemNote.trim(),
         },
       );
       return;

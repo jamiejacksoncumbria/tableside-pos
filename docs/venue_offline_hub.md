@@ -111,3 +111,13 @@ ordinary database-file copy alone.
   active.
 - Check the known medium-tablet PIN screen overflow separately; it is a UI
   issue already recorded for the next responsive-layout pass.
+
+## Post-pilot certificate hardening
+
+The pilot already pins the exact hub certificate and authenticates every
+request with an enrolled device key. A later security pass should replace the
+manually distributed self-signed leaf with a per-venue private CA and separate
+short-lived hub certificate, add overlap-based rotation and explicit
+revocation, warn before certificate expiry, and use hardware-backed private
+keys/device attestation where the terminal supports them. Mutual TLS can then
+be assessed in addition to the existing signed-request protocol.

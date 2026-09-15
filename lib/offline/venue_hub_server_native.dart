@@ -8,6 +8,8 @@ import 'venue_hub_command_processor.dart';
 import 'venue_hub_protocol.dart';
 import 'venue_hub_server.dart';
 import 'venue_hub_offline_pin.dart';
+import 'venue_offline_catalogue.dart';
+import 'offline_order_projection.dart';
 
 VenueHubServer createVenueHubServer() => NativeVenueHubServer();
 
@@ -244,6 +246,22 @@ class NativeVenueHubServer implements VenueHubServer {
     } on VenueHubCommandException catch (error, stackTrace) {
       AppLogger.error('Reject venue hub command', error, stackTrace);
       _json(response, HttpStatus.forbidden, {'error': 'forbidden'});
+    } on VenueOfflineCatalogueException catch (error, stackTrace) {
+      AppLogger.error(
+        'Reject venue hub catalogue operation',
+        error,
+        stackTrace,
+      );
+      _json(response, HttpStatus.conflict, {
+        'error': 'catalogue_conflict',
+        'message': error.message,
+      });
+    } on OfflineProjectionException catch (error, stackTrace) {
+      AppLogger.error('Reject venue hub order operation', error, stackTrace);
+      _json(response, HttpStatus.conflict, {
+        'error': 'order_conflict',
+        'message': error.message,
+      });
     } on VenueHubOfflinePinException catch (error, stackTrace) {
       AppLogger.error('Reject venue hub PIN', error, stackTrace);
       _json(response, HttpStatus.unauthorized, {'error': error.code});

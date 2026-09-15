@@ -9,13 +9,61 @@ class VenueHubOfflineView {
 
   static final VenueHubOfflineView instance = VenueHubOfflineView._();
   Map<String, Object?>? _snapshot;
+  final StreamController<void> _catalogueChanges =
+      StreamController<void>.broadcast();
   final StreamController<List<PosOrder>> _orders =
       StreamController<List<PosOrder>>.broadcast();
   List<PosOrder> _currentOrders = const [];
 
-  void install(Map<String, Object?> snapshot) =>
-      _snapshot = Map<String, Object?>.unmodifiable(snapshot);
-  void clear() => _snapshot = null;
+  void install(Map<String, Object?> snapshot) {
+    _snapshot = Map<String, Object?>.unmodifiable(snapshot);
+    _catalogueChanges.add(null);
+    // Tables depend on both catalogue and order state. Re-emit the current
+    // orders so a screen opened before PIN/hub setup refreshes immediately.
+    _orders.add(_currentOrders);
+  }
+
+  void clear() {
+    _snapshot = null;
+    _currentOrders = const [];
+    _catalogueChanges.add(null);
+    _orders.add(_currentOrders);
+  }
+
+  Stream<List<MenuSection>> get sectionStream async* {
+    yield sections;
+    await for (final _ in _catalogueChanges.stream) {
+      yield sections;
+    }
+  }
+
+  Stream<List<MenuProduct>> productStream({
+    bool includeArchived = false,
+  }) async* {
+    List<MenuProduct> current() => includeArchived
+        ? products
+        : products
+              .where((product) => !product.isArchived)
+              .toList(growable: false);
+    yield current();
+    await for (final _ in _catalogueChanges.stream) {
+      yield current();
+    }
+  }
+
+  Stream<List<MenuModifierGroup>> get modifierGroupStream async* {
+    yield modifierGroups;
+    await for (final _ in _catalogueChanges.stream) {
+      yield modifierGroups;
+    }
+  }
+
+  Stream<List<DiningTable>> get tableStream async* {
+    yield tables;
+    await for (final _ in _catalogueChanges.stream) {
+      yield tables;
+    }
+  }
 
   Stream<List<PosOrder>> get orderStream async* {
     yield _currentOrders;
@@ -36,8 +84,9 @@ class VenueHubOfflineView {
     final orderId = value['orderId'];
     final openedAt = DateTime.tryParse(value['openedAtUtc'] as String? ?? '');
     final rawLines = value['lines'];
-    if (orderId is! String || openedAt == null || rawLines is! List)
+    if (orderId is! String || openedAt == null || rawLines is! List) {
       return null;
+    }
     final lines = rawLines
         .whereType<Map>()
         .map((line) {
