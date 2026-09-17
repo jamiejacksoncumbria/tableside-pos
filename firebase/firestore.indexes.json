@@ -42,6 +42,14 @@
         { "fieldPath": "venueId", "order": "ASCENDING" },
         { "fieldPath": "businessDate", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "venueCustomers",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "venueId", "order": "ASCENDING" },
+        { "fieldPath": "normalisedPhones", "arrayConfig": "CONTAINS" }
+      ]
     }
   ],
   "fieldOverrides": [
