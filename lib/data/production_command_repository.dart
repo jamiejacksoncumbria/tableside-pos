@@ -410,6 +410,44 @@ class ProductionCommandRepository {
     });
   }
 
+  Future<Map<String, dynamic>> manageFulfilment({
+    required VenueScope scope,
+    required String operation,
+    String? documentId,
+    Map<String, Object?> values = const <String, Object?>{},
+  }) {
+    final hub = VenueHubClientRegistry.instance;
+    if (operation == 'updateOrderFulfilment' &&
+        documentId != null &&
+        hub.requiresHub(scope)) {
+      return hub
+          .send(
+            scope: scope,
+            eventType: 'order.fulfilmentChanged',
+            payload: <String, Object?>{
+              'orderId': documentId,
+              'status': values['status'],
+              if (values['driverId'] != null) 'driverId': values['driverId'],
+            },
+          )
+          .then(
+            (acknowledgement) => <String, dynamic>{
+              'documentId': documentId,
+              'eventId': acknowledgement.eventId,
+              'updated': true,
+            },
+          );
+    }
+    return _call('manageFulfilment', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'operation': operation,
+      if (documentId != null && documentId.trim().isNotEmpty)
+        'documentId': documentId,
+      'values': values,
+    });
+  }
+
   Future<String> registerPrinterDevice({
     required VenueScope scope,
     required Map<String, Object?> values,
@@ -979,6 +1017,12 @@ class ProductionCommandRepository {
         orderId: order.id,
         tableId: order.tableId,
         tabName: order.tabName,
+        channel: order.channel,
+        customerId: order.customerId,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        deliveryAddress: order.deliveryAddress,
+        scheduledFor: order.scheduledFor,
       );
       await hub.send(
         scope: scope,
@@ -988,10 +1032,15 @@ class ProductionCommandRepository {
           'lineId': line.id,
           'productId': line.productId,
           'quantity': line.quantity,
+          'channel': order.channel.name,
           if (line.variantId?.trim().isNotEmpty == true)
             'variantId': line.variantId!.trim(),
           'modifierSelections': _modifierSelections(line),
           if (line.itemNote.trim().isNotEmpty) 'itemNote': line.itemNote.trim(),
+          'courseId': line.courseId,
+          'courseName': line.courseName,
+          'courseSequence': line.courseSequence,
+          'courseReleasePolicy': line.courseReleasePolicy.name,
         },
       );
       return;
@@ -1002,6 +1051,14 @@ class ProductionCommandRepository {
       'orderId': order.id,
       'tableId': order.tableId,
       'tabName': order.tabName,
+      'channel': order.channel.name,
+      'customerId': order.customerId,
+      'customerName': order.customerName,
+      'customerPhone': order.customerPhone,
+      'deliveryAddress': order.deliveryAddress,
+      'scheduledForMillis': order.scheduledFor?.millisecondsSinceEpoch,
+      'primaryWaiterId': order.primaryWaiterId,
+      'primaryWaiterName': order.primaryWaiterName,
       'clientObservedAtMillis': DateTime.now().toUtc().millisecondsSinceEpoch,
       'line': {
         'id': line.id,
@@ -1010,6 +1067,10 @@ class ProductionCommandRepository {
         'variantId': line.variantId,
         'modifierSelections': _modifierSelections(line),
         'itemNote': line.itemNote,
+        'courseId': line.courseId,
+        'courseName': line.courseName,
+        'courseSequence': line.courseSequence,
+        'courseReleasePolicy': line.courseReleasePolicy.name,
       },
     });
   }
@@ -1041,6 +1102,7 @@ class ProductionCommandRepository {
       'orderId': order.id,
       'tableId': order.tableId,
       'tabName': order.tabName,
+      'channel': order.channel.name,
       'lineId': lineId,
       'quantity': quantity,
     });
@@ -1088,6 +1150,12 @@ class ProductionCommandRepository {
         orderId: order.id,
         tableId: order.tableId,
         tabName: order.tabName,
+        channel: order.channel,
+        customerId: order.customerId,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        deliveryAddress: order.deliveryAddress,
+        scheduledFor: order.scheduledFor,
       );
       await hub.send(
         scope: scope,
@@ -1115,6 +1183,7 @@ class ProductionCommandRepository {
       'orderId': order.id,
       'tableId': order.tableId,
       'tabName': order.tabName,
+      'channel': order.channel.name,
       'stockOverride': stockOverride,
       'printRequired': printRequired,
       'lines': unsentLines
@@ -1126,6 +1195,10 @@ class ProductionCommandRepository {
               'variantId': line.variantId,
               'modifierSelections': _modifierSelections(line),
               'itemNote': line.itemNote,
+              'courseId': line.courseId,
+              'courseName': line.courseName,
+              'courseSequence': line.courseSequence,
+              'courseReleasePolicy': line.courseReleasePolicy.name,
             },
           )
           .toList(growable: false),

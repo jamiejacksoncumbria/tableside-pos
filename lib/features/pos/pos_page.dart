@@ -14,6 +14,8 @@ import '../../core/tenant_scope.dart';
 import '../../core/training_mode.dart';
 import '../../data/production_command_repository.dart';
 import '../auth/staff_pin_gate.dart';
+import '../fulfilment/fulfilment_domain.dart';
+import '../fulfilment/fulfilment_repository.dart';
 import '../notifications/notification_centre.dart';
 import 'domain.dart';
 import 'pos_controller.dart';
@@ -3882,7 +3884,9 @@ Future<bool> _ensureOrderLocation(BuildContext context, WidgetRef ref) async {
   // Demo mode has no venue-backed table or named-tab registry.
   if (ref.read(activeVenueScopeProvider) == null) return true;
   final order = ref.read(activeOrderProvider);
-  if (order.tableId != null || order.tabName?.trim().isNotEmpty == true) {
+  if (order.channel != OrderChannel.dineIn ||
+      order.tableId != null ||
+      order.tabName?.trim().isNotEmpty == true) {
     return true;
   }
   return await showDialog<bool>(
@@ -3963,6 +3967,132 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
     }
   }
 
+  Future<void> _startFulfilment(OrderChannel channel) async {
+    final customers = await ref.read(venueCustomersProvider.future);
+    if (!mounted) return;
+    if (customers.isEmpty) {
+      setState(() {
+        _error =
+            'Add a telephone customer in Settings → Collection, delivery & courses first.';
+      });
+      return;
+    }
+    VenueCustomer selected = customers.first;
+    DateTime? scheduledFor;
+    final address = TextEditingController(
+      text: selected.addresses.firstOrNull?.addressLines ?? '',
+    );
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (customerContext) => StatefulBuilder(
+        builder: (context, setCustomerState) => AlertDialog(
+          title: Text('Start ${channel.label.toLowerCase()} order'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<VenueCustomer>(
+                initialValue: selected,
+                decoration: const InputDecoration(labelText: 'Customer'),
+                items: customers
+                    .map(
+                      (item) => DropdownMenuItem(
+                        value: item,
+                        child: Text(
+                          '${item.displayName} · ${item.phoneNumbers.first}',
+                        ),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value == null) return;
+                  setCustomerState(() {
+                    selected = value;
+                    address.text =
+                        value.addresses.firstOrNull?.addressLines ?? '';
+                  });
+                },
+              ),
+              if (channel == OrderChannel.delivery) ...[
+                const SizedBox(height: 12),
+                TextField(
+                  controller: address,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'Delivery address',
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.schedule_outlined),
+                title: Text(
+                  scheduledFor == null
+                      ? 'ASAP'
+                      : '${scheduledFor!.day.toString().padLeft(2, '0')}-${scheduledFor!.month.toString().padLeft(2, '0')}-${scheduledFor!.year} ${scheduledFor!.hour.toString().padLeft(2, '0')}:${scheduledFor!.minute.toString().padLeft(2, '0')}',
+                ),
+                subtitle: const Text('Collection / delivery time'),
+                trailing: const Icon(Icons.edit_calendar_outlined),
+                onTap: () async {
+                  final date = await showDatePicker(
+                    context: context,
+                    initialDate: scheduledFor ?? DateTime.now(),
+                    firstDate: DateTime.now(),
+                    lastDate: DateTime.now().add(const Duration(days: 365)),
+                  );
+                  if (date == null || !context.mounted) return;
+                  final time = await showTimePicker(
+                    context: context,
+                    initialTime: TimeOfDay.fromDateTime(
+                      scheduledFor ??
+                          DateTime.now().add(const Duration(minutes: 30)),
+                    ),
+                  );
+                  if (time == null) return;
+                  setCustomerState(
+                    () => scheduledFor = DateTime(
+                      date.year,
+                      date.month,
+                      date.day,
+                      time.hour,
+                      time.minute,
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(customerContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(customerContext, true),
+              child: const Text('Start order'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed == true && mounted) {
+      ref
+          .read(activeOrderProvider.notifier)
+          .startFulfilmentOrder(
+            channel: channel,
+            customerId: selected.id,
+            customerName: selected.displayName,
+            customerPhone: selected.phoneNumbers.first,
+            deliveryAddress: channel == OrderChannel.delivery
+                ? address.text
+                : null,
+            scheduledFor: scheduledFor,
+          );
+      Navigator.of(context).pop(true);
+    }
+    address.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final tablesState = ref.watch(diningTablesProvider);
@@ -3984,6 +4114,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
       },
     );
     final locationsLoading = tablesState.isLoading || tabsState.isLoading;
+    final fulfilmentSettings = ref.watch(venueFulfilmentSettingsProvider).value;
     return AlertDialog(
       icon: const Icon(Icons.receipt_long_outlined),
       title: const Text('Start this order'),
@@ -3994,6 +4125,29 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Text('Choose the table, or open a named customer tab first.'),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed:
+                      _saving || fulfilmentSettings?.collectionEnabled != true
+                      ? null
+                      : () => _startFulfilment(OrderChannel.collection),
+                  icon: const Icon(Icons.shopping_bag_outlined),
+                  label: const Text('Collection'),
+                ),
+                OutlinedButton.icon(
+                  onPressed:
+                      _saving || fulfilmentSettings?.deliveryEnabled != true
+                      ? null
+                      : () => _startFulfilment(OrderChannel.delivery),
+                  icon: const Icon(Icons.delivery_dining_outlined),
+                  label: const Text('Delivery'),
+                ),
+              ],
+            ),
             const SizedBox(height: 12),
             if (_error != null) ...[
               Text(

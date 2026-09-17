@@ -169,6 +169,60 @@ void main() {
       throwsA(isA<OfflineProjectionException>()),
     );
   });
+
+  test(
+    'delivery projection preserves customer, schedule, and driver state',
+    () {
+      final projection = projectOfflineOrder([
+        _event(1, 'order.opened', {
+          'orderId': 'order-a',
+          'channel': 'delivery',
+          'customerId': 'customer-a',
+          'customerName': 'Jamie Jackson',
+          'customerPhone': '+905551234567',
+          'deliveryAddress': 'Kyrenia Centre',
+          'scheduledForUtc': '2026-09-12T18:30:00.000Z',
+        }),
+        _event(2, 'order.fulfilmentChanged', {
+          'orderId': 'order-a',
+          'status': 'assigned',
+          'driverId': 'driver-a',
+          'managerAuthorized': true,
+        }, staffId: 'manager-a'),
+        _event(3, 'order.fulfilmentChanged', {
+          'orderId': 'order-a',
+          'status': 'outForDelivery',
+        }, staffId: 'driver-a'),
+      ]);
+
+      expect(projection.channel, 'delivery');
+      expect(projection.customerName, 'Jamie Jackson');
+      expect(projection.deliveryAddress, 'Kyrenia Centre');
+      expect(projection.scheduledForUtc, DateTime.utc(2026, 9, 12, 18, 30));
+      expect(projection.assignedDriverId, 'driver-a');
+      expect(projection.fulfilmentStatus, 'outForDelivery');
+    },
+  );
+
+  test('an unassigned driver cannot claim an offline delivery', () {
+    final events = [
+      _event(1, 'order.opened', {
+        'orderId': 'order-a',
+        'channel': 'delivery',
+        'customerId': 'customer-a',
+        'customerName': 'Jamie Jackson',
+        'deliveryAddress': 'Kyrenia Centre',
+      }),
+      _event(2, 'order.fulfilmentChanged', {
+        'orderId': 'order-a',
+        'status': 'outForDelivery',
+      }, staffId: 'driver-a'),
+    ];
+    expect(
+      () => projectOfflineOrder(events),
+      throwsA(isA<OfflineProjectionException>()),
+    );
+  });
 }
 
 OfflineEvent _event(
@@ -177,6 +231,7 @@ OfflineEvent _event(
   Map<String, Object?> payload, {
   int hubEpoch = 1,
   String venueId = 'venue-a',
+  String staffId = 'staff-a',
 }) {
   final timestamp = DateTime.utc(2026, 9, 12, 12, 0, sequence);
   return OfflineEvent(
@@ -184,7 +239,7 @@ OfflineEvent _event(
     tenantId: 'tenant-a',
     venueId: venueId,
     deviceId: 'device-a',
-    staffId: 'staff-a',
+    staffId: staffId,
     type: type,
     payload: payload,
     createdAtUtc: timestamp,

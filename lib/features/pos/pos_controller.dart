@@ -9,6 +9,7 @@ import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_offline_view.dart';
+import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
 import '../printing/bluetooth_production_print_service.dart';
 import 'domain.dart';
@@ -311,7 +312,8 @@ class ActiveOrderController extends Notifier<PosOrder> {
     ProductConfigurationSelection selection =
         const ProductConfigurationSelection(),
   }) async {
-    if (!state.canAddProduct(product)) {
+    if (!state.canAddProduct(product) ||
+        !product.isAvailableFor(state.channel)) {
       AppLogger.info(
         'Stock prevented adding ${product.id} to active order ${state.id}.',
       );
@@ -348,7 +350,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
       );
       return;
     }
-    if (product.priceMinor + selection.priceDeltaMinor < 0) {
+    if (product.priceFor(state.channel) + selection.priceDeltaMinor < 0) {
       throw StateError('The selected options produce an invalid item price.');
     }
     final scope = ref.read(activeVenueScopeProvider);
@@ -361,7 +363,8 @@ class ActiveOrderController extends Notifier<PosOrder> {
       productId: product.id,
       productName: product.name,
       quantity: 1,
-      unitPriceMinor: product.priceMinor + selection.priceDeltaMinor,
+      unitPriceMinor:
+          product.priceFor(state.channel) + selection.priceDeltaMinor,
       productionArea: product.productionArea,
       trackStock: product.trackStock,
       stockPerSale: product.stockPerSale,
@@ -375,6 +378,12 @@ class ActiveOrderController extends Notifier<PosOrder> {
       itemNote: selection.itemNote.trim(),
       stockComponents: stockComponents,
       addedAt: DateTime.now(),
+      courseId: product.defaultCourseId ?? 'standard',
+      courseName: product.defaultCourseName,
+      courseSequence: product.defaultCourseSequence,
+      courseReleasePolicy: state.channel == OrderChannel.dineIn
+          ? product.courseReleasePolicy
+          : CourseReleasePolicy.immediate,
     );
     state = state.copyWith(
       lines: [...state.lines, line],
@@ -747,6 +756,58 @@ class ActiveOrderController extends Notifier<PosOrder> {
     }
     state = order;
     _selectPersistedOrder(order.id);
+  }
+
+  void startFulfilmentOrder({
+    required OrderChannel channel,
+    required String customerId,
+    required String customerName,
+    required String customerPhone,
+    String? deliveryAddress,
+    DateTime? scheduledFor,
+  }) {
+    if (channel == OrderChannel.dineIn) {
+      throw ArgumentError('Use a table or named tab for dine-in orders.');
+    }
+    if (_hasUnsavedLocalDraft()) {
+      throw StateError(
+        'Send or remove the current draft before starting another order.',
+      );
+    }
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) throw StateError('Select a venue first.');
+    if (customerId.trim().isEmpty ||
+        customerName.trim().isEmpty ||
+        customerPhone.trim().isEmpty) {
+      throw StateError('Choose a customer with a telephone number.');
+    }
+    if (channel == OrderChannel.delivery &&
+        deliveryAddress?.trim().isEmpty != false) {
+      throw StateError('A delivery address is required.');
+    }
+    final now = DateTime.now();
+    state = PosOrder(
+      id: 'order-${now.microsecondsSinceEpoch}',
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      businessDate: DateTime(now.year, now.month, now.day),
+      openedAt: now,
+      status: OrderStatus.open,
+      lines: const [],
+      channel: channel,
+      fulfilmentStatus: channel == OrderChannel.delivery
+          ? FulfilmentStatus.awaitingDriver
+          : FulfilmentStatus.awaitingPreparation,
+      customerId: customerId.trim(),
+      customerName: customerName.trim(),
+      customerPhone: customerPhone.trim(),
+      deliveryAddress: deliveryAddress?.trim(),
+      scheduledFor: scheduledFor,
+      primaryWaiterId: ref.read(activeStaffPinSessionProvider)?.userId,
+      primaryWaiterName: ref.read(activeStaffPinSessionProvider)?.displayName,
+    );
+    ref.read(selectedTableProvider.notifier).select('');
+    _selectPersistedOrder(null);
   }
 
   Future<BluetoothProductionPrintResult> sendToProduction({
@@ -1185,6 +1246,17 @@ class ActiveOrderController extends Notifier<PosOrder> {
   }
 
   void _requireValidLiveOrderLocation() {
+    if (state.channel != OrderChannel.dineIn) {
+      if (state.customerId?.trim().isEmpty != false ||
+          state.customerName?.trim().isEmpty != false) {
+        throw StateError('Choose a valid customer for this order.');
+      }
+      if (state.channel == OrderChannel.delivery &&
+          state.deliveryAddress?.trim().isEmpty != false) {
+        throw StateError('A delivery address is required.');
+      }
+      return;
+    }
     if (state.tabName?.trim().isNotEmpty == true) return;
     final tableId = state.tableId;
     final problem = ref

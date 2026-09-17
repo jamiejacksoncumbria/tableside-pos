@@ -249,6 +249,13 @@ class VenueOfflineCatalogue {
         'This product is not currently available.',
       );
     }
+    final channel = payload['channel'] as String? ?? 'dineIn';
+    if ((channel == 'collection' && !product.availableForCollection) ||
+        (channel == 'delivery' && !product.availableForDelivery)) {
+      throw VenueOfflineCatalogueException(
+        'This product is unavailable for $channel.',
+      );
+    }
     final quantity = _positiveInt(payload, 'quantity');
     final lineId = _requiredText(payload, 'lineId');
     final variantId = _optionalText(payload['variantId']);
@@ -320,8 +327,13 @@ class VenueOfflineCatalogue {
         });
       }
     }
+    final channelPriceMinor = switch (channel) {
+      'collection' => product.collectionPriceMinor ?? product.priceMinor,
+      'delivery' => product.deliveryPriceMinor ?? product.priceMinor,
+      _ => product.priceMinor,
+    };
     final unitPriceMinor =
-        product.priceMinor +
+        channelPriceMinor +
         (variant?.priceDeltaMinor ?? 0) +
         canonicalSelections.fold<int>(
           0,
@@ -364,6 +376,12 @@ class VenueOfflineCatalogue {
       // valid line; non-empty notes remain length/type validated.
       'itemNote': _optionalNote(payload['itemNote']),
       'catalogueVersion': version,
+      'courseId': product.defaultCourseId ?? 'standard',
+      'courseName': product.defaultCourseName,
+      'courseSequence': product.defaultCourseSequence,
+      'courseReleasePolicy': channel == 'dineIn'
+          ? product.courseReleasePolicy
+          : 'immediate',
     };
   }
 }
@@ -384,6 +402,16 @@ class OfflineCatalogueProduct {
       stockPerSale = _positiveNumber(json['stockPerSale'], fallback: 1),
       stockOnHand = (json['stockOnHand'] as num?)?.toDouble(),
       stockComponents = _componentList(json['stockComponents']),
+      availableForCollection = json['availableForCollection'] != false,
+      availableForDelivery = json['availableForDelivery'] != false,
+      collectionPriceMinor = (json['collectionPriceMinor'] as num?)?.toInt(),
+      deliveryPriceMinor = (json['deliveryPriceMinor'] as num?)?.toInt(),
+      defaultCourseId = json['defaultCourseId'] as String?,
+      defaultCourseName = json['defaultCourseName'] as String? ?? 'Standard',
+      defaultCourseSequence =
+          (json['defaultCourseSequence'] as num?)?.toInt() ?? 0,
+      courseReleasePolicy =
+          json['courseReleasePolicy'] as String? ?? 'immediate',
       modifierGroupIds = List.unmodifiable(
         (json['modifierGroupIds'] as List? ?? const [])
             .whereType<String>()
@@ -410,6 +438,14 @@ class OfflineCatalogueProduct {
   final num stockPerSale;
   final double? stockOnHand;
   final List<Object?> stockComponents;
+  final bool availableForCollection;
+  final bool availableForDelivery;
+  final int? collectionPriceMinor;
+  final int? deliveryPriceMinor;
+  final String? defaultCourseId;
+  final String defaultCourseName;
+  final int defaultCourseSequence;
+  final String courseReleasePolicy;
   final List<String> modifierGroupIds;
   final Map<String, OfflineCatalogueVariant> variants;
 }

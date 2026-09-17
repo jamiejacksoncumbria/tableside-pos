@@ -149,6 +149,29 @@ class VenueHubOfflineView {
           : OrderStatus.open,
       lines: lines,
       payments: payments,
+      channel: switch (value['channel']) {
+        'collection' => OrderChannel.collection,
+        'delivery' => OrderChannel.delivery,
+        _ => OrderChannel.dineIn,
+      },
+      fulfilmentStatus: switch (value['fulfilmentStatus']) {
+        'readyForCollection' => FulfilmentStatus.readyForCollection,
+        'awaitingDriver' => FulfilmentStatus.awaitingDriver,
+        'assigned' => FulfilmentStatus.assigned,
+        'outForDelivery' => FulfilmentStatus.outForDelivery,
+        'collected' => FulfilmentStatus.collected,
+        'delivered' => FulfilmentStatus.delivered,
+        'cancelled' => FulfilmentStatus.cancelled,
+        _ => FulfilmentStatus.awaitingPreparation,
+      },
+      assignedDriverId: value['assignedDriverId'] as String?,
+      customerId: value['customerId'] as String?,
+      customerName: value['customerName'] as String?,
+      customerPhone: value['customerPhone'] as String?,
+      deliveryAddress: value['deliveryAddress'] as String?,
+      scheduledFor: DateTime.tryParse(
+        value['scheduledForUtc'] as String? ?? '',
+      )?.toLocal(),
     );
   }
 
@@ -279,6 +302,24 @@ class VenueHubOfflineView {
                 })
                 .toList(growable: false),
             stockComponents: _stockComponents(item['stockComponents']),
+            availableForCollection:
+                item['availableForCollection'] as bool? ?? true,
+            availableForDelivery: item['availableForDelivery'] as bool? ?? true,
+            collectionPriceMinor: (item['collectionPriceMinor'] as num?)
+                ?.toInt(),
+            deliveryPriceMinor: (item['deliveryPriceMinor'] as num?)?.toInt(),
+            defaultCourseId: item['defaultCourseId'] as String?,
+            defaultCourseName:
+                item['defaultCourseName'] as String? ?? 'Standard',
+            defaultCourseSequence:
+                (item['defaultCourseSequence'] as num?)?.toInt() ?? 0,
+            courseReleasePolicy: switch (item['courseReleasePolicy']) {
+              'manual' => CourseReleasePolicy.manual,
+              'afterPreviousCollected' =>
+                CourseReleasePolicy.afterPreviousCollected,
+              'afterPreviousServed' => CourseReleasePolicy.afterPreviousServed,
+              _ => CourseReleasePolicy.immediate,
+            },
           );
         })
         .toList(growable: false);

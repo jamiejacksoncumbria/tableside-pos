@@ -75,6 +75,9 @@ class VenueOfflineOrderBook {
         'order.sent' =>
           _canonicalJson(event.payload['lineIds']) ==
               _canonicalJson(draft.payload['lineIds']),
+        'order.fulfilmentChanged' =>
+          event.payload['status'] == draft.payload['status'] &&
+              event.payload['driverId'] == draft.payload['driverId'],
         _ => false,
       };
     }
@@ -218,6 +221,24 @@ class VenueOfflineOrderBook {
           lineIds.whereType<String>().toList(growable: false),
           printRequired: draft.payload['printRequired'] == true,
         );
+        break;
+      case 'order.fulfilmentChanged':
+        final status = draft.payload['status'];
+        if (status is! String ||
+            !const {
+              'awaitingPreparation',
+              'readyForCollection',
+              'awaitingDriver',
+              'assigned',
+              'outForDelivery',
+              'collected',
+              'delivered',
+              'cancelled',
+            }.contains(status)) {
+          throw const OfflineProjectionException(
+            'The fulfilment status is invalid.',
+          );
+        }
         break;
       case 'payment.recorded':
         final amount = draft.payload['baseAmountMinor'];

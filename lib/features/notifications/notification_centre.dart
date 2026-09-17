@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
 import '../../core/tenant_scope.dart';
+import '../auth/staff_pin_gate.dart';
 
 enum AppNotificationLevel { success, information, warning, error }
 
@@ -218,6 +219,88 @@ class AppNotificationsController extends Notifier<List<AppNotification>> {
 
 int unreadNotificationCount(List<AppNotification> notifications) =>
     notifications.where((notification) => !notification.isRead).length;
+
+/// Converts server-created waiter/driver notification events into the same
+/// non-blocking notification tray on Android, Windows and web. Events created
+/// before this host mounts are seeded rather than replayed as stale alerts.
+class OperationalNotificationHost extends ConsumerStatefulWidget {
+  const OperationalNotificationHost({super.key});
+
+  @override
+  ConsumerState<OperationalNotificationHost> createState() =>
+      _OperationalNotificationHostState();
+}
+
+class _OperationalNotificationHostState
+    extends ConsumerState<OperationalNotificationHost> {
+  String? _scopeKey;
+  bool _seeded = false;
+  final Set<String> _seen = <String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = ref.watch(activeVenueScopeProvider);
+    final staff = ref.watch(activeStaffPinSessionProvider);
+    final key = scope == null ? null : '${scope.tenantId}/${scope.venueId}';
+    if (_scopeKey != key) {
+      _scopeKey = key;
+      _seeded = false;
+      _seen.clear();
+    }
+    if (scope == null || staff == null) return const SizedBox.shrink();
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection('tenants/${scope.tenantId}/notificationEvents')
+          .where('venueId', isEqualTo: scope.venueId)
+          .limit(100)
+          .snapshots(),
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          AppLogger.error(
+            'Operational notification stream',
+            snapshot.error!,
+            StackTrace.current,
+          );
+        }
+        final documents = snapshot.data?.docs ?? const [];
+        if (!_seeded) {
+          _seen.addAll(documents.map((document) => document.id));
+          _seeded = true;
+          return const SizedBox.shrink();
+        }
+        for (final document in documents) {
+          if (!_seen.add(document.id)) continue;
+          final data = document.data();
+          final users = (data['recipientUserIds'] as List? ?? const [])
+              .whereType<String>();
+          final roles = (data['recipientRoles'] as List? ?? const [])
+              .whereType<String>();
+          if (!users.contains(staff.userId) &&
+              !roles.any(staff.roles.contains)) {
+            continue;
+          }
+          scheduleMicrotask(() {
+            if (!mounted) return;
+            ref
+                .read(appNotificationsProvider.notifier)
+                .add(
+                  title: data['title'] as String? ?? 'Order update',
+                  message: data['body'] as String? ?? 'An order was updated.',
+                  level: AppNotificationLevel.information,
+                  deduplicationKey: 'operational-${document.id}',
+                  retentionSeconds:
+                      ref
+                          .read(venueNotificationRetentionSecondsProvider)
+                          .value ??
+                      5,
+                );
+          });
+        }
+        return const SizedBox.shrink();
+      },
+    );
+  }
+}
 
 /// Records every important message for the non-blocking bottom notification
 /// tray. Messages disappear after the venue's configured retention time.

@@ -517,6 +517,9 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     _OrderFlowAction action,
   ) async {
     final updated = switch (action) {
+      _OrderFlowAction.releaseCourse => order.copyWith(
+        status: OrderFlowStatus.newOrder,
+      ),
       _OrderFlowAction.startPreparing => order.copyWith(
         status: OrderFlowStatus.preparing,
       ),
@@ -564,6 +567,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
 enum _FlowFilter { all, late, allergy, ready }
 
 enum _OrderFlowAction {
+  releaseCourse,
   startPreparing,
   markReady,
   markCollected,
@@ -579,6 +583,7 @@ _LateState _lateState(
   int amberMinutes,
   int redMinutes,
 ) {
+  if (order.status == OrderFlowStatus.held) return _LateState.normal;
   if (order.isDelayed) return _LateState.red;
   if (order.status.isTerminal) return _LateState.normal;
   final elapsed = now.difference(order.ticketReleasedAt);
@@ -960,6 +965,7 @@ class _PrimaryFlowAction extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final action = switch (order.status) {
+      OrderFlowStatus.held => _OrderFlowAction.releaseCourse,
       OrderFlowStatus.newOrder => _OrderFlowAction.startPreparing,
       OrderFlowStatus.preparing => _OrderFlowAction.markReady,
       OrderFlowStatus.ready => _OrderFlowAction.markCollected,
@@ -968,6 +974,7 @@ class _PrimaryFlowAction extends StatelessWidget {
     };
     if (action == null) return const SizedBox.shrink();
     final label = switch (action) {
+      _OrderFlowAction.releaseCourse => 'Release ${order.courseName}',
       _OrderFlowAction.startPreparing => 'Start preparing',
       _OrderFlowAction.markReady => 'Mark ready',
       _OrderFlowAction.markCollected => 'Mark collected',

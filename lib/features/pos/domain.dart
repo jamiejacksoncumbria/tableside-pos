@@ -1,8 +1,65 @@
 enum OrderStatus { open, pendingApproval, sent, closed, rolledOver }
 
+enum OrderChannel { dineIn, collection, delivery }
+
+extension OrderChannelLabel on OrderChannel {
+  String get label => switch (this) {
+    OrderChannel.dineIn => 'Dine in',
+    OrderChannel.collection => 'Collection',
+    OrderChannel.delivery => 'Delivery',
+  };
+}
+
+enum FulfilmentStatus {
+  awaitingPreparation,
+  readyForCollection,
+  awaitingDriver,
+  assigned,
+  outForDelivery,
+  collected,
+  delivered,
+  cancelled,
+}
+
+enum CourseReleasePolicy {
+  immediate,
+  manual,
+  afterPreviousCollected,
+  afterPreviousServed,
+}
+
+class MenuCourse {
+  const MenuCourse({
+    required this.id,
+    required this.name,
+    required this.sequence,
+    this.active = true,
+    this.releasePolicy = CourseReleasePolicy.immediate,
+    this.amberMinutes = 15,
+    this.redMinutes = 25,
+    this.productionAreas = const <ProductionArea>[],
+  });
+
+  static const standard = MenuCourse(
+    id: 'standard',
+    name: 'Standard',
+    sequence: 0,
+  );
+
+  final String id;
+  final String name;
+  final int sequence;
+  final bool active;
+  final CourseReleasePolicy releasePolicy;
+  final int amberMinutes;
+  final int redMinutes;
+  final List<ProductionArea> productionAreas;
+}
+
 enum ProductionArea { bar, kitchen, dessert }
 
 enum OrderFlowStatus {
+  held,
   newOrder,
   preparing,
   ready,
@@ -14,6 +71,7 @@ enum OrderFlowStatus {
 
 extension OrderFlowStatusLabel on OrderFlowStatus {
   String get label => switch (this) {
+    OrderFlowStatus.held => 'Held course',
     OrderFlowStatus.newOrder => 'New',
     OrderFlowStatus.preparing => 'Preparing',
     OrderFlowStatus.ready => 'Ready',
@@ -57,6 +115,8 @@ class OrderFlowOrder {
     this.hasAllergyAlert = false,
     this.isDelayed = false,
     this.note = '',
+    this.channel = OrderChannel.dineIn,
+    this.courseName = 'Standard',
   });
 
   final String id;
@@ -73,6 +133,8 @@ class OrderFlowOrder {
   final bool hasAllergyAlert;
   final bool isDelayed;
   final String note;
+  final OrderChannel channel;
+  final String courseName;
 
   OrderFlowOrder copyWith({OrderFlowStatus? status, bool? isDelayed}) =>
       OrderFlowOrder(
@@ -90,6 +152,8 @@ class OrderFlowOrder {
         hasAllergyAlert: hasAllergyAlert,
         isDelayed: isDelayed ?? this.isDelayed,
         note: note,
+        channel: channel,
+        courseName: courseName,
       );
 }
 
@@ -177,6 +241,9 @@ class Venue {
     this.address = '',
     this.phoneNumbers = const [],
     this.receiptFooter = '',
+    this.collectionEnabled = false,
+    this.deliveryEnabled = false,
+    this.courseControlEnabled = false,
   }) : _orderFlowAmberMinutes = orderFlowAmberMinutes,
        _orderFlowRedMinutes = orderFlowRedMinutes,
        _defaultBookingDurationMinutes = defaultBookingDurationMinutes,
@@ -195,6 +262,9 @@ class Venue {
   final String address;
   final List<String> phoneNumbers;
   final String receiptFooter;
+  final bool collectionEnabled;
+  final bool deliveryEnabled;
+  final bool courseControlEnabled;
 
   // Nullable backing fields deliberately protect a running debug session
   // whose Venue instances pre-date these fields after a hot reload. Existing
@@ -569,6 +639,20 @@ class MenuProduct {
     this.imageUrl,
     this.imageStoragePath,
     this.soldQuantity = 0,
+    this.availableForCollection = true,
+    this.availableForDelivery = true,
+    this.collectionPriceMinor,
+    this.deliveryPriceMinor,
+    this.collectionTaxRateId,
+    this.collectionTaxRateName,
+    this.collectionTaxRateBasisPoints,
+    this.deliveryTaxRateId,
+    this.deliveryTaxRateName,
+    this.deliveryTaxRateBasisPoints,
+    this.defaultCourseId,
+    this.defaultCourseName = 'Standard',
+    this.defaultCourseSequence = 0,
+    this.courseReleasePolicy = CourseReleasePolicy.immediate,
   });
 
   final String id;
@@ -606,6 +690,32 @@ class MenuProduct {
   /// Server-maintained quantity from securely closed bills. Used only to
   /// rank the automatic Popular menu; it never affects financial totals.
   final int soldQuantity;
+  final bool availableForCollection;
+  final bool availableForDelivery;
+  final int? collectionPriceMinor;
+  final int? deliveryPriceMinor;
+  final String? collectionTaxRateId;
+  final String? collectionTaxRateName;
+  final int? collectionTaxRateBasisPoints;
+  final String? deliveryTaxRateId;
+  final String? deliveryTaxRateName;
+  final int? deliveryTaxRateBasisPoints;
+  final String? defaultCourseId;
+  final String defaultCourseName;
+  final int defaultCourseSequence;
+  final CourseReleasePolicy courseReleasePolicy;
+
+  bool isAvailableFor(OrderChannel channel) => switch (channel) {
+    OrderChannel.dineIn => isAvailable,
+    OrderChannel.collection => isAvailable && availableForCollection,
+    OrderChannel.delivery => isAvailable && availableForDelivery,
+  };
+
+  int priceFor(OrderChannel channel) => switch (channel) {
+    OrderChannel.dineIn => priceMinor,
+    OrderChannel.collection => collectionPriceMinor ?? priceMinor,
+    OrderChannel.delivery => deliveryPriceMinor ?? priceMinor,
+  };
 
   double? get estimatedCostMinor {
     if (stockComponents.isNotEmpty) {
@@ -718,6 +828,10 @@ class OrderLine {
     this.addedLocalDate,
     this.addedLocalDateTime,
     this.venueTimeZone,
+    this.courseId = 'standard',
+    this.courseName = 'Standard',
+    this.courseSequence = 0,
+    this.courseReleasePolicy = CourseReleasePolicy.immediate,
   });
 
   final String id;
@@ -743,6 +857,10 @@ class OrderLine {
   final String? addedLocalDate;
   final String? addedLocalDateTime;
   final String? venueTimeZone;
+  final String courseId;
+  final String courseName;
+  final int courseSequence;
+  final CourseReleasePolicy courseReleasePolicy;
 
   int get totalMinor => quantity * unitPriceMinor;
 
@@ -781,6 +899,10 @@ class OrderLine {
     addedLocalDate: addedLocalDate,
     addedLocalDateTime: addedLocalDateTime,
     venueTimeZone: venueTimeZone,
+    courseId: courseId,
+    courseName: courseName,
+    courseSequence: courseSequence,
+    courseReleasePolicy: courseReleasePolicy,
   );
 }
 
@@ -831,6 +953,17 @@ class PosOrder {
     this.splitSequence,
     this.openSplitOrderIds = const <String>[],
     this.payments = const <OrderPayment>[],
+    this.channel = OrderChannel.dineIn,
+    this.fulfilmentStatus = FulfilmentStatus.awaitingPreparation,
+    this.customerId,
+    this.customerName,
+    this.customerPhone,
+    this.deliveryAddress,
+    this.scheduledFor,
+    this.assignedDriverId,
+    this.assignedDriverName,
+    this.primaryWaiterId,
+    this.primaryWaiterName,
   });
 
   final String id;
@@ -853,6 +986,17 @@ class PosOrder {
   /// have all been settled. This prevents a table being freed too early.
   final List<String> openSplitOrderIds;
   final List<OrderPayment> payments;
+  final OrderChannel channel;
+  final FulfilmentStatus fulfilmentStatus;
+  final String? customerId;
+  final String? customerName;
+  final String? customerPhone;
+  final String? deliveryAddress;
+  final DateTime? scheduledFor;
+  final String? assignedDriverId;
+  final String? assignedDriverName;
+  final String? primaryWaiterId;
+  final String? primaryWaiterName;
 
   bool get isSplitOrder => splitFromOrderId?.trim().isNotEmpty == true;
 
@@ -918,6 +1062,17 @@ class PosOrder {
     int? splitSequence,
     List<String>? openSplitOrderIds,
     List<OrderPayment>? payments,
+    OrderChannel? channel,
+    FulfilmentStatus? fulfilmentStatus,
+    String? customerId,
+    String? customerName,
+    String? customerPhone,
+    String? deliveryAddress,
+    DateTime? scheduledFor,
+    String? assignedDriverId,
+    String? assignedDriverName,
+    String? primaryWaiterId,
+    String? primaryWaiterName,
   }) {
     return PosOrder(
       id: id ?? this.id,
@@ -934,6 +1089,17 @@ class PosOrder {
       splitSequence: splitSequence ?? this.splitSequence,
       openSplitOrderIds: openSplitOrderIds ?? this.openSplitOrderIds,
       payments: payments ?? this.payments,
+      channel: channel ?? this.channel,
+      fulfilmentStatus: fulfilmentStatus ?? this.fulfilmentStatus,
+      customerId: customerId ?? this.customerId,
+      customerName: customerName ?? this.customerName,
+      customerPhone: customerPhone ?? this.customerPhone,
+      deliveryAddress: deliveryAddress ?? this.deliveryAddress,
+      scheduledFor: scheduledFor ?? this.scheduledFor,
+      assignedDriverId: assignedDriverId ?? this.assignedDriverId,
+      assignedDriverName: assignedDriverName ?? this.assignedDriverName,
+      primaryWaiterId: primaryWaiterId ?? this.primaryWaiterId,
+      primaryWaiterName: primaryWaiterName ?? this.primaryWaiterName,
     );
   }
 }

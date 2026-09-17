@@ -91,6 +91,14 @@ class OfflineOrderProjection {
     required this.payments,
     required this.isClosed,
     this.receiptNumber,
+    this.channel = 'dineIn',
+    this.customerId,
+    this.customerName,
+    this.customerPhone,
+    this.deliveryAddress,
+    this.scheduledForUtc,
+    this.fulfilmentStatus = 'awaitingPreparation',
+    this.assignedDriverId,
   });
 
   final String tenantId;
@@ -105,6 +113,14 @@ class OfflineOrderProjection {
   final List<OfflineProjectedPayment> payments;
   final bool isClosed;
   final String? receiptNumber;
+  final String channel;
+  final String? customerId;
+  final String? customerName;
+  final String? customerPhone;
+  final String? deliveryAddress;
+  final DateTime? scheduledForUtc;
+  final String fulfilmentStatus;
+  final String? assignedDriverId;
 
   int get totalMinor =>
       lines.values.fold(0, (sum, line) => sum + line.totalMinor);
@@ -123,6 +139,14 @@ class OfflineOrderProjection {
     'tabName': tabName,
     'isClosed': isClosed,
     'receiptNumber': receiptNumber,
+    'channel': channel,
+    'customerId': customerId,
+    'customerName': customerName,
+    'customerPhone': customerPhone,
+    'deliveryAddress': deliveryAddress,
+    'scheduledForUtc': scheduledForUtc?.toIso8601String(),
+    'fulfilmentStatus': fulfilmentStatus,
+    'assignedDriverId': assignedDriverId,
     'lines': lines.values
         .map(
           (line) => <String, Object?>{
@@ -173,6 +197,14 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
   var opened = false;
   var closed = false;
   String? receiptNumber;
+  var channel = 'dineIn';
+  String? customerId;
+  String? customerName;
+  String? customerPhone;
+  String? deliveryAddress;
+  DateTime? scheduledForUtc;
+  var fulfilmentStatus = 'awaitingPreparation';
+  String? assignedDriverId;
 
   for (final event in events) {
     if (event.tenantId != first.tenantId || event.venueId != first.venueId) {
@@ -208,6 +240,35 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           );
         }
         opened = true;
+        channel = event.payload['channel'] as String? ?? 'dineIn';
+        if (!const ['dineIn', 'collection', 'delivery'].contains(channel)) {
+          throw const OfflineProjectionException(
+            'The order channel is invalid.',
+          );
+        }
+        customerId = event.payload['customerId'] as String?;
+        customerName = event.payload['customerName'] as String?;
+        customerPhone = event.payload['customerPhone'] as String?;
+        deliveryAddress = event.payload['deliveryAddress'] as String?;
+        final scheduled = event.payload['scheduledForUtc'] as String?;
+        scheduledForUtc = scheduled == null
+            ? null
+            : DateTime.tryParse(scheduled)?.toUtc();
+        if (channel != 'dineIn' &&
+            (customerId?.trim().isEmpty != false ||
+                customerName?.trim().isEmpty != false)) {
+          throw const OfflineProjectionException(
+            'A fulfilment order needs a customer.',
+          );
+        }
+        if (channel == 'delivery' && deliveryAddress?.trim().isEmpty != false) {
+          throw const OfflineProjectionException(
+            'A delivery order needs an address.',
+          );
+        }
+        fulfilmentStatus = channel == 'delivery'
+            ? 'awaitingDriver'
+            : 'awaitingPreparation';
         break;
       case 'order.itemAdded':
         _requireOpened(opened);
@@ -266,6 +327,36 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           }
           lines[value] = lines[value]!.copyWith(sent: true);
         }
+        break;
+      case 'order.fulfilmentChanged':
+        _requireOpened(opened);
+        final status = _requiredString(event.payload, 'status');
+        if (!const {
+          'awaitingPreparation',
+          'readyForCollection',
+          'awaitingDriver',
+          'assigned',
+          'outForDelivery',
+          'collected',
+          'delivered',
+          'cancelled',
+        }.contains(status)) {
+          throw const OfflineProjectionException(
+            'The fulfilment status is invalid.',
+          );
+        }
+        final managerAuthorized = event.payload['managerAuthorized'] == true;
+        if (!managerAuthorized &&
+            (assignedDriverId == null ||
+                event.staffId != assignedDriverId ||
+                !const {'outForDelivery', 'delivered'}.contains(status))) {
+          throw const OfflineProjectionException(
+            'A driver may update only their own assigned delivery.',
+          );
+        }
+        fulfilmentStatus = status;
+        assignedDriverId =
+            event.payload['driverId'] as String? ?? assignedDriverId;
         break;
       case 'payment.recorded':
         _requireOpened(opened);
@@ -348,6 +439,14 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     payments: List.unmodifiable(payments),
     isClosed: closed,
     receiptNumber: receiptNumber,
+    channel: channel,
+    customerId: customerId,
+    customerName: customerName,
+    customerPhone: customerPhone,
+    deliveryAddress: deliveryAddress,
+    scheduledForUtc: scheduledForUtc,
+    fulfilmentStatus: fulfilmentStatus,
+    assignedDriverId: assignedDriverId,
   );
 }
 

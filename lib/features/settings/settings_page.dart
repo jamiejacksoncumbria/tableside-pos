@@ -9,6 +9,7 @@ import '../../core/tenant_scope.dart';
 import '../../data/tenant_profile_repository.dart';
 import '../../data/production_command_repository.dart';
 import '../auth/staff_pin_gate.dart';
+import '../fulfilment/fulfilment_management_page.dart';
 import '../notifications/notification_centre.dart';
 import '../printing/bluetooth_printer_setup_page.dart';
 import '../printing/print_queue_recovery_page.dart';
@@ -637,6 +638,24 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ),
               ),
               if (canManageVenue) ...[
+                if (widget.venueOverride != null) ...[
+                  const Divider(),
+                  ListTile(
+                    leading: const Icon(Icons.delivery_dining_outlined),
+                    title: const Text('Collection, delivery & courses'),
+                    subtitle: const Text(
+                      'Configure order channels, kitchen courses and telephone customers.',
+                    ),
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => FulfilmentManagementPage(
+                          venue: widget.venueOverride!,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
                 const Divider(),
                 ListTile(
                   leading: const Icon(Icons.school_outlined),

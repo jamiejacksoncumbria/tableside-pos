@@ -1134,6 +1134,7 @@ const _staffRoleLabels = <String, String>{
   'waiter': 'Waiter',
   'cashier': 'Cashier',
   'kitchen': 'Kitchen',
+  'driver': 'Delivery driver',
   'printer': 'Printer device',
 };
 

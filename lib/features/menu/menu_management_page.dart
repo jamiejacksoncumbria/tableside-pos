@@ -11,6 +11,7 @@ import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../notifications/notification_centre.dart';
+import '../fulfilment/fulfilment_repository.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 import 'modifier_groups_page.dart';
@@ -678,6 +679,10 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
     var replaceVariants = false;
     MenuVariantSet? selectedVariantSet;
     var orderFlowChoice = 'unchanged';
+    var collectionChoice = 'unchanged';
+    var deliveryChoice = 'unchanged';
+    var removeCollectionPrice = false;
+    var removeDeliveryPrice = false;
     var productionArea = ProductionArea.kitchen;
     final selectedSections = <String>{};
     final selectedGroups = <String>{};
@@ -721,6 +726,63 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                           ),
                       ],
                     ),
+                  const Divider(height: 28),
+                  DropdownButtonFormField<String>(
+                    initialValue: collectionChoice,
+                    decoration: const InputDecoration(
+                      labelText: 'Collection availability',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'unchanged',
+                        child: Text('Leave unchanged'),
+                      ),
+                      DropdownMenuItem(value: 'yes', child: Text('Available')),
+                      DropdownMenuItem(value: 'no', child: Text('Unavailable')),
+                    ],
+                    onChanged: (value) => setDialogState(
+                      () => collectionChoice = value ?? 'unchanged',
+                    ),
+                  ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: removeCollectionPrice,
+                    title: const Text('Remove collection price overrides'),
+                    subtitle: const Text(
+                      'Selected products will inherit their normal price.',
+                    ),
+                    onChanged: (value) => setDialogState(
+                      () => removeCollectionPrice = value ?? false,
+                    ),
+                  ),
+                  DropdownButtonFormField<String>(
+                    initialValue: deliveryChoice,
+                    decoration: const InputDecoration(
+                      labelText: 'Delivery availability',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'unchanged',
+                        child: Text('Leave unchanged'),
+                      ),
+                      DropdownMenuItem(value: 'yes', child: Text('Available')),
+                      DropdownMenuItem(value: 'no', child: Text('Unavailable')),
+                    ],
+                    onChanged: (value) => setDialogState(
+                      () => deliveryChoice = value ?? 'unchanged',
+                    ),
+                  ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: removeDeliveryPrice,
+                    title: const Text('Remove delivery price overrides'),
+                    subtitle: const Text(
+                      'Selected products will inherit their normal price.',
+                    ),
+                    onChanged: (value) => setDialogState(
+                      () => removeDeliveryPrice = value ?? false,
+                    ),
+                  ),
                   const Divider(height: 28),
                   CheckboxListTile(
                     value: replaceVariants,
@@ -887,6 +949,10 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                     !replaceVariants &&
                     !changeProductionArea &&
                     !changeMargin &&
+                    collectionChoice == 'unchanged' &&
+                    deliveryChoice == 'unchanged' &&
+                    !removeCollectionPrice &&
+                    !removeDeliveryPrice &&
                     orderFlowChoice == 'unchanged') {
                   showAppNotification(
                     context,
@@ -928,6 +994,14 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                     variants: replaceVariants
                         ? selectedVariantSet!.variants
                         : null,
+                    availableForCollection: collectionChoice == 'unchanged'
+                        ? null
+                        : collectionChoice == 'yes',
+                    availableForDelivery: deliveryChoice == 'unchanged'
+                        ? null
+                        : deliveryChoice == 'yes',
+                    removeCollectionPriceOverride: removeCollectionPrice,
+                    removeDeliveryPriceOverride: removeDeliveryPrice,
                   ),
                 );
               },
@@ -973,6 +1047,11 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
             modifierGroupIds: changes.modifierGroupIds,
             targetMarginBasisPoints: changes.targetMarginBasisPoints,
             variants: changes.variants,
+            availableForCollection: changes.availableForCollection,
+            availableForDelivery: changes.availableForDelivery,
+            removeCollectionPriceOverride:
+                changes.removeCollectionPriceOverride,
+            removeDeliveryPriceOverride: changes.removeDeliveryPriceOverride,
           );
       if (!mounted) return;
       setState(_selectedProductIds.clear);
@@ -1317,6 +1396,10 @@ class _BulkProductChanges {
     this.modifierGroupIds,
     this.targetMarginBasisPoints,
     this.variants,
+    this.availableForCollection,
+    this.availableForDelivery,
+    this.removeCollectionPriceOverride = false,
+    this.removeDeliveryPriceOverride = false,
   });
 
   final List<String>? sectionIds;
@@ -1325,6 +1408,10 @@ class _BulkProductChanges {
   final List<String>? modifierGroupIds;
   final int? targetMarginBasisPoints;
   final List<MenuProductVariant>? variants;
+  final bool? availableForCollection;
+  final bool? availableForDelivery;
+  final bool removeCollectionPriceOverride;
+  final bool removeDeliveryPriceOverride;
 }
 
 class _ProductTile extends StatelessWidget {
@@ -1916,6 +2003,16 @@ Future<void> _showProductDialog({
   final price = TextEditingController(
     text: existing == null ? '' : _priceText(existing.priceMinor),
   );
+  final collectionPrice = TextEditingController(
+    text: existing?.collectionPriceMinor == null
+        ? ''
+        : _priceText(existing!.collectionPriceMinor!),
+  );
+  final deliveryPrice = TextEditingController(
+    text: existing?.deliveryPriceMinor == null
+        ? ''
+        : _priceText(existing!.deliveryPriceMinor!),
+  );
   final stock = TextEditingController(
     text: existing == null
         ? (remembered?.trackStock == true ? '0' : '')
@@ -1970,6 +2067,11 @@ Future<void> _showProductDialog({
   var stockUnit = existing?.stockUnit ?? remembered?.stockUnit ?? 'each';
   var showOnOrderFlow =
       existing?.showOnOrderFlow ?? remembered?.showOnOrderFlow ?? true;
+  var availableForCollection = existing?.availableForCollection ?? true;
+  var availableForDelivery = existing?.availableForDelivery ?? true;
+  final courses = await ref.read(venueCoursesProvider.future);
+  if (!context.mounted) return;
+  var defaultCourseId = existing?.defaultCourseId;
   Uint8List? selectedImageBytes;
   String? selectedImageFileName;
   String? selectedImageContentType;
@@ -2283,6 +2385,81 @@ Future<void> _showProductDialog({
                         },
                         icon: const Icon(Icons.bookmark_add_outlined),
                         label: const Text('Save current variants as a set'),
+                      ),
+                    const SizedBox(height: 18),
+                    Text(
+                      'Collection and delivery',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    SwitchListTile.adaptive(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Available for collection'),
+                      value: availableForCollection,
+                      onChanged: (value) =>
+                          setDialogState(() => availableForCollection = value),
+                    ),
+                    if (availableForCollection)
+                      TextFormField(
+                        controller: collectionPrice,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: InputDecoration(
+                          labelText:
+                              'Collection price override ($currencyCode)',
+                          helperText: 'Leave blank to use the normal price.',
+                        ),
+                        validator: (value) =>
+                            value?.trim().isEmpty == true ||
+                                _minorFromPriceText(value) != null
+                            ? null
+                            : 'Enter a valid price or leave blank.',
+                      ),
+                    SwitchListTile.adaptive(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Available for delivery'),
+                      value: availableForDelivery,
+                      onChanged: (value) =>
+                          setDialogState(() => availableForDelivery = value),
+                    ),
+                    if (availableForDelivery)
+                      TextFormField(
+                        controller: deliveryPrice,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: InputDecoration(
+                          labelText: 'Delivery price override ($currencyCode)',
+                          helperText: 'Leave blank to use the normal price.',
+                        ),
+                        validator: (value) =>
+                            value?.trim().isEmpty == true ||
+                                _minorFromPriceText(value) != null
+                            ? null
+                            : 'Enter a valid price or leave blank.',
+                      ),
+                    if (courses.isNotEmpty)
+                      DropdownButtonFormField<String?>(
+                        initialValue: defaultCourseId,
+                        decoration: const InputDecoration(
+                          labelText: 'Default course',
+                          helperText: 'Standard releases immediately.',
+                        ),
+                        items: [
+                          const DropdownMenuItem<String?>(
+                            value: null,
+                            child: Text('Standard'),
+                          ),
+                          for (final course in courses.where(
+                            (item) => item.active,
+                          ))
+                            DropdownMenuItem<String?>(
+                              value: course.id,
+                              child: Text(course.name),
+                            ),
+                        ],
+                        onChanged: (value) =>
+                            setDialogState(() => defaultCourseId = value),
                       ),
                     const SizedBox(height: 18),
                     Text(
@@ -2642,6 +2819,15 @@ Future<void> _showProductDialog({
                       imageBytes: selectedImageBytes,
                       imageFileName: selectedImageFileName,
                       imageContentType: selectedImageContentType,
+                      availableForCollection: availableForCollection,
+                      availableForDelivery: availableForDelivery,
+                      collectionPriceMinor: collectionPrice.text.trim().isEmpty
+                          ? null
+                          : _minorFromPriceText(collectionPrice.text),
+                      deliveryPriceMinor: deliveryPrice.text.trim().isEmpty
+                          ? null
+                          : _minorFromPriceText(deliveryPrice.text),
+                      defaultCourseId: defaultCourseId,
                     );
                     await _ProductFormDefaults(
                       sectionIds: selectedSections.toList(growable: false),
@@ -2698,6 +2884,15 @@ Future<void> _showProductDialog({
                       imageFileName: selectedImageFileName,
                       imageContentType: selectedImageContentType,
                       removeImage: removeExistingImage,
+                      availableForCollection: availableForCollection,
+                      availableForDelivery: availableForDelivery,
+                      collectionPriceMinor: collectionPrice.text.trim().isEmpty
+                          ? null
+                          : _minorFromPriceText(collectionPrice.text),
+                      deliveryPriceMinor: deliveryPrice.text.trim().isEmpty
+                          ? null
+                          : _minorFromPriceText(deliveryPrice.text),
+                      defaultCourseId: defaultCourseId,
                     );
                   }
                   if (dialogContext.mounted) Navigator.pop(dialogContext);
@@ -2722,6 +2917,8 @@ Future<void> _showProductDialog({
   } finally {
     name.dispose();
     price.dispose();
+    collectionPrice.dispose();
+    deliveryPrice.dispose();
     stock.dispose();
     stockPerSale.dispose();
     lowStockThreshold.dispose();

@@ -115,6 +115,11 @@ class FirestorePosRepository {
                       .take(3)
                       .toList(growable: false),
                   receiptFooter: data['receiptFooter'] as String? ?? '',
+                  collectionEnabled:
+                      data['collectionEnabled'] as bool? ?? false,
+                  deliveryEnabled: data['deliveryEnabled'] as bool? ?? false,
+                  courseControlEnabled:
+                      data['courseControlEnabled'] as bool? ?? false,
                   notificationRetentionSeconds: _notificationRetentionSeconds(
                     data['notificationRetentionSeconds'],
                   ),
@@ -415,6 +420,40 @@ class FirestorePosRepository {
                 imageStoragePath: _optionalNonEmptyString(
                   data['imageStoragePath'],
                 ),
+                availableForCollection:
+                    data['availableForCollection'] as bool? ?? true,
+                availableForDelivery:
+                    data['availableForDelivery'] as bool? ?? true,
+                collectionPriceMinor: (data['collectionPriceMinor'] as num?)
+                    ?.toInt(),
+                deliveryPriceMinor: (data['deliveryPriceMinor'] as num?)
+                    ?.toInt(),
+                collectionTaxRateId: _optionalNonEmptyString(
+                  data['collectionTaxRateId'],
+                ),
+                collectionTaxRateName: _optionalNonEmptyString(
+                  data['collectionTaxRateName'],
+                ),
+                collectionTaxRateBasisPoints:
+                    (data['collectionTaxRateBasisPoints'] as num?)?.toInt(),
+                deliveryTaxRateId: _optionalNonEmptyString(
+                  data['deliveryTaxRateId'],
+                ),
+                deliveryTaxRateName: _optionalNonEmptyString(
+                  data['deliveryTaxRateName'],
+                ),
+                deliveryTaxRateBasisPoints:
+                    (data['deliveryTaxRateBasisPoints'] as num?)?.toInt(),
+                defaultCourseId: _optionalNonEmptyString(
+                  data['defaultCourseId'],
+                ),
+                defaultCourseName:
+                    data['defaultCourseName'] as String? ?? 'Standard',
+                defaultCourseSequence:
+                    (data['defaultCourseSequence'] as num?)?.toInt() ?? 0,
+                courseReleasePolicy: _courseReleasePolicy(
+                  data['courseReleasePolicy'] as String?,
+                ),
               );
             })
             .toList(growable: false);
@@ -702,6 +741,12 @@ class FirestorePosRepository {
             addedLocalDate: line['addedLocalDate'] as String?,
             addedLocalDateTime: line['addedLocalDateTime'] as String?,
             venueTimeZone: line['venueTimeZone'] as String?,
+            courseId: line['courseId'] as String? ?? 'standard',
+            courseName: line['courseName'] as String? ?? 'Standard',
+            courseSequence: (line['courseSequence'] as num?)?.toInt() ?? 0,
+            courseReleasePolicy: _courseReleasePolicy(
+              line['courseReleasePolicy'] as String?,
+            ),
           );
         })
         .where((line) => line.id.isNotEmpty && line.productId.isNotEmpty)
@@ -745,7 +790,11 @@ class FirestorePosRepository {
       tenantId: scope.tenantId,
       venueId: scope.venueId,
       tableId: data['tableId'] as String?,
-      tabName: data['tabName'] as String?,
+      tabName:
+          data['tabName'] as String? ??
+          (data['channel'] == 'dineIn'
+              ? null
+              : data['customerName'] as String?),
       businessDate: DateTime(date.year, date.month, date.day),
       openedAt: date,
       status: status,
@@ -754,6 +803,19 @@ class FirestorePosRepository {
       splitSequence: (data['splitSequence'] as num?)?.toInt(),
       openSplitOrderIds: _stringIds(data['openSplitOrderIds']),
       payments: payments,
+      channel: _orderChannel(data['channel'] as String?),
+      fulfilmentStatus: _fulfilmentStatus(data['fulfilmentStatus'] as String?),
+      customerId: data['customerId'] as String?,
+      customerName: data['customerName'] as String?,
+      customerPhone: data['customerPhone'] as String?,
+      deliveryAddress: data['deliveryAddress'] as String?,
+      scheduledFor:
+          _dateTime(data['scheduledFor']) ??
+          _dateTimeFromMillis(data['scheduledForMillis']),
+      assignedDriverId: data['assignedDriverId'] as String?,
+      assignedDriverName: data['assignedDriverName'] as String?,
+      primaryWaiterId: data['primaryWaiterId'] as String?,
+      primaryWaiterName: data['primaryWaiterName'] as String?,
     );
   }
 
@@ -933,6 +995,11 @@ class FirestorePosRepository {
     Uint8List? imageBytes,
     String? imageFileName,
     String? imageContentType,
+    bool availableForCollection = true,
+    bool availableForDelivery = true,
+    int? collectionPriceMinor,
+    int? deliveryPriceMinor,
+    String? defaultCourseId,
   }) async {
     final cleanedName = toCatalogueTitleCase(name);
     if (cleanedName.isEmpty) throw ArgumentError.value(name, 'name');
@@ -970,6 +1037,11 @@ class FirestorePosRepository {
         'variants': _variantsToMap(variants),
         'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
         'stockComponents': _stockComponentsToMap(stockComponents),
+        'availableForCollection': availableForCollection,
+        'availableForDelivery': availableForDelivery,
+        'collectionPriceMinor': collectionPriceMinor,
+        'deliveryPriceMinor': deliveryPriceMinor,
+        'defaultCourseId': defaultCourseId,
         if (imageBytes != null)
           'imageUpload': _productImageUpload(
             imageBytes,
@@ -1003,6 +1075,11 @@ class FirestorePosRepository {
     List<String>? modifierGroupIds,
     int? targetMarginBasisPoints,
     List<MenuProductVariant>? variants,
+    bool? availableForCollection,
+    bool? availableForDelivery,
+    bool removeCollectionPriceOverride = false,
+    bool removeDeliveryPriceOverride = false,
+    String? defaultCourseId,
   }) async {
     await _commands.manageMenuConfiguration(
       scope: scope,
@@ -1017,6 +1094,14 @@ class FirestorePosRepository {
         if (targetMarginBasisPoints != null)
           'targetMarginBasisPoints': targetMarginBasisPoints,
         if (variants != null) 'variants': _variantsToMap(variants),
+        if (availableForCollection != null)
+          'availableForCollection': availableForCollection,
+        if (availableForDelivery != null)
+          'availableForDelivery': availableForDelivery,
+        if (removeCollectionPriceOverride)
+          'removeCollectionPriceOverride': true,
+        if (removeDeliveryPriceOverride) 'removeDeliveryPriceOverride': true,
+        if (defaultCourseId != null) 'defaultCourseId': defaultCourseId,
       },
     );
   }
@@ -1046,6 +1131,11 @@ class FirestorePosRepository {
     String? imageFileName,
     String? imageContentType,
     bool removeImage = false,
+    bool availableForCollection = true,
+    bool availableForDelivery = true,
+    int? collectionPriceMinor,
+    int? deliveryPriceMinor,
+    String? defaultCourseId,
   }) async {
     final cleanedName = toCatalogueTitleCase(name);
     if (cleanedName.isEmpty || priceMinor < 0 || sectionIds.isEmpty) {
@@ -1080,6 +1170,11 @@ class FirestorePosRepository {
         'variants': _variantsToMap(variants),
         'modifierGroupIds': _cleanModifierGroupIds(modifierGroupIds),
         'stockComponents': _stockComponentsToMap(stockComponents),
+        'availableForCollection': availableForCollection,
+        'availableForDelivery': availableForDelivery,
+        'collectionPriceMinor': collectionPriceMinor,
+        'deliveryPriceMinor': deliveryPriceMinor,
+        'defaultCourseId': defaultCourseId,
         if (imageBytes != null)
           'imageUpload': _productImageUpload(
             imageBytes,
@@ -1810,6 +1905,8 @@ class FirestorePosRepository {
       hasAllergyAlert: data['hasAllergyAlert'] as bool? ?? false,
       isDelayed: data['isDelayed'] as bool? ?? false,
       note: data['productionNote'] as String? ?? '',
+      channel: _orderChannel(data['channel'] as String?),
+      courseName: data['courseName'] as String? ?? 'Standard',
     );
   }
 
@@ -1819,7 +1916,32 @@ class FirestorePosRepository {
     _ => ProductionArea.kitchen,
   };
 
+  OrderChannel _orderChannel(String? value) => switch (value) {
+    'collection' => OrderChannel.collection,
+    'delivery' => OrderChannel.delivery,
+    _ => OrderChannel.dineIn,
+  };
+
+  FulfilmentStatus _fulfilmentStatus(String? value) => switch (value) {
+    'readyForCollection' => FulfilmentStatus.readyForCollection,
+    'awaitingDriver' => FulfilmentStatus.awaitingDriver,
+    'assigned' => FulfilmentStatus.assigned,
+    'outForDelivery' => FulfilmentStatus.outForDelivery,
+    'collected' => FulfilmentStatus.collected,
+    'delivered' => FulfilmentStatus.delivered,
+    'cancelled' => FulfilmentStatus.cancelled,
+    _ => FulfilmentStatus.awaitingPreparation,
+  };
+
+  CourseReleasePolicy _courseReleasePolicy(String? value) => switch (value) {
+    'manual' => CourseReleasePolicy.manual,
+    'afterPreviousCollected' => CourseReleasePolicy.afterPreviousCollected,
+    'afterPreviousServed' => CourseReleasePolicy.afterPreviousServed,
+    _ => CourseReleasePolicy.immediate,
+  };
+
   OrderFlowStatus _orderFlowStatus(String? value) => switch (value) {
+    'held' => OrderFlowStatus.held,
     'preparing' => OrderFlowStatus.preparing,
     'ready' => OrderFlowStatus.ready,
     'collected' => OrderFlowStatus.collected,

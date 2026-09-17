@@ -86,6 +86,7 @@ class VenueHubCommandProcessor {
     'order.itemAdded': 'order',
     'order.itemQuantityChanged': 'order',
     'order.sent': 'order',
+    'order.fulfilmentChanged': 'delivery',
     'payment.recorded': 'payment',
     'order.closed': 'payment',
     'receipt.requested': 'order',
@@ -126,6 +127,11 @@ class VenueHubCommandProcessor {
       Map<String, Object?>.from(rawPayload),
       grant,
     );
+    if (eventType == 'order.fulfilmentChanged') {
+      canonicalPayload['managerAuthorized'] = grant.permissions.contains(
+        'manager',
+      );
+    }
     DateTime? businessTimestamp;
     final rawTimestamp = body['businessTimestampUtc'];
     if (rawTimestamp != null) {

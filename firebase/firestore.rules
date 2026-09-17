@@ -219,6 +219,27 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // Courses are operational kitchen configuration. Customer records may
+      // contain contact/address data, so both are PIN-scoped and server-only
+      // for writes; a modified client cannot bypass duplicate checks/audits.
+      match /courses/{courseId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
+      }
+
+      match /venueCustomers/{customerId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
+      }
+
+      // Server-created waiter/driver operational notifications. The app
+      // filters recipients using the active PIN identity; clients cannot
+      // create or acknowledge another person's event.
+      match /notificationEvents/{eventId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
+      }
+
       // Server-only table-label registry makes table names unique per venue.
       match /tableLabels/{labelId} {
         allow read, write: if false;

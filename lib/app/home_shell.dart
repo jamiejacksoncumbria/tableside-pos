@@ -10,10 +10,12 @@ import '../core/tenant_scope.dart';
 import '../core/training_mode.dart';
 import '../data/production_command_repository.dart';
 import '../features/bookings/booking_calendar_page.dart';
+import '../features/fulfilment/fulfilment_management_page.dart';
 import '../features/order_flow/order_flow_page.dart';
 import '../features/auth/staff_pin_gate.dart';
 import '../features/menu/menu_management_page.dart';
 import '../features/notifications/notification_centre.dart';
+import '../features/notifications/push_notification_host.dart';
 import '../features/pos/domain.dart';
 import '../features/pos/pos_controller.dart';
 import '../features/pos/pos_page.dart';
@@ -27,6 +29,7 @@ enum HomeSection {
   pos,
   bookings,
   orderFlow,
+  fulfilment,
   menu,
   reports,
   settings,
@@ -80,6 +83,17 @@ class HomeShell extends ConsumerWidget {
           (role) => role == 'owner' || role == 'manager',
         ) ??
         false;
+    final canUseFulfilment =
+        staffSession?.roles.any(
+          (role) => const {
+            'owner',
+            'manager',
+            'waiter',
+            'cashier',
+            'driver',
+          }.contains(role),
+        ) ??
+        false;
     final protectedVenueSection =
         section == HomeSection.menu ||
         section == HomeSection.reports ||
@@ -111,6 +125,12 @@ class HomeShell extends ConsumerWidget {
           HomeSection.orderFlow,
           Icons.monitor_heart_outlined,
           'Order flow',
+        ),
+      if (canUseFulfilment && !trainingModeActive)
+        const _Destination(
+          HomeSection.fulfilment,
+          Icons.delivery_dining_outlined,
+          'Delivery',
         ),
       if (canManageVenue && !trainingModeActive)
         const _Destination(
@@ -352,6 +372,9 @@ class HomeShell extends ConsumerWidget {
                 ),
                 if (Firebase.apps.isNotEmpty) const PrintDeliveryMonitorHost(),
                 if (Firebase.apps.isNotEmpty) const OrderFlowNotificationHost(),
+                if (Firebase.apps.isNotEmpty)
+                  const OperationalNotificationHost(),
+                if (Firebase.apps.isNotEmpty) const PushNotificationHost(),
               ],
             ),
           ),
@@ -398,6 +421,7 @@ class HomeShell extends ConsumerWidget {
       amberMinutes: venueOverride?.orderFlowAmberMinutes ?? 15,
       redMinutes: venueOverride?.orderFlowRedMinutes ?? 25,
     ),
+    HomeSection.fulfilment => const FulfilmentOperationsPage(),
     HomeSection.menu => MenuManagementPage(currencyCode: profile.currencyCode),
     HomeSection.reports => ReportsPage(
       currencyCode: profile.currencyCode,

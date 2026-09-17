@@ -12,6 +12,9 @@
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Android 13+ requires an explicit runtime grant before order and
+         delivery alerts can appear outside the app. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
         android:label="tableside_pos"
         android:name="${applicationName}"

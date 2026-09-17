@@ -5,9 +5,10 @@ import {
 import {getApps, initializeApp} from "firebase-admin/app";
 import {getAppCheck} from "firebase-admin/app-check";
 import {getAuth} from "firebase-admin/auth";
+import {getMessaging} from "firebase-admin/messaging";
 import {getStorage} from "firebase-admin/storage";
 import {FieldValue, getFirestore} from "firebase-admin/firestore";
-import {onDocumentUpdated} from "firebase-functions/v2/firestore";
+import {onDocumentCreated, onDocumentUpdated} from "firebase-functions/v2/firestore";
 import {HttpsError, onRequest} from "firebase-functions/v2/https";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {defineBoolean, defineString} from "firebase-functions/params";
@@ -85,7 +86,7 @@ async function requireTenantHostMember(caller, tenantId) {
     throw new HttpsError("permission-denied", "You do not have active access to this restaurant.");
   }
   const roles = Array.isArray(membership.data().roles) ? membership.data().roles : [];
-  if (!roles.some((role) => ["owner", "manager", "waiter", "cashier", "printer"].includes(role))) {
+  if (!roles.some((role) => ["owner", "manager", "waiter", "cashier", "driver", "printer"].includes(role))) {
     throw new HttpsError("permission-denied", "This account cannot host a shared POS device.");
   }
   return {membership: membership.data(), roles};
@@ -691,6 +692,35 @@ async function manageMenuConfigurationFor(caller, rawData) {
       }
       updates.showOnOrderFlow = values.showOnOrderFlow;
     }
+    if (values.availableForCollection != null) {
+      if (typeof values.availableForCollection !== "boolean") {
+        throw new HttpsError("invalid-argument", "Collection availability must be true or false.");
+      }
+      updates.availableForCollection = values.availableForCollection;
+    }
+    if (values.availableForDelivery != null) {
+      if (typeof values.availableForDelivery !== "boolean") {
+        throw new HttpsError("invalid-argument", "Delivery availability must be true or false.");
+      }
+      updates.availableForDelivery = values.availableForDelivery;
+    }
+    if (values.removeCollectionPriceOverride === true) {
+      updates.collectionPriceMinor = FieldValue.delete();
+    }
+    if (values.removeDeliveryPriceOverride === true) {
+      updates.deliveryPriceMinor = FieldValue.delete();
+    }
+    if (values.defaultCourseId != null) {
+      const defaultCourseId = requiredDocumentId(values, "defaultCourseId");
+      const course = await db.doc(`tenants/${tenantId}/courses/${defaultCourseId}`).get();
+      if (!course.exists || course.data().venueId !== venueId || course.data().active === false) {
+        throw new HttpsError("failed-precondition", "The selected course is unavailable.");
+      }
+      updates.defaultCourseId = defaultCourseId;
+      updates.defaultCourseName = course.data().name;
+      updates.defaultCourseSequence = course.data().sequence ?? 0;
+      updates.courseReleasePolicy = course.data().releasePolicy ?? "immediate";
+    }
     if (values.targetMarginBasisPoints != null) {
       updates.targetMarginBasisPoints = requiredNonNegativeInteger(
         values.targetMarginBasisPoints, "targetMarginBasisPoints", 10000,
@@ -1090,6 +1120,25 @@ async function manageMenuConfigurationFor(caller, rawData) {
         taxRate.data().basisPoints, "basisPoints", 100000,
       );
     }
+    const optionalPrice = (value, field) => value == null
+      ? null
+      : requiredNonNegativeInteger(value, field, 100000000);
+    const defaultCourseIdRaw = optionalText(values, "defaultCourseId", 1500);
+    const defaultCourseId = defaultCourseIdRaw
+      ? requiredDocumentId({defaultCourseId: defaultCourseIdRaw}, "defaultCourseId")
+      : null;
+    let defaultCourseName = "Standard";
+    let defaultCourseSequence = 0;
+    let courseReleasePolicy = "immediate";
+    if (defaultCourseId != null) {
+      const course = await db.doc(`tenants/${tenantId}/courses/${defaultCourseId}`).get();
+      if (!course.exists || course.data().venueId !== venueId || course.data().active === false) {
+        throw new HttpsError("failed-precondition", "The selected course is unavailable.");
+      }
+      defaultCourseName = course.data().name;
+      defaultCourseSequence = course.data().sequence ?? 0;
+      courseReleasePolicy = course.data().releasePolicy ?? "immediate";
+    }
     cleaned = {
       name: catalogueTitleCase(requiredText(values, "name", 120)),
       priceMinor: requiredNonNegativeInteger(values.priceMinor, "priceMinor"),
@@ -1116,6 +1165,14 @@ async function manageMenuConfigurationFor(caller, rawData) {
       taxRateName,
       variants,
       modifierGroupIds,
+      availableForCollection: values.availableForCollection !== false,
+      availableForDelivery: values.availableForDelivery !== false,
+      collectionPriceMinor: optionalPrice(values.collectionPriceMinor, "collectionPriceMinor"),
+      deliveryPriceMinor: optionalPrice(values.deliveryPriceMinor, "deliveryPriceMinor"),
+      defaultCourseId,
+      defaultCourseName,
+      defaultCourseSequence,
+      courseReleasePolicy,
     };
   }
 
@@ -1265,6 +1322,84 @@ async function manageVenueConfigurationFor(caller, rawData) {
       address: optionalText(values, "address", 500),
       phoneNumbers,
       receiptFooter: optionalText(values, "receiptFooter", 300),
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    }, {merge: true});
+  } else if (resource === "fulfilmentSettings") {
+    const collectionEnabled = values.collectionEnabled === true;
+    const deliveryEnabled = values.deliveryEnabled === true;
+    const courseControlEnabled = values.courseControlEnabled === true;
+    const validateWindows = (raw, field) => {
+      if (!Array.isArray(raw) || raw.length > 28) {
+        throw new HttpsError("invalid-argument", `${field} is invalid.`);
+      }
+      return raw.map((entry) => {
+        const window = requireObject(entry);
+        const weekday = requiredNonNegativeInteger(window.weekday, "weekday", 7);
+        const opensMinute = requiredNonNegativeInteger(window.opensMinute, "opensMinute", 1439);
+        const closesMinute = requiredNonNegativeInteger(window.closesMinute, "closesMinute", 1440);
+        if (weekday < 1 || closesMinute <= opensMinute) {
+          throw new HttpsError("invalid-argument", "A service window is invalid.");
+        }
+        return {weekday, opensMinute, closesMinute, enabled: window.enabled !== false};
+      });
+    };
+    const serviceAreas = Array.isArray(values.serviceAreas)
+      ? values.serviceAreas.map((raw) => {
+          const area = requireObject(raw);
+          return {
+            id: requiredDocumentId(area, "id"),
+            name: catalogueTitleCase(requiredText(area, "name", 100)),
+            deliveryFeeMinor: requiredNonNegativeInteger(
+              area.deliveryFeeMinor ?? 0, "deliveryFeeMinor", 100000000,
+            ),
+            minimumOrderMinor: requiredNonNegativeInteger(
+              area.minimumOrderMinor ?? 0, "minimumOrderMinor", 100000000,
+            ),
+            estimatedMinutes: requiredNonNegativeInteger(
+              area.estimatedMinutes ?? 45, "estimatedMinutes", 1440,
+            ),
+            active: area.active !== false,
+          };
+        })
+      : [];
+    if (serviceAreas.length > 250 ||
+        new Set(serviceAreas.map((area) => area.id)).size !== serviceAreas.length) {
+      throw new HttpsError("invalid-argument", "Service areas are duplicated or exceed the limit.");
+    }
+    const dateOverrides = Array.isArray(values.dateOverrides)
+      ? values.dateOverrides.map((raw) => {
+          const override = requireObject(raw);
+          const date = requiredText(override, "date", 10);
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            throw new HttpsError("invalid-argument", "A service override date is invalid.");
+          }
+          const channel = requiredText(override, "channel", 20);
+          if (!["collection", "delivery"].includes(channel)) {
+            throw new HttpsError("invalid-argument", "A service override channel is invalid.");
+          }
+          return {
+            id: requiredDocumentId(override, "id"),
+            date,
+            channel,
+            closed: override.closed !== false,
+            windows: validateWindows(override.windows ?? [], "dateOverride.windows"),
+            note: optionalText(override, "note", 200),
+          };
+        })
+      : [];
+    if (dateOverrides.length > 365 ||
+        new Set(dateOverrides.map((item) => item.id)).size !== dateOverrides.length) {
+      throw new HttpsError("invalid-argument", "Service date overrides are duplicated or exceed the limit.");
+    }
+    await venue.ref.set({
+      collectionEnabled,
+      deliveryEnabled,
+      courseControlEnabled,
+      collectionWindows: validateWindows(values.collectionWindows ?? [], "collectionWindows"),
+      deliveryWindows: validateWindows(values.deliveryWindows ?? [], "deliveryWindows"),
+      serviceAreas,
+      fulfilmentDateOverrides: dateOverrides,
       updatedAt: FieldValue.serverTimestamp(),
       updatedByActor: actor,
     }, {merge: true});
@@ -1634,6 +1769,291 @@ async function heartbeatPrinterDeviceFor(caller, rawData) {
   return {online: true};
 }
 
+function normalisedPhone(value) {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  const plus = trimmed.startsWith("+") ? "+" : "";
+  const digits = trimmed.replace(/\D/gu, "");
+  return digits.length >= 7 && digits.length <= 15 ? `${plus}${digits}` : "";
+}
+
+async function manageFulfilmentFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const operation = requiredText(data, "operation", 40);
+  const values = data.values == null ? {} : requireObject(data.values);
+  const documentId = data.documentId == null || data.documentId === ""
+    ? null
+    : requiredDocumentId(data, "documentId");
+  const membership = await db.doc(`tenants/${tenantId}/members/${caller.uid}`).get();
+  if (!membership.exists || membership.data().active === false) {
+    throw new HttpsError("permission-denied", "You do not have active access to this restaurant.");
+  }
+  const roles = Array.isArray(membership.data().roles) ? membership.data().roles : [];
+  const canOperate = roles.some((role) =>
+    ["owner", "manager", "waiter", "cashier"].includes(role));
+  const isDriver = roles.includes("driver");
+  if (!canOperate && !isDriver) {
+    throw new HttpsError("permission-denied", "Your role cannot manage fulfilment orders.");
+  }
+  const canManage = roles.some((role) => role === "owner" || role === "manager");
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  if (!venue.exists || venue.data().status === "deleting") {
+    throw new HttpsError("failed-precondition", "The selected venue is not active.");
+  }
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+
+  if (operation === "registerNotificationDevice") {
+    const deviceId = requiredDocumentId(values, "deviceId");
+    const token = requiredText(values, "token", 4096);
+    const platform = requiredText(values, "platform", 20);
+    if (!["android", "ios"].includes(platform)) {
+      throw new HttpsError("invalid-argument", "Push notifications are unsupported on this platform.");
+    }
+    const reference = tenantRef.collection("notificationDevices")
+      .doc(`${caller.uid}_${deviceId}`);
+    // A shared terminal can change PIN users. Keep only the currently
+    // registered staff identity active for this physical device/venue so a
+    // later user cannot receive private driver assignments for an earlier
+    // user who happened to use the same terminal.
+    const existingRegistrations = await tenantRef.collection("notificationDevices")
+      .where("venueId", "==", venueId)
+      .where("deviceId", "==", deviceId)
+      .limit(100)
+      .get();
+    const registrationBatch = db.batch();
+    for (const registration of existingRegistrations.docs) {
+      if (registration.id !== reference.id && registration.data().active === true) {
+        registrationBatch.update(registration.ref, {
+          active: false,
+          deactivatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+    }
+    registrationBatch.set(reference, {
+      userId: caller.uid,
+      venueId,
+      deviceId,
+      token,
+      platform,
+      active: true,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    }, {merge: true});
+    await registrationBatch.commit();
+    return {documentId: reference.id, registered: true};
+  }
+
+  if (operation === "saveCourse") {
+    if (!canManage) {
+      throw new HttpsError("permission-denied", "Only a manager can change courses.");
+    }
+    const reference = documentId == null
+      ? tenantRef.collection("courses").doc()
+      : tenantRef.collection("courses").doc(documentId);
+    const releasePolicy = requiredText(values, "releasePolicy", 40);
+    if (!["immediate", "manual", "afterPreviousCollected", "afterPreviousServed"]
+      .includes(releasePolicy)) {
+      throw new HttpsError("invalid-argument", "The course release policy is invalid.");
+    }
+    const productionAreas = requiredStringArray(
+      values.productionAreas ?? [], "productionAreas", 3, 20,
+    );
+    if (productionAreas.some((area) => !["bar", "kitchen", "dessert"].includes(area))) {
+      throw new HttpsError("invalid-argument", "A course production area is invalid.");
+    }
+    const course = {
+      venueId,
+      name: catalogueTitleCase(requiredText(values, "name", 80)),
+      sequence: requiredNonNegativeInteger(values.sequence, "sequence", 1000),
+      active: values.active !== false,
+      releasePolicy,
+      amberMinutes: requiredNonNegativeInteger(values.amberMinutes, "amberMinutes", 480),
+      redMinutes: requiredNonNegativeInteger(values.redMinutes, "redMinutes", 480),
+      productionAreas,
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    };
+    if (course.amberMinutes < 1 || course.redMinutes <= course.amberMinutes) {
+      throw new HttpsError("invalid-argument", "Course warning times are invalid.");
+    }
+    const duplicates = await tenantRef.collection("courses")
+      .where("venueId", "==", venueId).get();
+    if (duplicates.docs.some((item) => item.id !== reference.id &&
+        String(item.data().name ?? "").toLowerCase() === course.name.toLowerCase() &&
+        item.data().active !== false)) {
+      throw new HttpsError("already-exists", "An active course already uses this name.");
+    }
+    await reference.set({
+      ...course,
+      ...(documentId == null ? {createdAt: FieldValue.serverTimestamp()} : {}),
+    }, {merge: documentId != null});
+    await writeAudit(caller.uid, "saveCourse", reference.id, {
+      tenantId, venueId, actor,
+    });
+    return {documentId: reference.id, saved: true};
+  }
+
+  if (operation === "archiveCourse") {
+    if (!canManage || documentId == null) {
+      throw new HttpsError("permission-denied", "Only a manager can archive a course.");
+    }
+    const reference = tenantRef.collection("courses").doc(documentId);
+    const course = await reference.get();
+    if (!course.exists || course.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "That course was not found.");
+    }
+    await reference.update({
+      active: false,
+      archivedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    });
+    await writeAudit(caller.uid, "archiveCourse", documentId, {
+      tenantId, venueId, actor,
+    });
+    return {documentId, archived: true};
+  }
+
+  if (operation === "saveCustomer") {
+    if (!canOperate) {
+      throw new HttpsError("permission-denied", "A driver cannot edit customer records.");
+    }
+    const reference = documentId == null
+      ? tenantRef.collection("venueCustomers").doc()
+      : tenantRef.collection("venueCustomers").doc(documentId);
+    if (documentId != null) {
+      const current = await reference.get();
+      if (!current.exists || current.data().venueId !== venueId) {
+        throw new HttpsError("not-found", "That customer was not found at this venue.");
+      }
+    }
+    const phoneNumbers = requiredStringArray(
+      values.phoneNumbers ?? [], "phoneNumbers", 5, 40,
+    ).map(normalisedPhone).filter(Boolean);
+    if (phoneNumbers.length === 0 || new Set(phoneNumbers).size !== phoneNumbers.length) {
+      throw new HttpsError("invalid-argument", "Add at least one unique valid telephone number.");
+    }
+    const duplicateQueries = await Promise.all(phoneNumbers.map((phone) =>
+      tenantRef.collection("venueCustomers")
+        .where("venueId", "==", venueId)
+        .where("normalisedPhones", "array-contains", phone)
+        .limit(2).get()));
+    if (duplicateQueries.some((query) =>
+      query.docs.some((item) => item.id !== reference.id))) {
+      throw new HttpsError("already-exists", "A customer already uses one of these phone numbers.");
+    }
+    const addresses = Array.isArray(values.addresses)
+      ? values.addresses.slice(0, 10).map((raw) => {
+          const address = requireObject(raw);
+          return {
+            id: requiredDocumentId(address, "id"),
+            label: catalogueTitleCase(requiredText(address, "label", 60)),
+            country: catalogueTitleCase(requiredText(address, "country", 80)),
+            town: catalogueTitleCase(requiredText(address, "town", 100)),
+            area: catalogueTitleCase(requiredText(address, "area", 100)),
+            addressLines: requiredText(address, "addressLines", 500),
+            notes: optionalText(address, "notes", 300),
+          };
+        })
+      : [];
+    await reference.set({
+      venueId,
+      displayName: catalogueTitleCase(requiredText(values, "displayName", 120)),
+      phoneNumbers,
+      normalisedPhones: phoneNumbers,
+      email: optionalText(values, "email", 254).toLowerCase() || null,
+      addresses,
+      ...(documentId == null
+        ? {claimStatus: "unclaimed", createdAt: FieldValue.serverTimestamp()}
+        : {}),
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByActor: actor,
+    }, {merge: documentId != null});
+    await writeAudit(caller.uid, "saveVenueCustomer", reference.id, {
+      tenantId, venueId, actor, customerClaimStatus: "unclaimed",
+    });
+    return {documentId: reference.id, saved: true};
+  }
+
+  if (operation === "updateOrderFulfilment") {
+    if (documentId == null) throw new HttpsError("invalid-argument", "An order is required.");
+    const status = requiredText(values, "status", 40);
+    const transitions = {
+      awaitingPreparation: ["awaitingPreparation", "readyForCollection", "awaitingDriver", "cancelled"],
+      awaitingDriver: ["awaitingDriver", "assigned", "readyForCollection", "cancelled"],
+      assigned: ["assigned", "readyForCollection", "outForDelivery", "cancelled"],
+      readyForCollection: ["readyForCollection", "collected", "outForDelivery", "cancelled"],
+      outForDelivery: ["outForDelivery", "delivered", "cancelled"],
+      collected: ["collected"], delivered: ["delivered"], cancelled: ["cancelled"],
+    };
+    if (!Object.hasOwn(transitions, status)) {
+      throw new HttpsError("invalid-argument", "The fulfilment status is invalid.");
+    }
+    const orderRef = tenantRef.collection("orders").doc(documentId);
+    const order = await orderRef.get();
+    if (!order.exists || order.data().venueId !== venueId ||
+        !["collection", "delivery"].includes(order.data().channel)) {
+      throw new HttpsError("not-found", "That collection or delivery order was not found.");
+    }
+    const currentStatus = typeof order.data().fulfilmentStatus === "string"
+      ? order.data().fulfilmentStatus : "awaitingPreparation";
+    if (!(transitions[currentStatus] ?? []).includes(status)) {
+      throw new HttpsError("failed-precondition", "That fulfilment status change is not permitted.");
+    }
+    const driverId = optionalText(values, "driverId", 128) || null;
+    if (isDriver && !canManage &&
+        (order.data().assignedDriverId !== caller.uid ||
+         !["outForDelivery", "delivered"].includes(status))) {
+      throw new HttpsError(
+        "permission-denied",
+        "A driver may update only their own assigned delivery.",
+      );
+    }
+    let driverName = null;
+    if (driverId != null) {
+      if (!canManage) throw new HttpsError("permission-denied", "Only a manager can assign a delivery driver.");
+      const driver = await tenantRef.collection("members").doc(driverId).get();
+      const driverRoles = driver.exists && Array.isArray(driver.data().roles) ? driver.data().roles : [];
+      const venueIds = driver.exists && Array.isArray(driver.data().venueIds) ? driver.data().venueIds : [];
+      if (!driver.exists || driver.data().active === false || !driverRoles.includes("driver") ||
+          (venueIds.length > 0 && !venueIds.includes(venueId))) {
+        throw new HttpsError("failed-precondition", "Select an active driver assigned to this venue.");
+      }
+      driverName = driver.data().displayName ?? driver.data().email ?? "Driver";
+    }
+    const batch = db.batch();
+    batch.update(orderRef, {
+      fulfilmentStatus: status,
+      fulfilmentUpdatedAt: FieldValue.serverTimestamp(),
+      fulfilmentUpdatedByActor: actor,
+      ...(driverId == null ? {} : {assignedDriverId: driverId, assignedDriverName: driverName}),
+    });
+    batch.set(tenantRef.collection("notificationEvents").doc(), {
+      venueId, type: driverId != null ? "delivery.assigned" : `order.${status}`,
+      orderId: documentId,
+      recipientUserIds: [
+        ...(driverId == null ? [] : [driverId]),
+        ...(typeof order.data().primaryWaiterId === "string" ? [order.data().primaryWaiterId] : []),
+      ],
+      recipientRoles: status === "readyForCollection" ? ["waiter", "cashier", "manager"] : [],
+      title: driverId != null ? "Delivery assigned" : "Order status updated",
+      body: `${order.data().customerName ?? "Customer order"}: ${status}`,
+      status: "pending", createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
+    });
+    batch.set(tenantRef.collection("auditEvents").doc(), {
+      action: "updateOrderFulfilment", venueId, orderId: documentId,
+      fromStatus: currentStatus, toStatus: status, driverId, actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    await batch.commit();
+    return {documentId, updated: true};
+  }
+
+  throw new HttpsError("invalid-argument", "That fulfilment operation is not supported.");
+}
+
 async function getOfflineHubBootstrapFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -1763,6 +2183,9 @@ function offlinePermissionsForRoles(roles) {
     if (["owner", "manager", "kitchen"].includes(role)) {
       permissions.add("production");
     }
+    if (["owner", "manager", "driver"].includes(role)) {
+      permissions.add("delivery");
+    }
     if (["owner", "manager"].includes(role)) permissions.add("manager");
   }
   return [...permissions].sort();
@@ -1795,7 +2218,7 @@ function timeZoneOffsetMinutes(timeZone, now = new Date()) {
 async function getOfflineHubSnapshotFor(caller, rawData) {
   const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/snapshot");
   const tenantRef = db.doc(`tenants/${upload.tenantId}`);
-  const [tenant, venue, sections, products, modifierGroups, tables, members, pins, routes, syncState] =
+  const [tenant, venue, sections, products, modifierGroups, tables, members, pins, routes, syncState, courses, customers] =
     await Promise.all([
       tenantRef.get(),
       tenantRef.collection("venues").doc(upload.venueId).get(),
@@ -1807,6 +2230,8 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       tenantRef.collection("staffPins").where("venueId", "==", upload.venueId).get(),
       tenantRef.collection("printerRoutes").where("venueId", "==", upload.venueId).get(),
       tenantRef.collection("offlineHubSyncState").doc(upload.venueId).get(),
+      tenantRef.collection("courses").where("venueId", "==", upload.venueId).get(),
+      tenantRef.collection("venueCustomers").where("venueId", "==", upload.venueId).get(),
     ]);
   const pinByUser = new Map(pins.docs.map((pin) => [pin.data().userId, pin.data()]));
   const staff = members.docs.map((member) => {
@@ -1856,6 +2281,16 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
         isAvailable: variant.isAvailable !== false,
         stockComponents: offlineStockComponents(variant.stockComponents),
       })),
+      availableForCollection: item.availableForCollection !== false,
+      availableForDelivery: item.availableForDelivery !== false,
+      collectionPriceMinor: Number.isSafeInteger(item.collectionPriceMinor)
+        ? item.collectionPriceMinor : null,
+      deliveryPriceMinor: Number.isSafeInteger(item.deliveryPriceMinor)
+        ? item.deliveryPriceMinor : null,
+      defaultCourseId: item.defaultCourseId ?? null,
+      defaultCourseName: item.defaultCourseName ?? "Standard",
+      defaultCourseSequence: Number(item.defaultCourseSequence ?? 0),
+      courseReleasePolicy: item.courseReleasePolicy ?? "immediate",
     };
   });
   const groupValues = modifierGroups.docs.map((document) => {
@@ -1896,6 +2331,15 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
     venuePhoneNumbers: Array.isArray(venue.data()?.phoneNumbers)
       ? venue.data().phoneNumbers : [],
     receiptFooter: venue.data()?.receiptFooter ?? tenant.data()?.receiptFooter ?? "",
+    collectionEnabled: venue.data()?.collectionEnabled === true,
+    deliveryEnabled: venue.data()?.deliveryEnabled === true,
+    courseControlEnabled: venue.data()?.courseControlEnabled === true,
+    collectionWindows: Array.isArray(venue.data()?.collectionWindows)
+      ? venue.data().collectionWindows : [],
+    deliveryWindows: Array.isArray(venue.data()?.deliveryWindows)
+      ? venue.data().deliveryWindows : [],
+    serviceAreas: Array.isArray(venue.data()?.serviceAreas)
+      ? venue.data().serviceAreas : [],
     sections: sections.docs.map((document) => ({
       id: document.id,
       name: document.data().name ?? "Menu section",
@@ -1905,6 +2349,26 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
     })),
     products: productValues,
     modifierGroups: groupValues,
+    courses: courses.docs.filter((course) => course.data().active !== false).map((course) => ({
+      id: course.id,
+      name: course.data().name,
+      sequence: Number(course.data().sequence ?? 0),
+      releasePolicy: course.data().releasePolicy ?? "immediate",
+      amberMinutes: Number(course.data().amberMinutes ?? 15),
+      redMinutes: Number(course.data().redMinutes ?? 25),
+      productionAreas: Array.isArray(course.data().productionAreas)
+        ? course.data().productionAreas : [],
+    })),
+    venueCustomers: customers.docs.map((customer) => ({
+      id: customer.id,
+      displayName: customer.data().displayName ?? "Customer",
+      phoneNumbers: Array.isArray(customer.data().phoneNumbers)
+        ? customer.data().phoneNumbers : [],
+      email: customer.data().email ?? null,
+      addresses: Array.isArray(customer.data().addresses)
+        ? customer.data().addresses : [],
+      claimStatus: customer.data().claimStatus ?? "unclaimed",
+    })),
     tables: tables.docs.map((table) => ({
       id: table.id, label: table.data().label ?? table.id,
       seats: Number(table.data().seats ?? 0), active: table.data().active !== false,
@@ -2230,11 +2694,21 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
     }
     const tableId = typeof payload.tableId === "string" ? payload.tableId : null;
     const tabName = typeof payload.tabName === "string" ? payload.tabName : null;
-    if ((tableId == null) === (tabName == null)) {
-      throw new HttpsError("invalid-argument", "An offline order needs one table or named tab.");
+    const channel = typeof payload.channel === "string" ? payload.channel : "dineIn";
+    if (!["dineIn", "collection", "delivery"].includes(channel) ||
+        (channel === "dineIn" && (tableId == null) === (tabName == null)) ||
+        (channel !== "dineIn" && (tableId != null || tabName != null))) {
+      throw new HttpsError("invalid-argument", "An offline order has an invalid channel or location.");
     }
     return {
       venueId, tableId, tabName, status: "open", lines: [], payments: [],
+      channel,
+      fulfilmentStatus: channel === "delivery" ? "awaitingDriver" : "awaitingPreparation",
+      customerId: channel === "dineIn" ? null : payload.customerId,
+      customerName: channel === "dineIn" ? null : payload.customerName,
+      customerPhone: channel === "dineIn" ? null : payload.customerPhone,
+      deliveryAddress: channel === "delivery" ? payload.deliveryAddress : null,
+      scheduledForUtc: payload.scheduledForUtc ?? null,
       openedAt: eventTime, openedOffline: true, createdByStaffId: event.staffId,
     };
   }
@@ -2276,6 +2750,18 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
       ? {...line, isSentToProduction: true, sentAt: eventTime,
         sentAtMillis: eventTime.getTime()} : line);
     next.status = "sent";
+    return next;
+  }
+  if (event.type === "order.fulfilmentChanged") {
+    const status = payload.status;
+    if (!["awaitingPreparation", "readyForCollection", "awaitingDriver", "assigned",
+      "outForDelivery", "collected", "delivered", "cancelled"].includes(status)) {
+      throw new HttpsError("invalid-argument", "The offline fulfilment status is invalid.");
+    }
+    next.fulfilmentStatus = status;
+    if (typeof payload.driverId === "string") next.assignedDriverId = payload.driverId;
+    next.fulfilmentUpdatedAt = eventTime;
+    next.fulfilmentUpdatedByStaffId = event.staffId;
     return next;
   }
   if (event.type === "payment.recorded") {
@@ -2465,7 +2951,7 @@ async function uploadTenantLogoFor(caller, rawData) {
 
 function validRoles(value) {
   const supported = new Set([
-    "owner", "manager", "waiter", "cashier", "kitchen", "printer",
+    "owner", "manager", "waiter", "cashier", "kitchen", "driver", "printer",
   ]);
   if (!Array.isArray(value) || value.length === 0) {
     throw new HttpsError("invalid-argument", "At least one role is required.");
@@ -4221,10 +4707,13 @@ async function addOrderDraftLineFor(caller, rawData) {
   const orderId = requiredText(data, "orderId", 180);
   const tableId = optionalText(data, "tableId", 180) || null;
   const tabName = optionalText(data, "tabName", 80) || null;
-  if ((tableId == null) === (tabName == null)) {
+  const channel = optionalText(data, "channel", 20) || "dineIn";
+  if (!["dineIn", "collection", "delivery"].includes(channel) ||
+      (channel === "dineIn" && (tableId == null) === (tabName == null)) ||
+      (channel !== "dineIn" && (tableId != null || tabName != null))) {
     throw new HttpsError(
       "invalid-argument",
-      "Choose either a table or a named tab for the order.",
+      "Choose a valid order channel and location.",
     );
   }
   const line = validProductionLine(data.line, 0);
@@ -4248,6 +4737,10 @@ async function addOrderDraftLineFor(caller, rawData) {
     ]);
     if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if ((channel === "collection" && venue.data().collectionEnabled !== true) ||
+        (channel === "delivery" && venue.data().deliveryEnabled !== true)) {
+      throw new HttpsError("failed-precondition", `${channel} ordering is not enabled at this venue.`);
     }
     if (tableRef != null && (!table.exists || table.data().venueId !== venueId)) {
       throw new HttpsError("failed-precondition", "The selected table is not available at this venue.");
@@ -4276,6 +4769,9 @@ async function addOrderDraftLineFor(caller, rawData) {
       if ((current.tableId ?? null) !== tableId || (current.tabName ?? null) !== tabName) {
         throw new HttpsError("failed-precondition", "This order belongs to a different table or named tab.");
       }
+      if ((current.channel ?? "dineIn") !== channel) {
+        throw new HttpsError("failed-precondition", "This order belongs to another sales channel.");
+      }
       priorLines = Array.isArray(current.lines) ? current.lines : [];
       // A lost HTTP response must never result in the same tap being added
       // twice. Line IDs are generated once by the client and are idempotent.
@@ -4283,10 +4779,19 @@ async function addOrderDraftLineFor(caller, rawData) {
         return {orderId, saved: true, alreadyPresent: true};
       }
     }
+    assertFulfilmentServiceAvailable(
+      venue.data(),
+      channel,
+      existingOrder.data()?.scheduledForMillis ?? data.scheduledForMillis,
+    );
     if (!product.exists || product.data().venueId !== venueId) {
       throw new HttpsError("not-found", "A selected menu product no longer exists at this venue.");
     }
     const productData = product.data();
+    if ((channel === "collection" && productData.availableForCollection === false) ||
+        (channel === "delivery" && productData.availableForDelivery === false)) {
+      throw new HttpsError("failed-precondition", `This product is unavailable for ${channel}.`);
+    }
     const modifierGroupIds = configuredModifierGroupIds(productData);
     const modifierGroups = await Promise.all(
       modifierGroupIds.map((groupId) =>
@@ -4353,7 +4858,12 @@ async function addOrderDraftLineFor(caller, rawData) {
     if (productData.archived === true || productData.isAvailable === false) {
       throw new HttpsError("failed-precondition", "This product is currently unavailable.");
     }
-    const basePriceMinor = Number(productData.priceMinor);
+    const channelPrice = channel === "collection"
+      ? productData.collectionPriceMinor
+      : channel === "delivery" ? productData.deliveryPriceMinor : null;
+    const basePriceMinor = Number(Number.isSafeInteger(channelPrice)
+      ? channelPrice
+      : productData.priceMinor);
     const unitPriceMinor = basePriceMinor + configuration.priceDeltaMinor;
     const stockPerSale = Number(productData.stockPerSale ?? 1);
     if (!Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0
@@ -4403,6 +4913,15 @@ async function addOrderDraftLineFor(caller, rawData) {
       taxRateName: typeof productData.taxRateName === "string"
         ? productData.taxRateName
         : "Zero rate",
+      courseId: typeof productData.defaultCourseId === "string"
+        ? productData.defaultCourseId : "standard",
+      courseName: typeof productData.defaultCourseName === "string"
+        ? productData.defaultCourseName : "Standard",
+      courseSequence: Number.isSafeInteger(productData.defaultCourseSequence)
+        ? productData.defaultCourseSequence : 0,
+      courseReleasePolicy: channel === "dineIn" &&
+        typeof productData.courseReleasePolicy === "string"
+        ? productData.courseReleasePolicy : "immediate",
       variantId: configuration.variantId,
       variantName: configuration.variantName,
       variantPriceDeltaMinor: configuration.variantPriceDeltaMinor,
@@ -4425,6 +4944,19 @@ async function addOrderDraftLineFor(caller, rawData) {
       venueId,
       tableId,
       tabName,
+      channel,
+      fulfilmentStatus: current?.fulfilmentStatus ??
+        (channel === "delivery" ? "awaitingDriver" : "awaitingPreparation"),
+      customerId: channel === "dineIn" ? null : requiredDocumentId(data, "customerId"),
+      customerName: channel === "dineIn" ? null : requiredText(data, "customerName", 120),
+      customerPhone: channel === "dineIn" ? null : requiredText(data, "customerPhone", 40),
+      deliveryAddress: channel === "delivery"
+        ? requiredText(data, "deliveryAddress", 500) : null,
+      scheduledForMillis: channel === "dineIn" ? null :
+        (Number.isSafeInteger(Number(data.scheduledForMillis))
+          ? Number(data.scheduledForMillis) : null),
+      primaryWaiterId: optionalText(data, "primaryWaiterId", 180) || caller.uid,
+      primaryWaiterName: optionalText(data, "primaryWaiterName", 120) || actor.displayName || "",
       tableLabel,
       status: current?.status === "sent" ? "sent" : "open",
       openedAt: current?.openedAt ?? FieldValue.serverTimestamp(),
@@ -4466,7 +4998,9 @@ async function updateOrderDraftLineFor(caller, rawData) {
   const orderId = requiredText(data, "orderId", 180);
   const tableId = optionalText(data, "tableId", 180) || null;
   const tabName = optionalText(data, "tabName", 80) || null;
-  if ((tableId == null) === (tabName == null)) {
+  const channel = optionalText(data, "channel", 20) || "dineIn";
+  if ((channel === "dineIn" && (tableId == null) === (tabName == null)) ||
+      (channel !== "dineIn" && (tableId != null || tabName != null))) {
     throw new HttpsError(
       "invalid-argument",
       "Choose either a table or a named tab for the order.",
@@ -5413,6 +5947,39 @@ function venueLocalDateTimeSnapshot(timeZone, now = new Date()) {
     throw new HttpsError("failed-precondition", "The venue local time could not be calculated.");
   }
   return {localDate: date, localDateTime: `${date} ${time}`, timeZone};
+}
+
+function assertFulfilmentServiceAvailable(venueData, channel, scheduledMillis) {
+  if (channel === "dineIn") return;
+  const millis = Number.isSafeInteger(Number(scheduledMillis))
+    ? Number(scheduledMillis) : Date.now();
+  if (millis < Date.now() - 5 * 60 * 1000 || millis > Date.now() + 366 * 24 * 60 * 60 * 1000) {
+    throw new HttpsError("failed-precondition", "Choose a valid future collection or delivery time.");
+  }
+  const local = venueLocalDateTimeSnapshot(
+    typeof venueData.timeZone === "string" ? venueData.timeZone : "Europe/London",
+    new Date(millis),
+  );
+  const override = (Array.isArray(venueData.fulfilmentDateOverrides)
+    ? venueData.fulfilmentDateOverrides : []).find((item) =>
+    item?.date === local.localDate && item?.channel === channel);
+  if (override?.closed === true) {
+    throw new HttpsError("failed-precondition", `${channel} is closed on the selected date.`);
+  }
+  const hourMinute = local.localDateTime.slice(11, 16).split(":").map(Number);
+  const minute = hourMinute[0] * 60 + hourMinute[1];
+  const weekdayRaw = new Date(`${local.localDate}T00:00:00Z`).getUTCDay();
+  const weekday = weekdayRaw === 0 ? 7 : weekdayRaw;
+  const configured = override?.closed === false && Array.isArray(override.windows)
+    ? override.windows
+    : (Array.isArray(venueData[`${channel}Windows`])
+      ? venueData[`${channel}Windows`] : []);
+  const enabled = configured.filter((window) => window?.enabled !== false);
+  if (enabled.length > 0 && !enabled.some((window) =>
+    Number(window.weekday) === weekday &&
+    minute >= Number(window.opensMinute) && minute < Number(window.closesMinute))) {
+    throw new HttpsError("failed-precondition", `${channel} is unavailable at the selected time.`);
+  }
 }
 
 function nextIsoDate(isoDate) {
@@ -7397,6 +7964,72 @@ export const enqueueFallbackPrintJob = onDocumentUpdated(
   },
 );
 
+export const deliverOperationalPushNotification = onDocumentCreated(
+  "tenants/{tenantId}/notificationEvents/{eventId}",
+  async (event) => {
+    const notification = event.data;
+    if (notification == null) return;
+    const data = notification.data();
+    const tenantId = event.params.tenantId;
+    const recipientIds = new Set(
+      (Array.isArray(data.recipientUserIds) ? data.recipientUserIds : [])
+        .filter((value) => typeof value === "string" && value.length > 0),
+    );
+    const recipientRoles = new Set(
+      (Array.isArray(data.recipientRoles) ? data.recipientRoles : [])
+        .filter((value) => typeof value === "string" && value.length > 0),
+    );
+    if (recipientRoles.size > 0) {
+      const members = await db.collection(`tenants/${tenantId}/members`)
+        .where("active", "!=", false).get();
+      for (const member of members.docs) {
+        const roles = Array.isArray(member.data().roles) ? member.data().roles : [];
+        if (roles.some((role) => recipientRoles.has(role))) recipientIds.add(member.id);
+      }
+    }
+    if (recipientIds.size === 0) {
+      await notification.ref.update({status: "noRecipients", processedAt: FieldValue.serverTimestamp()});
+      return;
+    }
+    const devices = await db.collection(`tenants/${tenantId}/notificationDevices`)
+      .where("active", "==", true).get();
+    const selected = devices.docs.filter((device) =>
+      recipientIds.has(device.data().userId) &&
+      (data.venueId == null || device.data().venueId === data.venueId));
+    const tokens = [...new Set(selected.map((device) => device.data().token)
+      .filter((token) => typeof token === "string" && token.length > 0))];
+    if (tokens.length === 0) {
+      await notification.ref.update({status: "noRegisteredDevices", processedAt: FieldValue.serverTimestamp()});
+      return;
+    }
+    let successCount = 0;
+    let failureCount = 0;
+    for (let offset = 0; offset < tokens.length; offset += 500) {
+      const response = await getMessaging().sendEachForMulticast({
+        tokens: tokens.slice(offset, offset + 500),
+        notification: {
+          title: "TableSide order update",
+          body: "Open TableSide POS to view the latest order status.",
+        },
+        data: {
+          type: typeof data.type === "string" ? data.type : "order.updated",
+          venueId: typeof data.venueId === "string" ? data.venueId : "",
+          orderId: typeof data.orderId === "string" ? data.orderId : "",
+        },
+        android: {priority: "high"},
+        apns: {headers: {"apns-priority": "10"}},
+      });
+      successCount += response.successCount;
+      failureCount += response.failureCount;
+    }
+    await notification.ref.update({
+      status: failureCount === 0 ? "sent" : "partlySent",
+      successCount, failureCount,
+      processedAt: FieldValue.serverTimestamp(),
+    });
+  },
+);
+
 async function sendOrderToProductionFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
@@ -7404,7 +8037,10 @@ async function sendOrderToProductionFor(caller, rawData) {
   const orderId = requiredText(data, "orderId", 180);
   const tableId = optionalText(data, "tableId", 180) || null;
   const tabName = optionalText(data, "tabName", 80) || null;
-  if ((tableId == null) === (tabName == null)) {
+  const channel = optionalText(data, "channel", 20) || "dineIn";
+  if (!["dineIn", "collection", "delivery"].includes(channel) ||
+      (channel === "dineIn" && (tableId == null) === (tabName == null)) ||
+      (channel !== "dineIn" && (tableId != null || tabName != null))) {
     throw new HttpsError(
       "invalid-argument",
       "Choose either a table or a named tab for the order.",
@@ -7459,6 +8095,13 @@ async function sendOrderToProductionFor(caller, rawData) {
     if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
     }
+    if ((channel === "collection" && venue.data().collectionEnabled !== true) ||
+        (channel === "delivery" && venue.data().deliveryEnabled !== true)) {
+      throw new HttpsError("failed-precondition", `${channel} ordering is not enabled at this venue.`);
+    }
+    assertFulfilmentServiceAvailable(
+      venue.data(), channel, existingOrder.data()?.scheduledForMillis,
+    );
     restaurantName = receiptBusinessSnapshot(tenant.data(), venue.data()).name;
     if (tableRef != null && (!table.exists || table.data().venueId !== venueId)) {
       throw new HttpsError("failed-precondition", "The selected table is not available at this venue.");
@@ -7545,6 +8188,10 @@ async function sendOrderToProductionFor(caller, rawData) {
       if (product.isAvailable === false) {
         throw new HttpsError("failed-precondition", "A selected product is unavailable.");
       }
+      if ((channel === "collection" && product.availableForCollection === false) ||
+          (channel === "delivery" && product.availableForDelivery === false)) {
+        throw new HttpsError("failed-precondition", `A selected product is unavailable for ${channel}.`);
+      }
       const configuration = canonicalLineConfiguration({
         productData: product,
         modifierGroupsById,
@@ -7555,7 +8202,12 @@ async function sendOrderToProductionFor(caller, rawData) {
         // configuration in addOrderDraftLineFor above.
         allowStoredDraftVariantMismatch: true,
       });
-      const unitPriceMinor = Number(product.priceMinor) + configuration.priceDeltaMinor;
+      const channelPrice = channel === "collection"
+        ? product.collectionPriceMinor
+        : channel === "delivery" ? product.deliveryPriceMinor : null;
+      const unitPriceMinor = Number(Number.isSafeInteger(channelPrice)
+        ? channelPrice
+        : product.priceMinor) + configuration.priceDeltaMinor;
       if (!Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0) {
         throw new HttpsError(
           "failed-precondition",
@@ -7614,17 +8266,35 @@ async function sendOrderToProductionFor(caller, rawData) {
         modifierSelections: configuration.modifierSelections,
         itemNote: configuration.itemNote,
         showOnOrderFlow: product.showOnOrderFlow !== false,
+        courseId: typeof product.defaultCourseId === "string"
+          ? product.defaultCourseId : "standard",
+        courseName: typeof product.defaultCourseName === "string"
+          ? product.defaultCourseName : "Standard",
+        courseSequence: Number.isSafeInteger(product.defaultCourseSequence)
+          ? product.defaultCourseSequence : 0,
+        courseReleasePolicy: channel === "dineIn" &&
+          typeof product.courseReleasePolicy === "string"
+          ? product.courseReleasePolicy : "immediate",
       };
     });
     const groups = new Map();
     for (const line of canonicalLines) {
-      const group = groups.get(line.productionArea) ?? [];
+      const key = `${line.productionArea}:${line.courseId}:${line.courseSequence}`;
+      const group = groups.get(key) ?? [];
       group.push(line);
-      groups.set(line.productionArea, group);
+      groups.set(key, group);
     }
-    const ticketEntries = [...groups.entries()].map(([area, areaLines]) => {
-      const ticketId = `${orderId}_${area}_${areaLines.map((line) => line.id).join("_")}`;
-      return {area, lines: areaLines, ticketId, ref: tenantRef.collection("productionTickets").doc(ticketId)};
+    const ticketEntries = [...groups.values()].map((areaLines) => {
+      const first = areaLines[0];
+      const area = first.productionArea;
+      const courseId = first.courseId;
+      const courseName = first.courseName;
+      const courseSequence = first.courseSequence;
+      const releasePolicy = first.courseReleasePolicy;
+      const held = channel === "dineIn" && releasePolicy !== "immediate";
+      const ticketId = `${orderId}_${area}_${courseId}_${areaLines.map((line) => line.id).join("_")}`;
+      return {area, lines: areaLines, courseId, courseName, courseSequence, releasePolicy, held,
+        ticketId, ref: tenantRef.collection("productionTickets").doc(ticketId)};
     });
     const existingTickets = await Promise.all(
       ticketEntries.map((ticket) => transaction.get(ticket.ref)),
@@ -7688,6 +8358,10 @@ async function sendOrderToProductionFor(caller, rawData) {
       variantPriceDeltaMinor: line.variantPriceDeltaMinor,
       modifierSelections: line.modifierSelections,
       itemNote: line.itemNote,
+      courseId: line.courseId,
+      courseName: line.courseName,
+      courseSequence: line.courseSequence,
+      courseReleasePolicy: line.courseReleasePolicy,
       isSentToProduction: true,
       addedAtMillis: Number.isSafeInteger(Number(line.addedAtMillis))
         ? Number(line.addedAtMillis)
@@ -7712,6 +8386,7 @@ async function sendOrderToProductionFor(caller, rawData) {
       venueId,
       tableId,
       tabName,
+      channel,
       tableLabel,
       status: "sent",
       openedAt: existingOrder.data()?.openedAt ?? FieldValue.serverTimestamp(),
@@ -7740,10 +8415,16 @@ async function sendOrderToProductionFor(caller, rawData) {
         reference: orderId.split("-").at(-1) ?? orderId,
         tableLabel,
         tabName,
+        channel,
+        customerName: existingOrder.data()?.customerName ?? null,
         productionArea: ticket.area,
+        courseId: ticket.courseId,
+        courseName: ticket.courseName,
+        courseSequence: ticket.courseSequence,
+        courseReleasePolicy: ticket.releasePolicy,
         printRequired,
-        flowStatus: "newOrder",
-        ticketReleasedAt: FieldValue.serverTimestamp(),
+        flowStatus: ticket.held ? "held" : "newOrder",
+        ticketReleasedAt: ticket.held ? null : FieldValue.serverTimestamp(),
         productionItems: ticket.lines.map((line) => ({
           name: line.productName,
           quantity: line.quantity,
@@ -7763,7 +8444,7 @@ async function sendOrderToProductionFor(caller, rawData) {
         idempotencyKey: ticket.ticketId,
         createdAt: FieldValue.serverTimestamp(),
       });
-      if (printRequired) {
+      if (printRequired && !ticket.held) {
         const route = routeByArea.get(ticket.area);
         const targetDeviceId = route?.data().primaryDeviceId;
         const targetDevice = typeof targetDeviceId === "string"
@@ -7793,6 +8474,7 @@ async function sendOrderToProductionFor(caller, rawData) {
               tableLabel,
               tabName,
               isAddition: hasPriorSentLines,
+              courseName: ticket.courseName,
               createdByName: actor.displayName ?? actor.email ?? "",
               lines: ticket.lines.map((line) => ({
                 name: line.productName,
@@ -7893,6 +8575,7 @@ async function sendOrderToProductionFor(caller, rawData) {
 }
 
 const permittedOrderFlowTransitions = Object.freeze({
+  held: ["held", "newOrder"],
   newOrder: ["newOrder", "preparing"],
   preparing: ["preparing", "ready"],
   ready: ["ready", "collected"],
@@ -7901,6 +8584,117 @@ const permittedOrderFlowTransitions = Object.freeze({
   cancelled: ["cancelled"],
   voided: ["voided"],
 });
+
+async function releaseHeldProductionTicket({tenantId, venueId, ticketId, actor}) {
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const ticketRef = tenantRef.collection("productionTickets").doc(ticketId);
+  const preview = await ticketRef.get();
+  if (!preview.exists || preview.data().venueId !== venueId) return false;
+  if (preview.data().flowStatus !== "held") return false;
+  const area = preview.data().productionArea;
+  const routeRef = tenantRef.collection("printerRoutes").doc(`${venueId}_${area}`);
+  const [tenant, venue, route] = await Promise.all([
+    tenantRef.get(), tenantRef.collection("venues").doc(venueId).get(), routeRef.get(),
+  ]);
+  const targetDeviceId = route.exists && typeof route.data().primaryDeviceId === "string"
+    ? route.data().primaryDeviceId : null;
+  const device = targetDeviceId == null
+    ? null : await tenantRef.collection("devices").doc(targetDeviceId).get();
+  const validDevice = targetDeviceId != null && activeRouteDevice(device, venueId, area);
+  const jobId = validDevice ? `${ticketId}_${targetDeviceId}` : null;
+  const restaurantName = receiptBusinessSnapshot(tenant.data() ?? {}, venue.data() ?? {}).name;
+  return db.runTransaction(async (transaction) => {
+    const current = await transaction.get(ticketRef);
+    if (!current.exists || current.data().flowStatus !== "held") return false;
+    transaction.update(ticketRef, {
+      flowStatus: "newOrder",
+      ticketReleasedAt: FieldValue.serverTimestamp(),
+      flowUpdatedAt: FieldValue.serverTimestamp(),
+      flowUpdatedByActor: actor,
+    });
+    if (current.data().printRequired === true && jobId != null) {
+      transaction.create(tenantRef.collection("printJobs").doc(jobId), {
+        venueId, targetDeviceId,
+        fallbackDeviceId: typeof route.data().fallbackDeviceId === "string"
+          ? route.data().fallbackDeviceId : null,
+        orderId: current.data().orderId,
+        ticketId, productionArea: area, status: "queued", attempts: 0,
+        idempotencyKey: jobId,
+        payload: {
+          type: "production", ticketId, restaurantName,
+          reference: current.data().reference ?? ticketId,
+          productionArea: area,
+          tableLabel: current.data().tableLabel ?? null,
+          tabName: current.data().tabName ?? null,
+          courseName: current.data().courseName ?? "Course",
+          isAddition: true,
+          createdByName: actor.displayName ?? actor.email ?? "",
+          lines: Array.isArray(current.data().productionItems)
+            ? current.data().productionItems : [],
+        },
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    }
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "releaseProductionCourse", venueId, ticketId,
+      orderId: current.data().orderId, courseId: current.data().courseId ?? null,
+      actor, createdAt: FieldValue.serverTimestamp(),
+    });
+    return true;
+  });
+}
+
+async function releaseEligibleFollowingCourses({tenantId, venueId, orderId, actor}) {
+  if (typeof orderId !== "string" || orderId.length === 0) return;
+  const tickets = await db.collection(`tenants/${tenantId}/productionTickets`)
+    .where("orderId", "==", orderId).get();
+  const values = tickets.docs.map((document) => ({id: document.id, ...document.data()}));
+  const held = values.filter((ticket) => ticket.flowStatus === "held")
+    .sort((left, right) => Number(left.courseSequence ?? 0) - Number(right.courseSequence ?? 0));
+  for (const candidate of held) {
+    if (candidate.courseReleasePolicy === "manual") continue;
+    const sequence = Number(candidate.courseSequence ?? 0);
+    const prior = values.filter((ticket) => Number(ticket.courseSequence ?? 0) < sequence);
+    const requiredStatus = candidate.courseReleasePolicy === "afterPreviousServed"
+      ? ["served"] : ["collected", "served"];
+    if (prior.length > 0 && prior.every((ticket) => requiredStatus.includes(ticket.flowStatus))) {
+      await releaseHeldProductionTicket({tenantId, venueId, ticketId: candidate.id, actor});
+    }
+  }
+}
+
+async function markFulfilmentReadyWhenProductionComplete({tenantId, venueId, orderId, actor}) {
+  if (typeof orderId !== "string" || orderId.length === 0) return;
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const [order, tickets] = await Promise.all([
+    tenantRef.collection("orders").doc(orderId).get(),
+    tenantRef.collection("productionTickets").where("orderId", "==", orderId).get(),
+  ]);
+  if (!order.exists || order.data().venueId !== venueId ||
+      !["collection", "delivery"].includes(order.data().channel) || tickets.empty) return;
+  const complete = tickets.docs.every((ticket) =>
+    ["ready", "collected", "served", "cancelled", "voided"].includes(ticket.data().flowStatus));
+  if (!complete || ["readyForCollection", "collected", "outForDelivery", "delivered"]
+    .includes(order.data().fulfilmentStatus)) return;
+  const batch = db.batch();
+  batch.update(order.ref, {
+    fulfilmentStatus: "readyForCollection",
+    fulfilmentUpdatedAt: FieldValue.serverTimestamp(),
+    fulfilmentUpdatedByActor: actor,
+  });
+  batch.set(tenantRef.collection("notificationEvents").doc(), {
+    venueId, type: "order.ready", orderId,
+    recipientUserIds: [
+      ...(typeof order.data().primaryWaiterId === "string" ? [order.data().primaryWaiterId] : []),
+      ...(typeof order.data().assignedDriverId === "string" ? [order.data().assignedDriverId] : []),
+    ],
+    recipientRoles: ["waiter", "cashier", "manager"],
+    title: `${order.data().channel === "delivery" ? "Delivery" : "Collection"} ready`,
+    body: order.data().customerName ?? "Customer order",
+    status: "pending", createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
+  });
+  await batch.commit();
+}
 
 async function updateProductionTicketFor(caller, rawData) {
   const data = requireObject(rawData);
@@ -7924,7 +8718,13 @@ async function updateProductionTicketFor(caller, rawData) {
   }
   const ticketRef = db.doc(`tenants/${tenantId}/productionTickets/${ticketId}`);
   const actor = actorSnapshot(await auth.getUser(caller.uid));
-  return db.runTransaction(async (transaction) => {
+  const preview = await ticketRef.get();
+  if (preview.exists && preview.data().venueId === venueId &&
+      preview.data().flowStatus === "held" && flowStatus === "newOrder") {
+    await releaseHeldProductionTicket({tenantId, venueId, ticketId, actor});
+    return {updated: true};
+  }
+  const result = await db.runTransaction(async (transaction) => {
     const ticket = await transaction.get(ticketRef);
     if (!ticket.exists || ticket.data().venueId !== venueId) {
       throw new HttpsError("not-found", "The production ticket was not found at this venue.");
@@ -7955,8 +8755,19 @@ async function updateProductionTicketFor(caller, rawData) {
       actor,
       createdAt: FieldValue.serverTimestamp(),
     });
-    return {updated: true};
+    return {updated: true, orderId: ticket.data().orderId ?? null};
   });
+  if (["collected", "served"].includes(flowStatus)) {
+    await releaseEligibleFollowingCourses({
+      tenantId, venueId, orderId: result.orderId, actor,
+    });
+  }
+  if (["ready", "collected", "served"].includes(flowStatus)) {
+    await markFulfilmentReadyWhenProductionComplete({
+      tenantId, venueId, orderId: result.orderId, actor,
+    });
+  }
+  return {updated: true};
 }
 
 function purchaseOrderDateKey(date) {
@@ -8627,6 +9438,8 @@ async function invokePosAction(action, caller, data) {
       return manageInventoryFor(actingCaller, data);
     case "manageVenueConfiguration":
       return manageVenueConfigurationFor(actingCaller, data);
+    case "manageFulfilment":
+      return manageFulfilmentFor(actingCaller, data);
     case "uploadTenantLogo":
       return uploadTenantLogoFor(actingCaller, data);
     case "lookupExchangeRate":

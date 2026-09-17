@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../core/trusted_clock.dart';
+import '../features/pos/domain.dart';
 import 'venue_hub_bootstrap.dart';
 import 'venue_hub_client.dart';
 import 'venue_hub_device_credential.dart';
@@ -63,6 +64,12 @@ class VenueHubClientRegistry {
     required String orderId,
     String? tableId,
     String? tabName,
+    OrderChannel channel = OrderChannel.dineIn,
+    String? customerId,
+    String? customerName,
+    String? customerPhone,
+    String? deliveryAddress,
+    DateTime? scheduledFor,
   }) async {
     final client = clientFor(scope);
     if (client == null) {
@@ -78,6 +85,17 @@ class VenueHubClientRegistry {
         'orderId': orderId,
         if (tableId?.trim().isNotEmpty == true) 'tableId': tableId!.trim(),
         if (tabName?.trim().isNotEmpty == true) 'tabName': tabName!.trim(),
+        'channel': channel.name,
+        if (customerId?.trim().isNotEmpty == true)
+          'customerId': customerId!.trim(),
+        if (customerName?.trim().isNotEmpty == true)
+          'customerName': customerName!.trim(),
+        if (customerPhone?.trim().isNotEmpty == true)
+          'customerPhone': customerPhone!.trim(),
+        if (deliveryAddress?.trim().isNotEmpty == true)
+          'deliveryAddress': deliveryAddress!.trim(),
+        if (scheduledFor != null)
+          'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
       },
     );
     _openedOrderIds.add(orderId);
