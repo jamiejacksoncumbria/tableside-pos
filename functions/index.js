@@ -710,16 +710,23 @@ async function manageMenuConfigurationFor(caller, rawData) {
     if (values.removeDeliveryPriceOverride === true) {
       updates.deliveryPriceMinor = FieldValue.delete();
     }
-    if (values.defaultCourseId != null) {
-      const defaultCourseId = requiredDocumentId(values, "defaultCourseId");
-      const course = await db.doc(`tenants/${tenantId}/courses/${defaultCourseId}`).get();
-      if (!course.exists || course.data().venueId !== venueId || course.data().active === false) {
-        throw new HttpsError("failed-precondition", "The selected course is unavailable.");
+    if (Object.prototype.hasOwnProperty.call(values, "defaultCourseId")) {
+      if (values.defaultCourseId == null) {
+        updates.defaultCourseId = FieldValue.delete();
+        updates.defaultCourseName = "Standard";
+        updates.defaultCourseSequence = 0;
+        updates.courseReleasePolicy = "immediate";
+      } else {
+        const defaultCourseId = requiredDocumentId(values, "defaultCourseId");
+        const course = await db.doc(`tenants/${tenantId}/courses/${defaultCourseId}`).get();
+        if (!course.exists || course.data().venueId !== venueId || course.data().active === false) {
+          throw new HttpsError("failed-precondition", "The selected course is unavailable.");
+        }
+        updates.defaultCourseId = defaultCourseId;
+        updates.defaultCourseName = course.data().name;
+        updates.defaultCourseSequence = course.data().sequence ?? 0;
+        updates.courseReleasePolicy = course.data().releasePolicy ?? "immediate";
       }
-      updates.defaultCourseId = defaultCourseId;
-      updates.defaultCourseName = course.data().name;
-      updates.defaultCourseSequence = course.data().sequence ?? 0;
-      updates.courseReleasePolicy = course.data().releasePolicy ?? "immediate";
     }
     if (values.targetMarginBasisPoints != null) {
       updates.targetMarginBasisPoints = requiredNonNegativeInteger(

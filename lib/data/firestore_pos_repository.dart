@@ -1079,6 +1079,7 @@ class FirestorePosRepository {
     bool? availableForDelivery,
     bool removeCollectionPriceOverride = false,
     bool removeDeliveryPriceOverride = false,
+    bool changeDefaultCourse = false,
     String? defaultCourseId,
   }) async {
     await _commands.manageMenuConfiguration(
@@ -1101,7 +1102,7 @@ class FirestorePosRepository {
         if (removeCollectionPriceOverride)
           'removeCollectionPriceOverride': true,
         if (removeDeliveryPriceOverride) 'removeDeliveryPriceOverride': true,
-        if (defaultCourseId != null) 'defaultCourseId': defaultCourseId,
+        if (changeDefaultCourse) 'defaultCourseId': defaultCourseId,
       },
     );
   }

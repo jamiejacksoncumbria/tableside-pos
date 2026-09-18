@@ -51,6 +51,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
     final defaultTaxRateIdValue = ref.watch(defaultTaxRateIdProvider);
     final modifierGroupsValue = ref.watch(menuModifierGroupsProvider);
     final variantSetsValue = ref.watch(menuVariantSetsProvider);
+    final coursesValue = ref.watch(venueCoursesProvider);
     final sections = sectionsValue.when(
       data: (items) => items,
       loading: () => scope == null ? demoSections : const <MenuSection>[],
@@ -81,6 +82,12 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
       data: (items) => items,
       loading: () => const <MenuVariantSet>[],
       error: (_, _) => const <MenuVariantSet>[],
+    );
+    final courses = coursesValue.when(
+      data: (items) =>
+          items.where((item) => item.active).toList(growable: false),
+      loading: () => const <MenuCourse>[],
+      error: (_, _) => const <MenuCourse>[],
     );
     final configuredDefaultTaxRateId = defaultTaxRateIdValue.value;
     final defaultTaxRateId =
@@ -526,6 +533,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                             sections: sections,
                             modifierGroups: modifierGroups,
                             variantSets: variantSets,
+                            courses: courses,
                           ),
                     icon: const Icon(Icons.edit_note_rounded),
                     label: const Text('Bulk change'),
@@ -671,13 +679,16 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
     required List<MenuSection> sections,
     required List<MenuModifierGroup> modifierGroups,
     required List<MenuVariantSet> variantSets,
+    required List<MenuCourse> courses,
   }) async {
     var replaceSections = false;
     var replaceOptions = false;
     var changeProductionArea = false;
     var changeMargin = false;
     var replaceVariants = false;
-    MenuVariantSet? selectedVariantSet;
+    String? selectedVariantSetId;
+    var changeDefaultCourse = false;
+    var selectedDefaultCourseChoice = 'standard';
     var orderFlowChoice = 'unchanged';
     var collectionChoice = 'unchanged';
     var deliveryChoice = 'unchanged';
@@ -798,20 +809,53 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                           ),
                   ),
                   if (replaceVariants)
-                    DropdownButtonFormField<MenuVariantSet>(
-                      initialValue: selectedVariantSet,
+                    DropdownButtonFormField<String>(
+                      initialValue: selectedVariantSetId,
                       decoration: const InputDecoration(
                         labelText: 'Reusable variant set',
                       ),
                       items: [
                         for (final set in variantSets)
                           DropdownMenuItem(
-                            value: set,
+                            value: set.id,
                             child: Text('${set.name} (${set.variants.length})'),
                           ),
                       ],
                       onChanged: (value) =>
-                          setDialogState(() => selectedVariantSet = value),
+                          setDialogState(() => selectedVariantSetId = value),
+                    ),
+                  const Divider(height: 28),
+                  CheckboxListTile(
+                    value: changeDefaultCourse,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Change default course'),
+                    subtitle: const Text(
+                      'Sets the course used when these products are added to an order.',
+                    ),
+                    onChanged: (value) => setDialogState(
+                      () => changeDefaultCourse = value ?? false,
+                    ),
+                  ),
+                  if (changeDefaultCourse)
+                    DropdownButtonFormField<String>(
+                      initialValue: selectedDefaultCourseChoice,
+                      decoration: const InputDecoration(
+                        labelText: 'Default course',
+                      ),
+                      items: [
+                        const DropdownMenuItem<String>(
+                          value: 'standard',
+                          child: Text('Standard (release immediately)'),
+                        ),
+                        for (final course in courses)
+                          DropdownMenuItem<String>(
+                            value: course.id,
+                            child: Text(course.name),
+                          ),
+                      ],
+                      onChanged: (value) => setDialogState(
+                        () => selectedDefaultCourseChoice = value ?? 'standard',
+                      ),
                     ),
                   const Divider(height: 28),
                   CheckboxListTile(
@@ -947,6 +991,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                 if (!replaceSections &&
                     !replaceOptions &&
                     !replaceVariants &&
+                    !changeDefaultCourse &&
                     !changeProductionArea &&
                     !changeMargin &&
                     collectionChoice == 'unchanged' &&
@@ -963,7 +1008,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                   );
                   return;
                 }
-                if (replaceVariants && selectedVariantSet == null) {
+                if (replaceVariants && selectedVariantSetId == null) {
                   showAppNotification(
                     context,
                     ref: ref,
@@ -992,8 +1037,16 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                         ? null
                         : (marginPercent * 100).round(),
                     variants: replaceVariants
-                        ? selectedVariantSet!.variants
+                        ? variantSets
+                              .firstWhere(
+                                (set) => set.id == selectedVariantSetId,
+                              )
+                              .variants
                         : null,
+                    changeDefaultCourse: changeDefaultCourse,
+                    defaultCourseId: selectedDefaultCourseChoice == 'standard'
+                        ? null
+                        : selectedDefaultCourseChoice,
                     availableForCollection: collectionChoice == 'unchanged'
                         ? null
                         : collectionChoice == 'yes',
@@ -1047,6 +1100,8 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
             modifierGroupIds: changes.modifierGroupIds,
             targetMarginBasisPoints: changes.targetMarginBasisPoints,
             variants: changes.variants,
+            changeDefaultCourse: changes.changeDefaultCourse,
+            defaultCourseId: changes.defaultCourseId,
             availableForCollection: changes.availableForCollection,
             availableForDelivery: changes.availableForDelivery,
             removeCollectionPriceOverride:
@@ -1396,6 +1451,8 @@ class _BulkProductChanges {
     this.modifierGroupIds,
     this.targetMarginBasisPoints,
     this.variants,
+    this.changeDefaultCourse = false,
+    this.defaultCourseId,
     this.availableForCollection,
     this.availableForDelivery,
     this.removeCollectionPriceOverride = false,
@@ -1408,6 +1465,8 @@ class _BulkProductChanges {
   final List<String>? modifierGroupIds;
   final int? targetMarginBasisPoints;
   final List<MenuProductVariant>? variants;
+  final bool changeDefaultCourse;
+  final String? defaultCourseId;
   final bool? availableForCollection;
   final bool? availableForDelivery;
   final bool removeCollectionPriceOverride;
@@ -2058,6 +2117,8 @@ Future<void> _showProductDialog({
     ...?existing?.variants,
     if (existing == null) ...?remembered?.variants,
   ];
+  String? selectedVariantSetId;
+  String? appliedVariantSetName;
   var stockComponents = <ProductStockComponent>[...?existing?.stockComponents];
   var productionArea =
       existing?.productionArea ??
@@ -2267,31 +2328,58 @@ Future<void> _showProductDialog({
                     ),
                     const SizedBox(height: 8),
                     if (variantSets.isNotEmpty) ...[
-                      DropdownButtonFormField<MenuVariantSet>(
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedVariantSetId,
                         decoration: const InputDecoration(
                           labelText: 'Use a saved variant set',
                           helperText:
-                              'Copies its prices and stock usage into this product.',
+                              'Choose a set, then apply it to this product.',
                         ),
                         items: [
                           for (final set in variantSets)
                             DropdownMenuItem(
-                              value: set,
+                              value: set.id,
                               child: Text(
                                 '${set.name} (${set.variants.length})',
                               ),
                             ),
                         ],
-                        onChanged: (set) {
-                          if (set != null) {
-                            setDialogState(
-                              () => variants = List<MenuProductVariant>.from(
-                                set.variants,
-                              ),
-                            );
-                          }
-                        },
+                        onChanged: (value) => setDialogState(() {
+                          selectedVariantSetId = value;
+                          appliedVariantSetName = null;
+                        }),
                       ),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: FilledButton.tonalIcon(
+                          onPressed: selectedVariantSetId == null
+                              ? null
+                              : () {
+                                  final selected = variantSets.firstWhere(
+                                    (set) => set.id == selectedVariantSetId,
+                                  );
+                                  setDialogState(() {
+                                    variants = List<MenuProductVariant>.of(
+                                      selected.variants,
+                                    );
+                                    appliedVariantSetName = selected.name;
+                                  });
+                                },
+                          icon: const Icon(Icons.content_copy_rounded),
+                          label: const Text('Apply variant set'),
+                        ),
+                      ),
+                      if (appliedVariantSetName != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            '$appliedVariantSetName applied. Save the product to keep this change.',
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.primary,
+                            ),
+                          ),
+                        ),
                       const SizedBox(height: 8),
                     ],
                     OutlinedButton.icon(
