@@ -117,6 +117,16 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
         },
         freshSnapshot: freshSnapshot,
       );
+      // The hub host should talk to its own listener through loopback. Using
+      // its advertised LAN address can be blocked by Windows firewall or
+      // router hairpin rules even though remote venue devices can reach it.
+      await VenueHubPrinterClientRegistry.instance.configure(
+        scope: widget.scope,
+        bootstrap: bootstrap,
+        deviceId: deviceId,
+        credential: credential,
+        endpointOverride: VenueHubRuntime.instance.status.endpoint,
+      );
       AppLogger.info('Venue offline hub auto-started for this venue.');
     } catch (error, stackTrace) {
       AppLogger.error('Auto-start venue offline hub', error, stackTrace);

@@ -129,12 +129,13 @@ class VenueHubClientRegistry {
     required String staffId,
     required String pin,
     required VenueHubDeviceCredential credential,
+    Uri? endpointOverride,
   }) async {
     clear();
     _scope = scope;
     _bootstrap = bootstrap;
     if (!bootstrap.enabled) return null;
-    final endpoint = bootstrap.endpoint;
+    final endpoint = endpointOverride ?? bootstrap.endpoint;
     if (endpoint == null) {
       throw StateError('The venue hub endpoint is not configured.');
     }
@@ -286,12 +287,13 @@ class VenueHubPrinterClientRegistry {
     required VenueHubBootstrap bootstrap,
     required String deviceId,
     required VenueHubDeviceCredential credential,
+    Uri? endpointOverride,
   }) async {
     clear();
     _scope = scope;
     _bootstrap = bootstrap;
     if (!bootstrap.enabled) return;
-    final endpoint = bootstrap.endpoint;
+    final endpoint = endpointOverride ?? bootstrap.endpoint;
     final enrolled = bootstrap.credentials[credential.credentialId];
     if (endpoint == null || enrolled?.deviceId != deviceId) return;
     final trustedCertificate = await _secrets.read(

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -135,6 +136,11 @@ class VenueHubClient {
       );
       _lastHealthFailure = null;
       return true;
+    } on TimeoutException catch (error) {
+      _lastHealthFailure =
+          'Could not connect securely to ${configuration.endpoint}: $error';
+      AppLogger.info(_lastHealthFailure!);
+      return false;
     } catch (error, stackTrace) {
       _lastHealthFailure =
           'Could not connect securely to ${configuration.endpoint}: $error';

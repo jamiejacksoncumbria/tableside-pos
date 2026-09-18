@@ -363,6 +363,10 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             staffId: staff.userId,
             pin: pin,
             credential: credential,
+            endpointOverride:
+                VenueHubRuntime.instance.activeScope == widget.scope
+                ? VenueHubRuntime.instance.status.endpoint
+                : null,
           );
         } on VenueHubClientException catch (error) {
           final verifierMissing = error.code == 'offline_verifier_unavailable';
@@ -399,6 +403,10 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             staffId: staff.userId,
             pin: pin,
             credential: credential,
+            endpointOverride:
+                VenueHubRuntime.instance.activeScope == widget.scope
+                ? VenueHubRuntime.instance.status.endpoint
+                : null,
           );
         } on StateError catch (error, stackTrace) {
           // Certificate installation and device enrolment are managed from
