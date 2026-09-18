@@ -18,6 +18,15 @@ class PlatformAdminRepository {
   List<String>? _supportedTimeZones;
   List<String>? _supportedCurrencyCodes;
 
+  /// Checks only whether the signed Firebase account is a platform
+  /// administrator. The trusted server may use its protected administrator
+  /// record when an older account's custom claim has not refreshed yet.
+  /// This operation never grants a platform PIN session.
+  Future<bool> hasPlatformAdminAccess() async {
+    final data = await _call('platformAccessStatus');
+    return data['platformAdmin'] == true;
+  }
+
   Future<bool> hasPlatformAdminPin() async {
     final data = await _call('platformAdminPinStatus');
     return data['configured'] == true;

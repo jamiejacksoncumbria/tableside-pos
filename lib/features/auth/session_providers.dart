@@ -17,16 +17,26 @@ final platformAdminProvider = FutureProvider<bool>((ref) async {
   AppLogger.info(
     'Platform access check: custom admin claim present=$hasCustomClaim.',
   );
-  // The signed Firebase custom claim is the client-side authority for showing
-  // platform tools. Never probe the protected platformAdmins collection from
-  // an ordinary client: the intentional rule denial both leaks into logs and,
-  // more importantly, can prevent a native till reaching its cached venue and
-  // offline PIN screen when it cold-starts without internet.
-  //
-  // Platform bootstrap already forces an ID-token refresh before invalidating
-  // this provider, so a second Firestore fallback is neither necessary nor a
-  // safe dependency of normal sign-in.
-  return hasCustomClaim;
+  // Never probe the protected platformAdmins collection directly from the
+  // client. Older administrator accounts may not yet carry the custom claim,
+  // so the narrowly scoped server check below verifies the protected record.
+  // Failure is deliberately treated as ordinary access so an offline till is
+  // never prevented from reaching its venue and cached PIN screen.
+  if (hasCustomClaim) return true;
+  try {
+    final hasServerRecord = await ref
+        .read(platformAdminRepositoryProvider)
+        .hasPlatformAdminAccess();
+    AppLogger.info(
+      'Platform access check: protected server admin record found=$hasServerRecord.',
+    );
+    return hasServerRecord;
+  } on Object catch (error, stackTrace) {
+    // Platform discovery must never prevent an ordinary till reaching its
+    // cached venue and offline PIN screen. Fail closed for platform tools.
+    AppLogger.error('Platform access server check', error, stackTrace);
+    return false;
+  }
 });
 
 final platformAuthUsersProvider =

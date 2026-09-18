@@ -255,7 +255,7 @@ class AuthenticatedWorkspace extends ConsumerWidget {
         }
         final scope = ref.watch(activeVenueScopeProvider);
         return scope == null
-            ? VenuePicker(memberships: items)
+            ? VenuePicker(memberships: items, isPlatformAdmin: isPlatformAdmin)
             : _TenantWorkspace(scope: scope);
       },
     );
@@ -263,9 +263,14 @@ class AuthenticatedWorkspace extends ConsumerWidget {
 }
 
 class VenuePicker extends ConsumerStatefulWidget {
-  const VenuePicker({super.key, required this.memberships});
+  const VenuePicker({
+    super.key,
+    required this.memberships,
+    required this.isPlatformAdmin,
+  });
 
   final List<TenantMembership> memberships;
+  final bool isPlatformAdmin;
 
   @override
   ConsumerState<VenuePicker> createState() => _VenuePickerState();
@@ -273,6 +278,19 @@ class VenuePicker extends ConsumerStatefulWidget {
 
 class _VenuePickerState extends ConsumerState<VenuePicker> {
   String? _tenantId;
+
+  Future<void> _openPlatformAdministration() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (routeContext) => _PlatformAdminScaffold(
+          onSignOut: () {
+            Navigator.of(routeContext).popUntil((route) => route.isFirst);
+            unawaited(ref.read(authRepositoryProvider).signOut());
+          },
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -289,116 +307,154 @@ class _VenuePickerState extends ConsumerState<VenuePicker> {
             ),
     };
     return Scaffold(
-      body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 500),
-          child: Card(
-            margin: const EdgeInsets.all(24),
-            child: Padding(
-              padding: const EdgeInsets.all(28),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    'Choose a venue',
-                    style: Theme.of(context).textTheme.headlineSmall,
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Your access is restricted to restaurants assigned to your account.',
-                  ),
-                  const SizedBox(height: 20),
-                  DropdownButtonFormField<String>(
-                    initialValue: tenantId,
-                    decoration: const InputDecoration(
-                      labelText: 'Restaurant company',
-                    ),
-                    items: [
-                      for (final membership in widget.memberships)
-                        DropdownMenuItem(
-                          value: membership.tenantId,
-                          child: Text(
-                            companyNames[membership.tenantId] ??
-                                'Restaurant company',
-                          ),
+      appBar: AppBar(
+        title: const Text('Choose workspace'),
+        actions: [
+          if (widget.isPlatformAdmin)
+            IconButton(
+              tooltip: 'Platform administration',
+              onPressed: _openPlatformAdministration,
+              icon: const Icon(Icons.admin_panel_settings_outlined),
+            ),
+          IconButton(
+            tooltip: 'Sign out',
+            onPressed: () => ref.read(authRepositoryProvider).signOut(),
+            icon: const Icon(Icons.logout_rounded),
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(vertical: 24),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 500),
+              child: Card(
+                margin: const EdgeInsets.symmetric(horizontal: 24),
+                child: Padding(
+                  padding: const EdgeInsets.all(28),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        'Choose a venue',
+                        style: Theme.of(context).textTheme.headlineSmall,
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Your access is restricted to restaurants assigned to your account.',
+                      ),
+                      if (widget.isPlatformAdmin) ...[
+                        const SizedBox(height: 16),
+                        FilledButton.icon(
+                          onPressed: _openPlatformAdministration,
+                          icon: const Icon(Icons.admin_panel_settings_outlined),
+                          label: const Text('Open platform administration'),
                         ),
-                    ],
-                    onChanged: (value) => setState(() => _tenantId = value),
-                  ),
-                  const SizedBox(height: 18),
-                  venues.when(
-                    loading: () =>
-                        const Center(child: CircularProgressIndicator()),
-                    error: (error, _) => Text('Could not load venues: $error'),
-                    data: (items) => Column(
-                      children: [
-                        if (items.isEmpty)
-                          const Text(
-                            'No venues have been assigned to this tenant.',
-                          )
-                        else
-                          for (final venue in items)
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 8),
-                              child: ListTile(
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                tileColor: Theme.of(
-                                  context,
-                                ).colorScheme.surfaceContainerHighest,
-                                leading: const Icon(Icons.storefront_outlined),
-                                title: Text(venue.name),
-                                subtitle: Text(venue.timeZone),
-                                trailing: const Icon(
-                                  Icons.chevron_right_rounded,
-                                ),
-                                onTap: () {
-                                  AppLogger.info(
-                                    'Venue selected: tenant=$tenantId, venue=${venue.id}.',
-                                  );
-                                  // A scope change must never leave a local
-                                  // order pointing at a table from the venue
-                                  // just left, even before the POS controller
-                                  // rebuilds its live stream.
-                                  ref
-                                      .read(
-                                        activeStaffPinSessionProvider.notifier,
-                                      )
-                                      .lock();
-                                  unawaited(
-                                    ref
-                                        .read(
-                                          appThemeControllerProvider.notifier,
-                                        )
-                                        .applyVenueDefault(
-                                          venue.defaultThemeMode,
-                                        ),
-                                  );
-                                  ref
-                                      .read(
-                                        activePersistedOrderIdProvider.notifier,
-                                      )
-                                      .select(null);
-                                  ref
-                                      .read(selectedTableProvider.notifier)
-                                      .select('');
-                                  ref
-                                      .read(activeVenueScopeProvider.notifier)
-                                      .select(
-                                        VenueScope(
-                                          tenantId: tenantId,
-                                          venueId: venue.id,
-                                        ),
-                                      );
-                                },
+                      ],
+                      const SizedBox(height: 20),
+                      DropdownButtonFormField<String>(
+                        initialValue: tenantId,
+                        decoration: const InputDecoration(
+                          labelText: 'Restaurant company',
+                        ),
+                        items: [
+                          for (final membership in widget.memberships)
+                            DropdownMenuItem(
+                              value: membership.tenantId,
+                              child: Text(
+                                companyNames[membership.tenantId] ??
+                                    'Restaurant company',
                               ),
                             ),
-                      ],
-                    ),
+                        ],
+                        onChanged: (value) => setState(() => _tenantId = value),
+                      ),
+                      const SizedBox(height: 18),
+                      venues.when(
+                        loading: () =>
+                            const Center(child: CircularProgressIndicator()),
+                        error: (error, _) =>
+                            Text('Could not load venues: $error'),
+                        data: (items) => Column(
+                          children: [
+                            if (items.isEmpty)
+                              const Text(
+                                'No venues have been assigned to this tenant.',
+                              )
+                            else
+                              for (final venue in items)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 8),
+                                  child: ListTile(
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    tileColor: Theme.of(
+                                      context,
+                                    ).colorScheme.surfaceContainerHighest,
+                                    leading: const Icon(
+                                      Icons.storefront_outlined,
+                                    ),
+                                    title: Text(venue.name),
+                                    subtitle: Text(venue.timeZone),
+                                    trailing: const Icon(
+                                      Icons.chevron_right_rounded,
+                                    ),
+                                    onTap: () {
+                                      AppLogger.info(
+                                        'Venue selected: tenant=$tenantId, venue=${venue.id}.',
+                                      );
+                                      // A scope change must never leave a local
+                                      // order pointing at a table from the venue
+                                      // just left, even before the POS controller
+                                      // rebuilds its live stream.
+                                      ref
+                                          .read(
+                                            activeStaffPinSessionProvider
+                                                .notifier,
+                                          )
+                                          .lock();
+                                      unawaited(
+                                        ref
+                                            .read(
+                                              appThemeControllerProvider
+                                                  .notifier,
+                                            )
+                                            .applyVenueDefault(
+                                              venue.defaultThemeMode,
+                                            ),
+                                      );
+                                      ref
+                                          .read(
+                                            activePersistedOrderIdProvider
+                                                .notifier,
+                                          )
+                                          .select(null);
+                                      ref
+                                          .read(selectedTableProvider.notifier)
+                                          .select('');
+                                      ref
+                                          .read(
+                                            activeVenueScopeProvider.notifier,
+                                          )
+                                          .select(
+                                            VenueScope(
+                                              tenantId: tenantId,
+                                              venueId: venue.id,
+                                            ),
+                                          );
+                                    },
+                                  ),
+                                ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
           ),

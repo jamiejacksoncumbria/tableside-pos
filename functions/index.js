@@ -9275,7 +9275,7 @@ async function manageInventoryFor(caller, rawData) {
 
 async function invokePlatformAction(action, caller, data) {
   let actingCaller = caller;
-  if (action !== "bootstrapPlatformAdmin") {
+  if (action !== "bootstrapPlatformAdmin" && action !== "platformAccessStatus") {
     const hasPinSession = typeof data.staffPinSessionId === "string" ||
       typeof data.staffPinSessionToken === "string";
     const hasPlatformPinSession = typeof data.platformAdminPinSessionId === "string" ||
@@ -9323,6 +9323,8 @@ async function invokePlatformAction(action, caller, data) {
   switch (action) {
     case "bootstrapPlatformAdmin":
       return bootstrapPlatformAdminFor(caller);
+    case "platformAccessStatus":
+      return {platformAdmin: await isPlatformAdmin(caller)};
     case "platformAdminPinStatus":
       return platformAdminPinStatusFor(caller);
     case "setPlatformAdminPin":
