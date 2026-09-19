@@ -3968,15 +3968,57 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
   }
 
   Future<void> _startFulfilment(OrderChannel channel) async {
-    final customers = await ref.read(venueCustomersProvider.future);
-    if (!mounted) return;
-    if (customers.isEmpty) {
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final loadedCustomers = await ref
+          .read(venueCustomersProvider.future)
+          .timeout(const Duration(seconds: 10));
+      if (!mounted) return;
+      final customers = loadedCustomers
+          .where(
+            (customer) =>
+                customer.phoneNumbers.any((number) => number.trim().isNotEmpty),
+          )
+          .toList(growable: false);
+      if (customers.isEmpty) {
+        const message =
+            'Add a telephone customer in Settings → Collection, delivery & courses → Customers first.';
+        setState(() => _error = message);
+        showAppNotification(
+          context,
+          ref: ref,
+          title: 'A customer is required',
+          message: message,
+          level: AppNotificationLevel.warning,
+        );
+        return;
+      }
+      await _chooseFulfilmentCustomer(channel, customers);
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Start ${channel.label} order', error, stackTrace);
+      if (!mounted) return;
       setState(() {
-        _error =
-            'Add a telephone customer in Settings → Collection, delivery & courses first.';
+        _error = 'Could not load customers. Check the connection and retry.';
       });
-      return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: '${channel.label} order could not start',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
+  }
+
+  Future<void> _chooseFulfilmentCustomer(
+    OrderChannel channel,
+    List<VenueCustomer> customers,
+  ) async {
     VenueCustomer selected = customers.first;
     DateTime? scheduledFor;
     final address = TextEditingController(
@@ -4093,6 +4135,37 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
     address.dispose();
   }
 
+  void _requestFulfilment(
+    OrderChannel channel,
+    AsyncValue<VenueFulfilmentSettings> settings,
+  ) {
+    settings.when(
+      data: (value) {
+        final enabled = channel == OrderChannel.delivery
+            ? value.deliveryEnabled
+            : value.collectionEnabled;
+        if (!enabled) {
+          setState(
+            () => _error =
+                '${channel.label} is disabled for this venue. Enable it in Settings → Collection, delivery & courses and save the settings.',
+          );
+          return;
+        }
+        unawaited(_startFulfilment(channel));
+      },
+      loading: () => setState(
+        () => _error = 'Venue collection and delivery settings are loading.',
+      ),
+      error: (error, stackTrace) {
+        AppLogger.error('Load fulfilment settings for POS', error, stackTrace);
+        setState(
+          () => _error =
+              'Collection and delivery settings could not be loaded. Check the connection and retry.',
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final tablesState = ref.watch(diningTablesProvider);
@@ -4114,7 +4187,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
       },
     );
     final locationsLoading = tablesState.isLoading || tabsState.isLoading;
-    final fulfilmentSettings = ref.watch(venueFulfilmentSettingsProvider).value;
+    final fulfilmentSettings = ref.watch(venueFulfilmentSettingsProvider);
     return AlertDialog(
       icon: const Icon(Icons.receipt_long_outlined),
       title: const Text('Start this order'),
@@ -4131,23 +4204,31 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
               runSpacing: 8,
               children: [
                 OutlinedButton.icon(
-                  onPressed:
-                      _saving || fulfilmentSettings?.collectionEnabled != true
+                  onPressed: _saving
                       ? null
-                      : () => _startFulfilment(OrderChannel.collection),
+                      : () => _requestFulfilment(
+                          OrderChannel.collection,
+                          fulfilmentSettings,
+                        ),
                   icon: const Icon(Icons.shopping_bag_outlined),
                   label: const Text('Collection'),
                 ),
                 OutlinedButton.icon(
-                  onPressed:
-                      _saving || fulfilmentSettings?.deliveryEnabled != true
+                  onPressed: _saving
                       ? null
-                      : () => _startFulfilment(OrderChannel.delivery),
+                      : () => _requestFulfilment(
+                          OrderChannel.delivery,
+                          fulfilmentSettings,
+                        ),
                   icon: const Icon(Icons.delivery_dining_outlined),
                   label: const Text('Delivery'),
                 ),
               ],
             ),
+            if (_saving) ...[
+              const SizedBox(height: 8),
+              const LinearProgressIndicator(),
+            ],
             const SizedBox(height: 12),
             if (_error != null) ...[
               Text(
