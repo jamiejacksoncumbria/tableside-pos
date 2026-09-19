@@ -14,6 +14,7 @@ import '../../core/tenant_scope.dart';
 import '../../core/training_mode.dart';
 import '../../data/production_command_repository.dart';
 import '../auth/staff_pin_gate.dart';
+import '../fulfilment/customer_editor.dart';
 import '../fulfilment/fulfilment_domain.dart';
 import '../fulfilment/fulfilment_repository.dart';
 import '../notifications/notification_centre.dart';
@@ -3983,19 +3984,6 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
                 customer.phoneNumbers.any((number) => number.trim().isNotEmpty),
           )
           .toList(growable: false);
-      if (customers.isEmpty) {
-        const message =
-            'Add a telephone customer in Settings → Collection, delivery & courses → Customers first.';
-        setState(() => _error = message);
-        showAppNotification(
-          context,
-          ref: ref,
-          title: 'A customer is required',
-          message: message,
-          level: AppNotificationLevel.warning,
-        );
-        return;
-      }
       await _chooseFulfilmentCustomer(channel, customers);
     } on Object catch (error, stackTrace) {
       AppLogger.error('Start ${channel.label} order', error, stackTrace);
@@ -4019,11 +4007,13 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
     OrderChannel channel,
     List<VenueCustomer> customers,
   ) async {
-    VenueCustomer selected = customers.first;
+    final selected = await _pickFulfilmentCustomer(channel, customers);
+    if (selected == null || !mounted) return;
     DateTime? scheduledFor;
     final address = TextEditingController(
       text: selected.addresses.firstOrNull?.addressLines ?? '',
     );
+    String? validationError;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (customerContext) => StatefulBuilder(
@@ -4032,27 +4022,11 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              DropdownButtonFormField<VenueCustomer>(
-                initialValue: selected,
-                decoration: const InputDecoration(labelText: 'Customer'),
-                items: customers
-                    .map(
-                      (item) => DropdownMenuItem(
-                        value: item,
-                        child: Text(
-                          '${item.displayName} · ${item.phoneNumbers.first}',
-                        ),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (value) {
-                  if (value == null) return;
-                  setCustomerState(() {
-                    selected = value;
-                    address.text =
-                        value.addresses.firstOrNull?.addressLines ?? '';
-                  });
-                },
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.person_outline),
+                title: Text(selected.displayName),
+                subtitle: Text(selected.phoneNumbers.join(' · ')),
               ),
               if (channel == OrderChannel.delivery) ...[
                 const SizedBox(height: 12),
@@ -4102,6 +4076,11 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
                   );
                 },
               ),
+              if (validationError != null)
+                Text(
+                  validationError!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
             ],
           ),
           actions: [
@@ -4110,7 +4089,16 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
               child: const Text('Cancel'),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(customerContext, true),
+              onPressed: () {
+                if (channel == OrderChannel.delivery &&
+                    address.text.trim().isEmpty) {
+                  setCustomerState(
+                    () => validationError = 'Enter the delivery address.',
+                  );
+                  return;
+                }
+                Navigator.pop(customerContext, true);
+              },
               child: const Text('Start order'),
             ),
           ],
@@ -4133,6 +4121,128 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
       Navigator.of(context).pop(true);
     }
     address.dispose();
+  }
+
+  Future<VenueCustomer?> _pickFulfilmentCustomer(
+    OrderChannel channel,
+    List<VenueCustomer> customers,
+  ) async {
+    final search = TextEditingController();
+    try {
+      return await showDialog<VenueCustomer>(
+        context: context,
+        builder: (pickerContext) {
+          var query = '';
+          return StatefulBuilder(
+            builder: (context, setPickerState) {
+              final terms = query
+                  .trim()
+                  .toLowerCase()
+                  .split(RegExp(r'\s+'))
+                  .where((term) => term.isNotEmpty)
+                  .toList(growable: false);
+              final filtered = customers
+                  .where((customer) {
+                    final searchable =
+                        '${customer.displayName} ${customer.phoneNumbers.join(' ')} ${customer.email ?? ''} ${customer.addresses.map((address) => '${address.town} ${address.area} ${address.addressLines}').join(' ')}'
+                            .toLowerCase();
+                    return terms.every(searchable.contains);
+                  })
+                  .toList(growable: false);
+              return AlertDialog(
+                title: Text('Choose ${channel.label.toLowerCase()} customer'),
+                content: SizedBox(
+                  width: 560,
+                  height: MediaQuery.sizeOf(context).height * 0.62,
+                  child: Column(
+                    children: [
+                      TextField(
+                        controller: search,
+                        autofocus: customers.isNotEmpty,
+                        decoration: InputDecoration(
+                          prefixIcon: const Icon(Icons.search),
+                          labelText: 'Search name, phone, email or address',
+                          suffixIcon: query.isEmpty
+                              ? null
+                              : IconButton(
+                                  tooltip: 'Clear search',
+                                  onPressed: () {
+                                    search.clear();
+                                    setPickerState(() => query = '');
+                                  },
+                                  icon: const Icon(Icons.clear),
+                                ),
+                        ),
+                        onChanged: (value) =>
+                            setPickerState(() => query = value),
+                      ),
+                      const SizedBox(height: 8),
+                      Expanded(
+                        child: filtered.isEmpty
+                            ? Center(
+                                child: Text(
+                                  customers.isEmpty
+                                      ? 'No customers yet. Add the first customer below.'
+                                      : 'No customers match this search.',
+                                  textAlign: TextAlign.center,
+                                ),
+                              )
+                            : ListView.builder(
+                                itemCount: filtered.length,
+                                itemBuilder: (context, index) {
+                                  final customer = filtered[index];
+                                  final address =
+                                      customer.addresses.firstOrNull;
+                                  return ListTile(
+                                    leading: const Icon(Icons.person_outline),
+                                    title: Text(customer.displayName),
+                                    subtitle: Text(
+                                      '${customer.phoneNumbers.join(' · ')}${address == null ? '' : '\n${address.area}, ${address.town}'}',
+                                    ),
+                                    isThreeLine: address != null,
+                                    trailing: const Icon(
+                                      Icons.chevron_right_rounded,
+                                    ),
+                                    onTap: () =>
+                                        Navigator.pop(pickerContext, customer),
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(pickerContext),
+                    child: const Text('Cancel'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: () async {
+                      final scope = ref.read(activeVenueScopeProvider);
+                      if (scope == null) return;
+                      final created = await showVenueCustomerEditor(
+                        context: pickerContext,
+                        ref: ref,
+                        scope: scope,
+                        requireAddress: channel == OrderChannel.delivery,
+                      );
+                      if (created != null && pickerContext.mounted) {
+                        Navigator.pop(pickerContext, created);
+                      }
+                    },
+                    icon: const Icon(Icons.person_add_alt_1),
+                    label: const Text('New customer'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      search.dispose();
+    }
   }
 
   void _requestFulfilment(

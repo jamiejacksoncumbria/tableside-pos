@@ -6,6 +6,7 @@ import '../../core/tenant_scope.dart';
 import '../notifications/notification_centre.dart';
 import '../auth/staff_pin_gate.dart';
 import '../pos/domain.dart';
+import 'customer_editor.dart';
 import 'fulfilment_domain.dart';
 import 'fulfilment_repository.dart';
 
@@ -1024,8 +1025,12 @@ class _CustomersTabState extends ConsumerState<_CustomersTab> {
                     trailing: IconButton(
                       icon: const Icon(Icons.edit_outlined),
                       tooltip: 'Edit customer',
-                      onPressed: () =>
-                          _editCustomer(context, ref, widget.scope, item),
+                      onPressed: () => showVenueCustomerEditor(
+                        context: context,
+                        ref: ref,
+                        scope: widget.scope,
+                        existing: item,
+                      ),
                     ),
                   ),
             ],
@@ -1033,161 +1038,14 @@ class _CustomersTabState extends ConsumerState<_CustomersTab> {
         },
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _editCustomer(context, ref, widget.scope, null),
+        onPressed: () => showVenueCustomerEditor(
+          context: context,
+          ref: ref,
+          scope: widget.scope,
+        ),
         icon: const Icon(Icons.person_add_alt_1),
         label: const Text('Telephone customer'),
       ),
     );
   }
-}
-
-Future<void> _editCustomer(
-  BuildContext context,
-  WidgetRef ref,
-  VenueScope scope,
-  VenueCustomer? existing,
-) async {
-  final name = TextEditingController(text: existing?.displayName);
-  final phone = TextEditingController(
-    text: existing?.phoneNumbers.elementAtOrNull(0),
-  );
-  final phoneTwo = TextEditingController(
-    text: existing?.phoneNumbers.elementAtOrNull(1),
-  );
-  final phoneThree = TextEditingController(
-    text: existing?.phoneNumbers.elementAtOrNull(2),
-  );
-  final email = TextEditingController(text: existing?.email);
-  final address = existing?.addresses.firstOrNull;
-  final addressLabel = TextEditingController(text: address?.label ?? 'Home');
-  final country = TextEditingController(
-    text: address?.country ?? 'North Cyprus',
-  );
-  final town = TextEditingController(text: address?.town);
-  final area = TextEditingController(text: address?.area);
-  final addressLines = TextEditingController(text: address?.addressLines);
-  final save = await showDialog<bool>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
-      title: Text(
-        existing == null ? 'Add telephone customer' : 'Edit customer',
-      ),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: name,
-              textCapitalization: TextCapitalization.words,
-              decoration: const InputDecoration(labelText: 'Customer name'),
-            ),
-            TextField(
-              controller: phone,
-              keyboardType: TextInputType.phone,
-              decoration: const InputDecoration(labelText: 'Telephone number'),
-            ),
-            TextField(
-              controller: phoneTwo,
-              keyboardType: TextInputType.phone,
-              decoration: const InputDecoration(
-                labelText: 'Second number (optional)',
-              ),
-            ),
-            TextField(
-              controller: phoneThree,
-              keyboardType: TextInputType.phone,
-              decoration: const InputDecoration(
-                labelText: 'Third number (optional)',
-              ),
-            ),
-            TextField(
-              controller: email,
-              keyboardType: TextInputType.emailAddress,
-              decoration: const InputDecoration(labelText: 'Email (optional)'),
-            ),
-            const SizedBox(height: 8),
-            const Divider(),
-            TextField(
-              controller: addressLabel,
-              decoration: const InputDecoration(labelText: 'Address label'),
-            ),
-            TextField(
-              controller: country,
-              decoration: const InputDecoration(labelText: 'Country'),
-            ),
-            TextField(
-              controller: town,
-              decoration: const InputDecoration(labelText: 'Town'),
-            ),
-            TextField(
-              controller: area,
-              decoration: const InputDecoration(labelText: 'Area'),
-            ),
-            TextField(
-              controller: addressLines,
-              maxLines: 2,
-              decoration: const InputDecoration(
-                labelText: 'Address (optional)',
-              ),
-            ),
-            const Text(
-              'This creates an unclaimed venue record. The customer can later claim it using a verified phone number or email.',
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(dialogContext, false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(dialogContext, true),
-          child: const Text('Save'),
-        ),
-      ],
-    ),
-  );
-  if (save == true &&
-      name.text.trim().isNotEmpty &&
-      phone.text.trim().isNotEmpty) {
-    await ref
-        .read(fulfilmentRepositoryProvider)
-        .saveCustomer(
-          scope: scope,
-          customerId: existing?.id,
-          displayName: name.text,
-          phoneNumbers: [phone.text, phoneTwo.text, phoneThree.text]
-              .map((value) => value.trim())
-              .where((value) => value.isNotEmpty)
-              .toList(),
-          email: email.text.trim().isEmpty ? null : email.text,
-          addresses: addressLines.text.trim().isEmpty
-              ? const []
-              : [
-                  CustomerAddress(
-                    id: address?.id.isNotEmpty == true
-                        ? address!.id
-                        : '${DateTime.now().microsecondsSinceEpoch}',
-                    label: addressLabel.text.trim().isEmpty
-                        ? 'Home'
-                        : addressLabel.text.trim(),
-                    country: country.text.trim(),
-                    town: town.text.trim(),
-                    area: area.text.trim(),
-                    addressLines: addressLines.text.trim(),
-                  ),
-                ],
-        );
-  }
-  name.dispose();
-  phone.dispose();
-  phoneTwo.dispose();
-  phoneThree.dispose();
-  email.dispose();
-  addressLabel.dispose();
-  country.dispose();
-  town.dispose();
-  area.dispose();
-  addressLines.dispose();
 }
