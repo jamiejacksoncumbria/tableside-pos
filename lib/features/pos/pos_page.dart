@@ -13,6 +13,7 @@ import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/training_mode.dart';
 import '../../data/production_command_repository.dart';
+import '../../offline/venue_hub_client_registry.dart';
 import '../auth/staff_pin_gate.dart';
 import '../fulfilment/customer_editor.dart';
 import '../fulfilment/fulfilment_domain.dart';
@@ -68,6 +69,13 @@ class _PosPageState extends ConsumerState<PosPage>
 
   @override
   Widget build(BuildContext context) {
+    final scope = ref.watch(activeVenueScopeProvider);
+    final hubRegistry = VenueHubClientRegistry.instance;
+    if (scope != null &&
+        hubRegistry.requiresHub(scope) &&
+        !hubRegistry.hasUsableSession(scope)) {
+      return const _VenueHubRequiredPanel();
+    }
     final compactTab = ref.watch(posCompactTabProvider);
     if (_compactTabController.index != compactTab &&
         !_compactTabController.indexIsChanging) {
@@ -283,6 +291,31 @@ class _TablesPanel extends ConsumerWidget {
               ],
             ),
             const SizedBox(height: 4),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => _showFulfilmentOrderDialog(
+                    context,
+                    OrderChannel.collection,
+                    onStarted: onSelection,
+                  ),
+                  icon: const Icon(Icons.shopping_bag_outlined),
+                  label: const Text('Collection'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => _showFulfilmentOrderDialog(
+                    context,
+                    OrderChannel.delivery,
+                    onStarted: onSelection,
+                  ),
+                  icon: const Icon(Icons.delivery_dining_outlined),
+                  label: const Text('Delivery'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
             Text(
               activeOrder.tabName == null
                   ? 'Select a table or open a named tab'
@@ -421,6 +454,49 @@ class _TablesPanel extends ConsumerWidget {
       ),
     );
   }
+}
+
+class _VenueHubRequiredPanel extends StatelessWidget {
+  const _VenueHubRequiredPanel();
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 560),
+      child: Card(
+        margin: const EdgeInsets.all(24),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.hub_outlined,
+                size: 48,
+                color: Theme.of(context).colorScheme.error,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Venue hub unavailable',
+                style: Theme.of(context).textTheme.headlineSmall,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'This venue uses the protected offline hub, but this device cannot reach it on the local network. Start the hub device and confirm both devices are on the same Wi-Fi, then switch staff and enter the PIN again.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Cloud ordering stays disabled to prevent two independent copies of the venue data.',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 class _TableButton extends ConsumerWidget {
@@ -3898,8 +3974,23 @@ Future<bool> _ensureOrderLocation(BuildContext context, WidgetRef ref) async {
       false;
 }
 
+Future<void> _showFulfilmentOrderDialog(
+  BuildContext context,
+  OrderChannel channel, {
+  VoidCallback? onStarted,
+}) async {
+  final started = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => _OrderLocationDialog(initialChannel: channel),
+  );
+  if (started == true && context.mounted) onStarted?.call();
+}
+
 class _OrderLocationDialog extends ConsumerStatefulWidget {
-  const _OrderLocationDialog();
+  const _OrderLocationDialog({this.initialChannel});
+
+  final OrderChannel? initialChannel;
 
   @override
   ConsumerState<_OrderLocationDialog> createState() =>
@@ -3910,6 +4001,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
   final _tabName = TextEditingController();
   bool _saving = false;
   String? _error;
+  bool _initialChannelHandled = false;
 
   @override
   void dispose() {
@@ -4298,6 +4390,16 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
     );
     final locationsLoading = tablesState.isLoading || tabsState.isLoading;
     final fulfilmentSettings = ref.watch(venueFulfilmentSettingsProvider);
+    if (widget.initialChannel != null &&
+        !_initialChannelHandled &&
+        !fulfilmentSettings.isLoading) {
+      _initialChannelHandled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _requestFulfilment(widget.initialChannel!, fulfilmentSettings);
+        }
+      });
+    }
     return AlertDialog(
       icon: const Icon(Icons.receipt_long_outlined),
       title: const Text('Start this order'),
