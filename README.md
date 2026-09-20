@@ -165,7 +165,7 @@ Set up Android App Check in this order:
 3. For web production, register a reCAPTCHA v3 provider in App Check and build with `--dart-define=TABLESIDE_WEB_APP_CHECK_RECAPTCHA_SITE_KEY=YOUR_PUBLIC_SITE_KEY`. For iOS, register the iOS app and select App Attest with DeviceCheck fallback.
 4. In Google Cloud Console **IAM**, grant the Cloud Functions service account `33541448236-compute@developer.gserviceaccount.com` the **Firebase App Check Token Verifier** role. Without this role the monitor-mode APIs stay available, but their token verification will log a permission error instead of useful results.
 5. Keep Firestore, Storage, Authentication, and Functions in their App Check **monitor** state. Use their metrics to confirm valid requests are arriving.
-6. The custom `posApi` and `platformAdminApi` endpoints also receive and verify `X-Firebase-AppCheck` tokens, but remain monitor-only by default. After every live client is registered, set `REQUIRE_APP_CHECK=true` in `functions/.env.table-pos` and redeploy functions.
+6. App Check is disabled for the current rollout. Client activation requires `--dart-define=TABLESIDECY_ENABLE_APP_CHECK=true`; custom API enforcement additionally requires `REQUIRE_APP_CHECK=true` in `functions/.env.table-pos` followed by a Functions deployment. Do not enable either switch until every live Android, iOS and web client is registered and verified.
 7. Only then consider enabling Firebase Console enforcement for supported services. This action rejects clients without valid attestation, so it must be tested on the real Android 7.1 hardware first.
 
 For Windows development monitoring, create a registered debug token and run:

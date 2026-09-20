@@ -34,15 +34,23 @@
       "android": {
         "default": {
           "projectId": "table-pos",
-          "appId": "1:33541448236:android:5fd6ef5e9c4d500518e789",
+          "appId": "1:33541448236:android:13017a5cfeb7b36518e789",
           "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "ios": {
+        "default": {
+          "projectId": "table-pos",
+          "appId": "1:33541448236:ios:8e4c354f8142fe9418e789",
+          "fileOutput": "ios/Runner/GoogleService-Info.plist"
         }
       },
       "dart": {
         "lib/firebase_options.dart": {
           "projectId": "table-pos",
           "configurations": {
-            "android": "1:33541448236:android:5fd6ef5e9c4d500518e789",
+            "android": "1:33541448236:android:13017a5cfeb7b36518e789",
+            "ios": "1:33541448236:ios:8e4c354f8142fe9418e789",
             "web": "1:33541448236:web:64b30ce796e53fba18e789",
             "windows": "1:33541448236:web:2a6fb73c3186658618e789"
           }

@@ -6,6 +6,10 @@ import 'app_logger.dart';
 import '../firebase_options.dart';
 
 bool _appCheckActivated = false;
+const _enableFirebaseAppCheck = bool.fromEnvironment(
+  'TABLESIDECY_ENABLE_APP_CHECK',
+  defaultValue: false,
+);
 
 Future<void> initializeFirebase() async {
   if (Firebase.apps.isEmpty) {
@@ -13,7 +17,13 @@ Future<void> initializeFirebase() async {
       options: DefaultFirebaseOptions.currentPlatform,
     );
   }
-  await _activateAppCheck();
+  if (_enableFirebaseAppCheck) {
+    await _activateAppCheck();
+  } else {
+    AppLogger.info(
+      'Firebase App Check is disabled for the current TableSideCY rollout.',
+    );
+  }
 }
 
 /// Activates only providers that are safe for the current TableSideCY rollout.

@@ -9619,16 +9619,14 @@ export const markTenantOfflineHubSnapshotsChanged = onDocumentUpdated(
 );
 
 // Verifies App Check for TableSideCY's custom HTTP APIs. Firestore and Storage
-// have their own App Check enforcement in the Firebase console. Monitor mode
-// provides server-side evidence before enforcement rejects older clients.
+// have their own App Check enforcement in the Firebase console. Verification is
+// skipped entirely until REQUIRE_APP_CHECK is explicitly enabled for rollout.
 async function verifyAppCheckFromHttpRequest(request, endpointName) {
+  if (!requireAppCheck.value()) return null;
   const token = request.get("X-Firebase-AppCheck") ?? "";
   if (token.trim().length === 0) {
     console.warn(`App Check missing for ${endpointName}.`);
-    if (requireAppCheck.value()) {
-      throw new HttpsError("unauthenticated", "A valid Firebase App Check token is required.");
-    }
-    return null;
+    throw new HttpsError("unauthenticated", "A valid Firebase App Check token is required.");
   }
   try {
     const claims = await appCheck.verifyToken(token);
@@ -9636,10 +9634,7 @@ async function verifyAppCheckFromHttpRequest(request, endpointName) {
     return claims;
   } catch (error) {
     console.warn(`App Check verification failed for ${endpointName}.`, error);
-    if (requireAppCheck.value()) {
-      throw new HttpsError("unauthenticated", "The Firebase App Check token is invalid.");
-    }
-    return null;
+    throw new HttpsError("unauthenticated", "The Firebase App Check token is invalid.");
   }
 }
 
