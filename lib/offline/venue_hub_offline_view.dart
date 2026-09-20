@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../features/fulfilment/fulfilment_domain.dart';
 import '../features/pos/domain.dart';
 
 /// Last hub-approved catalogue used only when a Firestore stream fails.
@@ -62,6 +63,20 @@ class VenueHubOfflineView {
     yield tables;
     await for (final _ in _catalogueChanges.stream) {
       yield tables;
+    }
+  }
+
+  Stream<List<VenueCustomer>> get customerStream async* {
+    yield customers;
+    await for (final _ in _catalogueChanges.stream) {
+      yield customers;
+    }
+  }
+
+  Stream<VenueFulfilmentSettings> get fulfilmentSettingsStream async* {
+    yield fulfilmentSettings;
+    await for (final _ in _catalogueChanges.stream) {
+      yield fulfilmentSettings;
     }
   }
 
@@ -217,6 +232,120 @@ class VenueHubOfflineView {
             seats: (item['seats'] as num?)?.toInt() ?? 0,
           );
         })
+        .toList(growable: false);
+  }
+
+  List<VenueCustomer> get customers {
+    final raw = _snapshot?['venueCustomers'];
+    if (raw is! List) return const [];
+    final result = raw
+        .whereType<Map>()
+        .map((item) {
+          final value = Map<String, Object?>.from(item);
+          final id = value['id'] as String? ?? '';
+          final displayName = value['displayName'] as String? ?? 'Customer';
+          return VenueCustomer(
+            id: id,
+            displayName: displayName,
+            phoneNumbers: (value['phoneNumbers'] as List? ?? const [])
+                .whereType<String>()
+                .toList(growable: false),
+            email: value['email'] as String?,
+            claimStatus: value['claimStatus'] as String? ?? 'unclaimed',
+            globalCustomerId: value['globalCustomerId'] as String?,
+            createdAt: DateTime.tryParse(
+              value['createdAtUtc'] as String? ?? '',
+            )?.toLocal(),
+            addresses: (value['addresses'] as List? ?? const [])
+                .whereType<Map>()
+                .map((address) {
+                  return CustomerAddress(
+                    id: address['id'] as String? ?? '',
+                    label: address['label'] as String? ?? 'Address',
+                    country: address['country'] as String? ?? '',
+                    town: address['town'] as String? ?? '',
+                    area: address['area'] as String? ?? '',
+                    addressLines: address['addressLines'] as String? ?? '',
+                    notes: address['notes'] as String? ?? '',
+                  );
+                })
+                .toList(growable: false),
+          );
+        })
+        .where((customer) => customer.id.isNotEmpty)
+        .toList(growable: false);
+    result.sort(
+      (left, right) => left.displayName.toLowerCase().compareTo(
+        right.displayName.toLowerCase(),
+      ),
+    );
+    return result;
+  }
+
+  VenueFulfilmentSettings get fulfilmentSettings => VenueFulfilmentSettings(
+    collectionEnabled: _snapshot?['collectionEnabled'] == true,
+    deliveryEnabled: _snapshot?['deliveryEnabled'] == true,
+    courseControlEnabled: _snapshot?['courseControlEnabled'] == true,
+    collectionWindows: _serviceWindows(_snapshot?['collectionWindows']),
+    deliveryWindows: _serviceWindows(_snapshot?['deliveryWindows']),
+    serviceAreas: _serviceAreas(_snapshot?['serviceAreas']),
+    dateOverrides: _serviceDateOverrides(_snapshot?['fulfilmentDateOverrides']),
+  );
+
+  List<ServiceWindow> _serviceWindows(Object? raw) {
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Map>()
+        .map((window) {
+          return ServiceWindow(
+            weekday: (window['weekday'] as num?)?.toInt() ?? 1,
+            opensMinute: (window['opensMinute'] as num?)?.toInt() ?? 0,
+            closesMinute: (window['closesMinute'] as num?)?.toInt() ?? 1440,
+            enabled: window['enabled'] != false,
+          );
+        })
+        .toList(growable: false);
+  }
+
+  List<ServiceArea> _serviceAreas(Object? raw) {
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Map>()
+        .map((area) {
+          return ServiceArea(
+            id: area['id'] as String? ?? '',
+            name: area['name'] as String? ?? 'Area',
+            deliveryFeeMinor: (area['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
+            minimumOrderMinor:
+                (area['minimumOrderMinor'] as num?)?.toInt() ?? 0,
+            estimatedMinutes: (area['estimatedMinutes'] as num?)?.toInt() ?? 45,
+            active: area['active'] != false,
+          );
+        })
+        .where((area) => area.id.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  List<ServiceDateOverride> _serviceDateOverrides(Object? raw) {
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Map>()
+        .map((override) {
+          final parsedDate = DateTime.tryParse(
+            override['date'] as String? ?? '',
+          );
+          return ServiceDateOverride(
+            id: override['id'] as String? ?? '',
+            date: parsedDate ?? DateTime(1970),
+            channel: override['channel'] == 'delivery'
+                ? OrderChannel.delivery
+                : OrderChannel.collection,
+            closed: override['closed'] != false,
+            windows: _serviceWindows(override['windows']),
+            note: override['note'] as String? ?? '',
+          );
+        })
+        .where((override) => override.id.isNotEmpty)
         .toList(growable: false);
   }
 

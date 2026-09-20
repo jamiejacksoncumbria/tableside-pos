@@ -25,6 +25,9 @@ final venueCoursesProvider = StreamProvider<List<MenuCourse>>((ref) {
 final venueCustomersProvider = StreamProvider<List<VenueCustomer>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <VenueCustomer>[]);
+  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+    return VenueHubOfflineView.instance.customerStream;
+  }
   return ref.watch(fulfilmentRepositoryProvider).watchCustomers(scope);
 });
 
@@ -57,6 +60,9 @@ final venueFulfilmentSettingsProvider = StreamProvider<VenueFulfilmentSettings>(
   (ref) {
     final scope = ref.watch(activeVenueScopeProvider);
     if (scope == null) return Stream.value(const VenueFulfilmentSettings());
+    if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+      return VenueHubOfflineView.instance.fulfilmentSettingsStream;
+    }
     return ref.watch(fulfilmentRepositoryProvider).watchSettings(scope);
   },
 );

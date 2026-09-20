@@ -4110,6 +4110,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
       context: context,
       builder: (customerContext) => StatefulBuilder(
         builder: (context, setCustomerState) => AlertDialog(
+          scrollable: true,
           title: Text('Start ${channel.label.toLowerCase()} order'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
@@ -4401,6 +4402,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
       });
     }
     return AlertDialog(
+      scrollable: true,
       icon: const Icon(Icons.receipt_long_outlined),
       title: const Text('Start this order'),
       content: SizedBox(
