@@ -40,11 +40,11 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       printer: selectedPrinter,
       title: isReceipt
           ? isRefund
-                ? 'TableSide refund receipt'
-                : 'TableSide paid receipt'
+                ? 'TableSideCY refund receipt'
+                : 'TableSideCY paid receipt'
           : isVoucher
-          ? 'TableSide gift voucher'
-          : 'TableSide production ticket',
+          ? 'TableSideCY gift voucher'
+          : 'TableSideCY production ticket',
       lines: lines,
     );
   }
@@ -360,8 +360,7 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
             rightText: _money(amount, paymentCurrency),
           ),
         );
-        final recordedLocalDateTime =
-            value['recordedLocalDateTime'] as String?;
+        final recordedLocalDateTime = value['recordedLocalDateTime'] as String?;
         final recordedAtMillis = (value['recordedAtMillis'] as num?)?.toInt();
         if (recordedLocalDateTime?.trim().isNotEmpty == true) {
           lines.add(

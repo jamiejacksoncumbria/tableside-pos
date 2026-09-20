@@ -1,4 +1,4 @@
-# TableSide security change checklist
+# TableSideCY security change checklist
 
 Before merging a feature that touches users, venues, orders, payments,
 printing, inventory, reports, or Firebase:

@@ -1,4 +1,4 @@
-package com.tableside.tableside_pos
+package uk.co.gopcpitstop.tablesideCY
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -9,7 +9,7 @@ class VenueHubBootReceiver : BroadcastReceiver() {
         if (!VenueHubForegroundService.wasEnabled(context)) return
         // Android cannot safely recreate the encrypted Dart hub in a bare boot
         // receiver. Keep the process available and ask the operator to reopen
-        // TableSide; the Flutter runtime then marks the service genuinely ready.
+        // TableSideCY; the Flutter runtime then marks the service genuinely ready.
         VenueHubForegroundService.start(context, runtimeReady = false)
     }
 }

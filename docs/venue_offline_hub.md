@@ -66,7 +66,7 @@ hub is required and unreachable; they never create a competing cloud history.
    needed only by the active or replacement hub.
 3. On the proposed hub, open **Settings > Venue offline hub**, enter its
    reserved LAN IP, import both `venue-hub-certificate.pem` and
-   `venue-hub-private-key.pem`, then choose **Make this the hub**. TableSide
+   `venue-hub-private-key.pem`, then choose **Make this the hub**. TableSideCY
    pins the exact public certificate, so Android/iOS system CA installation is
    not required for the app itself.
 4. On every other Android, Windows or iOS POS/printer device, open **Venue
@@ -74,12 +74,12 @@ hub is required and unreachable; they never create a competing cloud history.
    choose **Enrol this till / printer** while internet is available. Never copy
    the private key to an ordinary till.
 5. Configure venue printer devices and primary/fallback routes normally.
-6. On an Android hub, select **Battery settings**, give TableSide unrestricted
+6. On an Android hub, select **Battery settings**, give TableSideCY unrestricted
    battery use, keep the terminal powered, and disable vendor-specific app
    sleeping/Wi-Fi switching. A foreground service holds the CPU and Wi-Fi
    while the hub runs.
 7. After an Android reboot, the persistent notification asks an operator to
-   reopen TableSide once. This is deliberate: Android can restart the native
+   reopen TableSideCY once. This is deliberate: Android can restart the native
    service, but it cannot unlock and reconstruct the encrypted Dart hub safely
    until the application is opened. The notification changes to **venue hub is
    active** only after the HTTPS server is genuinely ready.
@@ -138,7 +138,7 @@ flutter run -d <iphone-device-id> --dart-define=TABLESIDE_USE_FIREBASE=true
 
 Open `ios/Runner.xcworkspace` in Xcode once, select the Runner target, choose
 the Apple team, and confirm the bundle identifier is
-`com.tableside.tablesidePos`. The first hub connection triggers Apple's local
+`uk.co.gopcpitstop.tablesideCY`. The first hub connection triggers Apple's local
 network permission prompt; allow it. Debug builds use Firebase App Check's
 debug provider, so register the printed iOS debug token in Firebase before
 enforcing App Check. Push notifications additionally require the Push

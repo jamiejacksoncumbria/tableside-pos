@@ -209,7 +209,7 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Pair your MPT-II printer in the phone’s Android Bluetooth settings first. TableSide lists only already-paired devices and does not request location access.',
+                    'Pair your MPT-II printer in the phone’s Android Bluetooth settings first. TableSideCY lists only already-paired devices and does not request location access.',
                   ),
                   const SizedBox(height: 12),
                   Wrap(

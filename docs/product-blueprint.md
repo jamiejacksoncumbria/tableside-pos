@@ -1,4 +1,4 @@
-# TableSide POS product blueprint
+# TableSideCY product blueprint
 
 Status: approved product/build blueprint for the Spice Garden core pilot. This
 is the living source of truth for product decisions, data rules, and the
@@ -7,7 +7,7 @@ built until their release phase; they do not delay the core pilot.
 
 ## Product principles
 
-- TableSide is a multi-restaurant SaaS product for the UK, Turkey, Northern
+- TableSideCY is a multi-restaurant SaaS product for the UK, Turkey, Northern
   Cyprus, and Cyprus first. It must not hard-code one country's tax, currency,
   receipt, or business-day assumptions.
 - Closed bills, payments, tax, exchange rates, menu prices, and audit events

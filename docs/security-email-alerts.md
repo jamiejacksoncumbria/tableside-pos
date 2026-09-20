@@ -1,6 +1,6 @@
 # Security email alerts
 
-When three wrong PINs lock a staff account, TableSide records a security alert
+When three wrong PINs lock a staff account, TableSideCY records a security alert
 and writes an email job to Firestore's top-level `mail` collection for every
 active owner and manager of that restaurant.
 

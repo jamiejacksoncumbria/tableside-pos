@@ -7,7 +7,7 @@ import 'windows_print_queue_factory.dart';
 import 'receipt_paper_width.dart';
 
 /// Chooses a Windows-installed queue for this physical PC. A USB receipt
-/// printer and a network printer need no different TableSide setup: install
+/// printer and a network printer need no different TableSideCY setup: install
 /// their Windows driver/port first, then choose its queue here.
 class WindowsPrinterSetupPage extends StatefulWidget {
   const WindowsPrinterSetupPage({super.key, required this.restaurantName});
@@ -257,7 +257,7 @@ class _WindowsPrinterSetupPageState extends State<WindowsPrinterSetupPage> {
                   ),
                   initialValue: _selected!.paperWidth,
                   decoration: const InputDecoration(
-                    labelText: 'TableSide receipt paper width',
+                    labelText: 'TableSideCY receipt paper width',
                     helperText:
                         'This must match the paper size selected in Windows printer preferences.',
                   ),

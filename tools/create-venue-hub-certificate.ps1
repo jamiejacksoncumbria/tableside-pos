@@ -107,7 +107,7 @@ function Export-Pkcs8PrivateKeyPem {
 $resolvedOutput = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $OutputDirectory))
 $workspace = [System.IO.Path]::GetFullPath((Get-Location).Path)
 if (-not $resolvedOutput.StartsWith($workspace, [System.StringComparison]::OrdinalIgnoreCase)) {
-  throw 'OutputDirectory must remain inside the current TableSide workspace.'
+  throw 'OutputDirectory must remain inside the current TableSideCY workspace.'
 }
 [System.IO.Directory]::CreateDirectory($resolvedOutput) | Out-Null
 
@@ -139,7 +139,7 @@ $certificateParameters = @{
     "2.5.29.17={text}$subjectAlternativeName"
   )
   NotAfter = (Get-Date).AddYears(3)
-  FriendlyName = "TableSide venue hub $HubHost"
+  FriendlyName = "TableSideCY venue hub $HubHost"
 }
 $certificate = New-SelfSignedCertificate @certificateParameters
 
@@ -171,9 +171,9 @@ try {
   $rootStore.Close()
 }
 
-Write-Host "Created and trusted the TableSide venue certificate for $HubHost."
+Write-Host "Created and trusted the TableSideCY venue certificate for $HubHost."
 Write-Host "Certificate PEM: $certificatePath"
 Write-Host "Android/iOS trust certificate: $certificateDerPath"
 Write-Host "Private key PEM: $privateKeyPath"
 Write-Warning 'Install venue-hub-trust-certificate.cer as a trusted CA on every Android or iOS device that connects to this hub. On iOS, also enable full trust for it.'
-Write-Warning 'Keep venue-hub-private-key.pem only on the hub. Delete the exported copy after importing it into TableSide.'
+Write-Warning 'Keep venue-hub-private-key.pem only on the hub. Delete the exported copy after importing it into TableSideCY.'

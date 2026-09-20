@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.tableside" "\0"
-            VALUE "FileDescription", "tableside_pos" "\0"
+            VALUE "CompanyName", "Go PC Pitstop" "\0"
+            VALUE "FileDescription", "TableSideCY" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "tableside_pos" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.tableside. All rights reserved." "\0"
-            VALUE "OriginalFilename", "tableside_pos.exe" "\0"
-            VALUE "ProductName", "tableside_pos" "\0"
+            VALUE "InternalName", "TableSideCY" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Go PC Pitstop. All rights reserved." "\0"
+            VALUE "OriginalFilename", "TableSideCY.exe" "\0"
+            VALUE "ProductName", "TableSideCY" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

@@ -567,7 +567,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                     const SizedBox(height: 12),
                     Text(
                       defaultTargetPlatform == TargetPlatform.android
-                          ? 'For a reliable Android hub: give TableSide unrestricted battery use, keep the device on charge, disable automatic Wi-Fi switching, and reserve its IP address in the router. After a reboot, open TableSide once when prompted so the encrypted hub can be restored.'
+                          ? 'For a reliable Android hub: give TableSideCY unrestricted battery use, keep the device on charge, disable automatic Wi-Fi switching, and reserve its IP address in the router. After a reboot, open TableSideCY once when prompted so the encrypted hub can be restored.'
                           : 'For a reliable Windows hub: reserve this computer\'s IP address in the router and prevent sleep while the venue is open.',
                     ),
                   ],

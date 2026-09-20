@@ -1230,8 +1230,8 @@ class PaymentRequest {
 
 const demoTenant = TenantProfile(
   id: 'tenant_demo',
-  displayName: 'TableSide Hospitality',
-  legalName: 'TableSide Hospitality Ltd',
+  displayName: 'TableSideCY Hospitality',
+  legalName: 'TableSideCY Hospitality Ltd',
   currencyCode: 'GBP',
   address: '12 Market Street, Manchester',
   phone: '+44 161 555 0100',

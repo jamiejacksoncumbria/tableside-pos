@@ -134,7 +134,7 @@ class _NativeWindowsPrintQueue implements WindowsPrintQueue {
   }) {
     return printText(
       printer: printer,
-      title: 'TableSide printer test',
+      title: 'TableSideCY printer test',
       lines: [
         WindowsPrintLine(
           restaurantName.trim().isEmpty ? 'TABLESIDE POS' : restaurantName,
@@ -153,10 +153,10 @@ class _NativeWindowsPrintQueue implements WindowsPrintQueue {
           WindowsPrintLine('Driver: ${printer.driverName}'),
         if (printer.portName.trim().isNotEmpty)
           WindowsPrintLine('Port: ${printer.portName}'),
-        WindowsPrintLine('TableSide layout: ${printer.paperWidth.label}'),
+        WindowsPrintLine('TableSideCY layout: ${printer.paperWidth.label}'),
         const WindowsPrintLine(''),
         const WindowsPrintLine(
-          'If this ticket is clear and complete, this Windows printer is ready for TableSide routes.',
+          'If this ticket is clear and complete, this Windows printer is ready for TableSideCY routes.',
         ),
       ],
     );

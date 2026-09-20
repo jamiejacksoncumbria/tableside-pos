@@ -141,7 +141,7 @@ class _SignInPageState extends ConsumerState<SignInPage> {
                     ),
                     const SizedBox(height: 14),
                     Text(
-                      'Sign in to TableSide',
+                      'Sign in to TableSideCY',
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.headlineSmall,
                     ),
@@ -643,7 +643,7 @@ class _NoMembershipScreenState extends ConsumerState<_NoMembershipScreen> {
               const SizedBox(height: 16),
               Text(
                 widget.checkingMembership
-                    ? 'Checking restaurant access. If this is the first TableSide account, you can set up the platform administrator now.'
+                    ? 'Checking restaurant access. If this is the first TableSideCY account, you can set up the platform administrator now.'
                     : 'Your account has no restaurant access yet. Ask an owner to invite you to a tenant and venue.',
                 textAlign: TextAlign.center,
               ),
@@ -682,7 +682,7 @@ class _PlatformAdminScaffold extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
-      title: const Text('TableSide platform'),
+      title: const Text('TableSideCY platform'),
       actions: [
         IconButton(
           tooltip: 'Sign out',

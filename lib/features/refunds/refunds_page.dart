@@ -464,7 +464,7 @@ class _RefundDialogState extends State<_RefundDialog> {
                     'Card refund completed on original terminal',
                   ),
                   subtitle: const Text(
-                    'TableSide records the correction only after the card provider accepts it.',
+                    'TableSideCY records the correction only after the card provider accepts it.',
                   ),
                 ),
               CheckboxListTile(

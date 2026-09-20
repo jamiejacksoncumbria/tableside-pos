@@ -54,18 +54,18 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions android = FirebaseOptions(
     apiKey: 'AIzaSyAfE04TymKUy_y8mpGJSExnY6sHKD0JX6M',
-    appId: '1:33541448236:android:5fd6ef5e9c4d500518e789',
+    appId: '1:33541448236:android:13017a5cfeb7b36518e789',
     messagingSenderId: '33541448236',
     projectId: 'table-pos',
     storageBucket: 'table-pos.firebasestorage.app',
   );
   static const FirebaseOptions ios = FirebaseOptions(
     apiKey: 'AIzaSyDhc6vw_Cf6Hh7quc7q45v5HPUh7cFtic4',
-    appId: '1:33541448236:ios:7745256a2b744fdb18e789',
+    appId: '1:33541448236:ios:8e4c354f8142fe9418e789',
     messagingSenderId: '33541448236',
     projectId: 'table-pos',
     storageBucket: 'table-pos.firebasestorage.app',
-    iosBundleId: 'com.tableside.tablesidePos',
+    iosBundleId: 'uk.co.gopcpitstop.tablesideCY',
   );
 
   static const FirebaseOptions windows = FirebaseOptions(

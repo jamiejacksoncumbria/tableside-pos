@@ -9,8 +9,8 @@ import '../core/firebase_runtime_config.dart';
 import '../features/auth/auth_gate.dart';
 import 'home_shell.dart';
 
-class TableSideApp extends ConsumerWidget {
-  const TableSideApp({super.key});
+class TableSideCYApp extends ConsumerWidget {
+  const TableSideCYApp({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -18,7 +18,7 @@ class TableSideApp extends ConsumerWidget {
       appThemeControllerProvider.select((selection) => selection.effectiveMode),
     );
     return MaterialApp(
-      title: 'TableSide POS',
+      title: 'TableSideCY',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),

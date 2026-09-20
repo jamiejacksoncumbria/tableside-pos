@@ -1,4 +1,4 @@
-package com.tableside.tableside_pos
+package uk.co.gopcpitstop.tablesideCY
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -69,8 +69,8 @@ class VenueHubForegroundService : Service() {
     private fun notification(runtimeReady: Boolean) = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.mipmap.ic_launcher)
         .setContentTitle(
-            if (runtimeReady) "TableSide venue hub is active"
-            else "Open TableSide to restore the venue hub",
+            if (runtimeReady) "TableSideCY venue hub is active"
+            else "Open TableSideCY to restore the venue hub",
         )
         .setContentText(
             if (runtimeReady) "Keeping local ordering and printing available"

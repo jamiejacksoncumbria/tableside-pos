@@ -174,7 +174,7 @@ function Package-Windows {
     $versionLine = Select-String -Path (Join-Path $script:RepoRoot 'pubspec.yaml') -Pattern '^version:\s*(.+)$'
     $version = if ($versionLine) { $versionLine.Matches[0].Groups[1].Value.Trim() } else { 'unknown' }
     $safeVersion = $version -replace '[^0-9A-Za-z._+-]', '-'
-    $zipPath = Join-Path $dist "tableside-pos-windows-$safeVersion.zip"
+    $zipPath = Join-Path $dist "tablesidecy-windows-$safeVersion.zip"
     if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath }
     Compress-Archive -Path (Join-Path $script:RepoRoot 'build\windows\x64\runner\Release\*') -DestinationPath $zipPath -CompressionLevel Optimal
     Write-Host "Windows ZIP: $zipPath" -ForegroundColor Green
@@ -301,7 +301,7 @@ function Show-Menu {
     while ($true) {
         Write-Host @'
 
-TableSide POS developer menu
+TableSideCY developer menu
   1  Flutter doctor
   2  Install/update dependencies
   3  Analyze app + check Functions

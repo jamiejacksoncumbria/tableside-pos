@@ -55,7 +55,7 @@ async function requirePlatformAdmin(caller) {
   if (!(await isPlatformAdmin(caller))) {
     throw new HttpsError(
       "permission-denied",
-      "This action is restricted to TableSide platform administrators.",
+      "This action is restricted to TableSideCY platform administrators.",
     );
   }
   return caller;
@@ -3056,10 +3056,10 @@ async function queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId}
     .filter((email) => typeof email === "string" && email.length > 0);
   if (emails.length === 0) return;
   const staff = await auth.getUser(userId).catch(() => null);
-  const subject = "TableSide security alert: staff PIN locked";
+  const subject = "TableSideCY security alert: staff PIN locked";
   const text = `A staff PIN was locked after three failed attempts. Venue: ${venueId}. ` +
     `Staff: ${staff?.displayName || staff?.email || userId}. Device account: ${hostUserId}. ` +
-    "Open TableSide and use a manager PIN to review and unlock it if appropriate.";
+    "Open TableSideCY and use a manager PIN to review and unlock it if appropriate.";
   // The official Firebase Trigger Email extension watches this collection.
   // Without its one-time installation, the alert remains safely recorded in
   // Firestore but cannot be delivered by Firebase Admin itself.
@@ -6976,7 +6976,7 @@ async function createRefundFor(caller, rawData) {
         !cardRefundConfirmed) {
       throw new HttpsError(
         "failed-precondition",
-        "Confirm the card refund on the original terminal before recording it in TableSide.",
+        "Confirm the card refund on the original terminal before recording it in TableSideCY.",
       );
     }
 
@@ -8065,8 +8065,8 @@ export const deliverOperationalPushNotification = onDocumentCreated(
       const response = await getMessaging().sendEachForMulticast({
         tokens: tokens.slice(offset, offset + 500),
         notification: {
-          title: "TableSide order update",
-          body: "Open TableSide POS to view the latest order status.",
+          title: "TableSideCY order update",
+          body: "Open TableSideCY to view the latest order status.",
         },
         data: {
           type: typeof data.type === "string" ? data.type : "order.updated",
@@ -9618,7 +9618,7 @@ export const markTenantOfflineHubSnapshotsChanged = onDocumentUpdated(
   },
 );
 
-// Verifies App Check for TableSide's custom HTTP APIs. Firestore and Storage
+// Verifies App Check for TableSideCY's custom HTTP APIs. Firestore and Storage
 // have their own App Check enforcement in the Firebase console. Monitor mode
 // provides server-side evidence before enforcement rejects older clients.
 async function verifyAppCheckFromHttpRequest(request, endpointName) {

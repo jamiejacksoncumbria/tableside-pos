@@ -1,4 +1,4 @@
-# TableSide POS
+# TableSideCY
 
 An adaptive Flutter foundation for a multi-restaurant restaurant POS. It targets Android, iOS, web, and Windows, uses Riverpod for UI state, and is structured to use Firebase Authentication, Cloud Firestore, and Cloud Storage.
 
@@ -88,10 +88,10 @@ Do **not** let a web client directly write a completed print job, and do not mak
 The Windows desktop app prints through installed Windows print queues. This supports a USB receipt printer such as the SAM4S GIANT100 and a network printer added through a Windows TCP/IP port using exactly the same flow:
 
 1. Install the manufacturer driver and confirm Windows can print a test page. Set the queue's 58 mm/80 mm paper and cutter preferences in Windows first.
-2. In TableSide, open **Settings → Windows USB/network printer setup**, select the installed queue, select the matching TableSide receipt width (58 mm or 80 mm), and print a test ticket.
+2. In TableSideCY, open **Settings → Windows USB/network printer setup**, select the installed queue, select the matching TableSideCY receipt width (58 mm or 80 mm), and print a test ticket.
 3. Open **Settings → Shared printer routes**, register the Windows PC as a venue printer device, then assign the kitchen, bar, dessert and/or paid-receipt routes to it.
 
-Jobs are rendered through the driver, not sent directly to USB. The printer-driver setting controls the physical paper, while TableSide's per-queue width selection controls receipt layout and must match it. Paid receipts combine identical products into compact lines such as `Efes x3`; kitchen/bar tickets remain uncombined.
+Jobs are rendered through the driver, not sent directly to USB. The printer-driver setting controls the physical paper, while TableSideCY's per-queue width selection controls receipt layout and must match it. Paid receipts combine identical products into compact lines such as `Efes x3`; kitchen/bar tickets remain uncombined.
 
 ## Payments
 
@@ -142,7 +142,7 @@ The first deployment prompts for `INITIAL_PLATFORM_ADMIN_EMAIL`. Enter the email
 - create the restaurant company and its first venue; and
 - assign an existing account an owner, manager, waiter, or printer-device role for a restaurant.
 
-The platform role is deliberately **not** Firebase-project Owner access. It has comprehensive TableSide data access while Firebase project administration, billing, and server credentials remain outside the app. User creation, Auth-user listing, membership assignment, tenant creation, and platform-admin promotion run only in authenticated Cloud Functions using the Firebase Admin SDK. This avoids a client being able to give itself privileges.
+The platform role is deliberately **not** Firebase-project Owner access. It has comprehensive TableSideCY data access while Firebase project administration, billing, and server credentials remain outside the app. User creation, Auth-user listing, membership assignment, tenant creation, and platform-admin promotion run only in authenticated Cloud Functions using the Firebase Admin SDK. This avoids a client being able to give itself privileges.
 
 Cloud Functions deployment requires the Firebase project to be on the Blaze plan. The functions are configured for Node.js 22 and `europe-west2` (London), alongside the existing Firestore and Storage location.
 
@@ -160,7 +160,7 @@ App Check is activated during Firebase startup before the app uses Authenticatio
 
 Set up Android App Check in this order:
 
-1. In Firebase Console, open **Security → App Check**, register the Android app (`com.tableside.tableside_pos`) with Play Integrity, and follow the Firebase/Google Play Console linking steps. Add the SHA-256 certificate used to sign the APK.
+1. In Firebase Console, open **Security → App Check**, register the Android app (`uk.co.gopcpitstop.tablesideCY`) with Play Integrity, and follow the Firebase/Google Play Console linking steps. Add the SHA-256 certificate used to sign the APK.
 2. Run a debug build on the test terminal. The Android debug provider writes an App Check debug token to the Android log. Add that token in **App Check → Apps → Manage debug tokens**. Never place a debug token in Git or a release build.
 3. For web production, register a reCAPTCHA v3 provider in App Check and build with `--dart-define=TABLESIDE_WEB_APP_CHECK_RECAPTCHA_SITE_KEY=YOUR_PUBLIC_SITE_KEY`. For iOS, register the iOS app and select App Attest with DeviceCheck fallback.
 4. In Google Cloud Console **IAM**, grant the Cloud Functions service account `33541448236-compute@developer.gserviceaccount.com` the **Firebase App Check Token Verifier** role. Without this role the monitor-mode APIs stay available, but their token verification will log a permission error instead of useful results.

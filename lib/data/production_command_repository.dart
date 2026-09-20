@@ -852,7 +852,7 @@ class ProductionCommandRepository {
 
   /// Verifies an email/password directly with Google's Firebase Auth REST
   /// endpoint. This avoids native plugin reauthentication deadlocks while
-  /// keeping the password away from TableSide's Functions and diagnostics.
+  /// keeping the password away from TableSideCY's Functions and diagnostics.
   Future<String> verifyPasswordForPinRecovery({
     required String email,
     required String password,

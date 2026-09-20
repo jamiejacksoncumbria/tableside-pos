@@ -1,4 +1,4 @@
-package com.tableside.tableside_pos
+package uk.co.gopcpitstop.tablesideCY
 
 import android.content.Intent
 import android.provider.Settings

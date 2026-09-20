@@ -7,9 +7,9 @@
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:33541448236:android:5fd6ef5e9c4d500518e789",
+        "mobilesdk_app_id": "1:33541448236:android:13017a5cfeb7b36518e789",
         "android_client_info": {
-          "package_name": "com.tableside.tableside_pos"
+          "package_name": "uk.co.gopcpitstop.tablesideCY"
         }
       },
       "oauth_client": [],

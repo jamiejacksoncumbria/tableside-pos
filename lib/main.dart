@@ -33,7 +33,7 @@ void main() {
       runApp(
         const ProviderScope(
           observers: [DebugProviderObserver()],
-          child: TableSideApp(),
+          child: TableSideCYApp(),
         ),
       );
     },

@@ -16,7 +16,7 @@ Future<void> initializeFirebase() async {
   await _activateAppCheck();
 }
 
-/// Activates only providers that are safe for the current TableSide rollout.
+/// Activates only providers that are safe for the current TableSideCY rollout.
 /// Android uses Play Integrity and iOS uses App Attest with a DeviceCheck
 /// fallback in release builds. The Windows plugin currently emits platform
 /// channel callbacks from a non-platform thread on some Flutter/Windows
@@ -93,7 +93,7 @@ Future<void> _activateAppCheck() async {
   }
 }
 
-/// Returns a token for TableSide's own HTTP APIs. Firestore and Storage attach
+/// Returns a token for TableSideCY's own HTTP APIs. Firestore and Storage attach
 /// their token automatically after activation. A missing token is accepted
 /// only while the server is in the monitor phase.
 Future<String?> currentFirebaseAppCheckToken() async {

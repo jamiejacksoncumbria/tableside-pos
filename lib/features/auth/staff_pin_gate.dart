@@ -921,7 +921,7 @@ class _PasswordReauthenticationDialogState
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            'Enter the password for ${widget.email}. It is sent directly to Firebase Authentication and is never stored by TableSide.',
+            'Enter the password for ${widget.email}. It is sent directly to Firebase Authentication and is never stored by TableSideCY.',
           ),
           const SizedBox(height: 16),
           TextField(
