@@ -51,6 +51,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan TableSide gift voucher QR codes at checkout.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Connect to this restaurant's secure TableSide venue hub for ordering and printing when the internet is unavailable.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

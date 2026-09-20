@@ -14,6 +14,7 @@ import 'venue_hub_offline_pin.dart';
 import 'venue_hub_server.dart';
 import 'venue_hub_staff_sessions.dart';
 import 'venue_hub_print_queue.dart';
+import 'venue_hub_platform.dart';
 import 'venue_hub_offline_view.dart';
 import 'venue_offline_catalogue.dart';
 import 'venue_offline_order_book.dart';
@@ -418,6 +419,7 @@ class VenueHubRuntime {
         const Duration(seconds: 30),
         (_) => unawaited(refreshAuthority()),
       );
+      await AndroidVenueHubService.start();
     } catch (error, stackTrace) {
       AppLogger.error('Start venue offline hub', error, stackTrace);
       await _server.stop();
@@ -443,6 +445,7 @@ class VenueHubRuntime {
     _installFreshSnapshot = null;
     _activeScope = null;
     await _server.stop();
+    await AndroidVenueHubService.stop();
     _emit(
       const VenueHubRuntimeStatus(
         state: VenueHubRuntimeState.stopped,

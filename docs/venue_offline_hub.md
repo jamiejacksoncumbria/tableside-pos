@@ -4,8 +4,9 @@ Status: pilot implementation on `feature/venue-offline-hub`.
 
 The venue hub lets native Android and Windows tills continue essential service
 when the venue Wi-Fi is working but its internet connection is unavailable. One
-manager-enrolled native device is the venue authority. Other enrolled native
-devices connect to it over authenticated local HTTPS.
+manager-enrolled native device is the venue authority. Enrolled Android,
+Windows and iOS POS devices connect to it over authenticated local HTTPS. iOS
+is client-only for this release; web remains online-only.
 
 Web builds remain cloud-connected and read-only when a venue hub owns write
 authority. Browsers do not currently write through the LAN hub. This avoids
@@ -57,23 +58,31 @@ hub is required and unreachable; they never create a competing cloud history.
 
 ## Setup
 
-1. Give the proposed hub and every native till/printer a stable LAN address.
-2. Generate a venue TLS certificate with
-   `tools/create-venue-hub-certificate.ps1`. Install its CA certificate as
-   trusted on every participating device. Android must install the generated
-   `.cer` file as a CA certificate; iOS must additionally enable full trust.
-3. In **Settings > Venue offline hub**, enter the hub LAN address, import the
-   public certificate PEM and private key PEM on the hub device, then choose
-   **Make this the hub**. TableSide pins this certificate for its HTTPS and
-   WebSocket connections instead of relying on inconsistent platform trust
-   stores.
-4. On every other native device, open the same page, import only the same
-   public certificate PEM with **Choose trusted certificate PEM**, and choose
-   **Enrol this till / printer** while internet is available. Never copy the
-   hub private key to a client device.
+1. Reserve one fixed IP address for the proposed Android or Windows hub in the
+   venue router. Ordinary tills/printers do not need fixed addresses.
+2. Generate one certificate pair for the venue with
+   `tools/create-venue-hub-certificate.ps1`. The certificate must contain the
+   reserved hub IP. Keep `venue-hub-private-key.pem` as a venue secret; it is
+   needed only by the active or replacement hub.
+3. On the proposed hub, open **Settings > Venue offline hub**, enter its
+   reserved LAN IP, import both `venue-hub-certificate.pem` and
+   `venue-hub-private-key.pem`, then choose **Make this the hub**. TableSide
+   pins the exact public certificate, so Android/iOS system CA installation is
+   not required for the app itself.
+4. On every other Android, Windows or iOS POS/printer device, open **Venue
+   offline connection**, import only the same `venue-hub-certificate.pem`, and
+   choose **Enrol this till / printer** while internet is available. Never copy
+   the private key to an ordinary till.
 5. Configure venue printer devices and primary/fallback routes normally.
-6. Keep the hub app open. Automatic Android boot/foreground-service startup is
-   not part of this pilot, so a device restart requires reopening TableSide.
+6. On an Android hub, select **Battery settings**, give TableSide unrestricted
+   battery use, keep the terminal powered, and disable vendor-specific app
+   sleeping/Wi-Fi switching. A foreground service holds the CPU and Wi-Fi
+   while the hub runs.
+7. After an Android reboot, the persistent notification asks an operator to
+   reopen TableSide once. This is deliberate: Android can restart the native
+   service, but it cannot unlock and reconstruct the encrypted Dart hub safely
+   until the application is opened. The notification changes to **venue hub is
+   active** only after the HTTPS server is genuinely ready.
 
 A manager takeover is intentionally explicit and audited. Confirm the previous
 hub is stopped before replacing it. Cloud activation is refused while Firebase
@@ -111,6 +120,30 @@ ordinary database-file copy alone.
   active.
 - Check the known medium-tablet PIN screen overflow separately; it is a UI
   issue already recorded for the next responsive-layout pass.
+
+## iOS POS test setup
+
+iOS 13 or later is supported as a POS client, not as a hub. Firebase options,
+the CocoaPods file, camera permission and local-network permission are present
+in the project. A Mac with current Xcode and an Apple development team is still
+required to build and sign the app:
+
+```bash
+flutter pub get
+cd ios
+pod install
+cd ..
+flutter run -d <iphone-device-id> --dart-define=TABLESIDE_USE_FIREBASE=true
+```
+
+Open `ios/Runner.xcworkspace` in Xcode once, select the Runner target, choose
+the Apple team, and confirm the bundle identifier is
+`com.tableside.tablesidePos`. The first hub connection triggers Apple's local
+network permission prompt; allow it. Debug builds use Firebase App Check's
+debug provider, so register the printed iOS debug token in Firebase before
+enforcing App Check. Push notifications additionally require the Push
+Notifications capability and an APNs key in Firebase, and should be validated
+on a physical iPhone rather than only the simulator.
 
 ## Post-pilot certificate hardening
 

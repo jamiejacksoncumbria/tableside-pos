@@ -22,7 +22,7 @@ class NativeVenueHubServer implements VenueHubServer {
   final Set<WebSocket> _sockets = <WebSocket>{};
 
   @override
-  bool get isSupported => true;
+  bool get isSupported => Platform.isAndroid || Platform.isWindows;
 
   @override
   bool get isRunning => _server != null;
@@ -40,6 +40,11 @@ class NativeVenueHubServer implements VenueHubServer {
 
   @override
   Future<Uri> start(VenueHubServerConfiguration configuration) async {
+    if (!isSupported) {
+      throw UnsupportedError(
+        'Only Android and Windows devices can host the venue hub.',
+      );
+    }
     if (_server != null) throw StateError('The venue hub is already running.');
     if (configuration.port < 1024 || configuration.port > 65535) {
       throw ArgumentError.value(

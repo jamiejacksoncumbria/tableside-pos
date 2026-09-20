@@ -8,6 +8,7 @@ import '../../core/app_theme_controller.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/tenant_profile_repository.dart';
 import '../../data/production_command_repository.dart';
+import '../../offline/venue_hub_platform.dart';
 import '../auth/staff_pin_gate.dart';
 import '../fulfilment/fulfilment_management_page.dart';
 import '../notifications/notification_centre.dart';
@@ -743,20 +744,28 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     ),
                   ),
                 ),
-                const Divider(),
-                ListTile(
-                  leading: const Icon(Icons.hub_outlined),
-                  title: const Text('Venue offline hub'),
-                  subtitle: const Text(
-                    'Securely enrol this device, cache venue data and monitor offline recovery.',
-                  ),
-                  trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => VenueOfflineHubPage(scope: venueScope),
+                if (!kIsWeb) ...[
+                  const Divider(),
+                  ListTile(
+                    leading: const Icon(Icons.hub_outlined),
+                    title: Text(
+                      canHostVenueHub
+                          ? 'Venue offline hub'
+                          : 'Venue offline connection',
+                    ),
+                    subtitle: Text(
+                      canHostVenueHub
+                          ? 'Host or join secure local ordering and printing.'
+                          : 'Join the Android or Windows venue hub as a POS device.',
+                    ),
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => VenueOfflineHubPage(scope: venueScope),
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
             ],
           ),

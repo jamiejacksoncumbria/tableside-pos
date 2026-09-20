@@ -13,6 +13,7 @@ import '../../offline/venue_hub_bootstrap.dart';
 import '../../offline/venue_hub_device_credential.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_runtime.dart';
+import '../../offline/venue_hub_platform.dart';
 import '../printing/local_printer_device_identity.dart';
 
 class VenueOfflineHubPage extends StatefulWidget {
@@ -36,6 +37,8 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
   VenueHubBootstrap? _bootstrap;
   late final StreamSubscription<VenueHubRuntimeStatus> _runtimeSubscription;
   bool _busy = false;
+  bool _hasCertificate = false;
+  bool _hasPrivateKey = false;
   String? _message;
 
   String get _storagePrefix =>
@@ -59,6 +62,8 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
   }
 
   Future<void> _refresh() => _run('Refresh offline hub', () async {
+    final certificate = await _secrets.read(key: '$_storagePrefix.certificate');
+    final privateKey = await _secrets.read(key: '$_storagePrefix.privateKey');
     final deviceId = await _identity.deviceIdForScope(widget.scope);
     final credential = await _credentialStore.getOrCreate(
       tenantId: widget.scope.tenantId,
@@ -82,6 +87,8 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       _deviceId = deviceId;
       _credential = credential;
       _bootstrap = bootstrap;
+      _hasCertificate = certificate?.isNotEmpty == true;
+      _hasPrivateKey = privateKey?.isNotEmpty == true;
     });
   });
 
@@ -114,6 +121,13 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
   });
 
   Future<void> _enrolAndActivate() async {
+    if (!canHostVenueHub) {
+      setState(() {
+        _message =
+            'Only an Android or Windows device can host the venue hub. This device can still join as a POS client.';
+      });
+      return;
+    }
     String? takeoverReason;
     if (_bootstrap?.enabled == true && _bootstrap?.hubDeviceId != _deviceId) {
       takeoverReason = await _requestReason(
@@ -269,10 +283,10 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
         final result = await FilePicker.pickFiles(
           type: FileType.custom,
           allowedExtensions: const ['pem'],
-          withData: true,
         );
-        final bytes = result?.files.single.bytes;
-        if (bytes == null) return;
+        final file = result?.files.single;
+        if (file == null) return;
+        final bytes = await file.readAsBytes();
         final value = utf8.decode(bytes);
         final expected = kind == 'certificate'
             ? 'BEGIN CERTIFICATE'
@@ -281,7 +295,16 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
           throw FormatException('The selected PEM file is not a valid $kind.');
         }
         await _secrets.write(key: '$_storagePrefix.$kind', value: value);
-        if (mounted) setState(() => _message = 'TLS $kind saved securely.');
+        if (mounted) {
+          setState(() {
+            if (kind == 'certificate') {
+              _hasCertificate = true;
+            } else {
+              _hasPrivateKey = true;
+            }
+            _message = 'TLS $kind saved securely.';
+          });
+        }
       });
 
   Future<void> _startRuntime({
@@ -369,49 +392,65 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                         : 'Another device owns hub generation ${bootstrap.hubEpoch}.',
                   ),
                   const SizedBox(height: 8),
+                  Text(
+                    canHostVenueHub
+                        ? 'This Android or Windows device can be made the venue hub.'
+                        : kIsWeb
+                        ? 'Web POS devices cannot join or host offline venue routing.'
+                        : 'This device is POS-client only. Android or Windows must host the venue hub.',
+                  ),
+                  const SizedBox(height: 8),
                   SelectableText('Device: ${deviceId ?? 'loading'}'),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _host,
-                          enabled: !_busy,
-                          decoration: const InputDecoration(
-                            labelText: 'LAN host or fixed IP',
-                            hintText: '192.168.1.20',
+                  if (canHostVenueHub) ...[
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _host,
+                            enabled: !_busy,
+                            decoration: const InputDecoration(
+                              labelText: 'LAN host or fixed IP',
+                              hintText: '192.168.1.20',
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      SizedBox(
-                        width: 110,
-                        child: TextField(
-                          controller: _port,
-                          enabled: !_busy,
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(labelText: 'Port'),
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          width: 110,
+                          child: TextField(
+                            controller: _port,
+                            enabled: !_busy,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Port',
+                            ),
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
                     children: [
-                      FilledButton.icon(
-                        onPressed: _busy || kIsWeb ? null : _enrolAndActivate,
-                        icon: const Icon(Icons.verified_user_outlined),
-                        label: Text(
-                          isThisHub ? 'Restart this hub' : 'Make this the hub',
+                      if (canHostVenueHub)
+                        FilledButton.icon(
+                          onPressed: _busy ? null : _enrolAndActivate,
+                          icon: const Icon(Icons.verified_user_outlined),
+                          label: Text(
+                            isThisHub
+                                ? 'Restart this hub'
+                                : 'Make this the hub',
+                          ),
                         ),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: _busy || kIsWeb ? null : _enrolThisDevice,
-                        icon: const Icon(Icons.devices_other_outlined),
-                        label: const Text('Enrol this till / printer'),
-                      ),
+                      if (canJoinVenueHubAsNativeClient)
+                        OutlinedButton.icon(
+                          onPressed: _busy ? null : _enrolThisDevice,
+                          icon: const Icon(Icons.devices_other_outlined),
+                          label: const Text('Enrol this till / printer'),
+                        ),
                       OutlinedButton.icon(
                         onPressed: _busy ? null : _refresh,
                         icon: const Icon(Icons.refresh),
@@ -441,8 +480,41 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                   const SizedBox(height: 8),
-                  const Text(
-                    'Use a venue certificate trusted by every till. Plain HTTP is never allowed.',
+                  Text(
+                    canHostVenueHub
+                        ? 'Import the venue certificate and its private key on the active hub. Other native POS devices import only the certificate. Plain HTTP is never allowed.'
+                        : 'Import only the public venue certificate on this POS device. The hub private key must never be copied to an ordinary till.',
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      Chip(
+                        avatar: Icon(
+                          _hasCertificate
+                              ? Icons.check_circle_outline
+                              : Icons.warning_amber_rounded,
+                        ),
+                        label: Text(
+                          _hasCertificate
+                              ? 'Certificate installed'
+                              : 'Certificate required',
+                        ),
+                      ),
+                      if (canHostVenueHub)
+                        Chip(
+                          avatar: Icon(
+                            _hasPrivateKey
+                                ? Icons.check_circle_outline
+                                : Icons.warning_amber_rounded,
+                          ),
+                          label: Text(
+                            _hasPrivateKey
+                                ? 'Private key installed'
+                                : 'Private key required',
+                          ),
+                        ),
+                    ],
                   ),
                   const SizedBox(height: 12),
                   Wrap(
@@ -450,33 +522,55 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                     runSpacing: 8,
                     children: [
                       OutlinedButton(
-                        onPressed: _busy || kIsWeb
+                        onPressed: _busy || !canJoinVenueHubAsNativeClient
                             ? null
                             : () => _chooseTlsFile('certificate'),
-                        child: const Text('Choose trusted certificate PEM'),
+                        child: const Text('Import venue certificate PEM'),
                       ),
-                      OutlinedButton(
-                        onPressed: _busy || kIsWeb
-                            ? null
-                            : () => _chooseTlsFile('privateKey'),
-                        child: const Text('Choose private key PEM'),
-                      ),
-                      FilledButton(
-                        onPressed: _busy || !isThisHub
-                            ? null
-                            : _downloadSnapshot,
-                        child: const Text('Refresh data & start'),
-                      ),
-                      OutlinedButton(
-                        onPressed:
-                            _busy ||
-                                runtime.state == VenueHubRuntimeState.stopped
-                            ? null
-                            : _stop,
-                        child: const Text('Stop'),
-                      ),
+                      if (canHostVenueHub) ...[
+                        OutlinedButton(
+                          onPressed: _busy
+                              ? null
+                              : () => _chooseTlsFile('privateKey'),
+                          child: const Text('Import hub private key PEM'),
+                        ),
+                        FilledButton(
+                          onPressed:
+                              _busy ||
+                                  !isThisHub ||
+                                  !_hasCertificate ||
+                                  !_hasPrivateKey
+                              ? null
+                              : _downloadSnapshot,
+                          child: const Text('Refresh data & start'),
+                        ),
+                        OutlinedButton(
+                          onPressed:
+                              _busy ||
+                                  runtime.state == VenueHubRuntimeState.stopped
+                              ? null
+                              : _stop,
+                          child: const Text('Stop'),
+                        ),
+                        if (defaultTargetPlatform == TargetPlatform.android)
+                          OutlinedButton.icon(
+                            onPressed: _busy
+                                ? null
+                                : AndroidVenueHubService.openBatterySettings,
+                            icon: const Icon(Icons.battery_saver_outlined),
+                            label: const Text('Battery settings'),
+                          ),
+                      ],
                     ],
                   ),
+                  if (canHostVenueHub) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      defaultTargetPlatform == TargetPlatform.android
+                          ? 'For a reliable Android hub: give TableSide unrestricted battery use, keep the device on charge, disable automatic Wi-Fi switching, and reserve its IP address in the router. After a reboot, open TableSide once when prompted so the encrypted hub can be restored.'
+                          : 'For a reliable Windows hub: reserve this computer\'s IP address in the router and prevent sleep while the venue is open.',
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   Text('State: ${runtime.state.name}'),
                   Text('Pending cloud events: ${runtime.pendingEvents}'),

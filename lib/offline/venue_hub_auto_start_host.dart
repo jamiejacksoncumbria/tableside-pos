@@ -13,6 +13,7 @@ import 'venue_hub_client_registry.dart';
 import 'venue_hub_device_credential.dart';
 import 'offline_event_ledger.dart';
 import 'venue_hub_runtime.dart';
+import 'venue_hub_platform.dart';
 
 /// Starts the configured hub when its venue workspace opens. This deliberately
 /// needs no staff PIN, so local ticket delivery continues while the UI locks.
@@ -76,6 +77,12 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
         credential: credential,
       );
       if (bootstrap.hubDeviceId != deviceId) return;
+      if (!canHostVenueHub) {
+        AppLogger.info(
+          'This platform can join the venue hub but cannot host it.',
+        );
+        return;
+      }
       if (bootstrap.hubCredentialId != credential.credentialId) return;
       final prefix =
           'tableside.offlineHub.tls.${widget.scope.tenantId}.${widget.scope.venueId}';
