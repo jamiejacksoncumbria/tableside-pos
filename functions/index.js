@@ -8,7 +8,9 @@ import {getAuth} from "firebase-admin/auth";
 import {getMessaging} from "firebase-admin/messaging";
 import {getStorage} from "firebase-admin/storage";
 import {FieldValue, getFirestore} from "firebase-admin/firestore";
-import {onDocumentCreated, onDocumentUpdated} from "firebase-functions/v2/firestore";
+import {
+  onDocumentCreated, onDocumentUpdated, onDocumentWritten,
+} from "firebase-functions/v2/firestore";
 import {HttpsError, onRequest} from "firebase-functions/v2/https";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {defineBoolean, defineString} from "firebase-functions/params";
@@ -2224,7 +2226,38 @@ function timeZoneOffsetMinutes(timeZone, now = new Date()) {
 
 async function getOfflineHubSnapshotFor(caller, rawData) {
   const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/snapshot");
+  const knownSnapshotDigest = upload.body.knownSnapshotDigest;
+  if (knownSnapshotDigest != null &&
+      (typeof knownSnapshotDigest !== "string" ||
+       !/^[A-Za-z0-9_-]{43}$/u.test(knownSnapshotDigest))) {
+    throw new HttpsError("invalid-argument", "The known venue snapshot digest is invalid.");
+  }
   const tenantRef = db.doc(`tenants/${upload.tenantId}`);
+  const snapshotVersionRef = tenantRef.collection("offlineHubSnapshotVersions")
+    .doc(upload.venueId);
+  let snapshotVersion = await snapshotVersionRef.get();
+  if (!snapshotVersion.exists) {
+    try {
+      await snapshotVersionRef.create({
+        generation: 1,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    } catch (error) {
+      // Another request or a Firestore trigger may initialise it first.
+      if (error?.code !== 6 && error?.code !== "already-exists") throw error;
+    }
+    snapshotVersion = await snapshotVersionRef.get();
+  }
+  const snapshotGeneration = Number(snapshotVersion.data()?.generation ?? 1);
+  const knownSnapshotGeneration = Number(upload.body.knownSnapshotGeneration ?? 0);
+  if (Number.isSafeInteger(knownSnapshotGeneration) &&
+      knownSnapshotGeneration > 0 && knownSnapshotGeneration === snapshotGeneration) {
+    return {
+      unchanged: true,
+      snapshotGeneration,
+      snapshotDigest: knownSnapshotDigest ?? null,
+    };
+  }
   const [tenant, venue, sections, products, modifierGroups, tables, members, pins, routes, syncState, courses, customers] =
     await Promise.all([
       tenantRef.get(),
@@ -2315,8 +2348,9 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       })),
     };
   });
-  return {
+  const snapshot = {
     version: Date.now(),
+    snapshotGeneration,
     generatedAtUtc: new Date().toISOString(),
     hubEpoch: upload.hubEpoch,
     cloudLastSequence: syncState.exists && syncState.data().hubEpoch === upload.hubEpoch
@@ -2347,6 +2381,8 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       ? venue.data().deliveryWindows : [],
     serviceAreas: Array.isArray(venue.data()?.serviceAreas)
       ? venue.data().serviceAreas : [],
+    fulfilmentDateOverrides: Array.isArray(venue.data()?.fulfilmentDateOverrides)
+      ? venue.data().fulfilmentDateOverrides : [],
     sections: sections.docs.map((document) => ({
       id: document.id,
       name: document.data().name ?? "Menu section",
@@ -2375,6 +2411,9 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       addresses: Array.isArray(customer.data().addresses)
         ? customer.data().addresses : [],
       claimStatus: customer.data().claimStatus ?? "unclaimed",
+      globalCustomerId: customer.data().globalCustomerId ?? null,
+      createdAtUtc: customer.data().createdAt?.toDate instanceof Function
+        ? customer.data().createdAt.toDate().toISOString() : null,
     })),
     tables: tables.docs.map((table) => ({
       id: table.id, label: table.data().label ?? table.id,
@@ -2387,6 +2426,17 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
     })).filter((route) => typeof route.primaryDeviceId === "string"),
     staff,
   };
+  const digestValue = {...snapshot};
+  delete digestValue.version;
+  delete digestValue.generatedAtUtc;
+  delete digestValue.snapshotGeneration;
+  const snapshotDigest = createHash("sha256")
+    .update(JSON.stringify(canonicalJsonValue(digestValue)))
+    .digest("base64url");
+  if (knownSnapshotDigest === snapshotDigest) {
+    return {unchanged: true, snapshotGeneration, snapshotDigest};
+  }
+  return {...snapshot, unchanged: false, snapshotDigest};
 }
 
 async function ingestOfflineHubEventsFor(caller, rawData) {
@@ -9498,6 +9548,75 @@ async function callerFromHttpRequest(request) {
     throw new HttpsError("unauthenticated", "The Firebase ID token is invalid or expired.");
   }
 }
+
+const offlineHubSnapshotCollections = new Set([
+  "venues", "menuSections", "products", "modifierGroups", "tables",
+  "members", "staffPins", "printerRoutes", "courses", "venueCustomers",
+  "offlineHubSyncState",
+]);
+
+async function bumpOfflineHubSnapshotVersions(tenantId, venueIds) {
+  const values = [...new Set(venueIds.filter((value) =>
+    typeof value === "string" && value.length > 0))];
+  for (let offset = 0; offset < values.length; offset += 400) {
+    const batch = db.batch();
+    for (const venueId of values.slice(offset, offset + 400)) {
+      batch.set(
+        db.doc(`tenants/${tenantId}/offlineHubSnapshotVersions/${venueId}`),
+        {
+          generation: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        {merge: true},
+      );
+    }
+    await batch.commit();
+  }
+}
+
+/// Maintains a cheap per-venue generation marker. Hubs read this single
+/// document every authority refresh and only rebuild/download the complete
+/// encrypted operational snapshot after relevant venue data changes.
+export const markOfflineHubSnapshotChanged = onDocumentWritten(
+  "tenants/{tenantId}/{collectionId}/{documentId}",
+  async (event) => {
+    const collectionId = event.params.collectionId;
+    if (!offlineHubSnapshotCollections.has(collectionId)) return;
+    const tenantId = event.params.tenantId;
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (collectionId === "venues") {
+      await bumpOfflineHubSnapshotVersions(tenantId, [event.params.documentId]);
+      return;
+    }
+    if (collectionId === "members") {
+      // Membership roles and display names are included in every venue's PIN
+      // snapshot, so a membership change invalidates all venue generations.
+      const venues = await db.collection(`tenants/${tenantId}/venues`).get();
+      await bumpOfflineHubSnapshotVersions(
+        tenantId,
+        venues.docs.map((document) => document.id),
+      );
+      return;
+    }
+    await bumpOfflineHubSnapshotVersions(tenantId, [
+      before?.venueId,
+      after?.venueId,
+    ]);
+  },
+);
+
+export const markTenantOfflineHubSnapshotsChanged = onDocumentUpdated(
+  "tenants/{tenantId}",
+  async (event) => {
+    if (event.data == null) return;
+    const venues = await db.collection(`tenants/${event.params.tenantId}/venues`).get();
+    await bumpOfflineHubSnapshotVersions(
+      event.params.tenantId,
+      venues.docs.map((document) => document.id),
+    );
+  },
+);
 
 // Verifies App Check for TableSide's custom HTTP APIs. Firestore and Storage
 // have their own App Check enforcement in the Firebase console. Monitor mode

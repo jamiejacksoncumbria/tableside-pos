@@ -48,7 +48,7 @@ class VenueHubRuntime {
 
   static final VenueHubRuntime instance = VenueHubRuntime();
 
-  static const _bootstrapSnapshotKind = 'venueBootstrap.v1';
+  static const bootstrapSnapshotKind = 'venueBootstrap.v1';
   final OfflineEventLedger _ledger;
   final ProductionCommandRepository _repository;
   final VenueHubServer _server;
@@ -114,7 +114,7 @@ class VenueHubRuntime {
         await _ledger.saveSnapshot(
           tenantId: scope.tenantId,
           venueId: scope.venueId,
-          kind: _bootstrapSnapshotKind,
+          kind: bootstrapSnapshotKind,
           version: freshSnapshot['version'] as int,
           value: freshSnapshot,
         );
@@ -122,7 +122,7 @@ class VenueHubRuntime {
       final stored = await _ledger.readSnapshot(
         tenantId: scope.tenantId,
         venueId: scope.venueId,
-        kind: _bootstrapSnapshotKind,
+        kind: bootstrapSnapshotKind,
       );
       final rawSnapshot = stored?['value'];
       if (rawSnapshot is! Map) {
@@ -198,7 +198,7 @@ class VenueHubRuntime {
         await _ledger.saveSnapshot(
           tenantId: scope.tenantId,
           venueId: scope.venueId,
-          kind: _bootstrapSnapshotKind,
+          kind: bootstrapSnapshotKind,
           version: refreshed['version'] as int,
           value: snapshot,
         );
@@ -376,8 +376,29 @@ class VenueHubRuntime {
               deviceId: deviceId,
               hubEpoch: bootstrap.hubEpoch,
               credential: credential,
+              knownSnapshotDigest: snapshot['snapshotDigest'] as String?,
+              knownSnapshotGeneration: snapshot['snapshotGeneration'] as int?,
             );
           } catch (_) {
+            return;
+          }
+          if (refreshed['unchanged'] == true) {
+            final returnedGeneration = refreshed['snapshotGeneration'] as int?;
+            if (returnedGeneration != null &&
+                returnedGeneration != snapshot['snapshotGeneration']) {
+              snapshot = Map<String, Object?>.from(snapshot)
+                ..['snapshotGeneration'] = returnedGeneration;
+              await _ledger.saveSnapshot(
+                tenantId: scope.tenantId,
+                venueId: scope.venueId,
+                kind: bootstrapSnapshotKind,
+                version: snapshot['version'] as int,
+                value: snapshot,
+              );
+            }
+            AppLogger.info(
+              'Venue hub snapshot is current; retained the encrypted local copy.',
+            );
             return;
           }
           await installFreshSnapshot(refreshed);

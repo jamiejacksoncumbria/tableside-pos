@@ -608,8 +608,16 @@ class ProductionCommandRepository {
     required String deviceId,
     required int hubEpoch,
     required VenueHubDeviceCredential credential,
+    String? knownSnapshotDigest,
+    int? knownSnapshotGeneration,
   }) async {
-    const body = <String, Object?>{'snapshotVersion': 1};
+    final body = <String, Object?>{
+      'snapshotVersion': 1,
+      if (knownSnapshotDigest != null)
+        'knownSnapshotDigest': knownSnapshotDigest,
+      if (knownSnapshotGeneration != null)
+        'knownSnapshotGeneration': knownSnapshotGeneration,
+    };
     final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
       credentialId: credential.credentialId,
       tenantId: scope.tenantId,

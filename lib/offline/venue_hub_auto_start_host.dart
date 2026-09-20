@@ -11,6 +11,7 @@ import 'venue_hub_bootstrap.dart';
 import 'venue_hub_client_cache.dart';
 import 'venue_hub_client_registry.dart';
 import 'venue_hub_device_credential.dart';
+import 'offline_event_ledger.dart';
 import 'venue_hub_runtime.dart';
 
 /// Starts the configured hub when its venue workspace opens. This deliberately
@@ -83,17 +84,49 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
       if (certificate == null || privateKey == null) return;
       Map<String, Object?>? freshSnapshot;
       try {
+        final ledger = OfflineEventLedger.instance;
+        await ledger.initialize();
+        final stored = await ledger.readSnapshot(
+          tenantId: widget.scope.tenantId,
+          venueId: widget.scope.venueId,
+          kind: VenueHubRuntime.bootstrapSnapshotKind,
+        );
+        final storedValue = stored?['value'];
+        final knownDigest = storedValue is Map
+            ? storedValue['snapshotDigest'] as String?
+            : null;
+        final knownGeneration = storedValue is Map
+            ? storedValue['snapshotGeneration'] as int?
+            : null;
         freshSnapshot = await repository
             .fetchOfflineHubSnapshot(
               scope: widget.scope,
               deviceId: deviceId,
               hubEpoch: bootstrap.hubEpoch,
               credential: credential,
+              knownSnapshotDigest: knownDigest,
+              knownSnapshotGeneration: knownGeneration,
             )
             .timeout(const Duration(seconds: 15));
-        AppLogger.info(
-          'Downloaded a fresh encrypted venue snapshot before hub auto-start.',
-        );
+        if (freshSnapshot['unchanged'] == true) {
+          final returnedGeneration =
+              freshSnapshot['snapshotGeneration'] as int?;
+          if (storedValue is Map) {
+            freshSnapshot = Map<String, Object?>.from(storedValue);
+            if (returnedGeneration != null) {
+              freshSnapshot['snapshotGeneration'] = returnedGeneration;
+            }
+          } else {
+            freshSnapshot = null;
+          }
+          AppLogger.info(
+            'Encrypted venue snapshot is current; reused the durable local copy.',
+          );
+        } else {
+          AppLogger.info(
+            'Downloaded a changed venue snapshot before hub auto-start.',
+          );
+        }
       } catch (error, stackTrace) {
         // An internet outage is expected here. Runtime startup will use the
         // last authenticated encrypted snapshot when one is available.
