@@ -7,7 +7,7 @@ void main() {
   testWidgets('compact POS menu hides the shell until tables is selected', (
     tester,
   ) async {
-    await tester.pumpWidget(const ProviderScope(child: TableSideApp()));
+    await tester.pumpWidget(const ProviderScope(child: TableSideCYApp()));
     await tester.pumpAndSettle();
 
     expect(find.text('New order'), findsOneWidget);
