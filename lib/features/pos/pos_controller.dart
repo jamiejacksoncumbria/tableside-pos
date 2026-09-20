@@ -17,7 +17,7 @@ import 'domain.dart';
 final menuSectionsProvider = StreamProvider<List<MenuSection>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoSections);
-  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     return VenueHubOfflineView.instance.sectionStream;
   }
   return ref.watch(firestorePosRepositoryProvider).watchMenuSections(scope);
@@ -26,7 +26,7 @@ final menuSectionsProvider = StreamProvider<List<MenuSection>>((ref) {
 final menuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoProducts);
-  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     return VenueHubOfflineView.instance.productStream();
   }
   return ref.watch(firestorePosRepositoryProvider).watchProducts(scope);
@@ -35,7 +35,7 @@ final menuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
 final allMenuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoProducts);
-  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     return VenueHubOfflineView.instance.productStream(includeArchived: true);
   }
   return ref
@@ -46,7 +46,7 @@ final allMenuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
 final diningTablesProvider = StreamProvider<List<DiningTable>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoTables);
-  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     final view = VenueHubOfflineView.instance;
     return view.orderStream.map((orders) {
       final openByTable = <String, PosOrder>{
@@ -74,7 +74,7 @@ final diningTablesProvider = StreamProvider<List<DiningTable>>((ref) {
 final openNamedTabsProvider = StreamProvider<List<OpenNamedTab>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const []);
-  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     return VenueHubOfflineView.instance.orderStream.map(
       (orders) => orders
           .where(
@@ -111,7 +111,7 @@ final menuModifierGroupsProvider = StreamProvider<List<MenuModifierGroup>>((
 ) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <MenuModifierGroup>[]);
-  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     return VenueHubOfflineView.instance.modifierGroupStream;
   }
   return ref.watch(firestorePosRepositoryProvider).watchModifierGroups(scope);
@@ -130,7 +130,7 @@ final tableOpenOrderProvider = StreamProvider.autoDispose
     .family<PosOrder?, String>((ref, orderId) {
       final scope = ref.watch(activeVenueScopeProvider);
       if (scope == null || orderId.trim().isEmpty) return Stream.value(null);
-      if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+      if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
         return VenueHubOfflineView.instance.orderStream.map(
           (orders) => orders.where((order) => order.id == orderId).firstOrNull,
         );
@@ -161,7 +161,7 @@ final activeOrderStreamProvider = StreamProvider<PosOrder?>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   final orderId = ref.watch(activePersistedOrderIdProvider);
   if (scope == null || orderId == null) return Stream.value(null);
-  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     return VenueHubOfflineView.instance.orderStream.map(
       (orders) => orders.where((order) => order.id == orderId).firstOrNull,
     );
@@ -643,7 +643,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
     }
     PosOrder? existing;
     if (scope != null && !isTraining) {
-      if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+      if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
         existing = VenueHubOfflineView.instance.currentOrders
             .where(
               (order) =>
@@ -733,7 +733,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
     final orderId = await ref
         .read(productionCommandRepositoryProvider)
         .openNamedTab(scope: scope, tabName: cleanedName);
-    if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+    if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
       final now = DateTime.now();
       state = PosOrder(
         id: orderId,
@@ -1038,7 +1038,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
     _pendingPaymentFingerprint = null;
     _pendingDraftQuantities.clear();
     if (!result.orderClosed) {
-      if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+      if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
         final first = payments.first;
         state = state.copyWith(
           payments: <OrderPayment>[

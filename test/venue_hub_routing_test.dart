@@ -3,7 +3,7 @@ import 'package:tableside_pos/offline/venue_hub_routing.dart';
 
 void main() {
   test(
-    'cloud-connected web is read-only while unreachable hub owns writes',
+    'cloud-connected web submits commands to the authoritative hub',
     () {
       expect(
         chooseVenueMutationRoute(
@@ -14,10 +14,24 @@ void main() {
             hubOwnsAuthority: true,
           ),
         ),
-        VenueMutationRoute.readOnly,
+        VenueMutationRoute.remoteHub,
       );
     },
   );
+
+  test('native mobile-data clients route through the remote hub queue', () {
+    expect(
+      chooseVenueMutationRoute(
+        const VenueHubRoutingInput(
+          platform: VenueClientPlatform.android,
+          cloudReachable: true,
+          hubReachable: false,
+          hubOwnsAuthority: true,
+        ),
+      ),
+      VenueMutationRoute.remoteHub,
+    );
+  });
 
   test('native LAN clients write through authoritative hub', () {
     for (final platform in [

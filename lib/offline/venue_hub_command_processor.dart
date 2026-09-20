@@ -104,7 +104,7 @@ class VenueHubCommandProcessor {
     }
     final rawEventType = body['eventType'];
     final eventType = rawEventType is String ? rawEventType : null;
-    final permission = eventType == null ? null : _permissionByEvent[eventType];
+    final permission = permissionForEvent(eventType);
     if (eventType == null || permission == null) {
       throw const VenueHubCommandException(
         'The staff member cannot perform this offline operation.',
@@ -116,17 +116,82 @@ class VenueHubCommandProcessor {
       trustedNowUtc: trustedNowUtc,
       requiredPermission: permission,
     );
+    return _validateAndCommit(
+      eventType: eventType,
+      body: body,
+      grant: grant,
+      deviceId: envelope.deviceId,
+      staffId: envelope.staffId,
+    );
+  }
+
+  /// Processes a short-lived command claimed from Firebase by the active hub.
+  /// The cloud has already authenticated the staff PIN session; the hub still
+  /// independently checks the cached staff grant and revalidates all business
+  /// inputs against its authoritative catalogue before the durable commit.
+  Future<VenueHubCommandAcknowledgement> processRemote({
+    required String commandId,
+    required String eventType,
+    required Map<String, Object?> payload,
+    required String deviceId,
+    required VenueHubStaffGrant grant,
+    DateTime? businessTimestampUtc,
+    required DateTime trustedNowUtc,
+  }) async {
+    final permission = permissionForEvent(eventType);
+    if (permission == null ||
+        !grant.active ||
+        grant.staffId.trim().isEmpty ||
+        !grant.expiresAtUtc.toUtc().isAfter(trustedNowUtc.toUtc()) ||
+        grant.pinVersion < 1 ||
+        grant.membershipVersion < 1 ||
+        !grant.permissions.contains(permission)) {
+      throw const VenueHubCommandException(
+        'The remote staff command is unavailable, expired, or not permitted.',
+      );
+    }
+    return _validateAndCommit(
+      eventType: eventType,
+      body: <String, Object?>{
+        'payload': <String, Object?>{
+          ...payload,
+          'remoteCommandId': commandId,
+        },
+        if (businessTimestampUtc != null)
+          'businessTimestampUtc': businessTimestampUtc.toUtc().toIso8601String(),
+      },
+      grant: grant,
+      deviceId: deviceId,
+      staffId: grant.staffId,
+    );
+  }
+
+  String? permissionForEvent(String? eventType) =>
+      eventType == null ? null : _permissionByEvent[eventType];
+
+  Future<VenueHubCommandAcknowledgement> _validateAndCommit({
+    required String eventType,
+    required Map<String, Object?> body,
+    required VenueHubStaffGrant grant,
+    required String deviceId,
+    required String staffId,
+  }) async {
     final rawPayload = body['payload'];
     if (rawPayload is! Map) {
       throw const VenueHubCommandException(
         'The offline event payload is invalid.',
       );
     }
+    final suppliedPayload = Map<String, Object?>.from(rawPayload);
     final canonicalPayload = await _validateEvent(
       eventType,
-      Map<String, Object?>.from(rawPayload),
+      suppliedPayload,
       grant,
     );
+    final remoteCommandId = suppliedPayload['remoteCommandId'];
+    if (remoteCommandId is String && remoteCommandId.isNotEmpty) {
+      canonicalPayload['remoteCommandId'] = remoteCommandId;
+    }
     if (eventType == 'order.fulfilmentChanged') {
       canonicalPayload['managerAuthorized'] = grant.permissions.contains(
         'manager',
@@ -151,8 +216,8 @@ class VenueHubCommandProcessor {
       OfflineEventDraft(
         tenantId: tenantId,
         venueId: venueId,
-        deviceId: envelope.deviceId,
-        staffId: envelope.staffId,
+        deviceId: deviceId,
+        staffId: staffId,
         type: eventType,
         payload: canonicalPayload,
         businessTimestamp: businessTimestamp,

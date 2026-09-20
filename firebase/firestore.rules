@@ -225,6 +225,20 @@ service cloud.firestore {
       match /courses/{courseId} {
         allow read: if canReadOperationalData(tenantId);
         allow write: if false;
+
+        // Remote devices may only observe their own short-lived command. All
+        // writes and hub acknowledgements pass through trusted server APIs.
+        match /remoteHubCommands/{commandId} {
+          allow read: if canReadOperationalData(tenantId)
+            && (resource.data.hostUid == request.auth.uid
+              || managesVenueWithActivePin(tenantId, venueId));
+          allow write: if false;
+        }
+
+        match /remoteHubState/{stateId} {
+          allow read: if canReadOperationalData(tenantId);
+          allow write: if false;
+        }
       }
 
       match /venueCustomers/{customerId} {

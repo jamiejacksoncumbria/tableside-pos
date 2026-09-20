@@ -123,6 +123,39 @@ void main() {
     );
     expect(committed, isFalse);
   });
+
+  test('remote command is revalidated and carries its idempotency key', () async {
+    final committedDrafts = <OfflineEventDraft>[];
+    final processor = VenueHubCommandProcessor(
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+      hubEpoch: 2,
+      credentials: const {},
+      authorizeStaff: (_, _, _) async => null,
+      validateEvent: (type, payload, grant) async => Map.of(payload),
+      commitEvent: (draft, epoch) async {
+        committedDrafts.add(draft);
+        return _event(draft, epoch);
+      },
+    );
+    final acknowledgement = await processor.processRemote(
+      commandId: 'remote-command-a',
+      eventType: 'order.opened',
+      payload: const {'orderId': 'order-a'},
+      deviceId: 'remote-host-a',
+      grant: VenueHubStaffGrant(
+        staffId: 'staff-a',
+        permissions: const {'order'},
+        expiresAtUtc: DateTime.utc(2026, 9, 12, 13),
+        pinVersion: 2,
+        membershipVersion: 3,
+      ),
+      trustedNowUtc: DateTime.utc(2026, 9, 12, 12),
+    );
+    expect(acknowledgement.eventId, 'evt_test');
+    expect(committedDrafts.single.payload['remoteCommandId'], 'remote-command-a');
+    expect(committedDrafts.single.deviceId, 'remote-host-a');
+  });
 }
 
 OfflineEvent _event(OfflineEventDraft draft, int epoch) {

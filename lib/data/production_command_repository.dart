@@ -15,6 +15,8 @@ import '../offline/offline_event.dart';
 import '../offline/venue_hub_device_credential.dart';
 import '../offline/venue_hub_protocol.dart';
 import '../offline/venue_hub_client_registry.dart';
+import '../offline/venue_hub_client.dart';
+import '../offline/venue_hub_remote_command_client.dart';
 
 class ProductionDispatchResult {
   const ProductionDispatchResult({
@@ -254,6 +256,8 @@ final productionCommandRepositoryProvider =
 /// Cloud Function verifies the signed-in membership, loads the canonical menu
 /// product, creates production tickets, and records stock movement atomically.
 class ProductionCommandRepository {
+  final VenueHubRemoteCommandClient _remoteHub = VenueHubRemoteCommandClient();
+
   Future<List<String>> suggestVoucherCodes({
     required VenueScope scope,
     required String prefix,
@@ -420,8 +424,7 @@ class ProductionCommandRepository {
     if (operation == 'updateOrderFulfilment' &&
         documentId != null &&
         hub.requiresHub(scope)) {
-      return hub
-          .send(
+      return _sendHubEvent(
             scope: scope,
             eventType: 'order.fulfilmentChanged',
             payload: <String, Object?>{
@@ -631,6 +634,99 @@ class ProductionCommandRepository {
       body: body,
     );
     return _call('getOfflineHubSnapshot', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+  }
+
+  Future<void> heartbeatRemoteHub({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+    required int pendingLocalEvents,
+  }) async {
+    final body = <String, Object?>{
+      'deviceId': deviceId,
+      'pendingLocalEvents': pendingLocalEvents,
+    };
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: '/v1/remote-heartbeat',
+      hubEpoch: hubEpoch,
+      sentAtUtc: DateTime.now().toUtc(),
+      body: body,
+    );
+    await _call('heartbeatRemoteHub', {'envelope': envelope.toJson(), 'body': body});
+  }
+
+  Future<List<Map<String, Object?>>> claimRemoteHubCommands({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+    int maximum = 10,
+  }) async {
+    final body = <String, Object?>{'deviceId': deviceId, 'maximum': maximum};
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: '/v1/remote-claim',
+      hubEpoch: hubEpoch,
+      sentAtUtc: DateTime.now().toUtc(),
+      body: body,
+    );
+    final response = await _call('claimRemoteHubCommands', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+    final commands = response['commands'];
+    return commands is List
+        ? commands.whereType<Map>().map(Map<String, Object?>.from).toList(growable: false)
+        : const <Map<String, Object?>>[];
+  }
+
+  Future<void> completeRemoteHubCommand({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+    required String commandId,
+    required String claimToken,
+    required bool accepted,
+    Map<String, Object?> result = const <String, Object?>{},
+    String? rejectionMessage,
+  }) async {
+    final body = <String, Object?>{
+      'deviceId': deviceId,
+      'commandId': commandId,
+      'claimToken': claimToken,
+      'accepted': accepted,
+      'result': result,
+      if (rejectionMessage != null) 'rejectionMessage': rejectionMessage,
+    };
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: '/v1/remote-complete',
+      hubEpoch: hubEpoch,
+      sentAtUtc: DateTime.now().toUtc(),
+      body: body,
+    );
+    await _call('completeRemoteHubCommand', {
       'envelope': envelope.toJson(),
       'body': body,
     });
@@ -991,7 +1087,7 @@ class ProductionCommandRepository {
     final hub = VenueHubClientRegistry.instance;
     if (hub.requiresHub(scope)) {
       final orderId = 'order-${DateTime.now().microsecondsSinceEpoch}';
-      await hub.ensureOrderOpened(
+      await _ensureHubOrderOpened(
         scope: scope,
         orderId: orderId,
         tabName: tabName,
@@ -1020,7 +1116,7 @@ class ProductionCommandRepository {
   }) async {
     final hub = VenueHubClientRegistry.instance;
     if (hub.requiresHub(scope)) {
-      await hub.ensureOrderOpened(
+      await _ensureHubOrderOpened(
         scope: scope,
         orderId: order.id,
         tableId: order.tableId,
@@ -1032,7 +1128,7 @@ class ProductionCommandRepository {
         deliveryAddress: order.deliveryAddress,
         scheduledFor: order.scheduledFor,
       );
-      await hub.send(
+      await _sendHubEvent(
         scope: scope,
         eventType: 'order.itemAdded',
         payload: <String, Object?>{
@@ -1093,7 +1189,7 @@ class ProductionCommandRepository {
   }) async {
     final hub = VenueHubClientRegistry.instance;
     if (hub.requiresHub(scope)) {
-      await hub.send(
+      await _sendHubEvent(
         scope: scope,
         eventType: 'order.itemQuantityChanged',
         payload: <String, Object?>{
@@ -1153,7 +1249,7 @@ class ProductionCommandRepository {
 
     final hub = VenueHubClientRegistry.instance;
     if (hub.requiresHub(scope)) {
-      await hub.ensureOrderOpened(
+      await _ensureHubOrderOpened(
         scope: scope,
         orderId: order.id,
         tableId: order.tableId,
@@ -1165,7 +1261,7 @@ class ProductionCommandRepository {
         deliveryAddress: order.deliveryAddress,
         scheduledFor: order.scheduledFor,
       );
-      await hub.send(
+      await _sendHubEvent(
         scope: scope,
         eventType: 'order.sent',
         payload: <String, Object?>{
@@ -1319,7 +1415,7 @@ class ProductionCommandRepository {
   }) async {
     final hub = VenueHubClientRegistry.instance;
     if (hub.requiresHub(scope)) {
-      await hub.ensureOrderOpened(
+      await _ensureHubOrderOpened(
         scope: scope,
         orderId: order.id,
         tableId: order.tableId,
@@ -1330,7 +1426,7 @@ class ProductionCommandRepository {
         final payment = payments[index];
         final baseAmount = _baseAmountMinor(payment);
         paidThisTime += baseAmount;
-        await hub.send(
+        await _sendHubEvent(
           scope: scope,
           eventType: 'payment.recorded',
           payload: <String, Object?>{
@@ -1353,7 +1449,7 @@ class ProductionCommandRepository {
       final receiptNumber =
           'OFF-${hub.hubEpochFor(scope)}-${requestId.split('-').last}';
       if (closed) {
-        await hub.send(
+        await _sendHubEvent(
           scope: scope,
           eventType: 'order.closed',
           payload: <String, Object?>{
@@ -1546,7 +1642,7 @@ class ProductionCommandRepository {
   }) async {
     final hub = VenueHubClientRegistry.instance;
     if (hub.requiresHub(scope)) {
-      await hub.send(
+      await _sendHubEvent(
         scope: scope,
         eventType: 'receipt.requested',
         payload: <String, Object?>{'orderId': order.id},
@@ -1628,6 +1724,85 @@ class ProductionCommandRepository {
       'businessDayCutoffMinutes': businessDayCutoffMinutes,
       'defaultThemeMode': defaultThemeMode,
     });
+  }
+
+  Future<void> _ensureHubOrderOpened({
+    required VenueScope scope,
+    required String orderId,
+    String? tableId,
+    String? tabName,
+    OrderChannel channel = OrderChannel.dineIn,
+    String? customerId,
+    String? customerName,
+    String? customerPhone,
+    String? deliveryAddress,
+    DateTime? scheduledFor,
+  }) async {
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.hasUsableSession(scope)) {
+      await hub.ensureOrderOpened(
+        scope: scope,
+        orderId: orderId,
+        tableId: tableId,
+        tabName: tabName,
+        channel: channel,
+        customerId: customerId,
+        customerName: customerName,
+        customerPhone: customerPhone,
+        deliveryAddress: deliveryAddress,
+        scheduledFor: scheduledFor,
+      );
+      return;
+    }
+    await _sendHubEvent(
+      scope: scope,
+      eventType: 'order.opened',
+      payload: <String, Object?>{
+        'orderId': orderId,
+        if (tableId?.trim().isNotEmpty == true) 'tableId': tableId!.trim(),
+        if (tabName?.trim().isNotEmpty == true) 'tabName': tabName!.trim(),
+        'channel': channel.name,
+        if (customerId?.trim().isNotEmpty == true) 'customerId': customerId!.trim(),
+        if (customerName?.trim().isNotEmpty == true) 'customerName': customerName!.trim(),
+        if (customerPhone?.trim().isNotEmpty == true) 'customerPhone': customerPhone!.trim(),
+        if (deliveryAddress?.trim().isNotEmpty == true)
+          'deliveryAddress': deliveryAddress!.trim(),
+        if (scheduledFor != null)
+          'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
+      },
+    );
+  }
+
+  Future<VenueHubEventAcknowledgement> _sendHubEvent({
+    required VenueScope scope,
+    required String eventType,
+    required Map<String, Object?> payload,
+    DateTime? businessTimestampUtc,
+  }) async {
+    final hub = VenueHubClientRegistry.instance;
+    if (!hub.requiresHub(scope)) {
+      throw StateError('The venue hub is not authoritative for this venue.');
+    }
+    if (hub.hasUsableSession(scope)) {
+      return hub.send(
+        scope: scope,
+        eventType: eventType,
+        payload: payload,
+        businessTimestampUtc: businessTimestampUtc,
+      );
+    }
+    final epoch = hub.hubEpochFor(scope);
+    if (epoch == null || epoch < 1) {
+      throw StateError('The venue hub generation is unavailable.');
+    }
+    return _remoteHub.send(
+      scope: scope,
+      hubEpoch: epoch,
+      eventType: eventType,
+      payload: payload,
+      businessTimestampUtc: businessTimestampUtc,
+      submit: (request) => _call('submitRemoteHubCommand', request),
+    );
   }
 
   Future<Map<String, Object?>> _call(

@@ -60,6 +60,7 @@ class VenueHubRuntime {
   Future<void> Function(Map<String, Object?> snapshot)? _installFreshSnapshot;
   StreamSubscription? _pendingSubscription;
   Timer? _authorityTimer;
+  Timer? _remoteCommandTimer;
   VenueHubRuntimeStatus _status = const VenueHubRuntimeStatus(
     state: VenueHubRuntimeState.stopped,
     pendingEvents: 0,
@@ -317,6 +318,136 @@ class VenueHubRuntime {
           return VenueHubCloudUploadResult(acknowledgedEventIds: acknowledged);
         },
       );
+      var remoteTickRunning = false;
+      var remoteCloudAvailable = true;
+      VenueHubStaffGrant? remoteGrant(Map<String, Object?> command) {
+        final staffId = command['staffId'];
+        final expectedPinVersion = command['pinVersion'];
+        final expectedMembershipVersion = command['membershipVersion'];
+        final expiresAt = DateTime.tryParse(command['expiresAt'] as String? ?? '');
+        if (staffId is! String ||
+            expectedPinVersion is! int ||
+            expectedMembershipVersion is! int ||
+            expiresAt == null ||
+            !expiresAt.toUtc().isAfter(TrustedClock.instance.nowUtc())) {
+          return null;
+        }
+        final rawStaff = snapshot['staff'];
+        if (rawStaff is! List) return null;
+        for (final raw in rawStaff.whereType<Map>()) {
+          if (raw['staffId'] != staffId ||
+              raw['pinVersion'] != expectedPinVersion ||
+              raw['membershipVersion'] != expectedMembershipVersion) {
+            continue;
+          }
+          return VenueHubStaffGrant(
+            staffId: staffId,
+            permissions: (raw['permissions'] as List? ?? const [])
+                .whereType<String>()
+                .toSet(),
+            expiresAtUtc: expiresAt.toUtc(),
+            pinVersion: expectedPinVersion,
+            membershipVersion: expectedMembershipVersion,
+          );
+        }
+        return null;
+      }
+
+      Future<void> remoteTick() async {
+        if (remoteTickRunning || _activeScope != scope) return;
+        remoteTickRunning = true;
+        try {
+          await _repository.heartbeatRemoteHub(
+            scope: scope,
+            deviceId: deviceId,
+            hubEpoch: bootstrap.hubEpoch,
+            credential: credential,
+            pendingLocalEvents: (await _ledger.pending()).length,
+          );
+          final commands = await _repository.claimRemoteHubCommands(
+            scope: scope,
+            deviceId: deviceId,
+            hubEpoch: bootstrap.hubEpoch,
+            credential: credential,
+          );
+          if (!remoteCloudAvailable) {
+            AppLogger.info('Venue hub remote command connection restored.');
+            remoteCloudAvailable = true;
+          }
+          for (final command in commands) {
+            final commandId = command['commandId'];
+            final claimToken = command['claimToken'];
+            if (commandId is! String || claimToken is! String) continue;
+            try {
+              final grant = remoteGrant(command);
+              final eventType = command['eventType'];
+              final payload = command['payload'];
+              if (grant == null || eventType is! String || payload is! Map) {
+                throw const VenueHubCommandException(
+                  'The staff permission snapshot changed before the command was accepted.',
+                );
+              }
+              final acknowledgement = await processor.processRemote(
+                commandId: commandId,
+                eventType: eventType,
+                payload: Map<String, Object?>.from(payload),
+                deviceId: 'remote-${command['hostUid']}',
+                grant: grant,
+                businessTimestampUtc: DateTime.tryParse(
+                  command['businessTimestampUtc'] as String? ?? '',
+                ),
+                trustedNowUtc: TrustedClock.instance.nowUtc(),
+              );
+              await _repository.completeRemoteHubCommand(
+                scope: scope,
+                deviceId: deviceId,
+                hubEpoch: bootstrap.hubEpoch,
+                credential: credential,
+                commandId: commandId,
+                claimToken: claimToken,
+                accepted: true,
+                result: <String, Object?>{
+                  'eventId': acknowledgement.eventId,
+                  'sequence': acknowledgement.sequence,
+                  'eventHash': acknowledgement.eventHash,
+                  'committedAtUtc': acknowledgement.committedAtUtc.toUtc().toIso8601String(),
+                },
+              );
+              unawaited(_sync!.flush());
+            } catch (error, stackTrace) {
+              AppLogger.error('Process remote venue command', error, stackTrace);
+              try {
+                await _repository.completeRemoteHubCommand(
+                  scope: scope,
+                  deviceId: deviceId,
+                  hubEpoch: bootstrap.hubEpoch,
+                  credential: credential,
+                  commandId: commandId,
+                  claimToken: claimToken,
+                  accepted: false,
+                  rejectionMessage: error.toString(),
+                );
+              } catch (_) {
+                // The short claim lease makes an ambiguous completion retryable.
+              }
+            }
+          }
+        } catch (_) {
+          if (remoteCloudAvailable) {
+            AppLogger.info(
+              'Venue hub remote command connection is offline; LAN orders remain available.',
+            );
+            remoteCloudAvailable = false;
+          }
+        } finally {
+          remoteTickRunning = false;
+        }
+      }
+      _remoteCommandTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => unawaited(remoteTick()),
+      );
+      unawaited(remoteTick());
       _pendingSubscription = _ledger.watchPending().listen(
         (events) {
           _emit(
@@ -437,6 +568,8 @@ class VenueHubRuntime {
   Future<void> stop() async {
     _authorityTimer?.cancel();
     _authorityTimer = null;
+    _remoteCommandTimer?.cancel();
+    _remoteCommandTimer = null;
     await _pendingSubscription?.cancel();
     _pendingSubscription = null;
     _sync?.dispose();

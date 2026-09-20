@@ -25,7 +25,7 @@ final venueCoursesProvider = StreamProvider<List<MenuCourse>>((ref) {
 final venueCustomersProvider = StreamProvider<List<VenueCustomer>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <VenueCustomer>[]);
-  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     return VenueHubOfflineView.instance.customerStream;
   }
   return ref.watch(fulfilmentRepositoryProvider).watchCustomers(scope);
@@ -34,7 +34,7 @@ final venueCustomersProvider = StreamProvider<List<VenueCustomer>>((ref) {
 final fulfilmentOrdersProvider = StreamProvider<List<PosOrder>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <PosOrder>[]);
-  if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     return VenueHubOfflineView.instance.orderStream.map(
       (orders) => orders
           .where(
@@ -60,7 +60,7 @@ final venueFulfilmentSettingsProvider = StreamProvider<VenueFulfilmentSettings>(
   (ref) {
     final scope = ref.watch(activeVenueScopeProvider);
     if (scope == null) return Stream.value(const VenueFulfilmentSettings());
-    if (!kIsWeb && VenueHubClientRegistry.instance.requiresHub(scope)) {
+    if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
       return VenueHubOfflineView.instance.fulfilmentSettingsStream;
     }
     return ref.watch(fulfilmentRepositoryProvider).watchSettings(scope);

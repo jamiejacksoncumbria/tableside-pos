@@ -2096,6 +2096,181 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
   };
 }
 
+const remoteHubCommandTtlMs = 25 * 1000;
+const remoteHubClaimLeaseMs = 15 * 1000;
+const remoteHubHeartbeatTtlMs = 15 * 1000;
+const remoteHubEventTypes = new Set([
+  "order.opened", "order.itemAdded", "order.itemQuantityChanged",
+  "order.sent", "order.fulfilmentChanged", "payment.recorded",
+  "order.closed", "receipt.requested",
+]);
+
+function remoteHubQueue(tenantId, venueId) {
+  return db.collection(`tenants/${tenantId}/venues/${venueId}/remoteHubCommands`);
+}
+
+function remoteHubStateRef(tenantId, venueId) {
+  return db.doc(`tenants/${tenantId}/venues/${venueId}/remoteHubState/status`);
+}
+
+async function submitRemoteHubCommandFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const commandId = requiredDocumentId(data, "commandId");
+  const idempotencyKey = requiredText(data, "idempotencyKey", 160);
+  const eventType = requiredText(data, "eventType", 80);
+  const payload = requireObject(data.payload);
+  const hubEpoch = Number(data.hubEpoch);
+  if (!remoteHubEventTypes.has(eventType) ||
+      !Number.isSafeInteger(hubEpoch) || hubEpoch < 1) {
+    throw new HttpsError("invalid-argument", "The remote venue command is invalid.");
+  }
+  const encodedPayload = JSON.stringify(canonicalJsonValue(payload));
+  if (Buffer.byteLength(encodedPayload, "utf8") > 64 * 1024) {
+    throw new HttpsError("invalid-argument", "The remote venue command is too large.");
+  }
+  const [{membership}, venue, state, pin] = await Promise.all([
+    requireTenantOperationalMember(caller, tenantId),
+    db.doc(`tenants/${tenantId}/venues/${venueId}`).get(),
+    remoteHubStateRef(tenantId, venueId).get(),
+    db.doc(`tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`).get(),
+  ]);
+  const hub = venue.data()?.offlineHub;
+  const heartbeatExpiresAt = state.data()?.heartbeatExpiresAt?.toDate?.();
+  if (!venue.exists || venue.data()?.status === "deleting" ||
+      hub?.enabled !== true || hub.epoch !== hubEpoch ||
+      state.data()?.hubEpoch !== hubEpoch ||
+      state.data()?.hubDeviceId !== hub.deviceId ||
+      heartbeatExpiresAt == null || heartbeatExpiresAt.getTime() <= Date.now()) {
+    throw new HttpsError(
+      "unavailable",
+      "The venue hub is offline. Join the venue network or wait for the hub to reconnect.",
+    );
+  }
+  if (!pin.exists || pin.data()?.locked === true) {
+    throw new HttpsError("unauthenticated", "The staff PIN is unavailable or locked.");
+  }
+  const venueIds = Array.isArray(membership.venueIds) ? membership.venueIds : [];
+  if (venueIds.length > 0 && !venueIds.includes(venueId)) {
+    throw new HttpsError("permission-denied", "This staff member is not assigned to this venue.");
+  }
+  const requestDigest = createHash("sha256").update(JSON.stringify(canonicalJsonValue({
+    tenantId, venueId, hubEpoch, idempotencyKey, eventType, payload,
+  }))).digest("base64url");
+  const commandRef = remoteHubQueue(tenantId, venueId).doc(commandId);
+  const expiresAt = new Date(Date.now() + remoteHubCommandTtlMs);
+  await db.runTransaction(async (transaction) => {
+    const existing = await transaction.get(commandRef);
+    if (existing.exists) {
+      if (existing.data().requestDigest !== requestDigest ||
+          existing.data().hostUid !== caller.hostUid) {
+        throw new HttpsError("already-exists", "That remote command key was already used.");
+      }
+      return;
+    }
+    transaction.create(commandRef, {
+      tenantId, venueId, hubEpoch, idempotencyKey, requestDigest, eventType, payload,
+      hostUid: caller.hostUid, staffId: caller.uid,
+      pinVersion: Number(pin.data()?.pinVersion ?? 0),
+      membershipVersion: Number(membership.membershipVersion ?? 1),
+      status: "pending", createdAt: FieldValue.serverTimestamp(), expiresAt,
+      businessTimestampUtc: typeof data.businessTimestampUtc === "string"
+        ? data.businessTimestampUtc : null,
+    });
+  });
+  return {commandId, expiresAt: expiresAt.toISOString(), documentPath: commandRef.path};
+}
+
+async function heartbeatRemoteHubFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/remote-heartbeat");
+  const expiresAt = new Date(Date.now() + remoteHubHeartbeatTtlMs);
+  await remoteHubStateRef(upload.tenantId, upload.venueId).set({
+    hubDeviceId: upload.body.deviceId,
+    hubEpoch: upload.hubEpoch,
+    status: "online",
+    pendingLocalEvents: Number(upload.body.pendingLocalEvents ?? 0),
+    lastHeartbeatAt: FieldValue.serverTimestamp(),
+    heartbeatExpiresAt: expiresAt,
+  }, {merge: true});
+  return {heartbeatExpiresAt: expiresAt.toISOString()};
+}
+
+async function claimRemoteHubCommandsFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/remote-claim");
+  const maximum = Math.min(Math.max(Number(upload.body.maximum ?? 10), 1), 25);
+  const candidates = await remoteHubQueue(upload.tenantId, upload.venueId)
+    .where("status", "in", ["pending", "claimed"])
+    .orderBy("createdAt")
+    .limit(maximum * 3)
+    .get();
+  const claimed = [];
+  for (const candidate of candidates.docs) {
+    if (claimed.length >= maximum) break;
+    const result = await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(candidate.ref);
+      if (!current.exists || current.data().hubEpoch !== upload.hubEpoch) return null;
+      const value = current.data();
+      const expiresAt = value.expiresAt?.toDate?.();
+      if (expiresAt == null || expiresAt.getTime() <= Date.now()) {
+        transaction.update(candidate.ref, {status: "expired", completedAt: FieldValue.serverTimestamp()});
+        return null;
+      }
+      const claimExpiresAt = value.claimExpiresAt?.toDate?.();
+      if (value.status !== "pending" &&
+          (claimExpiresAt == null || claimExpiresAt.getTime() > Date.now())) return null;
+      const claimToken = randomBytes(24).toString("base64url");
+      transaction.update(candidate.ref, {
+        status: "claimed", claimedByDeviceId: upload.body.deviceId,
+        claimTokenHash: createHash("sha256").update(claimToken).digest("base64"),
+        claimedAt: FieldValue.serverTimestamp(),
+        claimExpiresAt: new Date(Date.now() + remoteHubClaimLeaseMs),
+      });
+      return {
+        commandId: current.id, claimToken, eventType: value.eventType,
+        payload: value.payload, staffId: value.staffId,
+        pinVersion: Number(value.pinVersion ?? 0),
+        membershipVersion: Number(value.membershipVersion ?? 0),
+        expiresAt: expiresAt.toISOString(),
+        businessTimestampUtc: value.businessTimestampUtc ?? null,
+        hostUid: value.hostUid,
+      };
+    });
+    if (result != null) claimed.push(result);
+  }
+  return {commands: claimed};
+}
+
+async function completeRemoteHubCommandFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/remote-complete");
+  const commandId = requiredDocumentId(upload.body, "commandId");
+  const claimToken = requiredText(upload.body, "claimToken", 128);
+  const accepted = upload.body.accepted === true;
+  const result = upload.body.result == null ? {} : requireObject(upload.body.result);
+  const commandRef = remoteHubQueue(upload.tenantId, upload.venueId).doc(commandId);
+  await db.runTransaction(async (transaction) => {
+    const current = await transaction.get(commandRef);
+    if (!current.exists) throw new HttpsError("not-found", "The remote command no longer exists.");
+    if (["accepted", "rejected"].includes(current.data().status)) return;
+    const expected = String(current.data().claimTokenHash ?? "");
+    const supplied = createHash("sha256").update(claimToken).digest("base64");
+    if (expected.length !== supplied.length ||
+        !timingSafeEqual(Buffer.from(expected), Buffer.from(supplied)) ||
+        current.data().claimedByDeviceId !== upload.body.deviceId ||
+        current.data().hubEpoch !== upload.hubEpoch) {
+      throw new HttpsError("permission-denied", "The remote command claim is invalid.");
+    }
+    transaction.update(commandRef, {
+      status: accepted ? "accepted" : "rejected",
+      completedAt: FieldValue.serverTimestamp(),
+      result: accepted ? result : null,
+      rejectionMessage: accepted ? null : String(upload.body.rejectionMessage ?? "The venue hub rejected this command.").slice(0, 500),
+      claimTokenHash: FieldValue.delete(), claimExpiresAt: FieldValue.delete(),
+    });
+  });
+  return {commandId, accepted};
+}
+
 function canonicalJsonValue(value) {
   if (Array.isArray(value)) return value.map(canonicalJsonValue);
   if (value != null && typeof value === "object") {
@@ -9429,7 +9604,8 @@ async function invokePosAction(action, caller, data) {
     "recoverOwnStaffPin",
     "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
     "getTrustedTime", "getOfflineHubBootstrap", "ingestOfflineHubEvents",
-    "getOfflineHubSnapshot",
+    "getOfflineHubSnapshot", "heartbeatRemoteHub", "claimRemoteHubCommands",
+    "completeRemoteHubCommand",
   ]);
   const actingCaller = sessionBootstrapActions.has(action)
     ? caller
@@ -9465,6 +9641,14 @@ async function invokePosAction(action, caller, data) {
       return ingestOfflineHubEventsFor(caller, data);
     case "getOfflineHubSnapshot":
       return getOfflineHubSnapshotFor(caller, data);
+    case "submitRemoteHubCommand":
+      return submitRemoteHubCommandFor(actingCaller, data);
+    case "heartbeatRemoteHub":
+      return heartbeatRemoteHubFor(caller, data);
+    case "claimRemoteHubCommands":
+      return claimRemoteHubCommandsFor(caller, data);
+    case "completeRemoteHubCommand":
+      return completeRemoteHubCommandFor(caller, data);
     case "unlockStaffPin":
       return unlockStaffPinFor(actingCaller, data);
     case "lockStaffPin":

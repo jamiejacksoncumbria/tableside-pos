@@ -8,10 +8,11 @@ manager-enrolled native device is the venue authority. Enrolled Android,
 Windows and iOS POS devices connect to it over authenticated local HTTPS. iOS
 is client-only for this release; web remains online-only.
 
-Web builds remain cloud-connected and read-only when a venue hub owns write
-authority. Browsers do not currently write through the LAN hub. This avoids
-browser certificate, private-network and split-brain behaviour that cannot be
-made reliable across every browser in the pilot.
+Web and native devices away from the venue LAN submit short-lived commands to
+a venue-specific Firebase queue. The active hub must maintain a fresh signed
+heartbeat, claim the command, revalidate it, commit it durably and acknowledge
+it before the remote POS reports success. If the heartbeat is stale, remote
+ordering stops. The LAN path remains available during a venue internet outage.
 
 ## Pilot scope
 
@@ -55,6 +56,12 @@ hub is required and unreachable; they never create a competing cloud history.
    venue, time, success and lock status.
 10. Secrets, PINs, Firebase tokens and card details are never written to the
     event log or diagnostic output.
+11. Remote commands expire after 25 seconds, use transactional claim leases
+    and carry an idempotency key into the immutable ledger. Firebase clients
+    cannot write command state directly.
+12. A remote client never falls back to ordinary cloud order mutations while
+    hub authority is active. Its visible waiting banner remains until the hub
+    confirms the durable commit.
 
 ## Setup
 
@@ -116,8 +123,11 @@ ordinary database-file copy alone.
   request; all must fail.
 - Restore power with pending events and confirm cloud orders, payments, stock
   movements and audit events reconcile once and only once.
-- Verify web can read cloud data but cannot mutate while hub authority is
-  active.
+- Put a web/4G device outside the venue LAN and verify it can order only while
+  the hub heartbeat is fresh, displays **Waiting for venue hub**, and receives
+  the accepted result through Firebase streams.
+- Stop the hub while Firebase remains online and verify remote commands fail
+  closed without creating orders, stock changes, payments or print jobs.
 - Check the known medium-tablet PIN screen overflow separately; it is a UI
   issue already recorded for the next responsive-layout pass.
 

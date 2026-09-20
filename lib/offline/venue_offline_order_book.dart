@@ -61,6 +61,22 @@ class VenueOfflineOrderBook {
     List<OfflineEvent> existing,
     OfflineEventDraft draft,
   ) {
+    final remoteCommandId = draft.payload['remoteCommandId'];
+    if (remoteCommandId is String && remoteCommandId.isNotEmpty) {
+      final remoteMatches = existing
+          .where((event) => event.payload['remoteCommandId'] == remoteCommandId)
+          .toList(growable: false);
+      if (remoteMatches.isNotEmpty) {
+        final previous = remoteMatches.last;
+        if (previous.type != draft.type ||
+            _canonicalJson(previous.payload) != _canonicalJson(draft.payload)) {
+          throw const OfflineProjectionException(
+            'A remote command key was reused with different data.',
+          );
+        }
+        return previous;
+      }
+    }
     bool hasSameIdentity(OfflineEvent event) {
       if (event.type != draft.type ||
           event.payload['orderId'] != draft.payload['orderId']) {
@@ -85,7 +101,10 @@ class VenueOfflineOrderBook {
     final matches = existing.where(hasSameIdentity).toList(growable: false);
     if (matches.isEmpty) return null;
     final previous = matches.last;
-    if (_canonicalJson(previous.payload) != _canonicalJson(draft.payload)) {
+    Map<String, Object?> semanticPayload(Map<String, Object?> value) =>
+        Map<String, Object?>.from(value)..remove('remoteCommandId');
+    if (_canonicalJson(semanticPayload(previous.payload)) !=
+        _canonicalJson(semanticPayload(draft.payload))) {
       throw const OfflineProjectionException(
         'An offline retry key was reused with different data.',
       );

@@ -7,6 +7,7 @@ import '../core/app_logger.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/firebase_runtime_config.dart';
 import '../features/auth/auth_gate.dart';
+import '../offline/venue_hub_remote_command_client.dart';
 import 'home_shell.dart';
 
 class TableSideCYApp extends ConsumerWidget {
@@ -23,6 +24,46 @@ class TableSideCYApp extends ConsumerWidget {
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),
       themeMode: themeMode,
+      builder: (context, child) => ValueListenableBuilder<int>(
+        valueListenable: RemoteHubWaitState.pending,
+        builder: (context, pending, _) => Stack(
+          children: [
+            if (child != null) child,
+            if (pending > 0)
+              Positioned(
+                top: MediaQuery.paddingOf(context).top + 8,
+                left: 16,
+                right: 16,
+                child: Material(
+                  elevation: 8,
+                  color: Theme.of(context).colorScheme.tertiaryContainer,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2.5),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            pending == 1
+                                ? 'Waiting for venue hub…'
+                                : 'Waiting for venue hub… ($pending commands)',
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
       home: FirebaseRuntimeConfig.enabled
           ? const _FirebaseBootstrapGate()
           : const HomeShell(),

@@ -320,8 +320,9 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         );
       }
       if (kIsWeb) {
-        // Browsers are intentionally read-only while hub authority is active:
-        // private device signing keys are not enrolled into web storage.
+        // Browsers do not retain the hub's native device key. Their
+        // PIN-authenticated mutations use the short-lived Firebase queue and
+        // are successful only after the authoritative hub commits them.
         VenueHubClientRegistry.instance.rememberBootstrap(
           widget.scope,
           bootstrap,
@@ -468,8 +469,8 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           SnackBar(
             content: Text(
               hubConnectionUnavailable
-                  ? 'Signed in online for recovery. Open Venue offline hub settings and install the trusted certificate; orders remain blocked until the hub connects.'
-                  : 'Signed in online. A manager must enrol this device in Venue offline hub settings before it can process orders offline.',
+                  ? 'Signed in online. Orders will use the protected remote hub queue while its heartbeat is live. Install the venue certificate for LAN offline use.'
+                  : 'Signed in online. Orders will use the protected remote hub queue; enrol this device only if it also needs LAN offline use.',
             ),
           ),
         );

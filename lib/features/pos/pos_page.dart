@@ -13,7 +13,6 @@ import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/training_mode.dart';
 import '../../data/production_command_repository.dart';
-import '../../offline/venue_hub_client_registry.dart';
 import '../auth/staff_pin_gate.dart';
 import '../fulfilment/customer_editor.dart';
 import '../fulfilment/fulfilment_domain.dart';
@@ -69,13 +68,6 @@ class _PosPageState extends ConsumerState<PosPage>
 
   @override
   Widget build(BuildContext context) {
-    final scope = ref.watch(activeVenueScopeProvider);
-    final hubRegistry = VenueHubClientRegistry.instance;
-    if (scope != null &&
-        hubRegistry.requiresHub(scope) &&
-        !hubRegistry.hasUsableSession(scope)) {
-      return const _VenueHubRequiredPanel();
-    }
     final compactTab = ref.watch(posCompactTabProvider);
     if (_compactTabController.index != compactTab &&
         !_compactTabController.indexIsChanging) {
@@ -454,49 +446,6 @@ class _TablesPanel extends ConsumerWidget {
       ),
     );
   }
-}
-
-class _VenueHubRequiredPanel extends StatelessWidget {
-  const _VenueHubRequiredPanel();
-
-  @override
-  Widget build(BuildContext context) => Center(
-    child: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 560),
-      child: Card(
-        margin: const EdgeInsets.all(24),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.hub_outlined,
-                size: 48,
-                color: Theme.of(context).colorScheme.error,
-              ),
-              const SizedBox(height: 12),
-              Text(
-                'Venue hub unavailable',
-                style: Theme.of(context).textTheme.headlineSmall,
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'This venue uses the protected offline hub, but this device cannot reach it on the local network. Start the hub device and confirm both devices are on the same Wi-Fi, then switch staff and enter the PIN again.',
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Cloud ordering stays disabled to prevent two independent copies of the venue data.',
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
 }
 
 class _TableButton extends ConsumerWidget {

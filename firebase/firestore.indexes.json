@@ -50,6 +50,14 @@
         { "fieldPath": "venueId", "order": "ASCENDING" },
         { "fieldPath": "normalisedPhones", "arrayConfig": "CONTAINS" }
       ]
+    },
+    {
+      "collectionGroup": "remoteHubCommands",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -75,6 +83,12 @@
     },
     {
       "collectionGroup": "platformAdminPinSessions",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "remoteHubCommands",
       "fieldPath": "expiresAt",
       "ttl": true,
       "indexes": []
