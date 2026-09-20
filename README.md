@@ -105,6 +105,23 @@ Customer orders should use a separate public session, for example `tableSessions
 
 This means the customer app can be built later without changing the core order, bill, stock, or print model.
 
+## iOS development setup
+
+TableSideCY targets iOS 15 and newer. Before opening Xcode after a fresh clone,
+dependency change, `flutter clean`, or removal of `ios/Flutter/ephemeral`, run:
+
+```bash
+./tools/prepare-ios.sh
+open ios/Runner.xcworkspace
+```
+
+The preparation script runs `flutter pub get`, corrects Flutter's ignored
+`FlutterGeneratedPluginSwiftPackage` manifest to iOS 15, and installs the
+CocoaPods dependencies. This explicit preparation is required because some
+Flutter SDK versions initially generate the aggregate Swift package with an
+iOS 13 target; Xcode resolves packages before Flutter's build migration can
+raise that generated target.
+
 ## Firebase setup
 
 1. This repository is connected to the Firebase project `table-pos`. In the Firebase Console, enable **Email/Password** in Authentication, Cloud Firestore, and Storage.
