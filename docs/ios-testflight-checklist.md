@@ -56,13 +56,13 @@ project root.
 Increment `version` in `pubspec.yaml` for every upload. The build number after
 the `+` must always increase.
 
+The first TestFlight build must be a Shorebird release baseline. A stock
+`flutter build ipa` cannot be patched later.
+
 ```bash
 cd ~/StudioProjects/tableside-pos
-flutter pub get
-flutter analyze
-flutter test
-flutter build ipa --release \
-  --dart-define-from-file=config/firebase-staging.json
+chmod +x tableside-release.sh
+./tableside-release.sh release-ios staging
 ```
 
 Upload the generated archive with Xcode Organizer or Apple's Transporter.

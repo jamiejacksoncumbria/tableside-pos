@@ -5,7 +5,9 @@ param(
         'BuildAppBundle', 'BuildWindows', 'BuildWeb', 'BuildAll',
         'PackageWindows', 'DeployFunctions', 'DeployFirestore',
         'DeployStorage', 'DeployWeb', 'DeployBackend', 'GitStatus',
-        'GitPull', 'GitCommit', 'GitPush', 'Clean'
+        'GitPull', 'GitCommit', 'GitPush', 'ShorebirdDoctor',
+        'ShorebirdReleaseAndroid', 'ShorebirdPatchAndroid',
+        'ShorebirdReleaseWindows', 'ShorebirdPatchWindows', 'Clean'
     )]
     [string]$Action = 'Menu',
     [ValidateSet('Staging', 'Production')]
@@ -184,9 +186,22 @@ function Prepare-Build {
     if (-not $SkipTests) { Invoke-Tests }
 }
 
-function Invoke-AndroidBuild([string]$Target) {
+function Shorebird {
+    $shorebird = Find-CommandPath 'shorebird'
+    & $shorebird @args
+    if ($LASTEXITCODE -ne 0) { throw "Shorebird command failed ($LASTEXITCODE)." }
+}
+
+function Assert-ShorebirdReady {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'shorebird.yaml'))) {
+        throw 'Shorebird is not initialized. Install/login to Shorebird, run shorebird init once, and commit the generated shorebird.yaml.'
+    }
+    Shorebird doctor
+}
+
+function Invoke-WithAndroidNativeFirebaseConfig([scriptblock]$Operation) {
     if ($script:EnvironmentName -eq 'staging') {
-        Flutter build $Target --release $script:FirebaseBuildArgument
+        & $Operation
         return
     }
 
@@ -204,10 +219,16 @@ function Invoke-AndroidBuild([string]$Target) {
     Copy-Item -LiteralPath $androidConfig -Destination $backupConfig -Force
     try {
         Copy-Item -LiteralPath $productionGoogleServices -Destination $androidConfig -Force
-        Flutter build $Target --release $script:FirebaseBuildArgument
+        & $Operation
     } finally {
         Copy-Item -LiteralPath $backupConfig -Destination $androidConfig -Force
         Remove-Item -LiteralPath $backupConfig -Force
+    }
+}
+
+function Invoke-AndroidBuild([string]$Target) {
+    Invoke-WithAndroidNativeFirebaseConfig {
+        Flutter build $Target --release $script:FirebaseBuildArgument
     }
 }
 
@@ -264,6 +285,45 @@ function Package-Windows {
     Compress-Archive -Path (Join-Path $script:RepoRoot 'build\windows\x64\runner\Release\*') -DestinationPath $zipPath -CompressionLevel Optimal
     Write-Host "Windows ZIP: $zipPath" -ForegroundColor Green
 }
+
+function Invoke-ShorebirdRelease([string]$Platform, [bool]$Patch) {
+    Assert-ShorebirdReady
+    Prepare-Build
+    $operation = if ($Patch) { 'patch' } else { 'release' }
+    $publicKey = [string]$env:SHOREBIRD_PUBLIC_KEY_PATH
+    if ([string]::IsNullOrWhiteSpace($publicKey) -or -not (Test-Path -LiteralPath $publicKey)) {
+        throw 'Set SHOREBIRD_PUBLIC_KEY_PATH to the secured Shorebird RSA public PEM before creating a release or patch.'
+    }
+    $signingArguments = @('--public-key-path', $publicKey)
+    if ($Patch) {
+        $privateKey = [string]$env:SHOREBIRD_PRIVATE_KEY_PATH
+        if ([string]::IsNullOrWhiteSpace($privateKey) -or -not (Test-Path -LiteralPath $privateKey)) {
+            throw 'Set SHOREBIRD_PRIVATE_KEY_PATH to the secured Shorebird RSA private PEM before creating a patch.'
+        }
+        $signingArguments += @('--private-key-path', $privateKey)
+        if ($script:EnvironmentName -eq 'staging') {
+            $signingArguments += @('--track', 'staging')
+        }
+    }
+    Write-Heading "Shorebird $operation for $Platform"
+    if ($Platform -eq 'android') {
+        Invoke-WithAndroidNativeFirebaseConfig {
+            Shorebird $operation $Platform @signingArguments '--' $script:FirebaseBuildArgument
+        }
+    } else {
+        Shorebird $operation $Platform @signingArguments '--' $script:FirebaseBuildArgument
+    }
+    if ($Patch) {
+        Write-Host 'Patch uploaded. Promote it through a test track before stable production rollout.' -ForegroundColor Green
+    } else {
+        Write-Host 'Shorebird baseline created. Distribute this exact generated build; stock Flutter builds cannot receive its patches.' -ForegroundColor Green
+    }
+}
+
+function Shorebird-ReleaseAndroid { Invoke-ShorebirdRelease 'android' $false }
+function Shorebird-PatchAndroid { Invoke-ShorebirdRelease 'android' $true }
+function Shorebird-ReleaseWindows { Invoke-ShorebirdRelease 'windows' $false }
+function Shorebird-PatchWindows { Invoke-ShorebirdRelease 'windows' $true }
 
 function Check-Functions {
     $npm = Find-CommandPath 'npm'
@@ -407,7 +467,12 @@ TableSideCY developer menu
  17  Git pull current branch (fast-forward only)
  18  Git commit tracked changes
  19  Git push current branch
- 20  Flutter clean (troubleshooting only)
+ 20  Shorebird doctor
+ 21  Shorebird Android release baseline
+ 22  Shorebird Android patch
+ 23  Shorebird Windows release baseline
+ 24  Shorebird Windows patch
+ 25  Flutter clean (troubleshooting only)
   0  Exit
 '@
         $choice = Read-Host 'Choose an option'
@@ -433,7 +498,12 @@ TableSideCY developer menu
                 '17' { Pull-Git }
                 '18' { Commit-Git }
                 '19' { Push-Git }
-                '20' { Clean-Build }
+                '20' { Assert-ShorebirdReady }
+                '21' { Shorebird-ReleaseAndroid }
+                '22' { Shorebird-PatchAndroid }
+                '23' { Shorebird-ReleaseWindows }
+                '24' { Shorebird-PatchWindows }
+                '25' { Clean-Build }
                 '0'  { return }
                 default { Write-Host 'Choose a number shown in the menu.' -ForegroundColor Yellow }
             }
@@ -465,5 +535,10 @@ switch ($Action) {
     'GitPull'         { Pull-Git }
     'GitCommit'       { Commit-Git }
     'GitPush'         { Push-Git }
+    'ShorebirdDoctor' { Assert-ShorebirdReady }
+    'ShorebirdReleaseAndroid' { Shorebird-ReleaseAndroid }
+    'ShorebirdPatchAndroid' { Shorebird-PatchAndroid }
+    'ShorebirdReleaseWindows' { Shorebird-ReleaseWindows }
+    'ShorebirdPatchWindows' { Shorebird-PatchWindows }
     'Clean'           { Clean-Build }
 }

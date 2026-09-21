@@ -7,6 +7,7 @@ import '../core/app_logger.dart';
 import '../core/app_environment.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/firebase_runtime_config.dart';
+import '../core/shorebird_update_host.dart';
 import '../features/auth/auth_gate.dart';
 import '../offline/venue_hub_remote_command_client.dart';
 import 'home_shell.dart';
@@ -33,7 +34,7 @@ class TableSideCYApp extends ConsumerWidget {
           final topInset = MediaQuery.paddingOf(context).top;
           return Stack(
             children: [
-              if (child != null) child,
+              ?child,
               if (showStaging)
                 Positioned(
                   top: topInset + 4,
@@ -64,35 +65,41 @@ class TableSideCYApp extends ConsumerWidget {
               if (pending > 0)
                 Positioned(
                   top: topInset + (showStaging ? 42 : 8),
-                left: 16,
-                right: 16,
-                child: Material(
-                  elevation: 8,
-                  color: Theme.of(context).colorScheme.tertiaryContainer,
-                  borderRadius: BorderRadius.circular(12),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const SizedBox.square(
-                          dimension: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2.5),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            pending == 1
-                                ? 'Waiting for venue hub…'
-                                : 'Waiting for venue hub… ($pending commands)',
-                            style: Theme.of(context).textTheme.titleSmall,
+                  left: 16,
+                  right: 16,
+                  child: Material(
+                    elevation: 8,
+                    color: Theme.of(context).colorScheme.tertiaryContainer,
+                    borderRadius: BorderRadius.circular(12),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const SizedBox.square(
+                            dimension: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2.5),
                           ),
-                        ),
-                      ],
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              pending == 1
+                                  ? 'Waiting for venue hub…'
+                                  : 'Waiting for venue hub… ($pending commands)',
+                              style: Theme.of(context).textTheme.titleSmall,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
-                ),
+              ShorebirdUpdateHost(
+                top: topInset + (showStaging ? 42 : 8) + (pending > 0 ? 58 : 0),
+              ),
             ],
           );
         },
