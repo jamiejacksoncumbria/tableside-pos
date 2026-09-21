@@ -9,7 +9,7 @@ import 'package:tableside_pos/core/tenant_scope.dart';
 import '../core/app_logger.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/staff_pin_session_store.dart';
-import '../firebase_options.dart';
+import '../core/firebase_environment_options.dart';
 import '../features/pos/domain.dart';
 import '../offline/offline_event.dart';
 import '../offline/venue_hub_device_credential.dart';
@@ -954,7 +954,7 @@ class ProductionCommandRepository {
     required String password,
     required String expectedUserId,
   }) async {
-    final options = DefaultFirebaseOptions.currentPlatform;
+    final options = FirebaseEnvironmentOptions.currentPlatform;
     final endpoint = Uri.https(
       'identitytoolkit.googleapis.com',
       '/v1/accounts:signInWithPassword',
@@ -1819,7 +1819,7 @@ class ProductionCommandRepository {
       throw StateError('Could not obtain a Firebase sign-in token.');
     }
     final appCheckToken = await currentFirebaseAppCheckToken();
-    final projectId = DefaultFirebaseOptions.currentPlatform.projectId;
+    final projectId = FirebaseEnvironmentOptions.currentPlatform.projectId;
     final endpoint = Uri.https(
       'europe-west2-$projectId.cloudfunctions.net',
       'posApi',

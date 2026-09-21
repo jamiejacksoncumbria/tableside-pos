@@ -8,14 +8,63 @@ param(
         'GitPull', 'GitCommit', 'GitPush', 'Clean'
     )]
     [string]$Action = 'Menu',
-    [string]$ProjectId = 'table-pos',
+    [ValidateSet('Staging', 'Production')]
+    [string]$Environment = 'Staging',
+    [string]$ProjectId = '',
     [switch]$SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
 $script:RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script:FirebaseDefine = 'TABLESIDE_USE_FIREBASE=true'
 Set-Location -LiteralPath $script:RepoRoot
+
+$environmentName = $Environment.ToLowerInvariant()
+if ($environmentName -eq 'staging') {
+    if ([string]::IsNullOrWhiteSpace($ProjectId)) { $ProjectId = 'table-pos' }
+    if ($ProjectId -ne 'table-pos') {
+        throw "Staging is locked to Firebase project 'table-pos'."
+    }
+    $script:DartDefineFile = Join-Path $script:RepoRoot 'config\firebase-staging.json'
+} else {
+    $script:DartDefineFile = Join-Path $script:RepoRoot 'config\firebase-production.json'
+    if (-not (Test-Path -LiteralPath $script:DartDefineFile)) {
+        throw 'Production is not configured. Copy config/firebase-production.example.json to config/firebase-production.json and add the real production Firebase identifiers.'
+    }
+    $productionConfig = Get-Content -Raw -LiteralPath $script:DartDefineFile | ConvertFrom-Json
+    if ([string]$productionConfig.TABLESIDE_ENVIRONMENT -ne 'production' -or
+        $productionConfig.TABLESIDE_USE_FIREBASE -ne $true) {
+        throw 'Production configuration must enable Firebase and set TABLESIDE_ENVIRONMENT to production.'
+    }
+    $configuredProject = [string]$productionConfig.TABLESIDE_PRODUCTION_FIREBASE_PROJECT_ID
+    if ([string]::IsNullOrWhiteSpace($configuredProject) -or $configuredProject -eq 'table-pos' -or $configuredProject -like 'REPLACE_*') {
+        throw 'The production Firebase project ID is missing or still points at staging.'
+    }
+    if ([string]::IsNullOrWhiteSpace($ProjectId)) { $ProjectId = $configuredProject }
+    if ($ProjectId -ne $configuredProject) {
+        throw "ProjectId '$ProjectId' does not match production configuration '$configuredProject'."
+    }
+    $requiredProductionKeys = @(
+        'TABLESIDE_PRODUCTION_FIREBASE_MESSAGING_SENDER_ID',
+        'TABLESIDE_PRODUCTION_FIREBASE_STORAGE_BUCKET',
+        'TABLESIDE_PRODUCTION_FIREBASE_AUTH_DOMAIN',
+        'TABLESIDE_PRODUCTION_FIREBASE_WEB_API_KEY',
+        'TABLESIDE_PRODUCTION_FIREBASE_WEB_APP_ID',
+        'TABLESIDE_PRODUCTION_FIREBASE_WINDOWS_API_KEY',
+        'TABLESIDE_PRODUCTION_FIREBASE_WINDOWS_APP_ID',
+        'TABLESIDE_PRODUCTION_FIREBASE_ANDROID_API_KEY',
+        'TABLESIDE_PRODUCTION_FIREBASE_ANDROID_APP_ID',
+        'TABLESIDE_PRODUCTION_FIREBASE_IOS_API_KEY',
+        'TABLESIDE_PRODUCTION_FIREBASE_IOS_APP_ID'
+    )
+    foreach ($key in $requiredProductionKeys) {
+        $value = [string]$productionConfig.$key
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            throw "Production Firebase setting '$key' is missing."
+        }
+    }
+}
+$script:EnvironmentName = $environmentName
+$script:FirebaseBuildArgument = "--dart-define-from-file=$($script:DartDefineFile)"
 
 function Write-Heading([string]$Text) {
     Write-Host "`n=== $Text ===" -ForegroundColor Cyan
@@ -58,6 +107,14 @@ function Invoke-Git([Parameter(ValueFromRemainingArguments)] [string[]]$Argument
 }
 
 function Confirm-RemoteAction([string]$Message) {
+    if ($script:EnvironmentName -eq 'production') {
+        Write-Host "PRODUCTION deployment selected: $ProjectId" -ForegroundColor Red
+        $confirmation = (Read-Host "Type the production project ID '$ProjectId' to continue").Trim()
+        if ($confirmation -ne $ProjectId) {
+            Write-Host 'Production operation cancelled; the project ID did not match.' -ForegroundColor Yellow
+            return $false
+        }
+    }
     while ($true) {
         $answer = (Read-Host "$Message [Y]es/[N]o").Trim()
         if ($answer -match '(?i)^(y|yes)$') { return $true }
@@ -122,35 +179,63 @@ function Invoke-Tests {
 }
 
 function Prepare-Build {
+    Write-Host "Environment: $($script:EnvironmentName.ToUpperInvariant()) | Firebase project: $ProjectId" -ForegroundColor Yellow
     Flutter pub get
     if (-not $SkipTests) { Invoke-Tests }
+}
+
+function Invoke-AndroidBuild([string]$Target) {
+    if ($script:EnvironmentName -eq 'staging') {
+        Flutter build $Target --release $script:FirebaseBuildArgument
+        return
+    }
+
+    $productionGoogleServices = Join-Path $script:RepoRoot 'config\firebase-production\google-services.json'
+    if (-not (Test-Path -LiteralPath $productionGoogleServices)) {
+        throw 'Production Android build requires config/firebase-production/google-services.json from the production Firebase project.'
+    }
+    $nativeConfig = Get-Content -Raw -LiteralPath $productionGoogleServices | ConvertFrom-Json
+    if ([string]$nativeConfig.project_info.project_id -ne $ProjectId) {
+        throw 'Production google-services.json does not match the selected production Firebase project.'
+    }
+
+    $androidConfig = Join-Path $script:RepoRoot 'android\app\google-services.json'
+    $backupConfig = Join-Path ([System.IO.Path]::GetTempPath()) "tableside-staging-google-services-$([guid]::NewGuid()).json"
+    Copy-Item -LiteralPath $androidConfig -Destination $backupConfig -Force
+    try {
+        Copy-Item -LiteralPath $productionGoogleServices -Destination $androidConfig -Force
+        Flutter build $Target --release $script:FirebaseBuildArgument
+    } finally {
+        Copy-Item -LiteralPath $backupConfig -Destination $androidConfig -Force
+        Remove-Item -LiteralPath $backupConfig -Force
+    }
 }
 
 function Build-Apk {
     Write-Heading 'Android APK (release)'
     Prepare-Build
-    Flutter build apk --release --dart-define=$script:FirebaseDefine
+    Invoke-AndroidBuild 'apk'
     Write-Host "APK: $script:RepoRoot\build\app\outputs\flutter-apk\app-release.apk" -ForegroundColor Green
 }
 
 function Build-AppBundle {
     Write-Heading 'Android App Bundle (release)'
     Prepare-Build
-    Flutter build appbundle --release --dart-define=$script:FirebaseDefine
+    Invoke-AndroidBuild 'appbundle'
     Write-Host "Bundle: $script:RepoRoot\build\app\outputs\bundle\release\app-release.aab" -ForegroundColor Green
 }
 
 function Build-Windows {
     Write-Heading 'Windows application (release)'
     Prepare-Build
-    Flutter build windows --release --dart-define=$script:FirebaseDefine
+    Flutter build windows --release $script:FirebaseBuildArgument
     Write-Host "Windows build: $script:RepoRoot\build\windows\x64\runner\Release" -ForegroundColor Green
 }
 
 function Build-Web {
     Write-Heading 'Web application (release)'
     Prepare-Build
-    Flutter build web --release --dart-define=$script:FirebaseDefine
+    Flutter build web --release $script:FirebaseBuildArgument
     Write-Host "Web build: $script:RepoRoot\build\web" -ForegroundColor Green
 }
 
@@ -158,11 +243,11 @@ function Build-All {
     Write-Heading 'Prepare all release builds'
     Prepare-Build
     Write-Heading 'Android APK (release)'
-    Flutter build apk --release --dart-define=$script:FirebaseDefine
+    Invoke-AndroidBuild 'apk'
     Write-Heading 'Windows application (release)'
-    Flutter build windows --release --dart-define=$script:FirebaseDefine
+    Flutter build windows --release $script:FirebaseBuildArgument
     Write-Heading 'Web application (release)'
-    Flutter build web --release --dart-define=$script:FirebaseDefine
+    Flutter build web --release $script:FirebaseBuildArgument
     Write-Host 'APK, Windows, and web release builds completed.' -ForegroundColor Green
 }
 
@@ -299,6 +384,7 @@ function Clean-Build {
 
 function Show-Menu {
     while ($true) {
+        Write-Host "`nEnvironment: $($script:EnvironmentName.ToUpperInvariant()) | Firebase: $ProjectId" -ForegroundColor Yellow
         Write-Host @'
 
 TableSideCY developer menu

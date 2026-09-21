@@ -40,6 +40,8 @@ functions/node_modules/
 functions/.env
 functions/.env.*
 functions/.runtimeconfig.json
+config/firebase-production.json
+config/firebase-production/
 .npm-cache/
 
 # Symbolication related

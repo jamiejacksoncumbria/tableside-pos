@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/app_theme.dart';
 import '../core/app_theme_controller.dart';
 import '../core/app_logger.dart';
+import '../core/app_environment.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/firebase_runtime_config.dart';
 import '../features/auth/auth_gate.dart';
@@ -19,19 +20,50 @@ class TableSideCYApp extends ConsumerWidget {
       appThemeControllerProvider.select((selection) => selection.effectiveMode),
     );
     return MaterialApp(
-      title: 'TableSideCY',
+      title: AppEnvironment.isStaging ? 'TableSideCY STAGING' : 'TableSideCY',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),
       themeMode: themeMode,
       builder: (context, child) => ValueListenableBuilder<int>(
         valueListenable: RemoteHubWaitState.pending,
-        builder: (context, pending, _) => Stack(
-          children: [
-            if (child != null) child,
-            if (pending > 0)
-              Positioned(
-                top: MediaQuery.paddingOf(context).top + 8,
+        builder: (context, pending, _) {
+          final showStaging =
+              FirebaseRuntimeConfig.enabled && AppEnvironment.isStaging;
+          final topInset = MediaQuery.paddingOf(context).top;
+          return Stack(
+            children: [
+              if (child != null) child,
+              if (showStaging)
+                Positioned(
+                  top: topInset + 4,
+                  left: 12,
+                  child: IgnorePointer(
+                    child: Material(
+                      elevation: 12,
+                      color: const Color(0xffff9800),
+                      borderRadius: BorderRadius.circular(7),
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        child: Text(
+                          'STAGING · TEST DATA ONLY',
+                          style: TextStyle(
+                            color: Colors.black,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              if (pending > 0)
+                Positioned(
+                  top: topInset + (showStaging ? 42 : 8),
                 left: 16,
                 right: 16,
                 child: Material(
@@ -60,9 +92,10 @@ class TableSideCYApp extends ConsumerWidget {
                     ),
                   ),
                 ),
-              ),
-          ],
-        ),
+                ),
+            ],
+          );
+        },
       ),
       home: FirebaseRuntimeConfig.enabled
           ? const _FirebaseBootstrapGate()
@@ -106,7 +139,7 @@ class _FirebaseBootstrapGateState extends State<_FirebaseBootstrapGate> {
               child: Padding(
                 padding: const EdgeInsets.all(24),
                 child: Text(
-                  'Firebase could not start. Verify the generated FlutterFire configuration and the TABLESIDE_USE_FIREBASE flag.\n\n${snapshot.error}',
+                  'Firebase could not start. Verify the selected staging or production configuration.\n\n${snapshot.error}',
                   textAlign: TextAlign.center,
                 ),
               ),

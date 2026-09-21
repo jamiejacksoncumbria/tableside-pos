@@ -3,7 +3,8 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 
 import 'app_logger.dart';
-import '../firebase_options.dart';
+import 'app_environment.dart';
+import 'firebase_environment_options.dart';
 
 bool _appCheckActivated = false;
 const _enableFirebaseAppCheck = bool.fromEnvironment(
@@ -14,7 +15,11 @@ const _enableFirebaseAppCheck = bool.fromEnvironment(
 Future<void> initializeFirebase() async {
   if (Firebase.apps.isEmpty) {
     await Firebase.initializeApp(
-      options: DefaultFirebaseOptions.currentPlatform,
+      options: FirebaseEnvironmentOptions.currentPlatform,
+    );
+    AppLogger.info(
+      'Firebase started in ${AppEnvironment.label} using project '
+      '${Firebase.app().options.projectId}.',
     );
   }
   if (_enableFirebaseAppCheck) {

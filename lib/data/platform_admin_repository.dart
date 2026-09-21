@@ -6,9 +6,9 @@ import 'package:http/http.dart' as http;
 
 import '../core/app_logger.dart';
 import '../core/firebase_bootstrap.dart';
+import '../core/firebase_environment_options.dart';
 import '../core/platform_admin_pin_session_store.dart';
 import '../core/staff_pin_session_store.dart';
-import '../firebase_options.dart';
 
 final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
   (ref) => PlatformAdminRepository(),
@@ -267,7 +267,7 @@ class PlatformAdminRepository {
       throw StateError('Could not obtain a Firebase sign-in token.');
     }
     final appCheckToken = await currentFirebaseAppCheckToken();
-    final projectId = DefaultFirebaseOptions.currentPlatform.projectId;
+    final projectId = FirebaseEnvironmentOptions.currentPlatform.projectId;
     final endpoint = Uri.https(
       'europe-west2-$projectId.cloudfunctions.net',
       'platformAdminApi',
