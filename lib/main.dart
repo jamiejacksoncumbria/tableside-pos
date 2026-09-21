@@ -36,6 +36,9 @@ void main() {
           child: TableSideCYApp(),
         ),
       );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        AppLogger.info('First Flutter frame completed.');
+      });
     },
     (error, stackTrace) =>
         AppLogger.error('Uncaught asynchronous error', error, stackTrace),
