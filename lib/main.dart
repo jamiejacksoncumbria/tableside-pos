@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app/pos_app.dart';
 import 'core/app_logger.dart';
+import 'core/push_notification_bootstrap.dart';
 import 'offline/offline_event_ledger.dart';
 
 void main() {
@@ -15,6 +16,7 @@ void main() {
       // zone. Initialising the binding before runZonedGuarded causes Flutter's
       // zone-mismatch assertion in debug builds.
       WidgetsFlutterBinding.ensureInitialized();
+      registerFirebaseMessagingBackgroundHandler();
       await AppLogger.initialize();
       try {
         await OfflineEventLedger.instance.initialize();
