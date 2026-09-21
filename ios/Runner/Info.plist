@@ -24,12 +24,6 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
-	<!-- The iOS simulator may fall back to software rendering when Metal is
-	     unavailable. Skia is required in that mode because Impeller cannot use
-	     the software renderer. Remove this override only after every supported
-	     Apple test/runtime environment has working Metal acceleration. -->
-	<key>FLTEnableImpeller</key>
-	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>
