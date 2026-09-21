@@ -146,6 +146,12 @@ cd ..
 flutter run -d <iphone-device-id> --dart-define=TABLESIDE_USE_FIREBASE=true
 ```
 
+Impeller is currently disabled in `ios/Runner/Info.plist` so debug simulators
+without Metal passthrough can use Flutter's software renderer. This setting is
+also honoured by Xcode launches. Re-enable Impeller only after testing the
+supported physical devices and every simulator/virtualised Mac environment
+with Metal acceleration available.
+
 Open `ios/Runner.xcworkspace` in Xcode once, select the Runner target, choose
 the Apple team, and confirm the bundle identifier is
 `uk.co.gopcpitstop.tablesideCY`. The first hub connection triggers Apple's local
