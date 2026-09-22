@@ -186,17 +186,19 @@ function Prepare-Build {
     if (-not $SkipTests) { Invoke-Tests }
 }
 
-function Shorebird {
+function Invoke-Shorebird([string[]]$Arguments) {
     $shorebird = Find-CommandPath 'shorebird'
-    & $shorebird @args
-    if ($LASTEXITCODE -ne 0) { throw "Shorebird command failed ($LASTEXITCODE)." }
+    $global:LASTEXITCODE = 0
+    & $shorebird @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { throw "Shorebird command failed ($exitCode)." }
 }
 
 function Assert-ShorebirdReady {
     if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'shorebird.yaml'))) {
         throw 'Shorebird is not initialized. Install/login to Shorebird, run shorebird init once, and commit the generated shorebird.yaml.'
     }
-    Shorebird doctor
+    Invoke-Shorebird -Arguments @('doctor')
 }
 
 function Invoke-WithAndroidNativeFirebaseConfig([scriptblock]$Operation) {
@@ -306,12 +308,36 @@ function Invoke-ShorebirdRelease([string]$Platform, [bool]$Patch) {
         }
     }
     Write-Heading "Shorebird $operation for $Platform"
+    # PowerShell must pass the Flutter argument separator as one literal
+    # argument. Building the complete array first prevents it from being
+    # reinterpreted as a PowerShell or Shorebird short option (for example
+    # `-e`) when this operation runs inside the Android configuration block.
+    $shorebirdArguments = @($operation, $Platform)
+    $shorebirdArguments += $signingArguments
+    $shorebirdArguments += @('--', $script:FirebaseBuildArgument)
+    $startedAtUtc = [DateTime]::UtcNow
     if ($Platform -eq 'android') {
         Invoke-WithAndroidNativeFirebaseConfig {
-            Shorebird $operation $Platform @signingArguments '--' $script:FirebaseBuildArgument
+            Invoke-Shorebird -Arguments $shorebirdArguments
         }
     } else {
-        Shorebird $operation $Platform @signingArguments '--' $script:FirebaseBuildArgument
+        Invoke-Shorebird -Arguments $shorebirdArguments
+    }
+    if (-not $Patch) {
+        $artifact = switch ($Platform) {
+            'android' { Join-Path $script:RepoRoot 'build\app\outputs\bundle\release\app-release.aab' }
+            'windows' { Join-Path $script:RepoRoot 'build\windows\x64\runner\Release\tableside_pos.exe' }
+            default { $null }
+        }
+        if ($null -ne $artifact) {
+            if (-not (Test-Path -LiteralPath $artifact)) {
+                throw "Shorebird returned without creating the expected $Platform release artifact: $artifact"
+            }
+            $artifactInfo = Get-Item -LiteralPath $artifact
+            if ($artifactInfo.LastWriteTimeUtc -lt $startedAtUtc.AddSeconds(-5)) {
+                throw "Shorebird did not refresh the expected $Platform release artifact. Refusing to report a stale build as successful."
+            }
+        }
     }
     if ($Patch) {
         Write-Host 'Patch uploaded. Promote it through a test track before stable production rollout.' -ForegroundColor Green
