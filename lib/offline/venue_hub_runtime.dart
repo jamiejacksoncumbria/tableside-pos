@@ -71,6 +71,48 @@ class VenueHubRuntime {
   Stream<VenueHubRuntimeStatus> get statuses => _statuses.stream;
   VenueScope? get activeScope => _activeScope;
 
+  /// Waits for this process's hub listener to become usable.
+  ///
+  /// The active scope is installed before the HTTPS listener has finished
+  /// binding. PIN entry can therefore race hub startup. Hub hosts must use the
+  /// loopback endpoint once it is ready instead of being mistaken for a remote
+  /// POS and routing their own commands through Firebase.
+  Future<Uri> waitForLocalEndpoint(
+    VenueScope scope, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    Uri? readyEndpoint() {
+      final current = _status;
+      if (_activeScope == scope &&
+          (current.state == VenueHubRuntimeState.ready ||
+              current.state == VenueHubRuntimeState.degraded) &&
+          current.endpoint != null) {
+        return current.endpoint;
+      }
+      return null;
+    }
+
+    final current = readyEndpoint();
+    if (current != null) return current;
+    try {
+      final ready = await statuses
+          .firstWhere(
+            (value) =>
+                _activeScope == scope &&
+                (value.state == VenueHubRuntimeState.ready ||
+                    value.state == VenueHubRuntimeState.degraded) &&
+                value.endpoint != null,
+          )
+          .timeout(timeout);
+      return ready.endpoint!;
+    } on TimeoutException {
+      throw StateError(
+        'This device is the venue hub, but its local service did not become ready. '
+        'Check Venue offline hub settings before processing orders.',
+      );
+    }
+  }
+
   Future<void> start({
     required VenueScope scope,
     required String deviceId,

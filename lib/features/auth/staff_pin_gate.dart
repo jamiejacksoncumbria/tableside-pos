@@ -357,6 +357,13 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       var hubConnectionUnavailable = false;
       if (bootstrap.enabled) {
         try {
+          final localHubEndpoint =
+              bootstrap.hubDeviceId == deviceId &&
+                  bootstrap.hubCredentialId == credential.credentialId
+              ? await VenueHubRuntime.instance.waitForLocalEndpoint(
+                  widget.scope,
+                )
+              : null;
           hubLogin = await VenueHubClientRegistry.instance.configure(
             scope: widget.scope,
             bootstrap: bootstrap,
@@ -364,10 +371,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             staffId: staff.userId,
             pin: pin,
             credential: credential,
-            endpointOverride:
-                VenueHubRuntime.instance.activeScope == widget.scope
-                ? VenueHubRuntime.instance.status.endpoint
-                : null,
+            endpointOverride: localHubEndpoint,
           );
         } on VenueHubClientException catch (error) {
           final verifierMissing = error.code == 'offline_verifier_unavailable';
@@ -397,6 +401,13 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             credential: credential,
           );
           await VenueHubRuntime.instance.installFreshSnapshot(refreshed);
+          final localHubEndpoint =
+              bootstrap.hubDeviceId == deviceId &&
+                  bootstrap.hubCredentialId == credential.credentialId
+              ? await VenueHubRuntime.instance.waitForLocalEndpoint(
+                  widget.scope,
+                )
+              : null;
           hubLogin = await VenueHubClientRegistry.instance.configure(
             scope: widget.scope,
             bootstrap: bootstrap,
@@ -404,10 +415,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             staffId: staff.userId,
             pin: pin,
             credential: credential,
-            endpointOverride:
-                VenueHubRuntime.instance.activeScope == widget.scope
-                ? VenueHubRuntime.instance.status.endpoint
-                : null,
+            endpointOverride: localHubEndpoint,
           );
         } on StateError catch (error, stackTrace) {
           // Certificate installation and device enrolment are managed from
