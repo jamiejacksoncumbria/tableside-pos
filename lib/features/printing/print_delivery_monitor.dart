@@ -8,6 +8,7 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/print_job_repository.dart';
 import '../../data/printer_device_repository.dart';
+import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 
@@ -44,6 +45,7 @@ class _PrintDeliveryMonitorHostState
   StreamSubscription<List<PrinterDevice>>? _devicesSubscription;
   Timer? _ageTimer;
   VenueScope? _scope;
+  String? _staffSessionId;
   List<PrintJob> _currentJobs = const [];
   List<PrinterDevice> _currentDevices = const [];
   Set<String> _activeAlertKeys = const {};
@@ -59,19 +61,25 @@ class _PrintDeliveryMonitorHostState
   @override
   Widget build(BuildContext context) {
     final scope = ref.watch(activeVenueScopeProvider);
-    if (scope != _scope) {
-      scheduleMicrotask(() => _configure(scope));
+    final staffSessionId = ref.watch(
+      activeStaffPinSessionProvider.select((session) => session?.sessionId),
+    );
+    if (scope != _scope || staffSessionId != _staffSessionId) {
+      scheduleMicrotask(() => _configure(scope, staffSessionId));
     }
     return const SizedBox.shrink();
   }
 
-  void _configure(VenueScope? scope) {
-    if (!mounted || scope == _scope) return;
+  void _configure(VenueScope? scope, String? staffSessionId) {
+    if (!mounted || (scope == _scope && staffSessionId == _staffSessionId)) {
+      return;
+    }
     _jobsSubscription?.cancel();
     _devicesSubscription?.cancel();
     _ageTimer?.cancel();
     _resolveAllAlerts();
     _scope = scope;
+    _staffSessionId = staffSessionId;
     _currentJobs = const [];
     _currentDevices = const [];
     if (scope == null) return;
