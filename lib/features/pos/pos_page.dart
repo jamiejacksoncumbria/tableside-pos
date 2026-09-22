@@ -4,6 +4,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
@@ -2793,6 +2794,7 @@ Future<void> _showCheckoutSheet(
       // to queue one to the venue's dedicated receipt printer.
       var printReceipt = isTraining ? false : defaultPrintPaidReceipt;
       var loadingOfficialRate = false;
+      var showAmountKeypad = false;
       ExchangeRateQuote? officialRateQuote;
       var voucherSuggestions = <String>[];
       final paymentEntries = <_CheckoutPaymentDraft>[];
@@ -3097,28 +3099,47 @@ Future<void> _showCheckoutSheet(
                   TextField(
                     controller: tenderedAmountController,
                     enabled: !saving,
-                    readOnly: true,
-                    showCursor: false,
                     keyboardType: const TextInputType.numberWithOptions(
                       decimal: true,
                     ),
+                    textInputAction: TextInputAction.done,
+                    inputFormatters: [
+                      _MoneyAmountInputFormatter(tenderedCurrencyCode),
+                    ],
                     decoration: InputDecoration(
                       labelText: 'Amount received ($tenderedCurrencyCode)',
-                      suffixIcon: const Icon(Icons.dialpad_rounded),
+                      suffixIcon: IconButton(
+                        tooltip: showAmountKeypad
+                            ? 'Hide touch keypad'
+                            : 'Show touch keypad',
+                        onPressed: saving
+                            ? null
+                            : () => setSheetState(
+                                () => showAmountKeypad = !showAmountKeypad,
+                              ),
+                        icon: Icon(
+                          showAmountKeypad
+                              ? Icons.keyboard_hide_rounded
+                              : Icons.dialpad_rounded,
+                        ),
+                      ),
                       helperText: isForeignCash
                           ? 'Enter the physical cash received in $tenderedCurrencyCode.'
-                          : 'Enter the amount received.',
+                          : 'Type the amount or use the touch keypad.',
                     ),
-                    onTap: saving
-                        ? null
-                        : () => _showDecimalKeypad(
-                            sheetContext,
-                            controller: tenderedAmountController,
-                            title: 'Amount received ($tenderedCurrencyCode)',
-                            onChanged: () => setSheetState(() {}),
-                          ),
                     onChanged: (_) => setSheetState(() {}),
+                    onSubmitted: (_) => FocusScope.of(context).unfocus(),
                   ),
+                  if (showAmountKeypad) ...[
+                    const SizedBox(height: 10),
+                    _DecimalKeypad(
+                      controller: tenderedAmountController,
+                      decimalDigits: currencyDecimalDigits(
+                        tenderedCurrencyCode,
+                      ),
+                      onChanged: () => setSheetState(() {}),
+                    ),
+                  ],
                   if (isForeignCash) ...[
                     const SizedBox(height: 12),
                     TextField(
@@ -3765,124 +3786,132 @@ class _ProductionPrintCountdownDialogState
   );
 }
 
-Future<void> _showDecimalKeypad(
-  BuildContext context, {
-  required TextEditingController controller,
-  required String title,
-  required VoidCallback onChanged,
-}) => showDialog<void>(
-  context: context,
-  builder: (dialogContext) {
-    void enter(String value, StateSetter setDialogState) {
-      var text = controller.text;
-      if (value == '.' && text.contains('.')) return;
-      if (value == '.' && text.isEmpty) text = '0';
-      controller.text = '$text$value';
-      controller.selection = TextSelection.collapsed(
-        offset: controller.text.length,
-      );
-      setDialogState(() {});
-      onChanged();
-    }
+class _MoneyAmountInputFormatter extends TextInputFormatter {
+  _MoneyAmountInputFormatter(String currencyCode)
+    : decimalDigits = currencyDecimalDigits(currencyCode);
 
-    return StatefulBuilder(
-      builder: (context, setDialogState) => AlertDialog(
-        title: Text(title),
-        content: SizedBox(
-          width: 300,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+  final int decimalDigits;
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final expression = decimalDigits == 0
+        ? RegExp(r'^\d{0,9}$')
+        : RegExp('^\\d{0,9}(?:[.,]\\d{0,$decimalDigits})?\$');
+    return expression.hasMatch(newValue.text) ? newValue : oldValue;
+  }
+}
+
+class _DecimalKeypad extends StatelessWidget {
+  const _DecimalKeypad({
+    required this.controller,
+    required this.decimalDigits,
+    required this.onChanged,
+  });
+
+  final TextEditingController controller;
+  final int decimalDigits;
+  final VoidCallback onChanged;
+
+  void _replace(String text) {
+    controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    onChanged();
+  }
+
+  void _enter(String value) {
+    var text = controller.text;
+    if (value == '.') {
+      if (decimalDigits == 0 || text.contains('.') || text.contains(',')) {
+        return;
+      }
+      if (text.isEmpty) text = '0';
+    } else {
+      final separator = text.contains('.')
+          ? '.'
+          : text.contains(',')
+          ? ','
+          : '';
+      if (separator.isEmpty && text.length >= 9) return;
+      if (separator.isNotEmpty &&
+          text.split(separator).last.length >= decimalDigits) {
+        return;
+      }
+    }
+    _replace('$text$value');
+  }
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+    ),
+    child: Padding(
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          GridView.count(
+            shrinkWrap: true,
+            crossAxisCount: 3,
+            mainAxisSpacing: 8,
+            crossAxisSpacing: 8,
+            childAspectRatio: 2.2,
+            physics: const NeverScrollableScrollPhysics(),
             children: [
-              TextField(
-                controller: controller,
-                autofocus: true,
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
+              for (final key in const [
+                '1',
+                '2',
+                '3',
+                '4',
+                '5',
+                '6',
+                '7',
+                '8',
+                '9',
+              ])
+                FilledButton.tonal(
+                  onPressed: () => _enter(key),
+                  child: Text(key, style: const TextStyle(fontSize: 18)),
                 ),
-                textAlign: TextAlign.end,
-                decoration: const InputDecoration(
-                  labelText: 'Enter amount',
-                  border: OutlineInputBorder(),
-                ),
-                onChanged: (_) {
-                  setDialogState(() {});
-                  onChanged();
-                },
+              OutlinedButton(
+                onPressed: controller.text.isEmpty ? null : () => _replace(''),
+                child: const Text('Clear'),
               ),
-              const SizedBox(height: 12),
-              GridView.count(
-                shrinkWrap: true,
-                crossAxisCount: 3,
-                mainAxisSpacing: 8,
-                crossAxisSpacing: 8,
-                childAspectRatio: 1.7,
-                physics: const NeverScrollableScrollPhysics(),
-                children: [
-                  for (final key in const [
-                    '1',
-                    '2',
-                    '3',
-                    '4',
-                    '5',
-                    '6',
-                    '7',
-                    '8',
-                    '9',
-                  ])
-                    FilledButton.tonal(
-                      onPressed: () => enter(key, setDialogState),
-                      child: Text(key, style: const TextStyle(fontSize: 20)),
-                    ),
-                  OutlinedButton(
-                    onPressed: () {
-                      controller.clear();
-                      setDialogState(() {});
-                      onChanged();
-                    },
-                    child: const Text('Clear'),
-                  ),
-                  FilledButton.tonal(
-                    onPressed: () => enter('0', setDialogState),
-                    child: const Text('0', style: TextStyle(fontSize: 20)),
-                  ),
-                  FilledButton.tonal(
-                    onPressed: () => enter('.', setDialogState),
-                    child: const Text('.', style: TextStyle(fontSize: 24)),
-                  ),
-                ],
+              FilledButton.tonal(
+                onPressed: () => _enter('0'),
+                child: const Text('0', style: TextStyle(fontSize: 18)),
               ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: controller.text.isEmpty
-                      ? null
-                      : () {
-                          final text = controller.text;
-                          controller.text = text.substring(0, text.length - 1);
-                          controller.selection = TextSelection.collapsed(
-                            offset: controller.text.length,
-                          );
-                          setDialogState(() {});
-                          onChanged();
-                        },
-                  icon: const Icon(Icons.backspace_outlined),
-                  label: const Text('Delete'),
-                ),
+              FilledButton.tonal(
+                onPressed: decimalDigits == 0 ? null : () => _enter('.'),
+                child: const Text('.', style: TextStyle(fontSize: 22)),
               ),
             ],
           ),
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Done'),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: controller.text.isEmpty
+                  ? null
+                  : () => _replace(
+                      controller.text.substring(0, controller.text.length - 1),
+                    ),
+              icon: const Icon(Icons.backspace_outlined),
+              label: const Text('Delete'),
+            ),
           ),
         ],
       ),
-    );
-  },
-);
+    ),
+  );
+}
 
 class _StatusChip extends StatelessWidget {
   const _StatusChip({required this.status});
