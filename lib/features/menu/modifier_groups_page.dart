@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
@@ -164,7 +165,7 @@ Future<void> _showModifierGroupDialog({
   String? validationMessage;
 
   try {
-    await showDialog<void>(
+    await showAppDialog<void>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -379,7 +380,7 @@ Future<void> _confirmDeleteGroup({
   required VenueScope scope,
   required MenuModifierGroup group,
 }) async {
-  final delete = await showDialog<bool>(
+  final delete = await showAppDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: Text('Delete ${group.name}?'),
@@ -522,7 +523,7 @@ Future<List<ProductStockComponent>?> _showOptionStockRecipeDialog({
       ),
   };
   try {
-    return await showDialog<List<ProductStockComponent>>(
+    return await showAppDialog<List<ProductStockComponent>>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(

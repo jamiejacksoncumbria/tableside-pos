@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
@@ -55,7 +56,7 @@ class _StaffPinManagementPageState
   }
 
   Future<void> _unlock(VenuePinStaff staff) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Unlock staff PIN?'),
@@ -111,7 +112,7 @@ class _StaffPinManagementPageState
   }
 
   Future<void> _lock(VenuePinStaff staff) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Lock staff PIN?'),
@@ -165,7 +166,7 @@ class _StaffPinManagementPageState
   }
 
   Future<void> _reset(VenuePinStaff staff) async {
-    final newPin = await showDialog<String>(
+    final newPin = await showAppDialog<String>(
       context: context,
       barrierDismissible: false,
       builder: (context) =>

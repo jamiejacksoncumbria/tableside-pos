@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../data/platform_admin_repository.dart';
 import '../auth/session_providers.dart';
@@ -205,7 +206,7 @@ Future<void> _showCreateRestaurantDialog(
   var ownerUid = users.first.uid;
   var submitting = false;
 
-  await showDialog<void>(
+  await showAppDialog<void>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
@@ -377,7 +378,7 @@ Future<void> _showEditRestaurantDialog(
   var savingCompany = false;
   var changingVenues = false;
 
-  await showDialog<void>(
+  await showAppDialog<void>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
@@ -613,7 +614,7 @@ Future<PlatformVenueSummary?> _showVenueDialog(
   final name = TextEditingController(text: venue?.name ?? '');
   var timeZone = _preferredTimeZone(timeZones, venue?.timeZone);
   var saving = false;
-  final saved = await showDialog<PlatformVenueSummary>(
+  final saved = await showAppDialog<PlatformVenueSummary>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
@@ -706,7 +707,7 @@ Future<bool> _confirmDeleteVenue(
   BuildContext context,
   PlatformVenueSummary venue,
 ) async {
-  final confirmed = await showDialog<bool>(
+  final confirmed = await showAppDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: Text('Delete ${venue.name}?'),
@@ -737,7 +738,7 @@ Future<void> _showCreateStaffDialog(BuildContext context, WidgetRef ref) async {
   final displayName = TextEditingController();
   var submitting = false;
 
-  await showDialog<void>(
+  await showAppDialog<void>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
@@ -911,7 +912,7 @@ Future<void> _confirmRetireStaffUser(
   PlatformAuthUser user,
 ) async {
   var retiring = false;
-  await showDialog<void>(
+  await showAppDialog<void>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
@@ -1006,7 +1007,7 @@ Future<void> _showAssignUserDialog(
   var roles = <String>{...?membershipByTenant[tenantId]?.roles};
   var submitting = false;
 
-  await showDialog<void>(
+  await showAppDialog<void>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(

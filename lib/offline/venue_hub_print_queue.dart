@@ -378,6 +378,16 @@ class VenueHubPrintQueue {
             .toList()
           ..sort((a, b) => a.createdAtUtc.compareTo(b.createdAtUtc));
     if (candidates.isEmpty) {
+      final queuedTargets = _jobs.values
+          .where((job) => job.status == 'queued')
+          .map((job) => job.targetDeviceId)
+          .toSet();
+      if (queuedTargets.isNotEmpty) {
+        AppLogger.info(
+          'Hub print claim found queued work, but none targets this device. '
+          'claimingDevice=$deviceId, queuedTargets=${queuedTargets.join(',')}.',
+        );
+      }
       if (recoveredClaim || routeRepaired || historyPruned) await _persist();
       return null;
     }

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
@@ -93,7 +94,7 @@ class VoucherManagementPage extends ConsumerWidget {
     var paymentMethod = 'cash';
     var cardApproved = false;
     DateTime? expiresAt = DateTime.now().add(const Duration(days: 365));
-    final result = await showDialog<IssuedVoucher>(
+    final result = await showAppDialog<IssuedVoucher>(
       context: pageContext,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setState) => AlertDialog(
@@ -257,7 +258,7 @@ class VoucherManagementPage extends ConsumerWidget {
       // the incoming AlertDialog without a laid-out render box on desktop.
       await Future<void>.delayed(const Duration(milliseconds: 220));
       if (!pageContext.mounted) return;
-      await showDialog<void>(
+      await showAppDialog<void>(
         context: pageContext,
         builder: (context) => AlertDialog(
           title: const Text('Voucher created'),

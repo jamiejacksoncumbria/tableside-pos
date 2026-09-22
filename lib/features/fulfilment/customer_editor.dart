@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../notifications/notification_centre.dart';
@@ -43,7 +44,7 @@ Future<VenueCustomer?> showVenueCustomerEditor({
   );
 
   try {
-    return await showDialog<VenueCustomer>(
+    return await showAppDialog<VenueCustomer>(
       context: context,
       builder: (dialogContext) {
         var saving = false;

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
@@ -219,7 +220,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     required String actionLabel,
   }) async {
     final controller = TextEditingController();
-    final result = await showDialog<String>(
+    final result = await showAppDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(title),

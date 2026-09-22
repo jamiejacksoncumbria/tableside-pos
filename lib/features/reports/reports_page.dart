@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
 import '../../core/money.dart';
@@ -601,7 +602,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
       if (windows.isSupported) {
         final printers = await windows.installedPrinters();
         if (!mounted) return;
-        final selected = await showDialog<WindowsPrintQueueDevice>(
+        final selected = await showAppDialog<WindowsPrintQueueDevice>(
           context: context,
           builder: (context) => SimpleDialog(
             title: const Text('Choose report printer'),
@@ -634,7 +635,7 @@ class _ReportsPageState extends ConsumerState<ReportsPage> {
         }
         final printers = await bluetooth.pairedDevices();
         if (!mounted) return;
-        final selected = await showDialog(
+        final selected = await showAppDialog(
           context: context,
           builder: (context) => SimpleDialog(
             title: const Text('Choose report printer'),

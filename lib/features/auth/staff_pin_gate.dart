@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/app_theme_controller.dart';
 import '../../core/tenant_scope.dart';
@@ -123,7 +124,7 @@ Future<void> changeCurrentStaffPin({
   required WidgetRef ref,
   required VenueScope scope,
 }) async {
-  final firstPin = await showDialog<String>(
+  final firstPin = await showAppDialog<String>(
     context: context,
     builder: (context) => const _PinPadDialog(
       title: Text('Change your staff PIN'),
@@ -132,7 +133,7 @@ Future<void> changeCurrentStaffPin({
     ),
   );
   if (firstPin == null || !context.mounted) return;
-  final confirmedPin = await showDialog<String>(
+  final confirmedPin = await showAppDialog<String>(
     context: context,
     builder: (context) => const _PinPadDialog(
       title: Text('Confirm new PIN'),
@@ -293,7 +294,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
 
   Future<void> _enterPin(VenuePinStaff staff) async {
     try {
-      final pin = await showDialog<String>(
+      final pin = await showAppDialog<String>(
         context: context,
         builder: (context) => _PinPadDialog(
           title: Text('Enter PIN for ${staff.displayName}'),
@@ -521,7 +522,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
 
   Future<void> _setOwnPin() async {
     try {
-      final firstPin = await showDialog<String>(
+      final firstPin = await showAppDialog<String>(
         context: context,
         builder: (context) => const _PinPadDialog(
           title: Text('Create your staff PIN'),
@@ -530,7 +531,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         ),
       );
       if (firstPin == null || !mounted) return;
-      final confirmedPin = await showDialog<String>(
+      final confirmedPin = await showAppDialog<String>(
         context: context,
         builder: (context) => const _PinPadDialog(
           title: Text('Confirm your staff PIN'),
@@ -566,7 +567,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       });
       return;
     }
-    final password = await showDialog<String>(
+    final password = await showAppDialog<String>(
       context: context,
       barrierDismissible: false,
       builder: (context) => _PasswordReauthenticationDialog(email: email),
@@ -593,7 +594,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       AppLogger.info('PIN recovery: Firebase account password verified.');
       if (!mounted) return;
       AppLogger.info('PIN recovery: opening replacement PIN entry.');
-      final newPin = await showDialog<String>(
+      final newPin = await showAppDialog<String>(
         context: context,
         barrierDismissible: false,
         builder: (context) => const _PinPadDialog(
@@ -603,7 +604,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         ),
       );
       if (newPin == null || !mounted) return;
-      final confirmation = await showDialog<String>(
+      final confirmation = await showAppDialog<String>(
         context: context,
         barrierDismissible: false,
         builder: (context) => const _PinPadDialog(

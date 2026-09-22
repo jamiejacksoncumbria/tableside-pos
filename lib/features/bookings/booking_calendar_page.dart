@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
 import '../../core/tenant_scope.dart';
@@ -255,7 +256,7 @@ class _BookingCalendarPageState extends ConsumerState<BookingCalendarPage> {
     var saving = false;
     final formKey = GlobalKey<FormState>();
     try {
-      await showDialog<void>(
+      await showAppDialog<void>(
         context: context,
         builder: (dialogContext) => StatefulBuilder(
           builder: (context, setDialogState) => AlertDialog(

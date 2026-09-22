@@ -8,6 +8,7 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/print_job_repository.dart';
 import '../../data/printer_device_repository.dart';
+import '../../offline/venue_hub_runtime.dart';
 import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
@@ -146,6 +147,14 @@ class _PrintDeliveryMonitorHostState
     final alerts = <_PrintDeliveryAlert>[];
 
     for (final job in _currentJobs) {
+      // While this process owns the venue hub, its encrypted local queue is
+      // authoritative. Legacy Firestore jobs from before hub activation stay
+      // available in recovery history, but must not create permanent false
+      // "printer offline" alarms beside current hub tickets.
+      if (VenueHubRuntime.instance.activeScope == _scope &&
+          !job.id.startsWith('offline-')) {
+        continue;
+      }
       final primary = job.fallbackFromJobId == null
           ? null
           : jobsById[job.fallbackFromJobId];

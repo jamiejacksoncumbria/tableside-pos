@@ -36,7 +36,11 @@ class PrinterDeviceRepository {
   final FirebaseFirestore _firestore;
   final ProductionCommandRepository _commands;
 
-  Future<String> register(PrinterDevice device, {required String tenantId}) {
+  Future<String> register(
+    PrinterDevice device, {
+    required String tenantId,
+    bool replaceExistingNamedDevice = false,
+  }) {
     return _commands.registerPrinterDevice(
       scope: VenueScope(tenantId: tenantId, venueId: device.venueId),
       values: {
@@ -46,6 +50,7 @@ class PrinterDeviceRepository {
         'productionAreas': device.productionAreas,
         'transports': device.transports,
         'active': device.active,
+        'replaceExistingNamedDevice': replaceExistingNamedDevice,
       },
     );
   }

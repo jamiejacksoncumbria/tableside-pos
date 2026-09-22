@@ -1461,6 +1461,8 @@ async function manageVenueConfigurationFor(caller, rawData) {
   } else if (resource === "printerDevice") {
     const deviceId = requiredDocumentId(values, "deviceId");
     const deviceName = requiredText(values, "name", 120);
+    const platform = requiredText(values, "platform", 32);
+    const replaceExistingNamedDevice = values.replaceExistingNamedDevice === true;
     const productionAreas = requiredStringArray(
       values.productionAreas, "productionAreas", 4, 32,
     );
@@ -1474,16 +1476,26 @@ async function manageVenueConfigurationFor(caller, rawData) {
     const venueDevices = await db.collection(`tenants/${tenantId}/devices`)
       .where("venueId", "==", venueId)
       .get();
-    if (venueDevices.docs.some((item) => item.id !== deviceId &&
-        item.data().active === true &&
-        String(item.data().name ?? "").trim().toLowerCase() === deviceName.toLowerCase())) {
+    const priorNamedDevice = venueDevices.docs.find((item) => item.id !== deviceId &&
+      item.data().active === true &&
+      String(item.data().name ?? "").trim().toLowerCase() === deviceName.toLowerCase());
+    if (priorNamedDevice && !replaceExistingNamedDevice) {
       throw new HttpsError("already-exists", "An active printer device already uses this name.");
     }
+    if (priorNamedDevice && String(priorNamedDevice.data().platform ?? "") !== platform) {
+      throw new HttpsError(
+        "failed-precondition",
+        "A printer registration can only replace the same platform type.",
+      );
+    }
     const deviceCredential = randomBytes(32).toString("base64url");
-    await db.doc(`tenants/${tenantId}/devices/${deviceId}`).set({
+    const tenantRef = db.doc(`tenants/${tenantId}`);
+    const deviceRef = tenantRef.collection("devices").doc(deviceId);
+    const batch = db.batch();
+    batch.set(deviceRef, {
       venueId,
       name: deviceName,
-      platform: requiredText(values, "platform", 32),
+      platform,
       productionAreas,
       transports,
       credentialHash: createHash("sha256").update(deviceCredential).digest("base64"),
@@ -1493,6 +1505,57 @@ async function manageVenueConfigurationFor(caller, rawData) {
       lastHeartbeatAt: FieldValue.serverTimestamp(),
       registeredByActor: actor,
     }, {merge: true});
+    if (priorNamedDevice) {
+      const [routes, queuedJobs] = await Promise.all([
+        tenantRef.collection("printerRoutes").where("venueId", "==", venueId).get(),
+        tenantRef.collection("printJobs")
+          .where("venueId", "==", venueId)
+          .where("targetDeviceId", "==", priorNamedDevice.id)
+          .where("status", "==", "queued")
+          .limit(400)
+          .get(),
+      ]);
+      batch.update(priorNamedDevice.ref, {
+        active: false,
+        credentialHash: FieldValue.delete(),
+        replacedByDeviceId: deviceId,
+        removedAt: FieldValue.serverTimestamp(),
+        removedByActor: actor,
+      });
+      for (const route of routes.docs) {
+        const routeData = route.data();
+        const updates = {};
+        if (routeData.primaryDeviceId === priorNamedDevice.id) {
+          updates.primaryDeviceId = deviceId;
+        }
+        if (routeData.fallbackDeviceId === priorNamedDevice.id) {
+          updates.fallbackDeviceId = deviceId;
+        }
+        if (Object.keys(updates).length > 0) {
+          batch.update(route.ref, {
+            ...updates,
+            updatedAt: FieldValue.serverTimestamp(),
+            updatedByActor: actor,
+          });
+        }
+      }
+      for (const job of queuedJobs.docs) {
+        batch.update(job.ref, {
+          targetDeviceId: deviceId,
+          failureReason: "Printer device was reconnected; ticket safely reassigned.",
+        });
+      }
+      batch.create(tenantRef.collection("auditEvents").doc(), {
+        action: "replacePrinterDevice",
+        venueId,
+        oldDeviceId: priorNamedDevice.id,
+        newDeviceId: deviceId,
+        deviceName,
+        actor,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    }
+    await batch.commit();
     result = {saved: true, deviceCredential};
   } else if (resource === "printerDeviceRemoval") {
     const deviceId = requiredDocumentId(values, "deviceId");

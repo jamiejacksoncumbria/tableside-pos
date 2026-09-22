@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
@@ -164,7 +165,7 @@ Future<void> _showTableDialog({
   );
   final formKey = GlobalKey<FormState>();
   try {
-    await showDialog<void>(
+    await showAppDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text(existing == null ? 'Add table' : 'Edit table'),
@@ -259,7 +260,7 @@ Future<void> _confirmDelete({
   required VenueScope scope,
   required DiningTable table,
 }) async {
-  final approved = await showDialog<bool>(
+  final approved = await showAppDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: const Text('Delete table?'),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/diagnostic_log_store.dart';
 import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
@@ -62,7 +63,7 @@ class _DiagnosticLogBodyState extends State<_DiagnosticLogBody> {
   }
 
   Future<void> _clear(BuildContext context) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Clear local diagnostics?'),

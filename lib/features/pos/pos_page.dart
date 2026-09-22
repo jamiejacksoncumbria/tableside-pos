@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
 import '../../core/money.dart';
@@ -821,7 +822,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
 
   Future<void> _showSearchTouchKeyboard() async {
     const rows = <String>['QWERTYUIOP', 'ASDFGHJKL', 'ZXCVBNM'];
-    await showDialog<void>(
+    await showAppDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Product search keyboard'),
@@ -1814,7 +1815,7 @@ Future<void> _showPosProductDetails({
       .where((section) => product.sectionIds.contains(section.id))
       .map((section) => section.name)
       .join(' · ');
-  final add = await showDialog<bool>(
+  final add = await showAppDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
       title: Text(product.name),
@@ -1907,7 +1908,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
           ? _moneyInputFromMinor(line.unitPriceMinor, widget.currencyCode)
           : '',
     );
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(switch (operation) {
@@ -2037,7 +2038,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     }
     final value = TextEditingController();
     final reason = TextEditingController();
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(
@@ -2727,7 +2728,7 @@ Future<void> _showPendingOrderItems(
   final pending = order.lines
       .where((line) => !line.isSentToProduction)
       .toList(growable: false);
-  return showDialog<void>(
+  return showAppDialog<void>(
     context: context,
     builder: (context) => AlertDialog(
       title: Text(
@@ -3388,7 +3389,7 @@ Future<void> _showCheckoutSheet(
                                   if (method == PaymentMethod.voucher) {
                                     final code = voucherCodeController.text
                                         .trim();
-                                    final confirmed = await showDialog<bool>(
+                                    final confirmed = await showAppDialog<bool>(
                                       context: sheetContext,
                                       builder: (context) => AlertDialog(
                                         title: const Text(
@@ -3720,11 +3721,12 @@ int _minorScale(int decimalDigits) {
 
 /// Always asks at the point an order leaves the basket. Bar staff often need
 /// the order recorded and visible on the flow board without wasting a ticket.
-Future<bool?> _confirmProductionPrint(BuildContext context) => showDialog<bool>(
-  context: context,
-  barrierDismissible: false,
-  builder: (_) => const _ProductionPrintCountdownDialog(),
-);
+Future<bool?> _confirmProductionPrint(BuildContext context) =>
+    showAppDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _ProductionPrintCountdownDialog(),
+    );
 
 class _ProductionPrintCountdownDialog extends StatefulWidget {
   const _ProductionPrintCountdownDialog();
@@ -3944,7 +3946,7 @@ Future<bool> _ensureOrderLocation(BuildContext context, WidgetRef ref) async {
       order.tabName?.trim().isNotEmpty == true) {
     return true;
   }
-  return await showDialog<bool>(
+  return await showAppDialog<bool>(
         context: context,
         barrierDismissible: false,
         builder: (_) => const _OrderLocationDialog(),
@@ -3957,7 +3959,7 @@ Future<void> _showFulfilmentOrderDialog(
   OrderChannel channel, {
   VoidCallback? onStarted,
 }) async {
-  final started = await showDialog<bool>(
+  final started = await showAppDialog<bool>(
     context: context,
     barrierDismissible: false,
     builder: (_) => _OrderLocationDialog(initialChannel: channel),
@@ -4084,7 +4086,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
       text: selected.addresses.firstOrNull?.addressLines ?? '',
     );
     String? validationError;
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (customerContext) => StatefulBuilder(
         builder: (context, setCustomerState) => AlertDialog(
@@ -4205,7 +4207,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
   ) async {
     final search = TextEditingController();
     try {
-      return await showDialog<VenueCustomer>(
+      return await showAppDialog<VenueCustomer>(
         context: context,
         builder: (pickerContext) {
           var query = '';
@@ -4521,7 +4523,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
 
 Future<void> _showNamedTabDialog(BuildContext context, WidgetRef ref) async {
   final nameController = TextEditingController();
-  await showDialog<void>(
+  await showAppDialog<void>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       icon: const Icon(Icons.person_outline_rounded),

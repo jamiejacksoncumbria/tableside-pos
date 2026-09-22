@@ -4,6 +4,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/safe_dialog.dart';
 import '../core/app_logger.dart';
 import '../core/app_theme_controller.dart';
 import '../core/tenant_scope.dart';
@@ -475,7 +476,7 @@ Future<void> _changeOwnAppearance({
   required WidgetRef ref,
   required VenueScope scope,
 }) async {
-  final selected = await showDialog<String>(
+  final selected = await showAppDialog<String>(
     context: context,
     builder: (dialogContext) => SimpleDialog(
       title: const Text('My appearance'),

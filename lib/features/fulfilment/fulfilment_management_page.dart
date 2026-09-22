@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../notifications/notification_centre.dart';
@@ -185,7 +186,7 @@ class _FulfilmentOrdersTab extends ConsumerWidget {
     PosOrder order,
     List<FulfilmentStaffMember> drivers,
   ) async {
-    final driver = await showDialog<FulfilmentStaffMember>(
+    final driver = await showAppDialog<FulfilmentStaffMember>(
       context: context,
       builder: (dialogContext) => SimpleDialog(
         title: const Text('Assign delivery driver'),
@@ -519,7 +520,7 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
     var weekday = DateTime.monday;
     var opens = const TimeOfDay(hour: 12, minute: 0);
     var closes = const TimeOfDay(hour: 22, minute: 0);
-    final result = await showDialog<ServiceWindow>(
+    final result = await showAppDialog<ServiceWindow>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setState) => AlertDialog(
@@ -605,7 +606,7 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
     final fee = TextEditingController(text: '0.00');
     final minimum = TextEditingController(text: '0.00');
     final minutes = TextEditingController(text: '45');
-    final save = await showDialog<bool>(
+    final save = await showAppDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Add delivery area'),
@@ -687,7 +688,7 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
     if (date == null || !mounted) return;
     var channel = OrderChannel.collection;
     final note = TextEditingController();
-    final save = await showDialog<bool>(
+    final save = await showAppDialog<bool>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setState) => AlertDialog(
@@ -887,7 +888,7 @@ Future<void> _editCourse(
   final amber = TextEditingController(text: '${course.amberMinutes}');
   final red = TextEditingController(text: '${course.redMinutes}');
   var policy = course.releasePolicy;
-  final result = await showDialog<MenuCourse>(
+  final result = await showAppDialog<MenuCourse>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setState) => AlertDialog(
