@@ -1791,6 +1791,11 @@ class ProductionCommandRepository {
         businessTimestampUtc: businessTimestampUtc,
       );
     }
+    if (hub.isLocalHubHost(scope)) {
+      throw StateError(
+        'The venue hub staff session is unavailable. Select your name and enter your PIN again.',
+      );
+    }
     final epoch = hub.hubEpochFor(scope);
     if (epoch == null || epoch < 1) {
       throw StateError('The venue hub generation is unavailable.');

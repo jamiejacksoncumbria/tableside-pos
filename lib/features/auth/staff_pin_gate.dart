@@ -355,11 +355,12 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       VenueHubLoginResult? hubLogin;
       StaffPinVerification? migratedCloudSession;
       var hubConnectionUnavailable = false;
+      final isLocalHubHost =
+          bootstrap.hubDeviceId == deviceId &&
+          bootstrap.hubCredentialId == credential.credentialId;
       if (bootstrap.enabled) {
         try {
-          final localHubEndpoint =
-              bootstrap.hubDeviceId == deviceId &&
-                  bootstrap.hubCredentialId == credential.credentialId
+          final localHubEndpoint = isLocalHubHost
               ? await VenueHubRuntime.instance.waitForLocalEndpoint(
                   widget.scope,
                 )
@@ -418,6 +419,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             endpointOverride: localHubEndpoint,
           );
         } on StateError catch (error, stackTrace) {
+          if (isLocalHubHost) rethrow;
           // Certificate installation and device enrolment are managed from
           // inside the authenticated Settings area. If Firebase is online,
           // permit a cloud-verified manager to enter that recovery surface.
@@ -468,6 +470,10 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             posProductSortPreference: 'alphabetical',
           );
         }
+      }
+      if (hubLogin != null &&
+          hubLogin.expiresAtUtc.isBefore(session.expiresAt)) {
+        session = session.copyWith(expiresAt: hubLogin.expiresAtUtc);
       }
       ref
           .read(activeStaffPinSessionProvider.notifier)

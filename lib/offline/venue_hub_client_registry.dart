@@ -27,6 +27,7 @@ class VenueHubClientRegistry {
   VenueHubClient? _client;
   DateTime? _sessionExpiresAtUtc;
   bool _deviceEnrolled = false;
+  bool _isLocalHubHost = false;
   String? _connectionFailure;
   StreamSubscription<List<Map<String, Object?>>>? _orderSubscription;
   Timer? _orderReconnectTimer;
@@ -38,6 +39,9 @@ class VenueHubClientRegistry {
 
   bool isDeviceEnrolled(VenueScope scope) =>
       requiresHub(scope) && _deviceEnrolled;
+
+  bool isLocalHubHost(VenueScope scope) =>
+      requiresHub(scope) && _isLocalHubHost;
 
   String _unavailableMessage(VenueScope scope) {
     if (!isDeviceEnrolled(scope)) {
@@ -135,6 +139,9 @@ class VenueHubClientRegistry {
     _scope = scope;
     _bootstrap = bootstrap;
     if (!bootstrap.enabled) return null;
+    _isLocalHubHost =
+        bootstrap.hubDeviceId == deviceId &&
+        bootstrap.hubCredentialId == credential.credentialId;
     final endpoint = endpointOverride ?? bootstrap.endpoint;
     if (endpoint == null) {
       throw StateError('The venue hub endpoint is not configured.');
@@ -223,6 +230,7 @@ class VenueHubClientRegistry {
       _scope = null;
       _bootstrap = null;
       _deviceEnrolled = false;
+      _isLocalHubHost = false;
       _connectionFailure = null;
     }
     _sessionExpiresAtUtc = null;

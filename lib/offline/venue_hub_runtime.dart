@@ -94,17 +94,28 @@ class VenueHubRuntime {
 
     final current = readyEndpoint();
     if (current != null) return current;
+    if (_status.state == VenueHubRuntimeState.failed) {
+      throw StateError(
+        _status.message ?? 'The venue hub local service failed to start.',
+      );
+    }
     try {
-      final ready = await statuses
+      final resolved = await statuses
           .firstWhere(
             (value) =>
-                _activeScope == scope &&
-                (value.state == VenueHubRuntimeState.ready ||
-                    value.state == VenueHubRuntimeState.degraded) &&
-                value.endpoint != null,
+                value.state == VenueHubRuntimeState.failed ||
+                (_activeScope == scope &&
+                    (value.state == VenueHubRuntimeState.ready ||
+                        value.state == VenueHubRuntimeState.degraded) &&
+                    value.endpoint != null),
           )
           .timeout(timeout);
-      return ready.endpoint!;
+      if (resolved.state == VenueHubRuntimeState.failed) {
+        throw StateError(
+          resolved.message ?? 'The venue hub local service failed to start.',
+        );
+      }
+      return resolved.endpoint!;
     } on TimeoutException {
       throw StateError(
         'This device is the venue hub, but its local service did not become ready. '
