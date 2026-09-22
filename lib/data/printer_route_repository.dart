@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:http/http.dart' as http;
 
 import '../core/tenant_scope.dart';
 import 'production_command_repository.dart';
@@ -89,15 +92,37 @@ class PrinterRouteRepository {
         'The fallback printer must be different from the primary printer.',
       );
     }
-    return _commands.manageVenueConfiguration(
+    return _saveRouteWithTransientRetry(
       scope: scope,
-      resource: 'printerRoute',
       values: {
         'productionArea': productionArea,
         'primaryDeviceId': primary,
         'fallbackDeviceId': fallback,
       },
     );
+  }
+
+  /// Printer-route saves are idempotent configuration writes. Retrying this
+  /// one operation is safe when the HTTPS socket closes before its response
+  /// headers arrive; order/payment commands deliberately do not use this
+  /// retry because their mutation semantics are different.
+  Future<void> _saveRouteWithTransientRetry({
+    required VenueScope scope,
+    required Map<String, Object?> values,
+  }) async {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        await _commands.manageVenueConfiguration(
+          scope: scope,
+          resource: 'printerRoute',
+          values: values,
+        );
+        return;
+      } on http.ClientException {
+        if (attempt == 1) rethrow;
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+    }
   }
 
   String? _cleanId(String? value) {

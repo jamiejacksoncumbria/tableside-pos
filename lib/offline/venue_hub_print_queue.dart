@@ -188,7 +188,7 @@ class VenueHubPrintQueue {
         );
       }
       final id =
-          'offline-${hubEpoch}-${order.orderId}-${entry.key}-${lineIds.join('-')}';
+          'offline-$hubEpoch-${order.orderId}-${entry.key}-${lineIds.join('-')}';
       _jobs.putIfAbsent(
         id,
         () => VenueHubLocalPrintJob(
@@ -339,6 +339,8 @@ class VenueHubPrintQueue {
   Future<Map<String, Object?>?> claim(String deviceId) => _run(() async {
     final now = TrustedClock.instance.nowUtc();
     var recoveredClaim = false;
+    var routeRepaired = false;
+    final activeRoutes = _routes();
     for (final job in _jobs.values.toList(growable: false)) {
       if (job.status == 'claimed' &&
           job.claimedAtUtc != null &&
@@ -351,6 +353,21 @@ class VenueHubPrintQueue {
         );
         recoveredClaim = true;
       }
+      // A manager may replace a printer after a ticket was queued. Reconcile
+      // only unclaimed work with the latest signed hub snapshot so a stale
+      // device ID cannot strand that ticket indefinitely.
+      final route = activeRoutes[job.productionArea];
+      if (job.status == 'queued' &&
+          route != null &&
+          route.primaryDeviceId.isNotEmpty &&
+          job.targetDeviceId != route.primaryDeviceId) {
+        _jobs[job.id] = job.copyWith(
+          targetDeviceId: route.primaryDeviceId,
+          clearClaim: true,
+          failureReason: 'Printer route changed; ticket safely reassigned.',
+        );
+        routeRepaired = true;
+      }
     }
     final historyPruned = _pruneHistory(now);
     final candidates =
@@ -361,7 +378,7 @@ class VenueHubPrintQueue {
             .toList()
           ..sort((a, b) => a.createdAtUtc.compareTo(b.createdAtUtc));
     if (candidates.isEmpty) {
-      if (recoveredClaim || historyPruned) await _persist();
+      if (recoveredClaim || routeRepaired || historyPruned) await _persist();
       return null;
     }
     final selected = candidates.first.copyWith(

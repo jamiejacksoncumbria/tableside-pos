@@ -735,9 +735,55 @@ async function manageMenuConfigurationFor(caller, rawData) {
         values.targetMarginBasisPoints, "targetMarginBasisPoints", 10000,
       );
     }
-    if (values.variants != null) {
+    if (values.variantSetId != null) {
+      if (values.variants != null) {
+        throw new HttpsError(
+          "invalid-argument",
+          "Choose either a reusable variant set or explicit variants, not both.",
+        );
+      }
+      const variantSetId = requiredDocumentId(values, "variantSetId");
+      const variantSet = await db.doc(
+        `tenants/${tenantId}/variantSets/${variantSetId}`,
+      ).get();
+      if (!variantSet.exists || variantSet.data().venueId !== venueId) {
+        throw new HttpsError(
+          "failed-precondition",
+          "The selected reusable variant set is unavailable at this venue.",
+        );
+      }
+      requestedBulkVariants = validatedVariants(variantSet.data().variants ?? []);
+      updates.variants = requestedBulkVariants;
+      updates.variantSetId = variantSetId;
+      updates.variantSetName = requiredText(variantSet.data(), "name", 120);
+    } else if (values.variants != null) {
       requestedBulkVariants = validatedVariants(values.variants);
       updates.variants = requestedBulkVariants;
+    }
+    if (values.changeTaxRate === true) {
+      if (values.taxRateId == null) {
+        updates.taxRateId = FieldValue.delete();
+        updates.taxRateName = "Zero rate";
+        updates.taxRateBasisPoints = 0;
+      } else {
+        const taxRateId = requiredDocumentId(values, "taxRateId");
+        const taxRate = await db.doc(
+          `tenants/${tenantId}/taxRates/${taxRateId}`,
+        ).get();
+        if (!taxRate.exists || taxRate.data().venueId !== venueId) {
+          throw new HttpsError(
+            "failed-precondition",
+            "The selected tax rate is unavailable at this venue.",
+          );
+        }
+        updates.taxRateId = taxRateId;
+        updates.taxRateName = requiredText(taxRate.data(), "name", 120);
+        updates.taxRateBasisPoints = requiredNonNegativeInteger(
+          taxRate.data().basisPoints,
+          "basisPoints",
+          100000,
+        );
+      }
     }
     const changeKeys = Object.keys(updates);
     if (changeKeys.length === 0) {

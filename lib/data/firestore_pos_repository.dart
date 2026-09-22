@@ -1074,7 +1074,9 @@ class FirestorePosRepository {
     bool? showOnOrderFlow,
     List<String>? modifierGroupIds,
     int? targetMarginBasisPoints,
-    List<MenuProductVariant>? variants,
+    String? variantSetId,
+    bool changeTaxRate = false,
+    String? taxRateId,
     bool? availableForCollection,
     bool? availableForDelivery,
     bool removeCollectionPriceOverride = false,
@@ -1094,7 +1096,8 @@ class FirestorePosRepository {
         if (modifierGroupIds != null) 'modifierGroupIds': modifierGroupIds,
         if (targetMarginBasisPoints != null)
           'targetMarginBasisPoints': targetMarginBasisPoints,
-        if (variants != null) 'variants': _variantsToMap(variants),
+        if (variantSetId != null) 'variantSetId': variantSetId,
+        if (changeTaxRate) ...{'changeTaxRate': true, 'taxRateId': taxRateId},
         if (availableForCollection != null)
           'availableForCollection': availableForCollection,
         if (availableForDelivery != null)

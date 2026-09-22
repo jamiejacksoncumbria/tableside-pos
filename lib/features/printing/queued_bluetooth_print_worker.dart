@@ -64,7 +64,6 @@ class QueuedNativePrintWorker {
       final user = FirebaseAuth.instance.currentUser;
       final requiredTransport = _requiredTransport;
       if (user == null || requiredTransport == null) return;
-      if (VenueHubPrinterClientRegistry.instance.requiresHub(scope)) return;
       var deviceId = await _identity.deviceIdForScope(scope);
       var deviceCredential = await _identity.credential(scope);
       if (deviceCredential == null || deviceCredential.isEmpty) {
@@ -85,6 +84,10 @@ class QueuedNativePrintWorker {
           !device.transports.contains(requiredTransport)) {
         return;
       }
+      // Hub-local tickets are claimed without Firebase, but the cloud device
+      // heartbeat still feeds every till's delivery monitor. Suppressing this
+      // heartbeat in hub mode made a healthy local printer appear offline and
+      // obscured the real state of queued tickets.
       await _devices.heartbeat(
         scope: scope,
         deviceId: deviceId,

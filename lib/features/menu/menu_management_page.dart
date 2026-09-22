@@ -552,6 +552,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                         : () => _showBulkProductEditor(
                             scope: scope,
                             sections: sections,
+                            taxRates: [TaxRate.zero, ...taxRates],
                             modifierGroups: modifierGroups,
                             variantSets: variantSets,
                             courses: courses,
@@ -698,6 +699,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
   Future<void> _showBulkProductEditor({
     required VenueScope scope,
     required List<MenuSection> sections,
+    required List<TaxRate> taxRates,
     required List<MenuModifierGroup> modifierGroups,
     required List<MenuVariantSet> variantSets,
     required List<MenuCourse> courses,
@@ -708,6 +710,8 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
     var changeMargin = false;
     var replaceVariants = false;
     String? selectedVariantSetId;
+    var changeTaxRate = false;
+    String? selectedTaxRateId = taxRates.firstOrNull?.id;
     var changeDefaultCourse = false;
     var selectedDefaultCourseChoice = 'standard';
     var orderFlowChoice = 'unchanged';
@@ -815,6 +819,36 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                       () => removeDeliveryPrice = value ?? false,
                     ),
                   ),
+                  const Divider(height: 28),
+                  CheckboxListTile(
+                    value: changeTaxRate,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Change tax rate'),
+                    subtitle: const Text(
+                      'Applies the selected tax snapshot to every selected product.',
+                    ),
+                    onChanged: taxRates.isEmpty
+                        ? null
+                        : (value) => setDialogState(
+                            () => changeTaxRate = value ?? false,
+                          ),
+                  ),
+                  if (changeTaxRate)
+                    DropdownButtonFormField<String>(
+                      initialValue: selectedTaxRateId,
+                      decoration: const InputDecoration(labelText: 'Tax rate'),
+                      items: [
+                        for (final rate in taxRates)
+                          DropdownMenuItem(
+                            value: rate.id,
+                            child: Text(
+                              '${rate.name} (${rate.percentageLabel})',
+                            ),
+                          ),
+                      ],
+                      onChanged: (value) =>
+                          setDialogState(() => selectedTaxRateId = value),
+                    ),
                   const Divider(height: 28),
                   CheckboxListTile(
                     value: replaceVariants,
@@ -1012,6 +1046,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                 if (!replaceSections &&
                     !replaceOptions &&
                     !replaceVariants &&
+                    !changeTaxRate &&
                     !changeDefaultCourse &&
                     !changeProductionArea &&
                     !changeMargin &&
@@ -1039,6 +1074,21 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                   );
                   return;
                 }
+                if (changeTaxRate && selectedTaxRateId == null) {
+                  showAppNotification(
+                    context,
+                    ref: ref,
+                    title: 'Choose a tax rate',
+                    message: 'Select the tax rate to apply.',
+                    level: AppNotificationLevel.warning,
+                  );
+                  return;
+                }
+                final selectedTaxRate = changeTaxRate
+                    ? taxRates.firstWhere(
+                        (rate) => rate.id == selectedTaxRateId,
+                      )
+                    : null;
                 Navigator.pop(
                   dialogContext,
                   _BulkProductChanges(
@@ -1057,13 +1107,11 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
                     targetMarginBasisPoints: marginPercent == null
                         ? null
                         : (marginPercent * 100).round(),
-                    variants: replaceVariants
-                        ? variantSets
-                              .firstWhere(
-                                (set) => set.id == selectedVariantSetId,
-                              )
-                              .variants
-                        : null,
+                    variantSetId: replaceVariants ? selectedVariantSetId : null,
+                    changeTaxRate: changeTaxRate,
+                    taxRateId: selectedTaxRate?.id == TaxRate.zero.id
+                        ? null
+                        : selectedTaxRate?.id,
                     changeDefaultCourse: changeDefaultCourse,
                     defaultCourseId: selectedDefaultCourseChoice == 'standard'
                         ? null
@@ -1120,7 +1168,9 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
             showOnOrderFlow: changes.showOnOrderFlow,
             modifierGroupIds: changes.modifierGroupIds,
             targetMarginBasisPoints: changes.targetMarginBasisPoints,
-            variants: changes.variants,
+            variantSetId: changes.variantSetId,
+            changeTaxRate: changes.changeTaxRate,
+            taxRateId: changes.taxRateId,
             changeDefaultCourse: changes.changeDefaultCourse,
             defaultCourseId: changes.defaultCourseId,
             availableForCollection: changes.availableForCollection,
@@ -1471,7 +1521,9 @@ class _BulkProductChanges {
     this.showOnOrderFlow,
     this.modifierGroupIds,
     this.targetMarginBasisPoints,
-    this.variants,
+    this.variantSetId,
+    this.changeTaxRate = false,
+    this.taxRateId,
     this.changeDefaultCourse = false,
     this.defaultCourseId,
     this.availableForCollection,
@@ -1485,7 +1537,9 @@ class _BulkProductChanges {
   final bool? showOnOrderFlow;
   final List<String>? modifierGroupIds;
   final int? targetMarginBasisPoints;
-  final List<MenuProductVariant>? variants;
+  final String? variantSetId;
+  final bool changeTaxRate;
+  final String? taxRateId;
   final bool changeDefaultCourse;
   final String? defaultCourseId;
   final bool? availableForCollection;

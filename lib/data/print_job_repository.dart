@@ -30,12 +30,49 @@ class PrintJobRepository {
     required String tenantId,
     required String venueId,
   }) {
-    return _jobs(tenantId)
+    final cloud = _jobs(tenantId)
         .where('venueId', isEqualTo: venueId)
         .where('status', isEqualTo: 'queued')
         .snapshots()
         .map((snapshot) => snapshot.size)
         .distinct();
+    final scope = VenueScope(tenantId: tenantId, venueId: venueId);
+    final local =
+        VenueHubRuntime.instance.localPrintJobs(scope) ??
+        (VenueHubClientRegistry.instance.hasUsableSession(scope)
+            ? VenueHubClientRegistry.instance.watchPrintJobs(scope)
+            : null);
+    if (local == null) return cloud;
+
+    // Hub-authoritative jobs live in the encrypted venue queue, not in the
+    // legacy Firestore collection. Merge both wake-up sources so a new local
+    // kitchen ticket is claimed immediately instead of relying on the ten
+    // second safety poll.
+    return Stream<int>.multi((controller) {
+      var cloudCount = 0;
+      var localCount = 0;
+      var lastCount = -1;
+      void emit() {
+        final count = cloudCount + localCount;
+        if (count != lastCount) {
+          lastCount = count;
+          controller.add(count);
+        }
+      }
+
+      final cloudSubscription = cloud.listen((queuedCount) {
+        cloudCount = queuedCount;
+        emit();
+      }, onError: controller.addError);
+      final localSubscription = local.listen((jobs) {
+        localCount = jobs.where((job) => job['status'] == 'queued').length;
+        emit();
+      }, onError: controller.addError);
+      controller.onCancel = () async {
+        await cloudSubscription.cancel();
+        await localSubscription.cancel();
+      };
+    });
   }
 
   /// A venue-wide live view used by every signed-in till to surface jobs that
