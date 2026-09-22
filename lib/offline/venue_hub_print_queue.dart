@@ -128,6 +128,8 @@ class VenueHubPrintQueue {
     yield* _changes.stream;
   }
 
+  List<Map<String, Object?>> get visibleJobs => _visibleJobs();
+
   Future<void> initialize() async {
     final stored = await _ledger.readSnapshot(
       tenantId: tenantId,

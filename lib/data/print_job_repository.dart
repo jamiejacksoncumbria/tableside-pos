@@ -55,7 +55,11 @@ class PrintJobRepository {
               .toList(growable: false),
         );
     final scope = VenueScope(tenantId: tenantId, venueId: venueId);
-    final local = VenueHubRuntime.instance.localPrintJobs(scope);
+    final local =
+        VenueHubRuntime.instance.localPrintJobs(scope) ??
+        (VenueHubClientRegistry.instance.hasUsableSession(scope)
+            ? VenueHubClientRegistry.instance.watchPrintJobs(scope)
+            : null);
     if (local == null) return cloud;
 
     // Hub-local operational jobs and the older cloud queue are both valid

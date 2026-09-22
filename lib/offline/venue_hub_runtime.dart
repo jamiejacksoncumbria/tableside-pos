@@ -398,6 +398,7 @@ class VenueHubRuntime {
             }
             await refresh();
           },
+          readPrintJobs: () async => printQueue.visibleJobs,
           readOrders: () async => (await orderBook.rebuild()).values
               .map((order) => order.toJson())
               .toList(growable: false),

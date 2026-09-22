@@ -27,6 +27,7 @@ typedef VenueHubPrintJobManager =
     );
 typedef VenueHubClientSnapshotReader = Future<Map<String, Object?>> Function();
 typedef VenueHubSnapshotRefresher = Future<void> Function();
+typedef VenueHubPrintJobReader = Future<List<Map<String, Object?>>> Function();
 typedef VenueHubOrderProjectionReader =
     Future<List<Map<String, Object?>>> Function();
 
@@ -43,6 +44,7 @@ class VenueHubServerConfiguration {
     required this.managePrintJob,
     required this.readClientSnapshot,
     required this.refreshSnapshot,
+    required this.readPrintJobs,
     required this.readOrders,
     this.privateKeyPassword,
     this.allowedOrigins = const <String>{},
@@ -61,6 +63,7 @@ class VenueHubServerConfiguration {
   final VenueHubPrintJobManager managePrintJob;
   final VenueHubClientSnapshotReader readClientSnapshot;
   final VenueHubSnapshotRefresher refreshSnapshot;
+  final VenueHubPrintJobReader readPrintJobs;
   final VenueHubOrderProjectionReader readOrders;
 }
 

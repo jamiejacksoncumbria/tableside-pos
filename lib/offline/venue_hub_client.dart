@@ -381,6 +381,33 @@ class VenueHubClient {
     return Map<String, Object?>.from(decoded);
   }
 
+  Future<List<Map<String, Object?>>> fetchPrintJobs() async {
+    final sessionId = configuration.staffSessionId;
+    final sessionToken = configuration.staffSessionToken;
+    if (sessionId == null || sessionToken == null) return const [];
+    final body = <String, Object?>{
+      'staffSessionId': sessionId,
+      'staffSessionToken': sessionToken,
+    };
+    final response = await _signedPost('/v1/print/jobs', body);
+    if (response.statusCode != 200) {
+      throw const VenueHubClientException(
+        'The venue hub print queue is unavailable.',
+      );
+    }
+    final decoded = jsonDecode(response.body);
+    final jobs = decoded is Map ? decoded['jobs'] : null;
+    if (jobs is! List) {
+      throw const VenueHubClientException(
+        'The print queue response is invalid.',
+      );
+    }
+    return jobs
+        .whereType<Map>()
+        .map((job) => Map<String, Object?>.from(job))
+        .toList(growable: false);
+  }
+
   Future<Map<String, Object?>> fetchCatalogue() async {
     const body = <String, Object?>{};
     final response = await _signedPost('/v1/catalogue', body);

@@ -216,6 +216,28 @@ class NativeVenueHubServer implements VenueHubServer {
         );
         return;
       }
+      if (request.uri.path == '/v1/print/jobs' && request.method == 'POST') {
+        _requireAllowedOrigin(request, allowNoOrigin: true);
+        final payload = await _readJson(request);
+        final envelope = _envelope(payload['envelope']);
+        final body = _map(
+          payload['body'],
+          'The print list request is invalid.',
+        );
+        if (envelope.path != '/v1/print/jobs' || envelope.method != 'POST') {
+          throw const VenueHubProtocolException('Invalid print endpoint.');
+        }
+        await _configuration!.processor.authenticate(
+          envelope: envelope,
+          body: body,
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+          requiredPermission: 'order',
+        );
+        _json(response, HttpStatus.ok, {
+          'jobs': await _configuration!.readPrintJobs(),
+        });
+        return;
+      }
       if (request.uri.path == '/v1/catalogue' && request.method == 'POST') {
         _requireAllowedOrigin(request, allowNoOrigin: true);
         final payload = await _readJson(request);

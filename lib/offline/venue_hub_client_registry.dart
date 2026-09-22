@@ -73,6 +73,19 @@ class VenueHubClientRegistry {
     VenueHubOfflineView.instance.install(await client.fetchCatalogue());
   }
 
+  /// Enrolled LAN clients poll only lightweight hub queue metadata. Physical
+  /// claiming remains device-authenticated and manager recovery remains
+  /// separately PIN-authorised; this stream merely makes delivery failures
+  /// visible on every signed-in venue device.
+  Stream<List<Map<String, Object?>>> watchPrintJobs(VenueScope scope) async* {
+    while (hasUsableSession(scope)) {
+      final client = clientFor(scope);
+      if (client == null) return;
+      yield await client.fetchPrintJobs();
+      await Future<void>.delayed(const Duration(seconds: 3));
+    }
+  }
+
   Future<void> ensureOrderOpened({
     required VenueScope scope,
     required String orderId,
