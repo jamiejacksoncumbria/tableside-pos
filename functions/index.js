@@ -1656,15 +1656,21 @@ async function manageVenueConfigurationFor(caller, rawData) {
     } else {
     const takeoverReason = currentHub?.enabled === true
       ? requiredText(values, "takeoverReason", 200) : null;
-    const existingOpenOrders = await db.collection(`tenants/${tenantId}/orders`)
-      .where("venueId", "==", venueId)
-      .get();
-    if (existingOpenOrders.docs.some((order) =>
-      ["open", "sent"].includes(order.data().status))) {
-      throw new HttpsError(
-        "failed-precondition",
-        "Close all current tables and named tabs before first activating the offline hub.",
-      );
+    // Open orders prevent a *first* activation because two authorities may
+    // otherwise have created them. During an explicit, audited takeover the
+    // existing Firebase orders are included in the new hub snapshot and must
+    // remain open so a failed/replaced hub does not deadlock the venue.
+    if (currentHub?.enabled !== true) {
+      const existingOpenOrders = await db.collection(`tenants/${tenantId}/orders`)
+        .where("venueId", "==", venueId)
+        .get();
+      if (existingOpenOrders.docs.some((order) =>
+        ["open", "sent"].includes(order.data().status))) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Close all current tables and named tabs before first activating the offline hub.",
+        );
+      }
     }
     const credential = await db.doc(
       `tenants/${tenantId}/offlineDeviceCredentials/${credentialId}`,

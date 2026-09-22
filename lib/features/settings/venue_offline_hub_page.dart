@@ -129,7 +129,9 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       return;
     }
     String? takeoverReason;
-    if (_bootstrap?.enabled == true && _bootstrap?.hubDeviceId != _deviceId) {
+    if (_bootstrap?.enabled == true &&
+        (_bootstrap?.hubDeviceId != _deviceId ||
+            _bootstrap?.hubCredentialId != _credential?.credentialId)) {
       takeoverReason = await _requestReason(
         title: 'Replace the active hub?',
         message:
@@ -364,7 +366,9 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     final bootstrap = _bootstrap;
     final deviceId = _deviceId;
     final isThisHub =
-        bootstrap?.enabled == true && bootstrap?.hubDeviceId == deviceId;
+        bootstrap?.enabled == true &&
+        bootstrap?.hubDeviceId == deviceId &&
+        bootstrap?.hubCredentialId == _credential?.credentialId;
     final runtime = VenueHubRuntime.instance.status;
     return Scaffold(
       appBar: AppBar(title: const Text('Venue offline hub')),

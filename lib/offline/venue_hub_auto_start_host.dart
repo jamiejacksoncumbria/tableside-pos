@@ -61,7 +61,12 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
       } catch (_) {
         bootstrap = await cache.readBootstrap(widget.scope);
       }
-      if (bootstrap == null || !bootstrap.enabled) return;
+      if (bootstrap == null || !bootstrap.enabled) {
+        AppLogger.info(
+          'Venue offline hub auto-start skipped: hub is not enabled.',
+        );
+        return;
+      }
       final deviceId = await LocalPrinterDeviceIdentity().deviceIdForScope(
         widget.scope,
       );
@@ -76,19 +81,36 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
         deviceId: deviceId,
         credential: credential,
       );
-      if (bootstrap.hubDeviceId != deviceId) return;
+      if (bootstrap.hubDeviceId != deviceId) {
+        AppLogger.info(
+          'Venue offline hub auto-start skipped: another device owns this venue. '
+          'A manager can replace it in Settings > Venue offline hub.',
+        );
+        return;
+      }
       if (!canHostVenueHub) {
         AppLogger.info(
           'This platform can join the venue hub but cannot host it.',
         );
         return;
       }
-      if (bootstrap.hubCredentialId != credential.credentialId) return;
+      if (bootstrap.hubCredentialId != credential.credentialId) {
+        AppLogger.info(
+          'Venue offline hub auto-start skipped: this installation has a new '
+          'device credential. A manager must restart/replace the hub in settings.',
+        );
+        return;
+      }
       final prefix =
           'tableside.offlineHub.tls.${widget.scope.tenantId}.${widget.scope.venueId}';
       final certificate = await _secrets.read(key: '$prefix.certificate');
       final privateKey = await _secrets.read(key: '$prefix.privateKey');
-      if (certificate == null || privateKey == null) return;
+      if (certificate == null || privateKey == null) {
+        AppLogger.info(
+          'Venue offline hub auto-start skipped: the TLS certificate or private key is missing.',
+        );
+        return;
+      }
       Map<String, Object?>? freshSnapshot;
       try {
         final ledger = OfflineEventLedger.instance;
