@@ -327,6 +327,60 @@ class VenueHubClient {
     return job is Map ? Map<String, Object?>.from(job) : null;
   }
 
+  /// Performs manager-only recovery against the authoritative hub queue. The
+  /// request carries both the enrolled device signature and current staff PIN
+  /// session, so exposing local recovery never weakens the security boundary.
+  Future<Map<String, Object?>> managePrintJob({
+    required String action,
+    required String jobId,
+    String? reason,
+  }) async {
+    final sessionId = configuration.staffSessionId;
+    final sessionToken = configuration.staffSessionToken;
+    if (sessionId == null || sessionToken == null) {
+      throw const VenueHubClientException(
+        'Enter a manager PIN before changing the print queue.',
+      );
+    }
+    final body = <String, Object?>{
+      'staffSessionId': sessionId,
+      'staffSessionToken': sessionToken,
+      'action': action,
+      'jobId': jobId,
+      if (reason != null) 'reason': reason,
+    };
+    final envelope =
+        await VenueHubRequestSigner(configuration.credential.keyPair).sign(
+          credentialId: configuration.credential.credentialId,
+          tenantId: configuration.tenantId,
+          venueId: configuration.venueId,
+          deviceId: configuration.deviceId,
+          staffId: configuration.staffId,
+          method: 'POST',
+          path: '/v1/print/manage',
+          hubEpoch: configuration.hubEpoch,
+          sentAtUtc: TrustedClock.instance.nowUtc(),
+          body: body,
+        );
+    final response = await _http
+        .post(
+          configuration.endpoint.resolve('/v1/print/manage'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({'envelope': envelope.toJson(), 'body': body}),
+        )
+        .timeout(timeout);
+    if (response.statusCode != 200) {
+      throw const VenueHubClientException(
+        'The venue hub rejected this print queue action.',
+      );
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map) {
+      throw const VenueHubClientException('The print response is invalid.');
+    }
+    return Map<String, Object?>.from(decoded);
+  }
+
   Future<Map<String, Object?>> fetchCatalogue() async {
     const body = <String, Object?>{};
     final response = await _signedPost('/v1/catalogue', body);
@@ -342,6 +396,45 @@ class VenueHubClient {
       );
     }
     return Map<String, Object?>.from(decoded);
+  }
+
+  Future<void> refreshCatalogue() async {
+    final sessionId = configuration.staffSessionId;
+    final sessionToken = configuration.staffSessionToken;
+    if (sessionId == null || sessionToken == null) {
+      throw const VenueHubClientException(
+        'Enter a manager PIN before refreshing venue configuration.',
+      );
+    }
+    final body = <String, Object?>{
+      'staffSessionId': sessionId,
+      'staffSessionToken': sessionToken,
+    };
+    final envelope =
+        await VenueHubRequestSigner(configuration.credential.keyPair).sign(
+          credentialId: configuration.credential.credentialId,
+          tenantId: configuration.tenantId,
+          venueId: configuration.venueId,
+          deviceId: configuration.deviceId,
+          staffId: configuration.staffId,
+          method: 'POST',
+          path: '/v1/catalogue/refresh',
+          hubEpoch: configuration.hubEpoch,
+          sentAtUtc: TrustedClock.instance.nowUtc(),
+          body: body,
+        );
+    final response = await _http
+        .post(
+          configuration.endpoint.resolve('/v1/catalogue/refresh'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({'envelope': envelope.toJson(), 'body': body}),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode != 200) {
+      throw const VenueHubClientException(
+        'The venue hub could not refresh its configuration.',
+      );
+    }
   }
 
   Future<List<Map<String, Object?>>> fetchOrders() async {

@@ -180,6 +180,42 @@ class NativeVenueHubServer implements VenueHubServer {
         }
         return;
       }
+      if (request.uri.path == '/v1/print/manage' && request.method == 'POST') {
+        _requireAllowedOrigin(request, allowNoOrigin: true);
+        final payload = await _readJson(request);
+        final envelope = _envelope(payload['envelope']);
+        final body = _map(payload['body'], 'The print action is invalid.');
+        if (envelope.path != '/v1/print/manage' || envelope.method != 'POST') {
+          throw const VenueHubProtocolException('Invalid print endpoint.');
+        }
+        await _configuration!.processor.authenticate(
+          envelope: envelope,
+          body: body,
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+          requiredPermission: 'manager',
+        );
+        final action = body['action'];
+        final jobId = body['jobId'];
+        final reason = body['reason'];
+        if (action is! String ||
+            jobId is! String ||
+            jobId.isEmpty ||
+            (reason != null && reason is! String)) {
+          throw const FormatException('The print action is invalid.');
+        }
+        _json(
+          response,
+          HttpStatus.ok,
+          await _configuration!.managePrintJob(
+            action,
+            jobId,
+            reason as String?,
+            envelope.deviceId,
+            envelope.staffId,
+          ),
+        );
+        return;
+      }
       if (request.uri.path == '/v1/catalogue' && request.method == 'POST') {
         _requireAllowedOrigin(request, allowNoOrigin: true);
         final payload = await _readJson(request);
@@ -198,6 +234,26 @@ class NativeVenueHubServer implements VenueHubServer {
           HttpStatus.ok,
           await _configuration!.readClientSnapshot(),
         );
+        return;
+      }
+      if (request.uri.path == '/v1/catalogue/refresh' &&
+          request.method == 'POST') {
+        _requireAllowedOrigin(request, allowNoOrigin: true);
+        final payload = await _readJson(request);
+        final envelope = _envelope(payload['envelope']);
+        final body = _map(payload['body'], 'The catalogue request is invalid.');
+        if (envelope.path != '/v1/catalogue/refresh' ||
+            envelope.method != 'POST') {
+          throw const VenueHubProtocolException('Invalid catalogue endpoint.');
+        }
+        await _configuration!.processor.authenticate(
+          envelope: envelope,
+          body: body,
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+          requiredPermission: 'manager',
+        );
+        await _configuration!.refreshSnapshot();
+        _json(response, HttpStatus.ok, {'refreshed': true});
         return;
       }
       if (request.uri.path == '/v1/orders' && request.method == 'POST') {

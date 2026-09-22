@@ -2648,7 +2648,9 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
   const nonceRef = tenantRef.collection("offlineHubUploadNonces").doc(nonceId);
   const eventRefs = events.map((event) =>
     tenantRef.collection("offlineHubEvents").doc(event.id));
-  const securityEventTypes = new Set(["security.pinAttempt"]);
+  const securityEventTypes = new Set([
+    "security.pinAttempt", "security.printQueueManaged",
+  ]);
   const orderEvents = events.filter((event) => !securityEventTypes.has(event.type));
   const orderIds = [...new Set(orderEvents.map((event) => event.payload.orderId))];
   if (orderIds.some((id) => typeof id !== "string" || id.length < 1 || id.length > 180)) {
@@ -2721,6 +2723,28 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
             deviceId: event.deviceId,
             successful: event.payload.successful,
             locked: event.payload.locked === true,
+            hubEpoch: upload.hubEpoch,
+            sourceEventId: event.id,
+            occurredAt: new Date(event.createdAtUtc),
+            createdAt: FieldValue.serverTimestamp(),
+          },
+        );
+      } else if (event.type === "security.printQueueManaged") {
+        if (typeof event.payload.action !== "string" ||
+            typeof event.payload.jobId !== "string" ||
+            (event.payload.reason != null && typeof event.payload.reason !== "string")) {
+          throw new HttpsError("invalid-argument", "An offline print audit event is invalid.");
+        }
+        transaction.create(
+          tenantRef.collection("auditEvents").doc(`offline_${event.id}`),
+          {
+            action: "offlinePrintQueueManaged",
+            venueId: upload.venueId,
+            staffId: event.staffId,
+            deviceId: event.deviceId,
+            printAction: event.payload.action,
+            printJobId: event.payload.jobId,
+            reason: event.payload.reason ?? null,
             hubEpoch: upload.hubEpoch,
             sourceEventId: event.id,
             occurredAt: new Date(event.createdAtUtc),

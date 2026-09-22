@@ -21,7 +21,17 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     required Map<String, Object?> payload,
     required String idempotencyKey,
   }) async {
-    final selectedPrinter = await _printer.selectedPrinter();
+    final ticketType = payload['type'];
+    final usesReceiptRoute =
+        ticketType == 'receipt' ||
+        ticketType == 'refundReceipt' ||
+        ticketType == 'giftVoucher';
+    final productionArea =
+        payload['productionArea'] as String? ??
+        (usesReceiptRoute ? 'receipt' : 'kitchen');
+    final selectedPrinter = await _printer.selectedPrinter(
+      productionArea: productionArea,
+    );
     if (selectedPrinter == null) {
       throw const WindowsPrintQueueException(
         'This registered Windows device has no selected print queue.',

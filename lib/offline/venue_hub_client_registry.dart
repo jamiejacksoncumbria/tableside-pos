@@ -63,6 +63,16 @@ class VenueHubClientRegistry {
   int? hubEpochFor(VenueScope scope) =>
       requiresHub(scope) ? _bootstrap?.hubEpoch : null;
 
+  Future<void> refreshCatalogue(VenueScope scope) async {
+    final client = clientFor(scope);
+    if (client == null) return;
+    await Future<void>.delayed(const Duration(milliseconds: 750));
+    await client.refreshCatalogue();
+    await Future<void>.delayed(const Duration(milliseconds: 750));
+    await client.refreshCatalogue();
+    VenueHubOfflineView.instance.install(await client.fetchCatalogue());
+  }
+
   Future<void> ensureOrderOpened({
     required VenueScope scope,
     required String orderId,

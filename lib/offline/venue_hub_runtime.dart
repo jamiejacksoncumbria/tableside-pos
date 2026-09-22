@@ -58,6 +58,7 @@ class VenueHubRuntime {
   VenueHubCloudSync? _sync;
   VenueHubPrintQueue? _printQueue;
   Future<void> Function(Map<String, Object?> snapshot)? _installFreshSnapshot;
+  Future<void> Function()? _refreshAuthorityNow;
   StreamSubscription? _pendingSubscription;
   Timer? _authorityTimer;
   Timer? _remoteCommandTimer;
@@ -298,6 +299,7 @@ class VenueHubRuntime {
           return event;
         },
       );
+      Future<void> Function()? refreshAuthorityCallback;
       final endpoint = await _server.start(
         VenueHubServerConfiguration(
           bindAddress: bindAddress,
@@ -350,8 +352,52 @@ class VenueHubRuntime {
                 printed: printed,
                 failureReason: failureReason,
               ),
+          managePrintJob:
+              (action, jobId, reason, clientDeviceId, staffId) async {
+                await _ledger.commit(
+                  OfflineEventDraft(
+                    tenantId: scope.tenantId,
+                    venueId: scope.venueId,
+                    deviceId: clientDeviceId,
+                    staffId: staffId,
+                    type: 'security.printQueueManaged',
+                    payload: <String, Object?>{
+                      'action': action,
+                      'jobId': jobId,
+                      if (reason != null) 'reason': reason,
+                    },
+                  ),
+                  hubEpoch: bootstrap.hubEpoch,
+                );
+                switch (action) {
+                  case 'retry':
+                    await printQueue.retry(jobId);
+                    return const <String, Object?>{'updated': true};
+                  case 'reprint':
+                    await printQueue.reprint(jobId);
+                    return const <String, Object?>{'updated': true};
+                  case 'cancel':
+                    return <String, Object?>{
+                      'cancelledJobIds': await printQueue.cancel(
+                        jobId,
+                        reason ?? 'Cleared by manager.',
+                      ),
+                    };
+                  default:
+                    throw StateError(
+                      'That local print action is not supported.',
+                    );
+                }
+              },
           readClientSnapshot: () async =>
               Map<String, Object?>.from(snapshot)..remove('staff'),
+          refreshSnapshot: () async {
+            final refresh = refreshAuthorityCallback;
+            if (refresh == null) {
+              throw StateError('The venue catalogue refresh is not ready.');
+            }
+            await refresh();
+          },
           readOrders: () async => (await orderBook.rebuild()).values
               .map((order) => order.toJson())
               .toList(growable: false),
@@ -377,7 +423,9 @@ class VenueHubRuntime {
         final staffId = command['staffId'];
         final expectedPinVersion = command['pinVersion'];
         final expectedMembershipVersion = command['membershipVersion'];
-        final expiresAt = DateTime.tryParse(command['expiresAt'] as String? ?? '');
+        final expiresAt = DateTime.tryParse(
+          command['expiresAt'] as String? ?? '',
+        );
         if (staffId is! String ||
             expectedPinVersion is! int ||
             expectedMembershipVersion is! int ||
@@ -463,12 +511,18 @@ class VenueHubRuntime {
                   'eventId': acknowledgement.eventId,
                   'sequence': acknowledgement.sequence,
                   'eventHash': acknowledgement.eventHash,
-                  'committedAtUtc': acknowledgement.committedAtUtc.toUtc().toIso8601String(),
+                  'committedAtUtc': acknowledgement.committedAtUtc
+                      .toUtc()
+                      .toIso8601String(),
                 },
               );
               unawaited(_sync!.flush());
             } catch (error, stackTrace) {
-              AppLogger.error('Process remote venue command', error, stackTrace);
+              AppLogger.error(
+                'Process remote venue command',
+                error,
+                stackTrace,
+              );
               try {
                 await _repository.completeRemoteHubCommand(
                   scope: scope,
@@ -496,6 +550,7 @@ class VenueHubRuntime {
           remoteTickRunning = false;
         }
       }
+
       _remoteCommandTimer = Timer.periodic(
         const Duration(seconds: 5),
         (_) => unawaited(remoteTick()),
@@ -564,7 +619,12 @@ class VenueHubRuntime {
               knownSnapshotDigest: snapshot['snapshotDigest'] as String?,
               knownSnapshotGeneration: snapshot['snapshotGeneration'] as int?,
             );
-          } catch (_) {
+          } catch (error, stackTrace) {
+            AppLogger.error(
+              'Download refreshed venue hub snapshot',
+              error,
+              stackTrace,
+            );
             return;
           }
           if (refreshed['unchanged'] == true) {
@@ -599,6 +659,13 @@ class VenueHubRuntime {
         }
       }
 
+      // Configuration writes are cloud-owned rather than order events. Keep a
+      // callable refresh hook so a successful menu/customer/settings edit can
+      // update the hub catalogue immediately instead of leaving every native
+      // screen on the old encrypted snapshot until the 30-second safety poll.
+      _refreshAuthorityNow = refreshAuthority;
+      refreshAuthorityCallback = refreshAuthority;
+
       _authorityTimer = Timer.periodic(
         const Duration(seconds: 30),
         (_) => unawaited(refreshAuthority()),
@@ -627,8 +694,10 @@ class VenueHubRuntime {
     _pendingSubscription = null;
     _sync?.dispose();
     _sync = null;
+    await _printQueue?.dispose();
     _printQueue = null;
     _installFreshSnapshot = null;
+    _refreshAuthorityNow = null;
     _activeScope = null;
     await _server.stop();
     await AndroidVenueHubService.stop();
@@ -654,6 +723,19 @@ class VenueHubRuntime {
       throw StateError('The venue hub is not ready to refresh staff access.');
     }
     return install(snapshot);
+  }
+
+  Stream<List<Map<String, Object?>>>? localPrintJobs(VenueScope scope) {
+    if (_activeScope != scope) return null;
+    return _printQueue?.changes;
+  }
+
+  /// Requests an immediate cloud-authority refresh when this process is the
+  /// active hub. Non-hub clients safely do nothing; they receive the refreshed
+  /// catalogue from the hub on their next explicit catalogue fetch.
+  Future<void> refreshAuthorityNow() async {
+    final refresh = _refreshAuthorityNow;
+    if (refresh != null) await refresh();
   }
 
   Future<void> completeLocalPrintJob({

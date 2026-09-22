@@ -17,6 +17,7 @@ import '../offline/venue_hub_protocol.dart';
 import '../offline/venue_hub_client_registry.dart';
 import '../offline/venue_hub_client.dart';
 import '../offline/venue_hub_remote_command_client.dart';
+import '../offline/venue_hub_runtime.dart';
 
 class ProductionDispatchResult {
   const ProductionDispatchResult({
@@ -368,12 +369,14 @@ class ProductionCommandRepository {
           'The menu server returned an invalid bulk update result.',
         );
       }
+      await _refreshHubConfiguration(scope);
       return;
     }
     final returnedId = response['documentId'];
     if (returnedId is! String || returnedId.isEmpty) {
       throw StateError('The menu server returned an invalid document ID.');
     }
+    await _refreshHubConfiguration(scope);
   }
 
   /// Performs manager-only supplier, purchasing and stock mutations. The
@@ -405,13 +408,14 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String resource,
     required Map<String, Object?> values,
-  }) {
-    return _call('manageVenueConfiguration', {
+  }) async {
+    await _call('manageVenueConfiguration', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'resource': resource,
       'values': values,
     });
+    await _refreshHubConfiguration(scope);
   }
 
   Future<Map<String, dynamic>> manageFulfilment({
@@ -425,21 +429,20 @@ class ProductionCommandRepository {
         documentId != null &&
         hub.requiresHub(scope)) {
       return _sendHubEvent(
-            scope: scope,
-            eventType: 'order.fulfilmentChanged',
-            payload: <String, Object?>{
-              'orderId': documentId,
-              'status': values['status'],
-              if (values['driverId'] != null) 'driverId': values['driverId'],
-            },
-          )
-          .then(
-            (acknowledgement) => <String, dynamic>{
-              'documentId': documentId,
-              'eventId': acknowledgement.eventId,
-              'updated': true,
-            },
-          );
+        scope: scope,
+        eventType: 'order.fulfilmentChanged',
+        payload: <String, Object?>{
+          'orderId': documentId,
+          'status': values['status'],
+          if (values['driverId'] != null) 'driverId': values['driverId'],
+        },
+      ).then(
+        (acknowledgement) => <String, dynamic>{
+          'documentId': documentId,
+          'eventId': acknowledgement.eventId,
+          'updated': true,
+        },
+      );
     }
     return _call('manageFulfilment', {
       'tenantId': scope.tenantId,
@@ -448,7 +451,37 @@ class ProductionCommandRepository {
       if (documentId != null && documentId.trim().isNotEmpty)
         'documentId': documentId,
       'values': values,
+    }).then((response) async {
+      await _refreshHubConfiguration(scope);
+      return response;
     });
+  }
+
+  /// Cloud configuration triggers update the hub generation asynchronously.
+  /// Two short refresh attempts cover that propagation window and make menu,
+  /// customer and fulfilment edits visible without an application restart.
+  /// This never changes order authority and is a no-op on non-hub devices.
+  Future<void> _refreshHubConfiguration(VenueScope scope) async {
+    try {
+      final runtime = VenueHubRuntime.instance;
+      if (runtime.activeScope != scope) {
+        await VenueHubClientRegistry.instance.refreshCatalogue(scope);
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 750));
+      await runtime.refreshAuthorityNow();
+      await Future<void>.delayed(const Duration(milliseconds: 750));
+      await runtime.refreshAuthorityNow();
+    } catch (error, stackTrace) {
+      // The cloud mutation has already succeeded. Preserve that success and
+      // let the periodic authority refresh recover, while retaining a useful
+      // diagnostic instead of falsely telling the manager the save failed.
+      AppLogger.error(
+        'Refresh venue configuration after save',
+        error,
+        stackTrace,
+      );
+    }
   }
 
   Future<String> registerPrinterDevice({
@@ -662,7 +695,10 @@ class ProductionCommandRepository {
       sentAtUtc: DateTime.now().toUtc(),
       body: body,
     );
-    await _call('heartbeatRemoteHub', {'envelope': envelope.toJson(), 'body': body});
+    await _call('heartbeatRemoteHub', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
   }
 
   Future<List<Map<String, Object?>>> claimRemoteHubCommands({
@@ -691,7 +727,10 @@ class ProductionCommandRepository {
     });
     final commands = response['commands'];
     return commands is List
-        ? commands.whereType<Map>().map(Map<String, Object?>.from).toList(growable: false)
+        ? commands
+              .whereType<Map>()
+              .map(Map<String, Object?>.from)
+              .toList(growable: false)
         : const <Map<String, Object?>>[];
   }
 
@@ -1336,6 +1375,10 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String jobId,
   }) {
+    final hubClient = VenueHubClientRegistry.instance.clientFor(scope);
+    if (jobId.startsWith('offline-') && hubClient != null) {
+      return hubClient.managePrintJob(action: 'retry', jobId: jobId);
+    }
     return _call('retryFailedPrintJob', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
@@ -1349,6 +1392,10 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String jobId,
   }) {
+    final hubClient = VenueHubClientRegistry.instance.clientFor(scope);
+    if (jobId.startsWith('offline-') && hubClient != null) {
+      return hubClient.managePrintJob(action: 'reprint', jobId: jobId);
+    }
     return _call('reprintPrintedJob', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
@@ -1364,6 +1411,15 @@ class ProductionCommandRepository {
     required String jobId,
     required String reason,
   }) async {
+    final hubClient = VenueHubClientRegistry.instance.clientFor(scope);
+    if (jobId.startsWith('offline-') && hubClient != null) {
+      final response = await hubClient.managePrintJob(
+        action: 'cancel',
+        jobId: jobId,
+        reason: reason,
+      );
+      return _stringList(response['cancelledJobIds']);
+    }
     final response = await _call('cancelPrintJob', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
@@ -1762,9 +1818,12 @@ class ProductionCommandRepository {
         if (tableId?.trim().isNotEmpty == true) 'tableId': tableId!.trim(),
         if (tabName?.trim().isNotEmpty == true) 'tabName': tabName!.trim(),
         'channel': channel.name,
-        if (customerId?.trim().isNotEmpty == true) 'customerId': customerId!.trim(),
-        if (customerName?.trim().isNotEmpty == true) 'customerName': customerName!.trim(),
-        if (customerPhone?.trim().isNotEmpty == true) 'customerPhone': customerPhone!.trim(),
+        if (customerId?.trim().isNotEmpty == true)
+          'customerId': customerId!.trim(),
+        if (customerName?.trim().isNotEmpty == true)
+          'customerName': customerName!.trim(),
+        if (customerPhone?.trim().isNotEmpty == true)
+          'customerPhone': customerPhone!.trim(),
         if (deliveryAddress?.trim().isNotEmpty == true)
           'deliveryAddress': deliveryAddress!.trim(),
         if (scheduledFor != null)

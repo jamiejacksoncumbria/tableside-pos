@@ -10,7 +10,7 @@ class _UnsupportedWindowsPrintQueue implements WindowsPrintQueue {
   bool get isSupported => false;
 
   @override
-  Future<void> clearSelectedPrinter() async {}
+  Future<void> clearSelectedPrinter({String? productionArea}) async {}
 
   @override
   Future<List<WindowsPrintQueueDevice>> installedPrinters() {
@@ -41,8 +41,13 @@ class _UnsupportedWindowsPrintQueue implements WindowsPrintQueue {
   }
 
   @override
-  Future<void> selectPrinter(WindowsPrintQueueDevice printer) async {}
+  Future<void> selectPrinter(
+    WindowsPrintQueueDevice printer, {
+    String? productionArea,
+  }) async {}
 
   @override
-  Future<WindowsPrintQueueDevice?> selectedPrinter() async => null;
+  Future<WindowsPrintQueueDevice?> selectedPrinter({
+    String? productionArea,
+  }) async => null;
 }

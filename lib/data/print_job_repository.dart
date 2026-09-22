@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../features/pos/domain.dart';
@@ -44,7 +46,7 @@ class PrintJobRepository {
     required String tenantId,
     required String venueId,
   }) {
-    return _jobs(tenantId)
+    final cloud = _jobs(tenantId)
         .where('venueId', isEqualTo: venueId)
         .snapshots()
         .map(
@@ -52,6 +54,41 @@ class PrintJobRepository {
               .map((document) => _fromDocument(tenantId, document))
               .toList(growable: false),
         );
+    final scope = VenueScope(tenantId: tenantId, venueId: venueId);
+    final local = VenueHubRuntime.instance.localPrintJobs(scope);
+    if (local == null) return cloud;
+
+    // Hub-local operational jobs and the older cloud queue are both valid
+    // histories during migration. Merge them by id so recovery, reprinting and
+    // alerts never hide a ticket merely because hub authority created it.
+    return Stream<List<PrintJob>>.multi((controller) {
+      var cloudJobs = const <PrintJob>[];
+      var localJobs = const <PrintJob>[];
+      void emit() {
+        final byId = <String, PrintJob>{
+          for (final job in cloudJobs) job.id: job,
+          for (final job in localJobs) job.id: job,
+        };
+        final values = byId.values.toList(growable: false)
+          ..sort((left, right) => right.createdAt.compareTo(left.createdAt));
+        controller.add(values);
+      }
+
+      final cloudSubscription = cloud.listen((jobs) {
+        cloudJobs = jobs;
+        emit();
+      }, onError: controller.addError);
+      final localSubscription = local.listen((jobs) {
+        localJobs = jobs
+            .map((data) => _fromLocalSnapshot(tenantId, venueId, data))
+            .toList(growable: false);
+        emit();
+      }, onError: controller.addError);
+      controller.onCancel = () async {
+        await cloudSubscription.cancel();
+        await localSubscription.cancel();
+      };
+    });
   }
 
   /// Atomically claims one queued job. A worker must print an idempotent ticket
@@ -168,6 +205,41 @@ class PrintJobRepository {
     attempts: data['attempts'] as int? ?? 1,
     payload: Map<String, Object?>.from(data['payload'] as Map? ?? const {}),
   );
+
+  PrintJob _fromLocalSnapshot(
+    String tenantId,
+    String venueId,
+    Map<String, Object?> data,
+  ) {
+    final statusName = data['status'] as String? ?? 'queued';
+    final status = PrintJobStatus.values
+        .where((value) => value.name == statusName)
+        .firstOrNull;
+    return PrintJob(
+      id: data['id'] as String,
+      tenantId: tenantId,
+      venueId: venueId,
+      targetDeviceId: data['targetDeviceId'] as String? ?? '',
+      orderId: data['orderId'] as String? ?? '',
+      status: status ?? PrintJobStatus.queued,
+      idempotencyKey: data['id'] as String,
+      createdAt:
+          DateTime.tryParse(data['createdAtUtc'] as String? ?? '') ??
+          DateTime.now(),
+      productionArea: data['productionArea'] as String?,
+      claimedByDeviceId: statusName == 'claimed'
+          ? data['targetDeviceId'] as String?
+          : null,
+      fallbackDeviceId: data['fallbackDeviceId'] as String?,
+      failureReason: data['failureReason'] as String?,
+      claimedAt: DateTime.tryParse(data['claimedAtUtc'] as String? ?? ''),
+      completedAt: statusName == 'printed'
+          ? DateTime.tryParse(data['createdAtUtc'] as String? ?? '')
+          : null,
+      attempts: data['attempts'] as int? ?? 0,
+      payload: Map<String, Object?>.from(data['payload'] as Map? ?? const {}),
+    );
+  }
 
   PrintJob _fromDocument(
     String tenantId,

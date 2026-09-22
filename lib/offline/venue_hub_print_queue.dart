@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../core/app_logger.dart';
 import '../core/trusted_clock.dart';
 import 'offline_event_ledger.dart';
 import 'offline_order_projection.dart';
@@ -115,7 +116,17 @@ class VenueHubPrintQueue {
   Map<String, Object?> snapshot;
   final OfflineEventLedger _ledger;
   final Map<String, VenueHubLocalPrintJob> _jobs = {};
+  final StreamController<List<Map<String, Object?>>> _changes =
+      StreamController<List<Map<String, Object?>>>.broadcast();
   Future<void> _serial = Future.value();
+
+  /// Local jobs remain durable in the encrypted hub ledger. This stream also
+  /// exposes them to the recovery desk and alert monitor; those screens used
+  /// to watch only the legacy Firestore queue and therefore hid hub jobs.
+  Stream<List<Map<String, Object?>>> get changes async* {
+    yield _visibleJobs();
+    yield* _changes.stream;
+  }
 
   Future<void> initialize() async {
     final stored = await _ledger.readSnapshot(
@@ -166,7 +177,14 @@ class VenueHubPrintQueue {
     }
     for (final entry in grouped.entries) {
       final route = routes[entry.key];
-      if (route == null || route.primaryDeviceId.isEmpty) continue;
+      if (route == null || route.primaryDeviceId.isEmpty) {
+        // A requested ticket must never disappear merely because staging (or
+        // a venue change) has an incomplete route. Reject the send visibly so
+        // staff can correct routing and safely retry the unchanged order.
+        throw StateError(
+          'No active printer route is configured for ${entry.key}.',
+        );
+      }
       final id =
           'offline-${hubEpoch}-${order.orderId}-${entry.key}-${lineIds.join('-')}';
       _jobs.putIfAbsent(
@@ -202,6 +220,9 @@ class VenueHubPrintQueue {
           },
         ),
       );
+      AppLogger.info(
+        'Hub print queued: job=$id, area=${entry.key}, device=${route.primaryDeviceId}.',
+      );
     }
     await _persist();
   });
@@ -214,7 +235,9 @@ class VenueHubPrintQueue {
   }) => _run(() async {
     if (!printRequired) return;
     final route = _routes()['receipt'];
-    if (route == null || route.primaryDeviceId.isEmpty) return;
+    if (route == null || route.primaryDeviceId.isEmpty) {
+      throw StateError('No active receipt printer route is configured.');
+    }
     final id =
         'offline-$hubEpoch-${order.orderId}-receipt-${jobSuffix ?? order.lastSequence}';
     final total = order.totalMinor;
@@ -305,6 +328,9 @@ class VenueHubPrintQueue {
         },
       ),
     );
+    AppLogger.info(
+      'Hub receipt queued: job=$id, device=${route.primaryDeviceId}.',
+    );
     await _persist();
   });
 
@@ -386,6 +412,60 @@ class VenueHubPrintQueue {
     await _persist();
   });
 
+  Future<void> retry(String jobId) => _run(() async {
+    final job = _jobs[jobId];
+    if (job == null || job.status != 'failed') {
+      throw StateError('Only a failed local print job can be retried.');
+    }
+    _jobs[jobId] = VenueHubLocalPrintJob(
+      id: job.id,
+      targetDeviceId: job.targetDeviceId,
+      fallbackDeviceId: job.fallbackDeviceId,
+      orderId: job.orderId,
+      productionArea: job.productionArea,
+      createdAtUtc: job.createdAtUtc,
+      attempts: 0,
+      status: 'queued',
+      payload: <String, Object?>{...job.payload, 'isReprint': true},
+    );
+    await _persist();
+  });
+
+  Future<void> reprint(String jobId) => _run(() async {
+    final job = _jobs[jobId];
+    if (job == null || job.status != 'printed') {
+      throw StateError('Only a printed local ticket can be reprinted.');
+    }
+    final now = TrustedClock.instance.nowUtc();
+    final reprintId = '${job.id}-reprint-${now.microsecondsSinceEpoch}';
+    _jobs[reprintId] = VenueHubLocalPrintJob(
+      id: reprintId,
+      targetDeviceId: job.targetDeviceId,
+      fallbackDeviceId: job.fallbackDeviceId,
+      orderId: job.orderId,
+      productionArea: job.productionArea,
+      createdAtUtc: now,
+      attempts: 0,
+      status: 'queued',
+      payload: <String, Object?>{...job.payload, 'isReprint': true},
+    );
+    await _persist();
+  });
+
+  Future<List<String>> cancel(String jobId, String reason) => _run(() async {
+    final job = _jobs[jobId];
+    if (job == null || !{'queued', 'failed'}.contains(job.status)) {
+      throw StateError('This local print job can no longer be cleared.');
+    }
+    _jobs[jobId] = job.copyWith(
+      status: 'cancelled',
+      clearClaim: true,
+      failureReason: reason,
+    );
+    await _persist();
+    return <String>[jobId];
+  });
+
   bool _pruneHistory(DateTime nowUtc) {
     final oldestRetained = nowUtc.subtract(const Duration(days: 5));
     final before = _jobs.length;
@@ -440,16 +520,27 @@ class VenueHubPrintQueue {
         '${venueTime.day.toString().padLeft(2, '0')}';
   }
 
-  Future<void> _persist() => _ledger.saveSnapshot(
-    tenantId: tenantId,
-    venueId: venueId,
-    kind: _kind,
-    version: DateTime.now().toUtc().microsecondsSinceEpoch,
-    value: <String, Object?>{
-      'hubEpoch': hubEpoch,
-      'jobs': _jobs.values.map((job) => job.toJson()).toList(growable: false),
-    },
-  );
+  Future<void> _persist() async {
+    await _ledger.saveSnapshot(
+      tenantId: tenantId,
+      venueId: venueId,
+      kind: _kind,
+      version: DateTime.now().toUtc().microsecondsSinceEpoch,
+      value: <String, Object?>{
+        'hubEpoch': hubEpoch,
+        'jobs': _jobs.values.map((job) => job.toJson()).toList(growable: false),
+      },
+    );
+    if (!_changes.isClosed) _changes.add(_visibleJobs());
+  }
+
+  List<Map<String, Object?>> _visibleJobs() {
+    final values = _jobs.values.toList(growable: false)
+      ..sort((left, right) => right.createdAtUtc.compareTo(left.createdAtUtc));
+    return values.map((job) => job.toJson()).toList(growable: false);
+  }
+
+  Future<void> dispose() => _changes.close();
 
   Future<T> _run<T>(Future<T> Function() operation) {
     final completer = Completer<T>();

@@ -4177,6 +4177,10 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
       ),
     );
     if (confirmed == true && mounted) {
+      // Do not dismiss two stacked dialogs while the order controller is
+      // still rebuilding the POS tree. Besides losing server errors, that
+      // route race can make Flutter flush semantics while parent data is
+      // dirty (the assertion previously seen on Collection/Delivery).
       ref
           .read(activeOrderProvider.notifier)
           .startFulfilmentOrder(
@@ -4189,7 +4193,8 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
                 : null,
             scheduledFor: scheduledFor,
           );
-      Navigator.of(context).pop(true);
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted) Navigator.of(context).pop(true);
     }
     address.dispose();
   }

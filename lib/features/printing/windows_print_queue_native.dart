@@ -68,24 +68,46 @@ class _NativeWindowsPrintQueue implements WindowsPrintQueue {
   }
 
   @override
-  Future<WindowsPrintQueueDevice?> selectedPrinter() async {
-    final name = await _preferences.getString(_namePreferenceKey);
+  Future<WindowsPrintQueueDevice?> selectedPrinter({
+    String? productionArea,
+  }) async {
+    final suffix = _areaSuffix(productionArea);
+    var name = await _preferences.getString('$_namePreferenceKey$suffix');
+    // Existing installations keep working until the manager deliberately
+    // assigns separate receipt/kitchen/bar/dessert queues.
+    name ??= await _preferences.getString(_namePreferenceKey);
     if (name == null || name.trim().isEmpty) return null;
     return WindowsPrintQueueDevice(
       name: name,
-      driverName: await _preferences.getString(_driverPreferenceKey) ?? '',
-      portName: await _preferences.getString(_portPreferenceKey) ?? '',
+      driverName:
+          await _preferences.getString('$_driverPreferenceKey$suffix') ??
+          await _preferences.getString(_driverPreferenceKey) ??
+          '',
+      portName:
+          await _preferences.getString('$_portPreferenceKey$suffix') ??
+          await _preferences.getString(_portPreferenceKey) ??
+          '',
       isDefault: false,
       paperWidth: await _paperWidthFor(name),
     );
   }
 
   @override
-  Future<void> selectPrinter(WindowsPrintQueueDevice printer) async {
+  Future<void> selectPrinter(
+    WindowsPrintQueueDevice printer, {
+    String? productionArea,
+  }) async {
     _ensureSupported();
-    await _preferences.setString(_namePreferenceKey, printer.name);
-    await _preferences.setString(_driverPreferenceKey, printer.driverName);
-    await _preferences.setString(_portPreferenceKey, printer.portName);
+    final suffix = _areaSuffix(productionArea);
+    await _preferences.setString('$_namePreferenceKey$suffix', printer.name);
+    await _preferences.setString(
+      '$_driverPreferenceKey$suffix',
+      printer.driverName,
+    );
+    await _preferences.setString(
+      '$_portPreferenceKey$suffix',
+      printer.portName,
+    );
     await _preferences.setInt(
       _paperWidthPreferenceKey(printer.name),
       printer.paperWidth.millimetres,
@@ -93,10 +115,11 @@ class _NativeWindowsPrintQueue implements WindowsPrintQueue {
   }
 
   @override
-  Future<void> clearSelectedPrinter() async {
-    await _preferences.remove(_namePreferenceKey);
-    await _preferences.remove(_driverPreferenceKey);
-    await _preferences.remove(_portPreferenceKey);
+  Future<void> clearSelectedPrinter({String? productionArea}) async {
+    final suffix = _areaSuffix(productionArea);
+    await _preferences.remove('$_namePreferenceKey$suffix');
+    await _preferences.remove('$_driverPreferenceKey$suffix');
+    await _preferences.remove('$_portPreferenceKey$suffix');
   }
 
   @override
@@ -177,4 +200,9 @@ class _NativeWindowsPrintQueue implements WindowsPrintQueue {
 
   String _paperWidthPreferenceKey(String printerName) =>
       'tableside.windowsPrinter.paperWidth.${Uri.encodeComponent(printerName)}';
+
+  String _areaSuffix(String? productionArea) =>
+      productionArea == null || productionArea.trim().isEmpty
+      ? ''
+      : '.area.${Uri.encodeComponent(productionArea.trim())}';
 }
