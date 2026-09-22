@@ -16,6 +16,27 @@ import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 import 'modifier_groups_page.dart';
 
+/// Opens a menu-management dialog and does not complete until Flutter has
+/// removed the route's overlay entries after its closing animation.
+///
+/// Several menu editors keep form controllers in their calling function. The
+/// regular `showDialog` future resolves when the route is popped, which can be
+/// before those text fields have left the overlay. Waiting for `completed`
+/// prevents barrier dismissal or Cancel from disposing controllers while the
+/// closing dialog can still lay out or paint them.
+Future<T?> _showMenuDialog<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+}) async {
+  final route = DialogRoute<T>(context: context, builder: builder);
+  final result = await Navigator.of(
+    context,
+    rootNavigator: true,
+  ).push<T>(route);
+  await route.completed;
+  return result;
+}
+
 /// Venue-scoped menu setup. A product may be attached to several sections but
 /// keeps one default production area, allowing separate food/bar tickets.
 class MenuManagementPage extends ConsumerStatefulWidget {
@@ -698,7 +719,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
     final selectedSections = <String>{};
     final selectedGroups = <String>{};
     final margin = TextEditingController();
-    final changes = await showDialog<_BulkProductChanges>(
+    final changes = await _showMenuDialog<_BulkProductChanges>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -1066,7 +1087,7 @@ class _MenuManagementPageState extends ConsumerState<MenuManagementPage> {
     );
     margin.dispose();
     if (changes == null || !mounted) return;
-    final confirmed = await showDialog<bool>(
+    final confirmed = await _showMenuDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Confirm bulk product change'),
@@ -1177,7 +1198,7 @@ Future<void> _showSectionOrderDialog({
   required List<MenuSection> sections,
 }) async {
   final ordered = List<MenuSection>.of(sections);
-  final save = await showDialog<bool>(
+  final save = await _showMenuDialog<bool>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
@@ -1340,7 +1361,7 @@ Future<void> _deleteSection({
   required VenueScope scope,
   required MenuSection section,
 }) async {
-  final approved = await showDialog<bool>(
+  final approved = await _showMenuDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: const Text('Delete menu section?'),
@@ -1385,7 +1406,7 @@ Future<void> _setProductArchived({
   required bool archived,
 }) async {
   if (archived) {
-    final approved = await showDialog<bool>(
+    final approved = await _showMenuDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Archive product?'),
@@ -1680,112 +1701,155 @@ Future<void> _showTaxRateDialog({
   required VenueScope scope,
   TaxRate? existing,
 }) async {
-  final name = TextEditingController(text: existing?.name ?? '');
-  final percentage = TextEditingController(
-    text: _taxPercentText(existing?.basisPoints ?? 0),
+  final savedName = await _showMenuDialog<String>(
+    context: context,
+    builder: (_) => _TaxRateEditorDialog(scope: scope, existing: existing),
   );
-  final formKey = GlobalKey<FormState>();
-  try {
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(existing == null ? 'Add tax rate' : 'Edit tax rate'),
-        content: SizedBox(
-          width: 420,
-          child: Form(
-            key: formKey,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextFormField(
-                  controller: name,
-                  autofocus: true,
-                  maxLength: 80,
-                  decoration: const InputDecoration(
-                    labelText: 'Tax rate name',
-                    hintText: 'For example, Food VAT',
-                  ),
-                  validator: _requiredText,
+  if (savedName == null || !context.mounted) return;
+  showAppNotification(
+    context,
+    ref: ref,
+    title: existing == null ? 'Tax rate added' : 'Tax rate updated',
+    message: '$savedName is now available for products.',
+    level: AppNotificationLevel.success,
+  );
+}
+
+/// Owns the tax editor's form state for the full lifetime of the dialog route.
+///
+/// Controllers created outside `showDialog` can be disposed as soon as the
+/// route's result completes, while Flutter is still running its closing
+/// animation. On Windows that left the text fields in the overlay with disposed
+/// state and could corrupt the next layout pass when the barrier was clicked.
+class _TaxRateEditorDialog extends ConsumerStatefulWidget {
+  const _TaxRateEditorDialog({required this.scope, this.existing});
+
+  final VenueScope scope;
+  final TaxRate? existing;
+
+  @override
+  ConsumerState<_TaxRateEditorDialog> createState() =>
+      _TaxRateEditorDialogState();
+}
+
+class _TaxRateEditorDialogState extends ConsumerState<_TaxRateEditorDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _name;
+  late final TextEditingController _percentage;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _name = TextEditingController(text: widget.existing?.name ?? '');
+    _percentage = TextEditingController(
+      text: _taxPercentText(widget.existing?.basisPoints ?? 0),
+    );
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _percentage.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (_saving || !(_formKey.currentState?.validate() ?? false)) return;
+    setState(() => _saving = true);
+    try {
+      final basisPoints = _taxBasisPointsFromText(_percentage.text)!;
+      final repository = ref.read(firestorePosRepositoryProvider);
+      if (widget.existing == null) {
+        await repository.createTaxRate(
+          scope: widget.scope,
+          name: _name.text,
+          basisPoints: basisPoints,
+        );
+      } else {
+        await repository.updateTaxRate(
+          scope: widget.scope,
+          existing: widget.existing!,
+          name: _name.text,
+          basisPoints: basisPoints,
+        );
+      }
+      ref.invalidate(taxRatesProvider);
+      if (mounted) Navigator.pop(context, _name.text.trim());
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Save tax rate', error, stackTrace);
+      if (!mounted) return;
+      setState(() => _saving = false);
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not save tax rate',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.existing == null ? 'Add tax rate' : 'Edit tax rate'),
+    // Scrolling keeps the form bounded when a touch keyboard, accessibility
+    // text scaling, or a short tablet window reduces the available height.
+    content: SizedBox(
+      width: 420,
+      child: SingleChildScrollView(
+        child: Form(
+          key: _formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: _name,
+                autofocus: true,
+                maxLength: 80,
+                decoration: const InputDecoration(
+                  labelText: 'Tax rate name',
+                  hintText: 'For example, Food VAT',
                 ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: percentage,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  decoration: const InputDecoration(
-                    labelText: 'Rate (%)',
-                    helperText:
-                        'Prices are inclusive. 20 means 20% of the price is tax-inclusive.',
-                  ),
-                  validator: (value) => _taxBasisPointsFromText(value) == null
-                      ? 'Enter a rate from 0% to 1,000% with at most two decimals.'
-                      : null,
+                validator: _requiredText,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _percentage,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
                 ),
-              ],
-            ),
+                decoration: const InputDecoration(
+                  labelText: 'Rate (%)',
+                  helperText:
+                      'Prices are inclusive. 20 means 20% of the price is tax-inclusive.',
+                ),
+                validator: (value) => _taxBasisPointsFromText(value) == null
+                    ? 'Enter a rate from 0% to 1,000% with at most two decimals.'
+                    : null,
+              ),
+            ],
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              if (!(formKey.currentState?.validate() ?? false)) return;
-              try {
-                final basisPoints = _taxBasisPointsFromText(percentage.text)!;
-                final repository = ref.read(firestorePosRepositoryProvider);
-                if (existing == null) {
-                  await repository.createTaxRate(
-                    scope: scope,
-                    name: name.text,
-                    basisPoints: basisPoints,
-                  );
-                } else {
-                  await repository.updateTaxRate(
-                    scope: scope,
-                    existing: existing,
-                    name: name.text,
-                    basisPoints: basisPoints,
-                  );
-                }
-                ref.invalidate(taxRatesProvider);
-                if (dialogContext.mounted) Navigator.pop(dialogContext);
-                if (context.mounted) {
-                  showAppNotification(
-                    context,
-                    ref: ref,
-                    title: existing == null
-                        ? 'Tax rate added'
-                        : 'Tax rate updated',
-                    message:
-                        '${name.text.trim()} is now available for products.',
-                    level: AppNotificationLevel.success,
-                  );
-                }
-              } on Object catch (error, stackTrace) {
-                AppLogger.error('Save tax rate', error, stackTrace);
-                if (!dialogContext.mounted) return;
-                showAppNotification(
-                  dialogContext,
-                  ref: ref,
-                  title: 'Could not save tax rate',
-                  message: '$error',
-                  level: AppNotificationLevel.error,
-                );
-              }
-            },
-            child: Text(existing == null ? 'Save rate' : 'Save changes'),
-          ),
-        ],
       ),
-    );
-  } finally {
-    name.dispose();
-    percentage.dispose();
-  }
+    ),
+    actions: [
+      TextButton(
+        onPressed: _saving ? null : () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: _saving ? null : _save,
+        child: Text(
+          _saving
+              ? 'Saving…'
+              : widget.existing == null
+              ? 'Save rate'
+              : 'Save changes',
+        ),
+      ),
+    ],
+  );
 }
 
 Future<void> _deleteTaxRate({
@@ -1794,7 +1858,7 @@ Future<void> _deleteTaxRate({
   required VenueScope scope,
   required TaxRate rate,
 }) async {
-  final approved = await showDialog<bool>(
+  final approved = await _showMenuDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: const Text('Delete tax rate?'),
@@ -1918,7 +1982,7 @@ Future<void> _showSectionDialog({
   ];
   final parentOptions = sections.where((item) => item.id != existing?.id);
   try {
-    await showDialog<void>(
+    await _showMenuDialog<void>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -2149,7 +2213,7 @@ Future<void> _showProductDialog({
             : TaxRate.zero.id);
 
   try {
-    await showDialog<void>(
+    await _showMenuDialog<void>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -2408,7 +2472,7 @@ Future<void> _showProductDialog({
                       TextButton.icon(
                         onPressed: () async {
                           final controller = TextEditingController();
-                          final setName = await showDialog<String>(
+                          final setName = await _showMenuDialog<String>(
                             context: dialogContext,
                             builder: (nameContext) => AlertDialog(
                               title: const Text('Save reusable variant set'),
@@ -3162,7 +3226,7 @@ Future<List<ProductStockComponent>?> _showStockComponentsDialog({
       ),
   };
   try {
-    return await showDialog<List<ProductStockComponent>>(
+    return await _showMenuDialog<List<ProductStockComponent>>(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setState) => AlertDialog(
@@ -3266,7 +3330,7 @@ Future<List<MenuProductVariant>?> _showVariantsDialog({
   String? validationMessage;
 
   try {
-    return await showDialog<List<MenuProductVariant>>(
+    return await _showMenuDialog<List<MenuProductVariant>>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
