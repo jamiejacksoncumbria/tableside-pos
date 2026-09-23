@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:tableside_pos/core/tenant_scope.dart';
 
 import '../core/app_logger.dart';
+import '../core/app_busy_state.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/staff_pin_session_store.dart';
 import '../core/firebase_environment_options.dart';
@@ -1874,6 +1875,39 @@ class ProductionCommandRepository {
     Map<String, Object?> data, {
     String? firebaseIdToken,
   }) async {
+    if (!_backgroundActions.contains(action)) {
+      return AppBusyState.guard(
+        () => _callUnblocked(action, data, firebaseIdToken: firebaseIdToken),
+      );
+    }
+    return _callUnblocked(action, data, firebaseIdToken: firebaseIdToken);
+  }
+
+  /// Creates an audited replacement print job for a live production ticket
+  /// and sends it to the manager-selected active device. The server rebuilds
+  /// the payload from its immutable ticket snapshot; the client cannot alter
+  /// item names, quantities, notes or routing area.
+  Future<void> reprintProductionTicket({
+    required VenueScope scope,
+    required String ticketId,
+    required String targetDeviceId,
+  }) {
+    return _call('reprintProductionTicket', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'ticketId': ticketId,
+      'targetDeviceId': targetDeviceId,
+    });
+  }
+
+  /// Executes the HTTP request after foreground-operation classification.
+  /// Keeping the overlay outside token acquisition also prevents rapid double
+  /// taps while Firebase is refreshing an expired identity token.
+  Future<Map<String, Object?>> _callUnblocked(
+    String action,
+    Map<String, Object?> data, {
+    String? firebaseIdToken,
+  }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       throw StateError('Sign in before sending an order to production.');
@@ -1929,6 +1963,22 @@ class ProductionCommandRepository {
         ? Map<String, Object?>.from(result)
         : const {};
   }
+
+  static const Set<String> _backgroundActions = {
+    'getOfflineHubBootstrap',
+    'getOfflineHubSnapshot',
+    'ingestOfflineHubEvents',
+    'heartbeatRemoteHub',
+    'claimRemoteHubCommands',
+    'completeRemoteHubCommand',
+    'heartbeatPrinterDevice',
+    'getTrustedTime',
+    'claimDevicePrintJob',
+    'completeDevicePrintJob',
+    'listVenuePinStaff',
+    'refreshStaffPinSession',
+    'submitRemoteHubCommand',
+  };
 
   List<String> _stringList(Object? value) => value is List
       ? value.whereType<String>().toList(growable: false)

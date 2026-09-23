@@ -10,8 +10,8 @@ import '../../core/app_logger.dart';
 /// normally satisfied by signing in and selecting a venue.
 class OrderFlowSound {
   OrderFlowSound()
-      : _newOrderPlayer = AudioPlayer(playerId: 'tableside-order-new'),
-        _alertPlayer = AudioPlayer(playerId: 'tableside-order-alert') {
+    : _newOrderPlayer = AudioPlayer(playerId: 'tableside-order-new'),
+      _alertPlayer = AudioPlayer(playerId: 'tableside-order-alert') {
     _newOrderPlayer.setReleaseMode(ReleaseMode.stop);
     _alertPlayer.setReleaseMode(ReleaseMode.stop);
   }
@@ -20,22 +20,29 @@ class OrderFlowSound {
   final AudioPlayer _alertPlayer;
 
   Future<void> playNewOrder() => _play(
-        _newOrderPlayer,
-        'assets/sounds/order_new.wav',
-        'Play new order alert',
-      );
+    _newOrderPlayer,
+    'assets/sounds/order_new.wav',
+    'Play new order alert',
+  );
 
   Future<void> playLateOrder() => _play(
-        _alertPlayer,
-        'assets/sounds/order_alert.wav',
-        'Play late order alert',
-      );
+    _alertPlayer,
+    'assets/sounds/order_alert.wav',
+    'Play late order alert',
+  );
 
   Future<void> playAllergyAlert() => _play(
-        _alertPlayer,
-        'assets/sounds/order_alert.wav',
-        'Play allergy alert',
-      );
+    _alertPlayer,
+    'assets/sounds/order_alert.wav',
+    'Play allergy alert',
+  );
+
+  /// Immediately stops both channels when this device is muted. Cancelling
+  /// the repeating timers alone is insufficient because a WAV may already be
+  /// playing when the user taps mute.
+  Future<void> stopAll() async {
+    await Future.wait([_newOrderPlayer.stop(), _alertPlayer.stop()]);
+  }
 
   Future<void> _play(
     AudioPlayer player,

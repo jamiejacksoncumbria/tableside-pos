@@ -2,17 +2,21 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/order_flow_display_mode.dart';
+import '../../core/safe_dialog.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
+import '../../data/printer_device_repository.dart';
 import '../notifications/notification_centre.dart';
 import '../auth/staff_pin_gate.dart';
 import '../pos/domain.dart';
+import '../pos/pos_controller.dart';
 import 'order_flow_sound.dart';
 
 final orderFlowProvider = StreamProvider<List<OrderFlowOrder>>((ref) {
@@ -114,6 +118,14 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
           (order) => scope == null ? _demoOverrides[order.id] ?? order : order,
         )
         .toList(growable: false);
+    final tables =
+        ref.watch(diningTablesProvider).value ?? const <DiningTable>[];
+    final staffSession = ref.watch(activeStaffPinSessionProvider);
+    final canReprint =
+        staffSession?.roles.any(
+          (role) => role == 'owner' || role == 'manager',
+        ) ??
+        false;
     if (scope != null && flowValue.hasValue) {
       scheduleMicrotask(() {
         if (mounted) _observeOrderAlerts(allOrders);
@@ -308,10 +320,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                 for (final order in orders) ...[
                   _OrderFlowCard(
                     order: order,
+                    location: _resolvedOrderLocation(order, tables),
                     now: DateTime.now(),
                     amberMinutes: widget.amberMinutes,
                     redMinutes: widget.redMinutes,
                     onAction: (action) => _applyAction(order, action),
+                    onReprint: canReprint ? () => _reprintOrder(order) : null,
                     lateAlarmDismissed: _dismissedLateTicketIds.contains(
                       order.id,
                     ),
@@ -405,12 +419,14 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   }
 
   void _startLateAlarm() {
+    if (_audioMuted) return;
     if (_lateAlarm != null) return;
     _lateAlarm = Timer.periodic(const Duration(seconds: 4), (_) {
       if (_currentLateTicketIds
               .difference(_dismissedLateTicketIds)
               .isNotEmpty &&
-          mounted) {
+          mounted &&
+          !_audioMuted) {
         unawaited(_sound.playLateOrder());
       }
     });
@@ -462,6 +478,15 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     }
     if (!muted) {
       if (_activeAllergyTicketIds.isNotEmpty) _startAllergyAlarm();
+      if (_currentLateTicketIds
+          .difference(_dismissedLateTicketIds)
+          .isNotEmpty) {
+        _startLateAlarm();
+      }
+    } else {
+      _lateAlarm?.cancel();
+      _lateAlarm = null;
+      await _sound.stopAll();
     }
   }
 
@@ -558,6 +583,93 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
         ref: ref,
         title: 'Order flow update failed',
         message: 'The order status could not be updated. Please retry.',
+        level: AppNotificationLevel.error,
+      );
+    }
+  }
+
+  Future<void> _reprintOrder(OrderFlowOrder order) async {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) return;
+    try {
+      final devices = await PrinterDeviceRepository(FirebaseFirestore.instance)
+          .watchVenueDevices(tenantId: scope.tenantId, venueId: scope.venueId)
+          .first
+          .timeout(const Duration(seconds: 10));
+      if (!mounted) return;
+      final compatible = devices
+          .where(
+            (device) =>
+                device.active &&
+                device.productionAreas.contains(order.productionArea.name),
+          )
+          .toList(growable: false);
+      if (compatible.isEmpty) {
+        showAppNotification(
+          context,
+          ref: ref,
+          title: 'No printer available',
+          message:
+              'Register an active ${order.productionArea.label.toLowerCase()} printer first.',
+          level: AppNotificationLevel.warning,
+        );
+        return;
+      }
+      final selected = await showAppDialog<PrinterDevice>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Reprint order'),
+          content: SizedBox(
+            width: 460,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                const Text(
+                  'Choose the physical printer. The replacement ticket will be marked REPRINT and audited.',
+                ),
+                const SizedBox(height: 12),
+                for (final device in compatible)
+                  ListTile(
+                    leading: const Icon(Icons.print_rounded),
+                    title: Text(device.name),
+                    subtitle: Text(device.platform),
+                    onTap: () => Navigator.pop(dialogContext, device),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      );
+      if (selected == null || !mounted) return;
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .reprintProductionTicket(
+            scope: scope,
+            ticketId: order.id,
+            targetDeviceId: selected.id,
+          );
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Reprint queued',
+        message: 'The order was sent to ${selected.name}.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Reprint order-flow ticket', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not reprint order',
+        message: '$error',
         level: AppNotificationLevel.error,
       );
     }
@@ -735,10 +847,12 @@ class _EmptyBoard extends StatelessWidget {
 class _OrderFlowCard extends StatelessWidget {
   const _OrderFlowCard({
     required this.order,
+    required this.location,
     required this.now,
     required this.amberMinutes,
     required this.redMinutes,
     required this.onAction,
+    this.onReprint,
     required this.itemsExpanded,
     required this.onToggleItems,
     required this.lateAlarmDismissed,
@@ -746,10 +860,12 @@ class _OrderFlowCard extends StatelessWidget {
   });
 
   final OrderFlowOrder order;
+  final String location;
   final DateTime now;
   final int amberMinutes;
   final int redMinutes;
   final ValueChanged<_OrderFlowAction> onAction;
+  final VoidCallback? onReprint;
   final bool itemsExpanded;
   final VoidCallback onToggleItems;
   final bool lateAlarmDismissed;
@@ -764,8 +880,6 @@ class _OrderFlowCard extends StatelessWidget {
       _LateState.normal => Colors.green.shade700,
     };
     final elapsed = now.difference(order.ticketReleasedAt);
-    final location = order.tableLabel ?? order.tabName ?? 'Unassigned';
-
     return Card(
       color: background,
       clipBehavior: Clip.antiAlias,
@@ -855,7 +969,11 @@ class _OrderFlowCard extends StatelessWidget {
                         ),
                       ),
                     ),
-                    _OrderActions(order: order, onAction: onAction),
+                    _OrderActions(
+                      order: order,
+                      onAction: onAction,
+                      onReprint: onReprint,
+                    ),
                   ],
                 ),
                 if (itemsExpanded)
@@ -1126,10 +1244,15 @@ class _AlertRow extends StatelessWidget {
 }
 
 class _OrderActions extends StatelessWidget {
-  const _OrderActions({required this.order, required this.onAction});
+  const _OrderActions({
+    required this.order,
+    required this.onAction,
+    this.onReprint,
+  });
 
   final OrderFlowOrder order;
   final ValueChanged<_OrderFlowAction> onAction;
+  final VoidCallback? onReprint;
 
   @override
   Widget build(BuildContext context) {
@@ -1160,10 +1283,16 @@ class _OrderActions extends StatelessWidget {
         Icons.priority_high_rounded,
       ),
     ];
-    return PopupMenuButton<_OrderFlowAction>(
+    return PopupMenuButton<Object>(
       tooltip: 'Update order',
       icon: const Icon(Icons.more_vert_rounded),
-      onSelected: onAction,
+      onSelected: (value) {
+        if (value == 'reprint') {
+          onReprint?.call();
+        } else if (value is _OrderFlowAction) {
+          onAction(value);
+        }
+      },
       itemBuilder: (context) => [
         for (final action in actions)
           PopupMenuItem(
@@ -1176,9 +1305,33 @@ class _OrderActions extends StatelessWidget {
               ],
             ),
           ),
+        if (onReprint != null) ...[
+          const PopupMenuDivider(),
+          const PopupMenuItem<Object>(
+            value: 'reprint',
+            child: Row(
+              children: [
+                Icon(Icons.print_rounded, size: 19),
+                SizedBox(width: 10),
+                Text('Reprint order'),
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
+}
+
+String _resolvedOrderLocation(OrderFlowOrder order, List<DiningTable> tables) {
+  final tabName = order.tabName?.trim();
+  if (tabName?.isNotEmpty == true) return tabName!;
+  final stored = order.tableLabel?.trim();
+  if (stored?.isNotEmpty != true) return 'Unassigned';
+  for (final table in tables) {
+    if (table.id == stored) return table.label;
+  }
+  return stored!;
 }
 
 String _formatElapsed(Duration value) {

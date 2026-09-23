@@ -4,11 +4,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
 import '../core/tenant_scope.dart';
+import '../core/app_busy_state.dart';
 import 'venue_hub_client.dart';
 
-typedef RemoteHubSubmitter = Future<Map<String, Object?>> Function(
-  Map<String, Object?> request,
-);
+typedef RemoteHubSubmitter =
+    Future<Map<String, Object?>> Function(Map<String, Object?> request);
 
 /// Global, process-local indicator used by the shell to make the durability
 /// wait explicit. A remote command is never reported as saved merely because
@@ -40,6 +40,26 @@ class VenueHubRemoteCommandClient {
     required RemoteHubSubmitter submit,
     DateTime? businessTimestampUtc,
   }) async {
+    return AppBusyState.guard(
+      () => _sendUnblocked(
+        scope: scope,
+        hubEpoch: hubEpoch,
+        eventType: eventType,
+        payload: payload,
+        submit: submit,
+        businessTimestampUtc: businessTimestampUtc,
+      ),
+    );
+  }
+
+  Future<VenueHubEventAcknowledgement> _sendUnblocked({
+    required VenueScope scope,
+    required int hubEpoch,
+    required String eventType,
+    required Map<String, Object?> payload,
+    required RemoteHubSubmitter submit,
+    DateTime? businessTimestampUtc,
+  }) async {
     final commandId =
         'remote-${DateTime.now().microsecondsSinceEpoch}-${UniqueKey().hashCode.abs()}';
     RemoteHubWaitState.begin();
@@ -53,11 +73,15 @@ class VenueHubRemoteCommandClient {
         'eventType': eventType,
         'payload': payload,
         if (businessTimestampUtc != null)
-          'businessTimestampUtc': businessTimestampUtc.toUtc().toIso8601String(),
+          'businessTimestampUtc': businessTimestampUtc
+              .toUtc()
+              .toIso8601String(),
       });
       final returnedId = submitted['commandId'];
       if (returnedId is! String || returnedId != commandId) {
-        throw StateError('The venue command server returned an invalid acknowledgement.');
+        throw StateError(
+          'The venue command server returned an invalid acknowledgement.',
+        );
       }
       final reference = _firestore
           .collection('tenants')
@@ -66,13 +90,20 @@ class VenueHubRemoteCommandClient {
           .doc(scope.venueId)
           .collection('remoteHubCommands')
           .doc(commandId);
-      final snapshot = await reference.snapshots().firstWhere((value) {
-        final status = value.data()?['status'];
-        return status == 'accepted' || status == 'rejected' || status == 'expired';
-      }).timeout(timeout);
+      final snapshot = await reference
+          .snapshots()
+          .firstWhere((value) {
+            final status = value.data()?['status'];
+            return status == 'accepted' ||
+                status == 'rejected' ||
+                status == 'expired';
+          })
+          .timeout(timeout);
       final value = snapshot.data();
       if (value == null) {
-        throw StateError('The venue hub command disappeared before confirmation.');
+        throw StateError(
+          'The venue hub command disappeared before confirmation.',
+        );
       }
       if (value['status'] != 'accepted') {
         final message = value['rejectionMessage'];
@@ -84,15 +115,24 @@ class VenueHubRemoteCommandClient {
       }
       final result = value['result'];
       if (result is! Map) {
-        throw StateError('The venue hub returned an invalid durable acknowledgement.');
+        throw StateError(
+          'The venue hub returned an invalid durable acknowledgement.',
+        );
       }
       final data = Map<String, Object?>.from(result);
       final eventId = data['eventId'];
       final sequence = data['sequence'];
       final eventHash = data['eventHash'];
-      final committedAt = DateTime.tryParse(data['committedAtUtc'] as String? ?? '');
-      if (eventId is! String || sequence is! int || eventHash is! String || committedAt == null) {
-        throw StateError('The venue hub returned an invalid durable acknowledgement.');
+      final committedAt = DateTime.tryParse(
+        data['committedAtUtc'] as String? ?? '',
+      );
+      if (eventId is! String ||
+          sequence is! int ||
+          eventHash is! String ||
+          committedAt == null) {
+        throw StateError(
+          'The venue hub returned an invalid durable acknowledgement.',
+        );
       }
       return VenueHubEventAcknowledgement(
         eventId: eventId,

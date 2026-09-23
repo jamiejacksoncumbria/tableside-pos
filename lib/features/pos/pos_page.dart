@@ -3946,10 +3946,11 @@ Future<bool> _ensureOrderLocation(BuildContext context, WidgetRef ref) async {
       order.tabName?.trim().isNotEmpty == true) {
     return true;
   }
-  return await showAppDialog<bool>(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const _OrderLocationDialog(),
+  return await Navigator.of(context).push<bool>(
+        MaterialPageRoute<bool>(
+          fullscreenDialog: true,
+          builder: (_) => const _OrderLocationPage(),
+        ),
       ) ??
       false;
 }
@@ -3959,25 +3960,32 @@ Future<void> _showFulfilmentOrderDialog(
   OrderChannel channel, {
   VoidCallback? onStarted,
 }) async {
-  final started = await showAppDialog<bool>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => _OrderLocationDialog(initialChannel: channel),
+  final started = await Navigator.of(context).push<bool>(
+    MaterialPageRoute<bool>(
+      fullscreenDialog: true,
+      builder: (_) => _OrderLocationPage(initialChannel: channel),
+    ),
   );
   if (started == true && context.mounted) onStarted?.call();
 }
 
-class _OrderLocationDialog extends ConsumerStatefulWidget {
-  const _OrderLocationDialog({this.initialChannel});
+/// Stable route used by every new-order entry point.
+///
+/// This deliberately is not a dialog. The old implementation stacked the
+/// location, customer and fulfilment dialogs while the POS order provider was
+/// rebuilding beneath them. Flutter could then rebuild a removed semantics
+/// node and crash in debug/release accessibility modes. A dedicated route
+/// keeps one owner alive until the order location has been committed.
+class _OrderLocationPage extends ConsumerStatefulWidget {
+  const _OrderLocationPage({this.initialChannel});
 
   final OrderChannel? initialChannel;
 
   @override
-  ConsumerState<_OrderLocationDialog> createState() =>
-      _OrderLocationDialogState();
+  ConsumerState<_OrderLocationPage> createState() => _OrderLocationPageState();
 }
 
-class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
+class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
   final _tabName = TextEditingController();
   bool _saving = false;
   String? _error;
@@ -4207,7 +4215,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
   ) async {
     final search = TextEditingController();
     try {
-      return await showAppDialog<VenueCustomer>(
+      final selected = await showAppDialog<Object>(
         context: context,
         builder: (pickerContext) {
           var query = '';
@@ -4296,19 +4304,13 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
                     child: const Text('Cancel'),
                   ),
                   FilledButton.icon(
-                    onPressed: () async {
-                      final scope = ref.read(activeVenueScopeProvider);
-                      if (scope == null) return;
-                      final created = await showVenueCustomerEditor(
-                        context: pickerContext,
-                        ref: ref,
-                        scope: scope,
-                        requireAddress: channel == OrderChannel.delivery,
-                      );
-                      if (created != null && pickerContext.mounted) {
-                        Navigator.pop(pickerContext, created);
-                      }
-                    },
+                    // Close this picker completely before opening the editor.
+                    // Stacking two dialogs was another route/semantics race on
+                    // touch devices when the customer stream refreshed.
+                    onPressed: () => Navigator.pop(
+                      pickerContext,
+                      const _CreateFulfilmentCustomer(),
+                    ),
                     icon: const Icon(Icons.person_add_alt_1),
                     label: const Text('New customer'),
                   ),
@@ -4318,6 +4320,18 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
           );
         },
       );
+      if (selected is VenueCustomer) return selected;
+      if (selected is _CreateFulfilmentCustomer && mounted) {
+        final scope = ref.read(activeVenueScopeProvider);
+        if (scope == null) return null;
+        return await showVenueCustomerEditor(
+          context: context,
+          ref: ref,
+          scope: scope,
+          requireAddress: channel == OrderChannel.delivery,
+        );
+      }
+      return null;
     } finally {
       search.dispose();
     }
@@ -4386,139 +4400,179 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
         }
       });
     }
-    return AlertDialog(
-      scrollable: true,
-      icon: const Icon(Icons.receipt_long_outlined),
-      title: const Text('Start this order'),
-      content: SizedBox(
-        width: 520,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text('Choose the table, or open a named customer tab first.'),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
+    return Scaffold(
+      appBar: AppBar(
+        leading: IconButton(
+          tooltip: 'Cancel',
+          onPressed: _saving ? null : () => Navigator.of(context).pop(false),
+          icon: const Icon(Icons.close_rounded),
+        ),
+        title: const Text('Start this order'),
+      ),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 620),
+            child: ListView(
+              padding: const EdgeInsets.all(20),
               children: [
-                OutlinedButton.icon(
-                  onPressed: _saving
-                      ? null
-                      : () => _requestFulfilment(
-                          OrderChannel.collection,
-                          fulfilmentSettings,
+                const Icon(Icons.receipt_long_outlined, size: 36),
+                const SizedBox(height: 12),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      'Choose the table, or open a named customer tab first.',
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: _saving
+                              ? null
+                              : () => _requestFulfilment(
+                                  OrderChannel.collection,
+                                  fulfilmentSettings,
+                                ),
+                          icon: const Icon(Icons.shopping_bag_outlined),
+                          label: const Text('Collection'),
                         ),
-                  icon: const Icon(Icons.shopping_bag_outlined),
-                  label: const Text('Collection'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _saving
-                      ? null
-                      : () => _requestFulfilment(
-                          OrderChannel.delivery,
-                          fulfilmentSettings,
+                        OutlinedButton.icon(
+                          onPressed: _saving
+                              ? null
+                              : () => _requestFulfilment(
+                                  OrderChannel.delivery,
+                                  fulfilmentSettings,
+                                ),
+                          icon: const Icon(Icons.delivery_dining_outlined),
+                          label: const Text('Delivery'),
                         ),
-                  icon: const Icon(Icons.delivery_dining_outlined),
-                  label: const Text('Delivery'),
+                      ],
+                    ),
+                    if (_saving) ...[
+                      const SizedBox(height: 8),
+                      const LinearProgressIndicator(),
+                    ],
+                    const SizedBox(height: 12),
+                    if (_error != null) ...[
+                      Text(
+                        _error!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 300),
+                      child: locationsLoading
+                          ? const Center(child: CircularProgressIndicator())
+                          : ListView(
+                              shrinkWrap: true,
+                              children: [
+                                if (tables.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      16,
+                                      4,
+                                      16,
+                                      4,
+                                    ),
+                                    child: Text(
+                                      'Tables',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.labelLarge,
+                                    ),
+                                  ),
+                                for (final table in tables)
+                                  ListTile(
+                                    enabled: !_saving,
+                                    leading: const Icon(
+                                      Icons.table_restaurant_rounded,
+                                    ),
+                                    title: Text(table.label),
+                                    subtitle: Text('${table.seats} seats'),
+                                    trailing: const Icon(
+                                      Icons.chevron_right_rounded,
+                                    ),
+                                    onTap: () => _selectTable(table),
+                                  ),
+                                if (tables.isNotEmpty && namedTabs.isNotEmpty)
+                                  const Divider(height: 16),
+                                if (namedTabs.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                      16,
+                                      4,
+                                      16,
+                                      4,
+                                    ),
+                                    child: Text(
+                                      'Open named tabs',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.labelLarge,
+                                    ),
+                                  ),
+                                for (final tab in namedTabs)
+                                  ListTile(
+                                    enabled: !_saving,
+                                    leading: const Icon(
+                                      Icons.person_outline_rounded,
+                                    ),
+                                    title: Text(tab.name),
+                                    subtitle: const Text('Open named tab'),
+                                    trailing: const Icon(
+                                      Icons.chevron_right_rounded,
+                                    ),
+                                    onTap: () => _selectNamedTab(tab),
+                                  ),
+                                if (tables.isEmpty && namedTabs.isEmpty)
+                                  const Padding(
+                                    padding: EdgeInsets.all(16),
+                                    child: Text(
+                                      'No tables or open named tabs are available.',
+                                    ),
+                                  ),
+                              ],
+                            ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _tabName,
+                      enabled: !_saving,
+                      maxLength: 80,
+                      textCapitalization: TextCapitalization.words,
+                      decoration: const InputDecoration(
+                        labelText: 'Or open a named tab',
+                        hintText: 'For example, John N',
+                      ),
+                      onSubmitted: (_) {
+                        if (!_saving) _openNamedTab();
+                      },
+                    ),
+                    FilledButton.icon(
+                      onPressed: _saving ? null : _openNamedTab,
+                      icon: const Icon(Icons.person_add_alt_1_rounded),
+                      label: const Text('Open named tab'),
+                    ),
+                  ],
                 ),
               ],
             ),
-            if (_saving) ...[
-              const SizedBox(height: 8),
-              const LinearProgressIndicator(),
-            ],
-            const SizedBox(height: 12),
-            if (_error != null) ...[
-              Text(
-                _error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-              const SizedBox(height: 8),
-            ],
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 300),
-              child: locationsLoading
-                  ? const Center(child: CircularProgressIndicator())
-                  : ListView(
-                      shrinkWrap: true,
-                      children: [
-                        if (tables.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-                            child: Text(
-                              'Tables',
-                              style: Theme.of(context).textTheme.labelLarge,
-                            ),
-                          ),
-                        for (final table in tables)
-                          ListTile(
-                            enabled: !_saving,
-                            leading: const Icon(Icons.table_restaurant_rounded),
-                            title: Text(table.label),
-                            subtitle: Text('${table.seats} seats'),
-                            trailing: const Icon(Icons.chevron_right_rounded),
-                            onTap: () => _selectTable(table),
-                          ),
-                        if (tables.isNotEmpty && namedTabs.isNotEmpty)
-                          const Divider(height: 16),
-                        if (namedTabs.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-                            child: Text(
-                              'Open named tabs',
-                              style: Theme.of(context).textTheme.labelLarge,
-                            ),
-                          ),
-                        for (final tab in namedTabs)
-                          ListTile(
-                            enabled: !_saving,
-                            leading: const Icon(Icons.person_outline_rounded),
-                            title: Text(tab.name),
-                            subtitle: const Text('Open named tab'),
-                            trailing: const Icon(Icons.chevron_right_rounded),
-                            onTap: () => _selectNamedTab(tab),
-                          ),
-                        if (tables.isEmpty && namedTabs.isEmpty)
-                          const Padding(
-                            padding: EdgeInsets.all(16),
-                            child: Text(
-                              'No tables or open named tabs are available.',
-                            ),
-                          ),
-                      ],
-                    ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _tabName,
-              enabled: !_saving,
-              maxLength: 80,
-              textCapitalization: TextCapitalization.words,
-              decoration: const InputDecoration(
-                labelText: 'Or open a named tab',
-                hintText: 'For example, John N',
-              ),
-              onSubmitted: (_) {
-                if (!_saving) _openNamedTab();
-              },
-            ),
-            FilledButton.icon(
-              onPressed: _saving ? null : _openNamedTab,
-              icon: const Icon(Icons.person_add_alt_1_rounded),
-              label: const Text('Open named tab'),
-            ),
-          ],
+          ),
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: _saving ? null : () => Navigator.of(context).pop(false),
-          child: const Text('Cancel'),
-        ),
-      ],
     );
   }
+}
+
+class _CreateFulfilmentCustomer {
+  const _CreateFulfilmentCustomer();
 }
 
 Future<void> _showNamedTabDialog(BuildContext context, WidgetRef ref) async {

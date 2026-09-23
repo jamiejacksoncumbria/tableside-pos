@@ -8095,6 +8095,103 @@ async function reprintPrintedJobFor(caller, rawData) {
   });
 }
 
+// Reprints a live kitchen/bar ticket on a manager-selected printer. The
+// server reconstructs the print payload exclusively from the production
+// ticket and validates the device belongs to this venue and production area,
+// preventing a modified client from printing arbitrary content or leaking a
+// ticket to another restaurant.
+async function reprintProductionTicketFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const ticketId = requiredDocumentId(data, "ticketId");
+  const targetDeviceId = requiredDocumentId(data, "targetDeviceId");
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError(
+      "permission-denied",
+      "Only a manager can reprint a production ticket.",
+    );
+  }
+
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const ticketRef = tenantRef.collection("productionTickets").doc(ticketId);
+  const deviceRef = tenantRef.collection("devices").doc(targetDeviceId);
+  const reprintRef = tenantRef.collection("printJobs").doc();
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  return db.runTransaction(async (transaction) => {
+    const [tenant, venue, ticket, device] = await Promise.all([
+      transaction.get(tenantRef),
+      transaction.get(venueRef),
+      transaction.get(ticketRef),
+      transaction.get(deviceRef),
+    ]);
+    if (!tenant.exists || !venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (!ticket.exists || ticket.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "The production ticket was not found at this venue.");
+    }
+    const ticketData = ticket.data();
+    const productionArea = typeof ticketData.productionArea === "string"
+      ? ticketData.productionArea
+      : "kitchen";
+    if (!activeRouteDevice(device, venueId, productionArea)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The selected printer is not active for this production area.",
+      );
+    }
+    const restaurantName = receiptBusinessSnapshot(
+      tenant.data() ?? {}, venue.data() ?? {},
+    ).name;
+    transaction.create(reprintRef, {
+      venueId,
+      targetDeviceId,
+      fallbackDeviceId: null,
+      orderId: typeof ticketData.orderId === "string" ? ticketData.orderId : "",
+      ticketId,
+      productionArea,
+      status: "queued",
+      attempts: 0,
+      idempotencyKey: reprintRef.id,
+      payload: {
+        type: "production",
+        isReprint: true,
+        reprintOfTicketId: ticketId,
+        ticketId,
+        restaurantName,
+        reference: ticketData.reference ?? ticketId,
+        productionArea,
+        tableLabel: ticketData.tableLabel ?? null,
+        tabName: ticketData.tabName ?? null,
+        courseName: ticketData.courseName ?? "Course",
+        isAddition: ticketData.isAddition === true,
+        createdByName: actor.displayName ?? actor.email ?? "",
+        lines: Array.isArray(ticketData.productionItems)
+          ? ticketData.productionItems
+          : [],
+      },
+      reprintOfTicketId: ticketId,
+      manualReprintRequestedByActor: actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "reprintProductionTicket",
+      venueId,
+      ticketId,
+      reprintJobId: reprintRef.id,
+      orderId: typeof ticketData.orderId === "string" ? ticketData.orderId : null,
+      productionArea,
+      targetDeviceId,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {jobId: reprintRef.id, queued: true, isReprint: true};
+  });
+}
+
 // Queue jobs are retained for audit, never physically deleted. A manager can
 // cancel work that has not been claimed by a printer yet. A recently claimed
 // job may already be travelling to the printer and remains protected, while a
@@ -9852,6 +9949,8 @@ async function invokePosAction(action, caller, data) {
       return retryFailedPrintJobFor(actingCaller, data);
     case "reprintPrintedJob":
       return reprintPrintedJobFor(actingCaller, data);
+    case "reprintProductionTicket":
+      return reprintProductionTicketFor(actingCaller, data);
     case "cancelPrintJob":
       return cancelPrintJobFor(actingCaller, data);
     default:

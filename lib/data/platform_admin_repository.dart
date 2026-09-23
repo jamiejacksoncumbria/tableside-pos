@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/app_logger.dart';
+import '../core/app_busy_state.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/firebase_environment_options.dart';
 import '../core/platform_admin_pin_session_store.dart';
@@ -258,6 +259,13 @@ class PlatformAdminRepository {
     String name, [
     Map<String, Object?> data = const {},
   ]) async {
+    return AppBusyState.guard(() => _callUnblocked(name, data));
+  }
+
+  Future<Map<String, Object?>> _callUnblocked(
+    String name,
+    Map<String, Object?> data,
+  ) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       throw StateError('Sign in before using platform administration.');

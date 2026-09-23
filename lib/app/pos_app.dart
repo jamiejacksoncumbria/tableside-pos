@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/app_theme.dart';
 import '../core/app_theme_controller.dart';
 import '../core/app_logger.dart';
+import '../core/app_busy_state.dart';
 import '../core/app_environment.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/firebase_runtime_config.dart';
@@ -28,81 +29,121 @@ class TableSideCYApp extends ConsumerWidget {
       themeMode: themeMode,
       builder: (context, child) => ValueListenableBuilder<int>(
         valueListenable: RemoteHubWaitState.pending,
-        builder: (context, pending, _) {
-          final showStaging =
-              FirebaseRuntimeConfig.enabled && AppEnvironment.isStaging;
-          final topInset = MediaQuery.paddingOf(context).top;
-          return Stack(
-            children: [
-              ?child,
-              if (showStaging)
-                Positioned(
-                  top: topInset + 4,
-                  left: 12,
-                  child: IgnorePointer(
-                    child: Material(
-                      elevation: 12,
-                      color: const Color(0xffff9800),
-                      borderRadius: BorderRadius.circular(7),
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 5,
-                        ),
-                        child: Text(
-                          'STAGING · TEST DATA ONLY',
-                          style: TextStyle(
-                            color: Colors.black,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 0.6,
+        builder: (context, pending, _) => ValueListenableBuilder<int>(
+          valueListenable: AppBusyState.pending,
+          builder: (context, busy, _) {
+            final showStaging =
+                FirebaseRuntimeConfig.enabled && AppEnvironment.isStaging;
+            final topInset = MediaQuery.paddingOf(context).top;
+            return Stack(
+              children: [
+                ?child,
+                if (showStaging)
+                  Positioned(
+                    top: topInset + 4,
+                    left: 12,
+                    child: IgnorePointer(
+                      child: Material(
+                        elevation: 12,
+                        color: const Color(0xffff9800),
+                        borderRadius: BorderRadius.circular(7),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 5,
                           ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              if (pending > 0)
-                Positioned(
-                  top: topInset + (showStaging ? 42 : 8),
-                  left: 16,
-                  right: 16,
-                  child: Material(
-                    elevation: 8,
-                    color: Theme.of(context).colorScheme.tertiaryContainer,
-                    borderRadius: BorderRadius.circular(12),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 12,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const SizedBox.square(
-                            dimension: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2.5),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              pending == 1
-                                  ? 'Waiting for venue hub…'
-                                  : 'Waiting for venue hub… ($pending commands)',
-                              style: Theme.of(context).textTheme.titleSmall,
+                          child: Text(
+                            'STAGING · TEST DATA ONLY',
+                            style: TextStyle(
+                              color: Colors.black,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w900,
+                              letterSpacing: 0.6,
                             ),
                           ),
-                        ],
+                        ),
                       ),
                     ),
                   ),
+                if (pending > 0)
+                  Positioned(
+                    top: topInset + (showStaging ? 42 : 8),
+                    left: 16,
+                    right: 16,
+                    child: Material(
+                      elevation: 8,
+                      color: Theme.of(context).colorScheme.tertiaryContainer,
+                      borderRadius: BorderRadius.circular(12),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 12,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox.square(
+                              dimension: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.5,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                pending == 1
+                                    ? 'Waiting for venue hub…'
+                                    : 'Waiting for venue hub… ($pending commands)',
+                                style: Theme.of(context).textTheme.titleSmall,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ShorebirdUpdateHost(
+                  top:
+                      topInset +
+                      (showStaging ? 42 : 8) +
+                      (pending > 0 ? 58 : 0),
                 ),
-              ShorebirdUpdateHost(
-                top: topInset + (showStaging ? 42 : 8) + (pending > 0 ? 58 : 0),
-              ),
-            ],
-          );
-        },
+                if (busy > 0) ...[
+                  const Positioned.fill(
+                    child: ModalBarrier(
+                      dismissible: false,
+                      color: Color(0x66000000),
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: Center(
+                      child: Card(
+                        elevation: 12,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 20,
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const CircularProgressIndicator(),
+                              const SizedBox(height: 14),
+                              Text(
+                                'Please wait…',
+                                style: Theme.of(context).textTheme.titleSmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
       ),
       home: FirebaseRuntimeConfig.enabled
           ? const _FirebaseBootstrapGate()
