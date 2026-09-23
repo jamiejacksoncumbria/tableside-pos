@@ -132,8 +132,8 @@ class VenueHubClientRegistry {
           'deliveryAddress': deliveryAddress!.trim(),
         if (deliveryAddressLabel?.trim().isNotEmpty == true)
           'deliveryAddressLabel': deliveryAddressLabel!.trim(),
-        if (deliveryLatitude != null) 'deliveryLatitude': deliveryLatitude,
-        if (deliveryLongitude != null) 'deliveryLongitude': deliveryLongitude,
+        'deliveryLatitude': ?deliveryLatitude,
+        'deliveryLongitude': ?deliveryLongitude,
         if (serviceAreaId?.trim().isNotEmpty == true)
           'serviceAreaId': serviceAreaId!.trim(),
         if (serviceAreaName?.trim().isNotEmpty == true)
@@ -331,12 +331,20 @@ class VenueHubPrinterClientRegistry {
   VenueHubBootstrap? _bootstrap;
   VenueHubClient? _client;
   bool _clockReady = false;
+  bool _localHubHost = false;
 
   bool requiresHub(VenueScope scope) =>
       _scope == scope && _bootstrap?.enabled == true;
 
   bool isDeviceEnrolled(VenueScope scope) =>
       requiresHub(scope) && _client != null;
+
+  /// Whether this process owns the authoritative hub for [scope].
+  ///
+  /// Printer polling uses this to avoid treating the short HTTPS listener
+  /// startup window as a failed ticket. Remote printer devices must still
+  /// fail quickly when the actual hub cannot be reached.
+  bool isLocalHubHost(VenueScope scope) => requiresHub(scope) && _localHubHost;
 
   Future<void> configure({
     required VenueScope scope,
@@ -348,6 +356,9 @@ class VenueHubPrinterClientRegistry {
     clear();
     _scope = scope;
     _bootstrap = bootstrap;
+    _localHubHost =
+        bootstrap.hubDeviceId == deviceId &&
+        bootstrap.hubCredentialId == credential.credentialId;
     if (!bootstrap.enabled) return;
     final endpoint = endpointOverride ?? bootstrap.endpoint;
     final enrolled = bootstrap.credentials[credential.credentialId];
@@ -409,6 +420,7 @@ class VenueHubPrinterClientRegistry {
     _client = null;
     _scope = null;
     _bootstrap = null;
+    _localHubHost = false;
   }
 }
 

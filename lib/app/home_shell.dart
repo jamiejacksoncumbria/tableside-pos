@@ -158,9 +158,6 @@ class HomeShell extends ConsumerWidget {
           'Platform',
         ),
     ];
-    final index = destinations.indexWhere(
-      (destination) => destination.section == visibleSection,
-    );
     // Material NavigationBar intentionally supports at most five destinations.
     // Platform tools stay available on compact devices from the app bar rather
     // than making the entire mobile shell fail for a platform administrator.
@@ -296,22 +293,11 @@ class HomeShell extends ConsumerWidget {
       body: Row(
         children: [
           if (wide)
-            SingleChildScrollView(
-              child: NavigationRail(
-                selectedIndex: index,
-                labelType: NavigationRailLabelType.all,
-                onDestinationSelected: (selected) => ref
-                    .read(homeSectionProvider.notifier)
-                    .select(destinations[selected].section),
-                destinations: [
-                  for (final item in destinations)
-                    NavigationRailDestination(
-                      icon: Icon(item.icon),
-                      selectedIcon: Icon(item.icon),
-                      label: Text(item.label),
-                    ),
-                ],
-              ),
+            _ScrollableHomeRail(
+              destinations: destinations,
+              selectedSection: visibleSection,
+              onSelected: (section) =>
+                  ref.read(homeSectionProvider.notifier).select(section),
             ),
           Expanded(
             // The print worker is intentionally invisible. A default loose
@@ -696,6 +682,100 @@ class _BottomNotificationTray extends ConsumerWidget {
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A compact navigation rail that remains usable when role-based destinations
+/// outgrow the available window height.
+///
+/// Material's [NavigationRail] contains a flex child and therefore cannot be
+/// placed in a vertical scroll view. Doing so gives it unbounded height and
+/// prevents the entire authenticated workspace from laying out after PIN
+/// entry. This rail uses a bounded [ListView] and keeps every destination
+/// reachable on short Windows displays and landscape tablets.
+class _ScrollableHomeRail extends StatelessWidget {
+  const _ScrollableHomeRail({
+    required this.destinations,
+    required this.selectedSection,
+    required this.onSelected,
+  });
+
+  final List<_Destination> destinations;
+  final HomeSection selectedSection;
+  final ValueChanged<HomeSection> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surface,
+      child: SafeArea(
+        right: false,
+        child: SizedBox(
+          width: 112,
+          child: ListView.separated(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+            itemCount: destinations.length,
+            separatorBuilder: (_, _) => const SizedBox(height: 4),
+            itemBuilder: (context, index) {
+              final destination = destinations[index];
+              final selected = destination.section == selectedSection;
+              return Semantics(
+                selected: selected,
+                button: true,
+                label: destination.label,
+                child: Tooltip(
+                  message: destination.label,
+                  child: Material(
+                    color: selected
+                        ? scheme.secondaryContainer
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(14),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: () => onSelected(destination.section),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 9,
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              destination.icon,
+                              color: selected
+                                  ? scheme.onSecondaryContainer
+                                  : scheme.onSurfaceVariant,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              destination.label,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                              style: Theme.of(context).textTheme.labelMedium
+                                  ?.copyWith(
+                                    color: selected
+                                        ? scheme.onSecondaryContainer
+                                        : scheme.onSurfaceVariant,
+                                    fontWeight: selected
+                                        ? FontWeight.w700
+                                        : FontWeight.w500,
+                                  ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
         ),
       ),

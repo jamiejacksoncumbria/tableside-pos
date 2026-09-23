@@ -4,6 +4,22 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:tableside_pos/app/pos_app.dart';
 
 void main() {
+  testWidgets('wide workspace navigation remains bounded and visible', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1024, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const ProviderScope(child: TableSideCYApp()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('TableSideCY Hospitality'), findsOneWidget);
+    expect(find.text('POS'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('compact POS menu hides the shell until tables is selected', (
     tester,
   ) async {

@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
+import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_runtime.dart';
 import '../notifications/notification_centre.dart';
 import 'native_print_worker.dart';
@@ -118,6 +119,20 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
 
   Future<void> _processAvailable(VenueScope scope) async {
     if (_processing || !mounted || _scope != scope) return;
+    final runtime = VenueHubRuntime.instance;
+    if (VenueHubPrinterClientRegistry.instance.isLocalHubHost(scope) &&
+        runtime.activeScope != scope) {
+      // The worker and hub auto-start hosts mount together. The printer
+      // registry already knows this device owns the hub before its HTTPS
+      // listener has bound. Wait for the runtime status stream to wake this
+      // worker instead of recording a false failed ticket/notification.
+      return;
+    }
+    if (VenueHubPrinterClientRegistry.instance.isLocalHubHost(scope) &&
+        runtime.status.state != VenueHubRuntimeState.ready &&
+        runtime.status.state != VenueHubRuntimeState.degraded) {
+      return;
+    }
     final worker = _worker;
     if (worker == null) return;
     _processing = true;
