@@ -154,7 +154,11 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
   }) async {
     final profile = await CapabilityProfile.load();
     final generator = Generator(_paperSize(device.paperWidth), profile);
-    final location = ticket.tabName?.trim().isNotEmpty == true
+    final location = ticket.channel == 'delivery'
+        ? 'DELIVERY: ${ticket.customerName?.trim().isNotEmpty == true ? ticket.customerName!.trim() : 'Customer'}'
+        : ticket.channel == 'collection'
+        ? 'COLLECTION: ${ticket.customerName?.trim().isNotEmpty == true ? ticket.customerName!.trim() : 'Customer'}'
+        : ticket.tabName?.trim().isNotEmpty == true
         ? 'Tab: ${ticket.tabName!.trim()}'
         : ticket.tableLabel?.trim().isNotEmpty == true
         ? 'Table: ${ticket.tableLabel!.trim()}'
@@ -187,6 +191,16 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       ),
       ...generator.hr(),
       ...generator.text(location, styles: const PosStyles(bold: true)),
+      if (ticket.channel != 'dineIn')
+        ...generator.text(
+          ticket.scheduledForMillis == null
+              ? 'Time: ASAP'
+              : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch(ticket.scheduledForMillis!))}',
+          styles: const PosStyles(bold: true),
+        ),
+      if (ticket.channel == 'delivery' &&
+          ticket.deliveryAddress?.trim().isNotEmpty == true)
+        ...generator.text('Address: ${ticket.deliveryAddress!.trim()}'),
       ...generator.text('Order #${ticket.reference}'),
       ...generator.text('Printed: $printedAt'),
       if (ticket.createdByName?.trim().isNotEmpty == true)
@@ -289,6 +303,8 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       ...generator.text(
         receipt.isRefund
             ? 'REFUND RECEIPT'
+            : receipt.isDeliveryNote
+            ? 'DELIVERY / COLLECTION NOTE'
             : receipt.isPreReceipt
             ? 'PRE RECEIPT - NOT PAID'
             : receipt.isPartPayment
@@ -306,11 +322,34 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       if (receipt.isRefund && receipt.refundReason?.trim().isNotEmpty == true)
         ...generator.text('Reason: ${receipt.refundReason!.trim()}'),
       if (location != null) ...generator.text(location),
+      if (receipt.channel != 'dineIn')
+        ...generator.text(
+          '${receipt.channel == 'delivery' ? 'Delivery' : 'Collection'}: ${receipt.customerName?.trim().isNotEmpty == true ? receipt.customerName!.trim() : 'Customer'}',
+          styles: const PosStyles(bold: true),
+        ),
+      if (receipt.channel != 'dineIn')
+        ...generator.text(
+          receipt.scheduledForMillis == null
+              ? 'Time: ASAP'
+              : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch(receipt.scheduledForMillis!))}',
+        ),
+      if (receipt.channel == 'delivery' &&
+          receipt.deliveryAddress?.trim().isNotEmpty == true)
+        ...generator.text('Address: ${receipt.deliveryAddress!.trim()}'),
       if (receipt.businessDate?.trim().isNotEmpty == true)
         ...generator.text('Business date: ${receipt.businessDate}'),
       ...generator.text('Printed: $printedAt'),
       ...generator.hr(),
       ...itemBytes,
+      if (receipt.isDeliveryNote)
+        ...generator.row([
+          PosColumn(text: 'Delivery charge', width: 7),
+          PosColumn(
+            text: _money(receipt.deliveryChargeMinor, receipt.currencyCode),
+            width: 5,
+            styles: const PosStyles(align: PosAlign.right),
+          ),
+        ]),
       ...generator.hr(),
       if (receipt.netTotalMinor != null)
         ...generator.row([

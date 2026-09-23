@@ -765,6 +765,8 @@ class ActiveOrderController extends Notifier<PosOrder> {
     required String customerPhone,
     String? deliveryAddress,
     DateTime? scheduledFor,
+    String? assignedDriverId,
+    String? assignedDriverName,
   }) {
     if (channel == OrderChannel.dineIn) {
       throw ArgumentError('Use a table or named tab for dine-in orders.');
@@ -803,6 +805,8 @@ class ActiveOrderController extends Notifier<PosOrder> {
       customerPhone: customerPhone.trim(),
       deliveryAddress: deliveryAddress?.trim(),
       scheduledFor: scheduledFor,
+      assignedDriverId: assignedDriverId,
+      assignedDriverName: assignedDriverName,
       primaryWaiterId: ref.read(activeStaffPinSessionProvider)?.userId,
       primaryWaiterName: ref.read(activeStaffPinSessionProvider)?.displayName,
     );
@@ -1243,6 +1247,29 @@ class ActiveOrderController extends Notifier<PosOrder> {
       _selectPersistedOrder(order.id);
     }
     AppLogger.info('Opened unpaid split bill ${order.id}.');
+  }
+
+  /// Opens an existing collection or delivery order in the normal POS.
+  ///
+  /// The lightweight fulfilment list may not contain its lines, so selecting
+  /// the persisted ID immediately attaches the normal live order stream. This
+  /// keeps edits and later cash/card settlement identical on every device.
+  void openFulfilmentOrder(PosOrder order) {
+    if (order.channel == OrderChannel.dineIn ||
+        order.status == OrderStatus.closed) {
+      return;
+    }
+    if (_hasUnsavedLocalDraft()) {
+      throw StateError(
+        'Send or remove the current draft before changing orders.',
+      );
+    }
+    state = order;
+    ref.read(selectedTableProvider.notifier).select('');
+    if (ref.read(trainingModeProvider) == null) {
+      _selectPersistedOrder(order.id);
+    }
+    AppLogger.info('Opened ${order.channel.name} order ${order.id}.');
   }
 
   void _requireValidLiveOrderLocation() {

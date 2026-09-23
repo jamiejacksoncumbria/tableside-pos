@@ -56,10 +56,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   final Set<String> _dismissedLateTicketIds = <String>{};
   final Set<String> _expandedTicketIds = <String>{};
   late final OrderFlowSound _sound;
+  late final OrderFlowDisplayModeController _displayModeController;
   bool _receivedInitialOrders = false;
   bool _audioMuted = false;
   bool _audioPreferenceLoaded = false;
   bool _refreshingPinSession = false;
+  bool _releasingScheduledTickets = false;
   bool _compactFiltersExpanded = false;
   bool _compactStatusExpanded = false;
   static const _audioMutedPreferenceKey = 'tableside.orderFlow.audioMuted';
@@ -68,9 +70,13 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   void initState() {
     super.initState();
     _sound = OrderFlowSound();
+    // Riverpod 3 deliberately rejects `ref.read` once a ConsumerState is
+    // unmounting. Cache the controller while the element is live so dispose
+    // can always clear the KDS keep-awake flag safely.
+    _displayModeController = ref.read(orderFlowDisplayActiveProvider.notifier);
     scheduleMicrotask(() {
       if (mounted) {
-        ref.read(orderFlowDisplayActiveProvider.notifier).setActive(true);
+        _displayModeController.setActive(true);
         unawaited(_refreshKdsPinSession());
       }
     });
@@ -80,8 +86,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     );
     unawaited(_loadAudioPreference());
     _clock = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {});
+        unawaited(_releaseScheduledTickets());
+      }
     });
+    scheduleMicrotask(_releaseScheduledTickets);
   }
 
   @override
@@ -90,7 +100,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     _allergyAlarm?.cancel();
     _lateAlarm?.cancel();
     _sessionKeepAlive?.cancel();
-    ref.read(orderFlowDisplayActiveProvider.notifier).setActive(false);
+    _displayModeController.setActive(false);
     unawaited(_sound.dispose());
     super.dispose();
   }
@@ -520,6 +530,31 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     }
   }
 
+  Future<void> _releaseScheduledTickets() async {
+    if (!mounted || _releasingScheduledTickets) return;
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null || ref.read(activeStaffPinSessionProvider) == null) {
+      return;
+    }
+    _releasingScheduledTickets = true;
+    try {
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .releaseDueFulfilmentTickets(scope);
+    } on Object catch (error, stackTrace) {
+      // A LAN-only hub can continue serving its current queue while Firebase
+      // is unavailable. Do not cover the KDS with repetitive warnings; the
+      // held ticket remains visible and can still be released manually.
+      AppLogger.error(
+        'Release scheduled fulfilment tickets',
+        error,
+        stackTrace,
+      );
+    } finally {
+      _releasingScheduledTickets = false;
+    }
+  }
+
   bool _matchesFilters(OrderFlowOrder order) {
     if (_area != null && order.productionArea != _area) return false;
     return switch (_filter) {
@@ -874,11 +909,13 @@ class _OrderFlowCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final late = _lateState(order, now, amberMinutes, redMinutes);
-    final background = switch (late) {
-      _LateState.red => Colors.red.shade800,
-      _LateState.amber => Colors.orange.shade800,
-      _LateState.normal => Colors.green.shade700,
-    };
+    final background = order.status == OrderFlowStatus.held
+        ? Colors.purple.shade700
+        : switch (late) {
+            _LateState.red => Colors.red.shade800,
+            _LateState.amber => Colors.orange.shade800,
+            _LateState.normal => Colors.green.shade700,
+          };
     final elapsed = now.difference(order.ticketReleasedAt);
     return Card(
       color: background,
@@ -904,7 +941,10 @@ class _OrderFlowCard extends StatelessWidget {
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _AreaIcon(area: order.productionArea),
+                        _AreaIcon(
+                          area: order.productionArea,
+                          channel: order.channel,
+                        ),
                         const SizedBox(width: 7),
                         ConstrainedBox(
                           constraints: const BoxConstraints(maxWidth: 180),
@@ -947,13 +987,22 @@ class _OrderFlowCard extends StatelessWidget {
                         ),
                       ),
                     _PrimaryFlowAction(order: order, onAction: onAction),
-                    _AlertRow(
-                      icon: late == _LateState.normal
-                          ? Icons.timer_outlined
-                          : Icons.priority_high_rounded,
-                      text: '${_formatElapsed(elapsed)} since ticket release',
-                      color: Colors.white,
-                    ),
+                    if (order.status == OrderFlowStatus.held)
+                      _AlertRow(
+                        icon: Icons.schedule_rounded,
+                        text: order.scheduledFor == null
+                            ? 'Held — release when preparation should start'
+                            : 'Due ${order.scheduledFor!.hour.toString().padLeft(2, '0')}:${order.scheduledFor!.minute.toString().padLeft(2, '0')} · timer starts at the venue lead time',
+                        color: Colors.white,
+                      )
+                    else
+                      _AlertRow(
+                        icon: late == _LateState.normal
+                            ? Icons.timer_outlined
+                            : Icons.priority_high_rounded,
+                        text: '${_formatElapsed(elapsed)} since ticket release',
+                        color: Colors.white,
+                      ),
                     SizedBox.square(
                       dimension: 34,
                       child: IconButton(
@@ -1173,20 +1222,28 @@ class _OrderFlowNotificationHostState
 }
 
 class _AreaIcon extends StatelessWidget {
-  const _AreaIcon({required this.area});
+  const _AreaIcon({required this.area, required this.channel});
 
   final ProductionArea area;
+  final OrderChannel channel;
 
   @override
   Widget build(BuildContext context) => CircleAvatar(
     radius: 16,
     backgroundColor: Colors.white24,
     foregroundColor: Colors.white,
-    child: Icon(switch (area) {
-      ProductionArea.bar => Icons.local_bar_rounded,
-      ProductionArea.kitchen => Icons.restaurant_rounded,
-      ProductionArea.dessert => Icons.cake_outlined,
-    }, size: 18),
+    child: Icon(
+      channel == OrderChannel.delivery
+          ? Icons.delivery_dining_rounded
+          : channel == OrderChannel.collection
+          ? Icons.shopping_bag_rounded
+          : switch (area) {
+              ProductionArea.bar => Icons.local_bar_rounded,
+              ProductionArea.kitchen => Icons.restaurant_rounded,
+              ProductionArea.dessert => Icons.cake_outlined,
+            },
+      size: 18,
+    ),
   );
 }
 
@@ -1324,6 +1381,11 @@ class _OrderActions extends StatelessWidget {
 }
 
 String _resolvedOrderLocation(OrderFlowOrder order, List<DiningTable> tables) {
+  if (order.channel != OrderChannel.dineIn) {
+    final customer = order.customerName?.trim();
+    return customer?.isNotEmpty == true ? customer! : order.channel.label;
+  }
+
   final tabName = order.tabName?.trim();
   if (tabName?.isNotEmpty == true) return tabName!;
   final stored = order.tableLabel?.trim();

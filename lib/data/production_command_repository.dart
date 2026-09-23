@@ -1167,6 +1167,8 @@ class ProductionCommandRepository {
         customerPhone: order.customerPhone,
         deliveryAddress: order.deliveryAddress,
         scheduledFor: order.scheduledFor,
+        assignedDriverId: order.assignedDriverId,
+        assignedDriverName: order.assignedDriverName,
       );
       await _sendHubEvent(
         scope: scope,
@@ -1203,6 +1205,7 @@ class ProductionCommandRepository {
       'scheduledForMillis': order.scheduledFor?.millisecondsSinceEpoch,
       'primaryWaiterId': order.primaryWaiterId,
       'primaryWaiterName': order.primaryWaiterName,
+      'assignedDriverId': order.assignedDriverId,
       'clientObservedAtMillis': DateTime.now().toUtc().millisecondsSinceEpoch,
       'line': {
         'id': line.id,
@@ -1366,6 +1369,17 @@ class ProductionCommandRepository {
       'ticketId': ticketId,
       'flowStatus': flowStatus,
       'isDelayed': isDelayed,
+    });
+  }
+
+  /// Releases scheduled collection/delivery tickets whose venue lead-time
+  /// boundary has arrived. It is deliberately idempotent and background-safe;
+  /// several KDS displays may call it without producing duplicate tickets or
+  /// print jobs because the server transitions each held ticket once.
+  Future<void> releaseDueFulfilmentTickets(VenueScope scope) async {
+    await _call('releaseDueFulfilmentTickets', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
     });
   }
 
@@ -1794,6 +1808,8 @@ class ProductionCommandRepository {
     String? customerPhone,
     String? deliveryAddress,
     DateTime? scheduledFor,
+    String? assignedDriverId,
+    String? assignedDriverName,
   }) async {
     final hub = VenueHubClientRegistry.instance;
     if (hub.hasUsableSession(scope)) {
@@ -1829,11 +1845,33 @@ class ProductionCommandRepository {
           'deliveryAddress': deliveryAddress!.trim(),
         if (scheduledFor != null)
           'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
+        if (assignedDriverId?.trim().isNotEmpty == true)
+          'assignedDriverId': assignedDriverId!.trim(),
+        if (assignedDriverName?.trim().isNotEmpty == true)
+          'assignedDriverName': assignedDriverName!.trim(),
       },
     );
   }
 
   Future<VenueHubEventAcknowledgement> _sendHubEvent({
+    required VenueScope scope,
+    required String eventType,
+    required Map<String, Object?> payload,
+    DateTime? businessTimestampUtc,
+  }) => AppBusyState.guard(
+    () => _sendHubEventUnblocked(
+      scope: scope,
+      eventType: eventType,
+      payload: payload,
+      businessTimestampUtc: businessTimestampUtc,
+    ),
+  );
+
+  /// Keeps the global duplicate-submit barrier active until the authoritative
+  /// hub has durably accepted the command. The nested HTTP submission may
+  /// finish several seconds earlier, so guarding only `_call` exposed the
+  /// underlying dialog while the same command was still in flight.
+  Future<VenueHubEventAcknowledgement> _sendHubEventUnblocked({
     required VenueScope scope,
     required String eventType,
     required Map<String, Object?> payload,
@@ -1897,6 +1935,23 @@ class ProductionCommandRepository {
       'venueId': scope.venueId,
       'ticketId': ticketId,
       'targetDeviceId': targetDeviceId,
+    });
+  }
+
+  /// Queues an address-bearing delivery/collection note on a specifically
+  /// selected receipt printer. The server reconstructs every price and line
+  /// from the live order; the client supplies only the order and device IDs.
+  Future<void> printFulfilmentDeliveryNote({
+    required VenueScope scope,
+    required String orderId,
+    required String targetDeviceId,
+  }) async {
+    await _call('printFulfilmentDeliveryNote', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'orderId': orderId,
+      'targetDeviceId': targetDeviceId,
+      'requestId': 'delivery-note-${DateTime.now().microsecondsSinceEpoch}',
     });
   }
 
@@ -1978,6 +2033,7 @@ class ProductionCommandRepository {
     'listVenuePinStaff',
     'refreshStaffPinSession',
     'submitRemoteHubCommand',
+    'releaseDueFulfilmentTickets',
   };
 
   List<String> _stringList(Object? value) => value is List

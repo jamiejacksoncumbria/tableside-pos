@@ -13,6 +13,7 @@ import 'native_print_worker.dart';
 import 'queued_bluetooth_receipt_printer.dart';
 import 'queued_windows_receipt_printer.dart';
 import '../../offline/venue_hub_client_registry.dart';
+import '../../offline/venue_hub_runtime.dart';
 
 /// Runs only in a foreground native app session. Android boot/background
 /// services are a later device-agent step; this worker gives each registered
@@ -108,7 +109,13 @@ class QueuedNativePrintWorker {
     }
     var deviceId = await _identity.deviceIdForScope(scope);
     var deviceCredential = await _identity.credential(scope);
-    final hubMode = VenueHubPrinterClientRegistry.instance.requiresHub(scope);
+    // The host itself owns the durable local queue even when its separate
+    // printer-only registry has not yet completed a LAN client handshake.
+    // Treating it as a cloud printer made queued local tickets wait forever
+    // despite a healthy configured printer and successful test prints.
+    final hubMode =
+        VenueHubRuntime.instance.activeScope == scope ||
+        VenueHubPrinterClientRegistry.instance.requiresHub(scope);
     if (deviceCredential == null || deviceCredential.isEmpty) {
       final legacyCredential = await _identity.legacyCredential();
       if (legacyCredential != null && legacyCredential.isNotEmpty) {

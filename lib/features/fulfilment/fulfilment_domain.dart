@@ -97,6 +97,8 @@ class VenueFulfilmentSettings {
     this.collectionEnabled = false,
     this.deliveryEnabled = false,
     this.courseControlEnabled = false,
+    this.collectionLeadMinutes = 20,
+    this.deliveryLeadMinutes = 20,
     this.collectionWindows = const <ServiceWindow>[],
     this.deliveryWindows = const <ServiceWindow>[],
     this.serviceAreas = const <ServiceArea>[],
@@ -106,6 +108,8 @@ class VenueFulfilmentSettings {
   final bool collectionEnabled;
   final bool deliveryEnabled;
   final bool courseControlEnabled;
+  final int collectionLeadMinutes;
+  final int deliveryLeadMinutes;
   final List<ServiceWindow> collectionWindows;
   final List<ServiceWindow> deliveryWindows;
   final List<ServiceArea> serviceAreas;

@@ -244,6 +244,16 @@ class _TablesPanel extends ConsumerWidget {
                 },
               );
     final namedTabGroups = _groupOpenNamedTabs(namedTabs);
+    final fulfilmentOrders = isTraining
+        ? trainingOrders
+              .where((order) => order.channel != OrderChannel.dineIn)
+              .toList(growable: false)
+        : ref
+                  .watch(fulfilmentOrdersProvider)
+                  .value
+                  ?.where((order) => order.status != OrderStatus.closed)
+                  .toList(growable: false) ??
+              const <PosOrder>[];
     final scheme = Theme.of(context).colorScheme;
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -313,7 +323,11 @@ class _TablesPanel extends ConsumerWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              activeOrder.tabName == null
+              activeOrder.channel == OrderChannel.collection
+                  ? 'Current collection: ${activeOrder.customerName ?? 'Customer'}'
+                  : activeOrder.channel == OrderChannel.delivery
+                  ? 'Current delivery: ${activeOrder.customerName ?? 'Customer'}'
+                  : activeOrder.tabName == null
                   ? 'Select a table or open a named tab'
                   : 'Current tab: ${activeOrder.tabName}',
               style: Theme.of(
@@ -396,10 +410,10 @@ class _TablesPanel extends ConsumerWidget {
                               for (final tab in group.tabs)
                                 SizedBox(
                                   width: compact
-                                      ? double.infinity
+                                      ? 118
                                       : expanded
                                       ? 180
-                                      : 96,
+                                      : 132,
                                   child: _NamedTabButton(
                                     tab: tab,
                                     scope: scope,
@@ -440,6 +454,68 @@ class _TablesPanel extends ConsumerWidget {
                           ),
                         ],
                       ],
+                      for (final channel in const [
+                        OrderChannel.collection,
+                        OrderChannel.delivery,
+                      ])
+                        if (fulfilmentOrders.any(
+                          (order) => order.channel == channel,
+                        )) ...[
+                          const SizedBox(height: 16),
+                          Text(
+                            channel == OrderChannel.collection
+                                ? 'Collections'
+                                : 'Deliveries',
+                            style: Theme.of(context).textTheme.labelLarge,
+                          ),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              for (final order in fulfilmentOrders.where(
+                                (item) => item.channel == channel,
+                              ))
+                                SizedBox(
+                                  width: compact
+                                      ? 118
+                                      : expanded
+                                      ? 180
+                                      : 132,
+                                  child: _FulfilmentOrderButton(
+                                    order: order,
+                                    scope: scope,
+                                    currencyCode: currencyCode,
+                                    selected: order.id == activeOrder.id,
+                                    onTap: () {
+                                      try {
+                                        ref
+                                            .read(activeOrderProvider.notifier)
+                                            .openFulfilmentOrder(order);
+                                        if (context.mounted) {
+                                          onSelection?.call();
+                                        }
+                                      } on Object catch (error, stackTrace) {
+                                        AppLogger.error(
+                                          'Open fulfilment order',
+                                          error,
+                                          stackTrace,
+                                        );
+                                        if (!context.mounted) return;
+                                        showAppNotification(
+                                          context,
+                                          ref: ref,
+                                          title: 'Could not open order',
+                                          message: '$error',
+                                          level: AppNotificationLevel.error,
+                                        );
+                                      }
+                                    },
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ],
                     ],
                   ),
                 ),
@@ -661,6 +737,84 @@ class _NamedTabButton extends ConsumerWidget {
                 const Icon(Icons.check_circle_rounded, color: Colors.white),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FulfilmentOrderButton extends ConsumerWidget {
+  const _FulfilmentOrderButton({
+    required this.order,
+    required this.scope,
+    required this.currencyCode,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final PosOrder order;
+  final VenueScope? scope;
+  final String currencyCode;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final liveOrder = scope == null
+        ? null
+        : ref.watch(tableOpenOrderProvider(order.id)).value;
+    final amount = liveOrder?.balanceDueMinor ?? order.balanceDueMinor;
+    final scheduled = order.scheduledFor;
+    final background = selected
+        ? Theme.of(context).colorScheme.primary
+        : Colors.green.shade600;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Ink(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(12),
+          border: selected ? Border.all(color: Colors.white, width: 2) : null,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  order.channel == OrderChannel.delivery
+                      ? Icons.delivery_dining_rounded
+                      : Icons.shopping_bag_rounded,
+                  size: 18,
+                  color: Colors.white,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    order.customerName ?? 'Customer',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 3),
+            Text(
+              scheduled == null
+                  ? 'ASAP · ${formatMoney(amount, currencyCode: currencyCode)}'
+                  : '${scheduled.hour.toString().padLeft(2, '0')}:${scheduled.minute.toString().padLeft(2, '0')} · ${formatMoney(amount, currencyCode: currencyCode)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white, fontSize: 11),
+            ),
+          ],
         ),
       ),
     );
@@ -2196,9 +2350,12 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 loading: () => tableId,
                 error: (_, _) => tableId,
               );
-    final orderLocationLabel =
-        order.tabName ??
-        (tableLabel.isEmpty ? 'No table selected' : tableLabel);
+    final orderLocationLabel = order.channel == OrderChannel.collection
+        ? 'Collection · ${order.customerName ?? 'Customer'}'
+        : order.channel == OrderChannel.delivery
+        ? 'Delivery · ${order.customerName ?? 'Customer'}'
+        : order.tabName ??
+              (tableLabel.isEmpty ? 'No table selected' : tableLabel);
     final scheme = Theme.of(context).colorScheme;
     final staff = ref.watch(activeStaffPinSessionProvider);
     final canAdjustSale =
@@ -2228,6 +2385,18 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 context,
               ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
             ),
+            if (order.channel != OrderChannel.dineIn)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  order.scheduledFor == null
+                      ? '${order.channel.label} time: ASAP'
+                      : '${order.channel.label} time: ${formatAppDateTime(order.scheduledFor!)}',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
             if (order.isSplitOrder)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -4301,6 +4470,13 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
     final selected = await _pickFulfilmentCustomer(channel, customers);
     if (selected == null || !mounted) return;
     DateTime? scheduledFor;
+    FulfilmentStaffMember? selectedDriver;
+    final drivers = channel == OrderChannel.delivery
+        ? (ref.read(fulfilmentStaffProvider).value ??
+                  const <FulfilmentStaffMember>[])
+              .where((staff) => staff.roles.contains('driver'))
+              .toList(growable: false)
+        : const <FulfilmentStaffMember>[];
     final address = TextEditingController(
       text: selected.addresses.firstOrNull?.addressLines ?? '',
     );
@@ -4329,6 +4505,25 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                     labelText: 'Delivery address',
                   ),
                 ),
+                if (drivers.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<FulfilmentStaffMember>(
+                    initialValue: selectedDriver,
+                    decoration: const InputDecoration(
+                      labelText: 'Delivery driver (optional)',
+                      prefixIcon: Icon(Icons.delivery_dining_outlined),
+                    ),
+                    items: [
+                      for (final driver in drivers)
+                        DropdownMenuItem(
+                          value: driver,
+                          child: Text(driver.name),
+                        ),
+                    ],
+                    onChanged: (value) =>
+                        setCustomerState(() => selectedDriver = value),
+                  ),
+                ],
               ],
               const SizedBox(height: 12),
               ListTile(
@@ -4413,6 +4608,8 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                 ? address.text
                 : null,
             scheduledFor: scheduledFor,
+            assignedDriverId: selectedDriver?.id,
+            assignedDriverName: selectedDriver?.name,
           );
       await WidgetsBinding.instance.endOfFrame;
       if (mounted) Navigator.of(context).pop(true);
@@ -4729,18 +4926,36 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                                       ).textTheme.labelLarge,
                                     ),
                                   ),
-                                for (final tab in namedTabs)
-                                  ListTile(
-                                    enabled: !_saving,
-                                    leading: const Icon(
-                                      Icons.person_outline_rounded,
+                                if (namedTabs.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 4,
                                     ),
-                                    title: Text(tab.name),
-                                    subtitle: const Text('Open named tab'),
-                                    trailing: const Icon(
-                                      Icons.chevron_right_rounded,
+                                    child: Wrap(
+                                      spacing: 8,
+                                      runSpacing: 8,
+                                      children: [
+                                        for (final tab in namedTabs)
+                                          SizedBox(
+                                            width: 132,
+                                            child: OutlinedButton.icon(
+                                              onPressed: _saving
+                                                  ? null
+                                                  : () => _selectNamedTab(tab),
+                                              icon: const Icon(
+                                                Icons.person_outline_rounded,
+                                                size: 18,
+                                              ),
+                                              label: Text(
+                                                tab.name,
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                          ),
+                                      ],
                                     ),
-                                    onTap: () => _selectNamedTab(tab),
                                   ),
                                 if (tables.isEmpty && namedTabs.isEmpty)
                                   const Padding(

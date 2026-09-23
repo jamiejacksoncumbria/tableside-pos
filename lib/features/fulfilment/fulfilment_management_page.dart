@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
+import '../../data/printer_device_repository.dart';
+import '../../data/production_command_repository.dart';
 import '../notifications/notification_centre.dart';
 import '../auth/staff_pin_gate.dart';
 import '../pos/domain.dart';
@@ -162,6 +165,16 @@ class _FulfilmentOrdersTab extends ConsumerWidget {
                                         : 'Change driver',
                                   ),
                                 ),
+                              if (order.fulfilmentStatus ==
+                                      FulfilmentStatus.readyForCollection ||
+                                  order.fulfilmentStatus ==
+                                      FulfilmentStatus.outForDelivery)
+                                OutlinedButton.icon(
+                                  onPressed: () =>
+                                      _printDeliveryNote(context, ref, order),
+                                  icon: const Icon(Icons.print_outlined),
+                                  label: const Text('Delivery note'),
+                                ),
                               for (final next in _nextStatuses(order))
                                 FilledButton.tonal(
                                   onPressed: () =>
@@ -229,6 +242,72 @@ class _FulfilmentOrdersTab extends ConsumerWidget {
         .read(fulfilmentRepositoryProvider)
         .updateFulfilmentOrder(scope: scope, orderId: order.id, status: status),
   );
+
+  Future<void> _printDeliveryNote(
+    BuildContext context,
+    WidgetRef ref,
+    PosOrder order,
+  ) async {
+    try {
+      final devices = await PrinterDeviceRepository(FirebaseFirestore.instance)
+          .watchVenueDevices(tenantId: scope.tenantId, venueId: scope.venueId)
+          .first
+          .timeout(const Duration(seconds: 10));
+      if (!context.mounted) return;
+      final printers = devices
+          .where(
+            (device) =>
+                device.active && device.productionAreas.contains('receipt'),
+          )
+          .toList(growable: false);
+      if (printers.isEmpty) {
+        throw StateError('No active receipt printer is registered here.');
+      }
+      final selected = await showAppDialog<PrinterDevice>(
+        context: context,
+        builder: (dialogContext) => SimpleDialog(
+          title: const Text('Print delivery note'),
+          children: [
+            for (final printer in printers)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(dialogContext, printer),
+                child: ListTile(
+                  leading: const Icon(Icons.print_outlined),
+                  title: Text(printer.name),
+                  subtitle: Text(printer.platform),
+                ),
+              ),
+          ],
+        ),
+      );
+      if (selected == null || !context.mounted) return;
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .printFulfilmentDeliveryNote(
+            scope: scope,
+            orderId: order.id,
+            targetDeviceId: selected.id,
+          );
+      if (!context.mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Delivery note queued',
+        message: 'The note was sent to ${selected.name}.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Print fulfilment delivery note', error, stackTrace);
+      if (!context.mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not print delivery note',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    }
+  }
 
   Future<void> _run(
     BuildContext context,
@@ -342,6 +421,8 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
     bool? collectionEnabled,
     bool? deliveryEnabled,
     bool? courseControlEnabled,
+    int? collectionLeadMinutes,
+    int? deliveryLeadMinutes,
     List<ServiceWindow>? collectionWindows,
     List<ServiceWindow>? deliveryWindows,
     List<ServiceArea>? serviceAreas,
@@ -350,6 +431,9 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
     collectionEnabled: collectionEnabled ?? current.collectionEnabled,
     deliveryEnabled: deliveryEnabled ?? current.deliveryEnabled,
     courseControlEnabled: courseControlEnabled ?? current.courseControlEnabled,
+    collectionLeadMinutes:
+        collectionLeadMinutes ?? current.collectionLeadMinutes,
+    deliveryLeadMinutes: deliveryLeadMinutes ?? current.deliveryLeadMinutes,
     collectionWindows: collectionWindows ?? current.collectionWindows,
     deliveryWindows: deliveryWindows ?? current.deliveryWindows,
     serviceAreas: serviceAreas ?? current.serviceAreas,
@@ -403,6 +487,50 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
               subtitle: const Text(
                 'Existing products remain Standard / immediate.',
               ),
+            ),
+            const Divider(height: 32),
+            Text(
+              'Preparation lead times',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'A future order stays purple and its kitchen timer does not start until this many minutes before the promised time.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<int>(
+              initialValue: draft.collectionLeadMinutes,
+              decoration: const InputDecoration(
+                labelText: 'Collection lead time',
+                suffixText: 'minutes',
+              ),
+              items: [
+                for (var minutes = 5; minutes <= 120; minutes += 5)
+                  DropdownMenuItem(value: minutes, child: Text('$minutes')),
+              ],
+              onChanged: _saving
+                  ? null
+                  : (value) => setState(
+                      () => _draft = _copy(draft, collectionLeadMinutes: value),
+                    ),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<int>(
+              initialValue: draft.deliveryLeadMinutes,
+              decoration: const InputDecoration(
+                labelText: 'Delivery lead time',
+                suffixText: 'minutes',
+              ),
+              items: [
+                for (var minutes = 5; minutes <= 120; minutes += 5)
+                  DropdownMenuItem(value: minutes, child: Text('$minutes')),
+              ],
+              onChanged: _saving
+                  ? null
+                  : (value) => setState(
+                      () => _draft = _copy(draft, deliveryLeadMinutes: value),
+                    ),
             ),
             const Divider(height: 32),
             _SettingsHeading(

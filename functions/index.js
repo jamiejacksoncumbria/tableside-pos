@@ -1384,6 +1384,15 @@ async function manageVenueConfigurationFor(caller, rawData) {
     const collectionEnabled = values.collectionEnabled === true;
     const deliveryEnabled = values.deliveryEnabled === true;
     const courseControlEnabled = values.courseControlEnabled === true;
+    const collectionLeadMinutes = requiredNonNegativeInteger(
+      values.collectionLeadMinutes ?? 20, "collectionLeadMinutes", 240,
+    );
+    const deliveryLeadMinutes = requiredNonNegativeInteger(
+      values.deliveryLeadMinutes ?? 20, "deliveryLeadMinutes", 240,
+    );
+    if (collectionLeadMinutes < 1 || deliveryLeadMinutes < 1) {
+      throw new HttpsError("invalid-argument", "Lead times must be at least one minute.");
+    }
     const validateWindows = (raw, field) => {
       if (!Array.isArray(raw) || raw.length > 28) {
         throw new HttpsError("invalid-argument", `${field} is invalid.`);
@@ -1451,6 +1460,8 @@ async function manageVenueConfigurationFor(caller, rawData) {
       collectionEnabled,
       deliveryEnabled,
       courseControlEnabled,
+      collectionLeadMinutes,
+      deliveryLeadMinutes,
       collectionWindows: validateWindows(values.collectionWindows ?? [], "collectionWindows"),
       deliveryWindows: validateWindows(values.deliveryWindows ?? [], "deliveryWindows"),
       serviceAreas,
@@ -2978,9 +2989,24 @@ async function applyOfflineStockForEvents(tenantRef, venueId, events) {
 }
 
 async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
+  // The cloud projection must preserve the fulfilment timing chosen at the
+  // venue hub. Otherwise a future delivery ingested after an outage would
+  // incorrectly appear as an immediately-due dine-in ticket on every KDS.
+  const venue = await tenantRef.collection("venues").doc(venueId).get();
+  const venueData = venue.exists ? venue.data() : {};
   for (const event of events.filter((item) => item.type === "order.sent")) {
     const order = await tenantRef.collection("orders").doc(event.payload.orderId).get();
     if (!order.exists || order.data().venueId !== venueId) continue;
+    const orderData = order.data();
+    const channel = ["delivery", "collection"].includes(orderData.channel)
+      ? orderData.channel : "dineIn";
+    const scheduledForMillis = Date.parse(orderData.scheduledForUtc ?? "");
+    const leadMinutes = channel === "delivery"
+      ? Number(venueData.deliveryLeadMinutes ?? 20)
+      : Number(venueData.collectionLeadMinutes ?? 20);
+    const productionStartMillis = channel === "dineIn" || !Number.isFinite(scheduledForMillis)
+      ? null : scheduledForMillis - Math.max(1, leadMinutes) * 60000;
+    const held = productionStartMillis != null && productionStartMillis > Date.now();
     const ids = new Set(Array.isArray(event.payload.lineIds) ? event.payload.lineIds : []);
     const grouped = new Map();
     for (const line of (Array.isArray(order.data().lines) ? order.data().lines : [])) {
@@ -2998,11 +3024,17 @@ async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
       await ticketRef.create({
         venueId, orderId: event.payload.orderId,
         reference: String(event.payload.orderId).split("-").at(-1),
-        tableLabel: order.data().tableLabel ?? order.data().tableId ?? null,
-        tabName: order.data().tabName ?? null,
+        tableLabel: orderData.tableLabel ?? orderData.tableId ?? null,
+        tabName: orderData.tabName ?? null,
+        channel,
+        customerName: orderData.customerName ?? null,
+        deliveryAddress: channel === "delivery" ? orderData.deliveryAddress ?? null : null,
+        scheduledForMillis: Number.isFinite(scheduledForMillis) ? scheduledForMillis : null,
+        productionStartMillis,
         productionArea: area,
         printRequired: event.payload.printRequired === true,
-        flowStatus: "newOrder", ticketReleasedAt: new Date(event.createdAtUtc),
+        flowStatus: held ? "held" : "newOrder",
+        ticketReleasedAt: held ? null : new Date(event.createdAtUtc),
         productionItems: lines.map((line) => ({
           name: line.productName ?? "Menu item", quantity: Number(line.quantity),
           details: productionLineDetails(line),
@@ -3012,7 +3044,7 @@ async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
           details: productionLineDetails(line),
         })),
         showOnOrderFlow: lines.some((line) => line.showOnOrderFlow !== false),
-        hasAllergyAlert: false, isDelayed: false,
+        hasAllergyAlert: false, isDelayed: held,
         source: "venueHub", sourceEventId: event.id,
         createdByStaffId: event.staffId,
         idempotencyKey: ticketId,
@@ -3080,6 +3112,12 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
       customerPhone: channel === "dineIn" ? null : payload.customerPhone,
       deliveryAddress: channel === "delivery" ? payload.deliveryAddress : null,
       scheduledForUtc: payload.scheduledForUtc ?? null,
+      assignedDriverId: channel === "delivery"
+        ? payload.assignedDriverId ?? null : null,
+      assignedDriverName: channel === "delivery"
+        ? payload.assignedDriverName ?? null : null,
+      ...(channel === "delivery" && typeof payload.assignedDriverId === "string"
+        ? {fulfilmentStatus: "assigned"} : {}),
       openedAt: eventTime, openedOffline: true, createdByStaffId: event.staffId,
     };
   }
@@ -5088,7 +5126,14 @@ async function addOrderDraftLineFor(caller, rawData) {
     );
   }
   const line = validProductionLine(data.line, 0);
-  await requireTenantOperationalMember(caller, tenantId);
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  const assignedDriverId = channel === "delivery"
+    ? optionalText(data, "assignedDriverId", 128) || null
+    : null;
+  if (assignedDriverId != null &&
+      !roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager can assign a delivery driver.");
+  }
 
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
@@ -5096,15 +5141,18 @@ async function addOrderDraftLineFor(caller, rawData) {
   const tabRef = tabName == null ? null : openTabRegistryRef(tenantId, venueId, tabName);
   const orderRef = tenantRef.collection("orders").doc(orderId);
   const productRef = tenantRef.collection("products").doc(line.productId);
+  const driverRef = assignedDriverId == null
+    ? null : tenantRef.collection("members").doc(assignedDriverId);
   const actor = actorSnapshot(await auth.getUser(caller.uid));
 
   return db.runTransaction(async (transaction) => {
-    const [venue, table, namedTab, existingOrder, product] = await Promise.all([
+    const [venue, table, namedTab, existingOrder, product, driver] = await Promise.all([
       transaction.get(venueRef),
       tableRef == null ? Promise.resolve(null) : transaction.get(tableRef),
       tabRef == null ? Promise.resolve(null) : transaction.get(tabRef),
       transaction.get(orderRef),
       transaction.get(productRef),
+      driverRef == null ? Promise.resolve(null) : transaction.get(driverRef),
     ]);
     if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
@@ -5112,6 +5160,21 @@ async function addOrderDraftLineFor(caller, rawData) {
     if ((channel === "collection" && venue.data().collectionEnabled !== true) ||
         (channel === "delivery" && venue.data().deliveryEnabled !== true)) {
       throw new HttpsError("failed-precondition", `${channel} ordering is not enabled at this venue.`);
+    }
+    let assignedDriverName = null;
+    if (driver != null) {
+      const driverRoles = driver.exists && Array.isArray(driver.data().roles)
+        ? driver.data().roles : [];
+      const driverVenueIds = driver.exists && Array.isArray(driver.data().venueIds)
+        ? driver.data().venueIds : [];
+      if (!driver.exists || driver.data().active === false ||
+          !driverRoles.includes("driver") ||
+          (driverVenueIds.length > 0 && !driverVenueIds.includes(venueId))) {
+        throw new HttpsError(
+          "failed-precondition", "Select an active driver assigned to this venue.",
+        );
+      }
+      assignedDriverName = driver.data().displayName ?? driver.data().email ?? "Driver";
     }
     if (tableRef != null && (!table.exists || table.data().venueId !== venueId)) {
       throw new HttpsError("failed-precondition", "The selected table is not available at this venue.");
@@ -5328,6 +5391,11 @@ async function addOrderDraftLineFor(caller, rawData) {
           ? Number(data.scheduledForMillis) : null),
       primaryWaiterId: optionalText(data, "primaryWaiterId", 180) || caller.uid,
       primaryWaiterName: optionalText(data, "primaryWaiterName", 120) || actor.displayName || "",
+      ...(assignedDriverId == null ? {} : {
+        assignedDriverId,
+        assignedDriverName,
+        fulfilmentStatus: "assigned",
+      }),
       tableLabel,
       status: current?.status === "sent" ? "sent" : "open",
       openedAt: current?.openedAt ?? FieldValue.serverTimestamp(),
@@ -5358,6 +5426,23 @@ async function addOrderDraftLineFor(caller, rawData) {
       actor,
       createdAt: FieldValue.serverTimestamp(),
     });
+    if (!existingOrder.exists && assignedDriverId != null) {
+      transaction.create(
+        tenantRef.collection("notificationEvents").doc(`${orderId}_driverAssigned`),
+        {
+          venueId,
+          type: "delivery.assigned",
+          orderId,
+          recipientUserIds: [assignedDriverId],
+          recipientRoles: [],
+          title: "Delivery assigned",
+          body: `${requiredText(data, "customerName", 120)}: preparing`,
+          status: "pending",
+          createdAt: FieldValue.serverTimestamp(),
+          createdByActor: actor,
+        },
+      );
+    }
     return {orderId, saved: true, alreadyPresent: false};
   });
 }
@@ -6432,6 +6517,11 @@ async function printPreReceiptFor(caller, rawData) {
         business: receiptBusinessSnapshot(tenant.data(), venue.data()), currencyCode,
         tableLabel: typeof order.data().tableLabel === "string" ? order.data().tableLabel : null,
         tabName: typeof order.data().tabName === "string" ? order.data().tabName : null,
+        channel: order.data().channel ?? "dineIn",
+        customerName: order.data().customerName ?? null,
+        customerPhone: order.data().customerPhone ?? null,
+        deliveryAddress: order.data().deliveryAddress ?? null,
+        scheduledForMillis: order.data().scheduledForMillis ?? null,
         totalMinor, netTotalMinor: totalMinor - taxTotalMinor, taxTotalMinor,
         taxBreakdown: [], lines: receiptLines, payments,
         paidTotalMinor, balanceDueMinor,
@@ -6903,6 +6993,11 @@ async function closeOrderFor(caller, rawData) {
       tableId,
       tableLabel: typeof orderData.tableLabel === "string" ? orderData.tableLabel : null,
       tabName,
+      channel: orderData.channel ?? "dineIn",
+      customerName: orderData.customerName ?? null,
+      customerPhone: orderData.customerPhone ?? null,
+      deliveryAddress: orderData.deliveryAddress ?? null,
+      scheduledForMillis: orderData.scheduledForMillis ?? null,
       splitFromOrderId,
       splitSequence: Number.isInteger(orderData.splitSequence)
         ? orderData.splitSequence
@@ -6972,6 +7067,11 @@ async function closeOrderFor(caller, rawData) {
             ? orderData.tableLabel
             : null,
           tabName,
+          channel: orderData.channel ?? "dineIn",
+          customerName: orderData.customerName ?? null,
+          customerPhone: orderData.customerPhone ?? null,
+          deliveryAddress: orderData.deliveryAddress ?? null,
+          scheduledForMillis: orderData.scheduledForMillis ?? null,
           totalMinor,
           netTotalMinor,
           taxTotalMinor,
@@ -8759,9 +8859,21 @@ async function sendOrderToProductionFor(caller, rawData) {
       const courseName = first.courseName;
       const courseSequence = first.courseSequence;
       const releasePolicy = first.courseReleasePolicy;
-      const held = channel === "dineIn" && releasePolicy !== "immediate";
+      const scheduledForMillis = Number(existingOrder.data()?.scheduledForMillis);
+      const leadMinutes = channel === "delivery"
+        ? Number(venue.data().deliveryLeadMinutes ?? 20)
+        : Number(venue.data().collectionLeadMinutes ?? 20);
+      const productionStartMillis = channel === "dineIn" ||
+          !Number.isSafeInteger(scheduledForMillis)
+        ? null
+        : scheduledForMillis - Math.max(1, leadMinutes) * 60000;
+      const heldForSchedule = productionStartMillis != null && productionStartMillis > Date.now();
+      const held = heldForSchedule ||
+        (channel === "dineIn" && releasePolicy !== "immediate");
       const ticketId = `${orderId}_${area}_${courseId}_${areaLines.map((line) => line.id).join("_")}`;
       return {area, lines: areaLines, courseId, courseName, courseSequence, releasePolicy, held,
+        scheduledForMillis: Number.isSafeInteger(scheduledForMillis) ? scheduledForMillis : null,
+        productionStartMillis,
         ticketId, ref: tenantRef.collection("productionTickets").doc(ticketId)};
     });
     const existingTickets = await Promise.all(
@@ -8885,6 +8997,10 @@ async function sendOrderToProductionFor(caller, rawData) {
         tabName,
         channel,
         customerName: existingOrder.data()?.customerName ?? null,
+        customerPhone: existingOrder.data()?.customerPhone ?? null,
+        deliveryAddress: existingOrder.data()?.deliveryAddress ?? null,
+        scheduledForMillis: ticket.scheduledForMillis,
+        productionStartMillis: ticket.productionStartMillis,
         productionArea: ticket.area,
         courseId: ticket.courseId,
         courseName: ticket.courseName,
@@ -8941,6 +9057,10 @@ async function sendOrderToProductionFor(caller, rawData) {
               productionArea: ticket.area,
               tableLabel,
               tabName,
+              channel,
+              customerName: existingOrder.data()?.customerName ?? null,
+              deliveryAddress: existingOrder.data()?.deliveryAddress ?? null,
+              scheduledForMillis: ticket.scheduledForMillis,
               isAddition: hasPriorSentLines,
               courseName: ticket.courseName,
               createdByName: actor.displayName ?? actor.email ?? "",
@@ -9094,6 +9214,10 @@ async function releaseHeldProductionTicket({tenantId, venueId, ticketId, actor})
           productionArea: area,
           tableLabel: current.data().tableLabel ?? null,
           tabName: current.data().tabName ?? null,
+          channel: current.data().channel ?? "dineIn",
+          customerName: current.data().customerName ?? null,
+          deliveryAddress: current.data().deliveryAddress ?? null,
+          scheduledForMillis: current.data().scheduledForMillis ?? null,
           courseName: current.data().courseName ?? "Course",
           isAddition: true,
           createdByName: actor.displayName ?? actor.email ?? "",
@@ -9110,6 +9234,31 @@ async function releaseHeldProductionTicket({tenantId, venueId, ticketId, actor})
     });
     return true;
   });
+}
+
+async function releaseDueFulfilmentTicketsFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  await requireTenantOperationalMember(caller, tenantId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const now = Date.now();
+  // Filter the status and due time in process to avoid making every existing
+  // venue deploy a new composite index before scheduled orders can run.
+  const snapshot = await db.collection(`tenants/${tenantId}/productionTickets`)
+    .where("venueId", "==", venueId).limit(500).get();
+  const due = snapshot.docs.filter((ticket) =>
+    ticket.data().flowStatus === "held" &&
+    ["collection", "delivery"].includes(ticket.data().channel) &&
+    Number.isSafeInteger(Number(ticket.data().productionStartMillis)) &&
+    Number(ticket.data().productionStartMillis) <= now);
+  let released = 0;
+  for (const ticket of due) {
+    if (await releaseHeldProductionTicket({
+      tenantId, venueId, ticketId: ticket.id, actor,
+    })) released += 1;
+  }
+  return {released};
 }
 
 async function releaseEligibleFollowingCourses({tenantId, venueId, orderId, actor}) {
@@ -9229,6 +9378,30 @@ async function updateProductionTicketFor(caller, rawData) {
     await releaseEligibleFollowingCourses({
       tenantId, venueId, orderId: result.orderId, actor,
     });
+  }
+  if (flowStatus === "preparing" && typeof result.orderId === "string") {
+    const order = await db.doc(`tenants/${tenantId}/orders/${result.orderId}`).get();
+    if (order.exists && ["collection", "delivery"].includes(order.data().channel)) {
+      await db.doc(
+        `tenants/${tenantId}/notificationEvents/${result.orderId}_preparing`,
+      ).set({
+        venueId,
+        type: "order.preparing",
+        orderId: result.orderId,
+        recipientUserIds: [
+          ...(typeof order.data().assignedDriverId === "string"
+            ? [order.data().assignedDriverId] : []),
+          ...(typeof order.data().primaryWaiterId === "string"
+            ? [order.data().primaryWaiterId] : []),
+        ],
+        recipientRoles: ["manager"],
+        title: `${order.data().channel === "delivery" ? "Delivery" : "Collection"} preparing`,
+        body: order.data().customerName ?? "Customer order",
+        status: "pending",
+        createdAt: FieldValue.serverTimestamp(),
+        createdByActor: actor,
+      }, {merge: true});
+    }
   }
   if (["ready", "collected", "served"].includes(flowStatus)) {
     await markFulfilmentReadyWhenProductionComplete({
@@ -9834,6 +10007,87 @@ async function invokePlatformAction(action, caller, data) {
   }
 }
 
+async function printFulfilmentDeliveryNoteFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const orderId = requiredDocumentId(data, "orderId");
+  const targetDeviceId = requiredDocumentId(data, "targetDeviceId");
+  const requestId = requiredText(data, "requestId", 180);
+  await requireTenantOperationalMember(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const [tenant, venue, order, device] = await Promise.all([
+    tenantRef.get(),
+    tenantRef.collection("venues").doc(venueId).get(),
+    tenantRef.collection("orders").doc(orderId).get(),
+    tenantRef.collection("devices").doc(targetDeviceId).get(),
+  ]);
+  if (!venue.exists || !order.exists || order.data().venueId !== venueId ||
+      !["collection", "delivery"].includes(order.data().channel)) {
+    throw new HttpsError("not-found", "That collection or delivery order was not found.");
+  }
+  if (!activeRouteDevice(device, venueId, "receipt")) {
+    throw new HttpsError(
+      "failed-precondition", "Select an active receipt printer at this venue.",
+    );
+  }
+  const lines = Array.isArray(order.data().lines) ? order.data().lines : [];
+  if (lines.length === 0) {
+    throw new HttpsError("failed-precondition", "That order does not contain any items.");
+  }
+  const receiptLines = lines.map((line) => {
+    const quantity = Number(line.quantity);
+    const unitPriceMinor = Number(line.unitPriceMinor);
+    const lineTotalMinor = quantity * unitPriceMinor;
+    return {...line, quantity, unitPriceMinor, lineTotalMinor};
+  });
+  const itemsTotalMinor = receiptLines.reduce(
+    (sum, line) => sum + Number(line.lineTotalMinor), 0,
+  );
+  const deliveryChargeMinor = Number(order.data().deliveryChargeMinor ?? 0);
+  const totalMinor = itemsTotalMinor +
+    (Number.isSafeInteger(deliveryChargeMinor) ? deliveryChargeMinor : 0);
+  const jobId = `deliveryNote_${orderId}_${requestId}_${targetDeviceId}`;
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  await tenantRef.collection("printJobs").doc(jobId).create({
+    venueId,
+    targetDeviceId,
+    fallbackDeviceId: null,
+    orderId,
+    ticketId: `deliveryNote_${orderId}`,
+    productionArea: "receipt",
+    status: "queued",
+    attempts: 0,
+    idempotencyKey: jobId,
+    payload: {
+      type: "receipt",
+      isDeliveryNote: true,
+      receiptNumber: `NOTE-${orderId.slice(-6).toUpperCase()}`,
+      restaurantName: receiptBusinessSnapshot(tenant.data() ?? {}, venue.data()).name,
+      business: receiptBusinessSnapshot(tenant.data() ?? {}, venue.data()),
+      currencyCode: String(tenant.data()?.currencyCode ?? "GBP").toUpperCase(),
+      channel: order.data().channel,
+      customerName: order.data().customerName ?? null,
+      customerPhone: order.data().customerPhone ?? null,
+      deliveryAddress: order.data().deliveryAddress ?? null,
+      scheduledForMillis: order.data().scheduledForMillis ?? null,
+      lines: receiptLines,
+      totalMinor,
+      netTotalMinor: totalMinor,
+      taxTotalMinor: 0,
+      taxBreakdown: [],
+      payments: Array.isArray(order.data().payments) ? order.data().payments : [],
+      deliveryChargeMinor: Number.isSafeInteger(deliveryChargeMinor)
+        ? deliveryChargeMinor : 0,
+    },
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  await writeAudit(caller.uid, "printFulfilmentDeliveryNote", orderId, {
+    tenantId, venueId, targetDeviceId, jobId, actor,
+  });
+  return {queued: true, jobId};
+}
+
 async function invokePosAction(action, caller, data) {
   const sessionBootstrapActions = new Set([
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
@@ -9945,12 +10199,16 @@ async function invokePosAction(action, caller, data) {
       return splitOrderFor(actingCaller, data);
     case "updateProductionTicket":
       return updateProductionTicketFor(actingCaller, data);
+    case "releaseDueFulfilmentTickets":
+      return releaseDueFulfilmentTicketsFor(actingCaller, data);
     case "retryFailedPrintJob":
       return retryFailedPrintJobFor(actingCaller, data);
     case "reprintPrintedJob":
       return reprintPrintedJobFor(actingCaller, data);
     case "reprintProductionTicket":
       return reprintProductionTicketFor(actingCaller, data);
+    case "printFulfilmentDeliveryNote":
+      return printFulfilmentDeliveryNoteFor(actingCaller, data);
     case "cancelPrintJob":
       return cancelPrintJobFor(actingCaller, data);
     default:

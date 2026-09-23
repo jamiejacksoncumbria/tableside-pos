@@ -286,6 +286,10 @@ class VenueHubOfflineView {
     collectionEnabled: _snapshot?['collectionEnabled'] == true,
     deliveryEnabled: _snapshot?['deliveryEnabled'] == true,
     courseControlEnabled: _snapshot?['courseControlEnabled'] == true,
+    collectionLeadMinutes:
+        (_snapshot?['collectionLeadMinutes'] as num?)?.toInt() ?? 20,
+    deliveryLeadMinutes:
+        (_snapshot?['deliveryLeadMinutes'] as num?)?.toInt() ?? 20,
     collectionWindows: _serviceWindows(_snapshot?['collectionWindows']),
     deliveryWindows: _serviceWindows(_snapshot?['deliveryWindows']),
     serviceAreas: _serviceAreas(_snapshot?['serviceAreas']),

@@ -116,6 +116,8 @@ class OrderFlowOrder {
     this.isDelayed = false,
     this.note = '',
     this.channel = OrderChannel.dineIn,
+    this.customerName,
+    this.scheduledFor,
     this.courseName = 'Standard',
   });
 
@@ -134,6 +136,8 @@ class OrderFlowOrder {
   final bool isDelayed;
   final String note;
   final OrderChannel channel;
+  final String? customerName;
+  final DateTime? scheduledFor;
   final String courseName;
 
   OrderFlowOrder copyWith({OrderFlowStatus? status, bool? isDelayed}) =>
@@ -153,6 +157,8 @@ class OrderFlowOrder {
         isDelayed: isDelayed ?? this.isDelayed,
         note: note,
         channel: channel,
+        customerName: customerName,
+        scheduledFor: scheduledFor,
         courseName: courseName,
       );
 }

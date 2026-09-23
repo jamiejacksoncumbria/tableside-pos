@@ -82,6 +82,10 @@ class FulfilmentRepository {
           collectionEnabled: data['collectionEnabled'] as bool? ?? false,
           deliveryEnabled: data['deliveryEnabled'] as bool? ?? false,
           courseControlEnabled: data['courseControlEnabled'] as bool? ?? false,
+          collectionLeadMinutes:
+              (data['collectionLeadMinutes'] as num?)?.toInt() ?? 20,
+          deliveryLeadMinutes:
+              (data['deliveryLeadMinutes'] as num?)?.toInt() ?? 20,
           collectionWindows: _windows(data['collectionWindows']),
           deliveryWindows: _windows(data['deliveryWindows']),
           serviceAreas: _areas(data['serviceAreas']),
@@ -253,6 +257,10 @@ class FulfilmentRepository {
           ? scheduledFor.toDate()
           : scheduledFor is String
           ? DateTime.tryParse(scheduledFor)
+          : data['scheduledForMillis'] is num
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (data['scheduledForMillis'] as num).toInt(),
+            )
           : null,
       assignedDriverId: data['assignedDriverId'] as String?,
       assignedDriverName: data['assignedDriverName'] as String?,
@@ -283,6 +291,8 @@ class FulfilmentRepository {
       'collectionEnabled': settings.collectionEnabled,
       'deliveryEnabled': settings.deliveryEnabled,
       'courseControlEnabled': settings.courseControlEnabled,
+      'collectionLeadMinutes': settings.collectionLeadMinutes,
+      'deliveryLeadMinutes': settings.deliveryLeadMinutes,
       'collectionWindows': settings.collectionWindows.map(_windowMap).toList(),
       'deliveryWindows': settings.deliveryWindows.map(_windowMap).toList(),
       'serviceAreas': settings.serviceAreas.map(_areaMap).toList(),

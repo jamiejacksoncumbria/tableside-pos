@@ -168,7 +168,13 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     final isReprint = payload['isReprint'] == true;
     final tabName = payload['tabName'] as String?;
     final tableLabel = payload['tableLabel'] as String?;
-    final location = tabName?.trim().isNotEmpty == true
+    final channel = payload['channel'] as String? ?? 'dineIn';
+    final customerName = payload['customerName'] as String?;
+    final location = channel == 'delivery'
+        ? 'DELIVERY: ${customerName?.trim().isNotEmpty == true ? customerName!.trim() : 'Customer'}'
+        : channel == 'collection'
+        ? 'COLLECTION: ${customerName?.trim().isNotEmpty == true ? customerName!.trim() : 'Customer'}'
+        : tabName?.trim().isNotEmpty == true
         ? 'Tab: ${tabName!.trim()}'
         : tableLabel?.trim().isNotEmpty == true
         ? 'Table: ${tableLabel!.trim()}'
@@ -192,6 +198,18 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       ),
       const WindowsPrintLine(''),
       WindowsPrintLine(location),
+      if (channel != 'dineIn')
+        WindowsPrintLine(
+          (payload['scheduledForMillis'] as num?) == null
+              ? 'Time: ASAP'
+              : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch((payload['scheduledForMillis'] as num).toInt()))}',
+          bold: true,
+        ),
+      if (channel == 'delivery' &&
+          (payload['deliveryAddress'] as String?)?.trim().isNotEmpty == true)
+        WindowsPrintLine(
+          'Address: ${(payload['deliveryAddress'] as String).trim()}',
+        ),
       WindowsPrintLine('Order #$reference'),
       if ((payload['createdByName'] as String?)?.trim().isNotEmpty == true)
         WindowsPrintLine('By: ${(payload['createdByName'] as String).trim()}'),
@@ -244,6 +262,8 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     }
     final tabName = payload['tabName'] as String?;
     final tableLabel = payload['tableLabel'] as String?;
+    final channel = payload['channel'] as String? ?? 'dineIn';
+    final customerName = payload['customerName'] as String?;
     final business = payload['business'] is Map
         ? Map<Object?, Object?>.from(payload['business'] as Map)
         : const <Object?, Object?>{};
@@ -286,6 +306,8 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       WindowsPrintLine(
         payload['type'] == 'refundReceipt'
             ? 'REFUND RECEIPT'
+            : payload['isDeliveryNote'] == true
+            ? 'DELIVERY / COLLECTION NOTE'
             : payload['isPreReceipt'] == true
             ? 'PRE RECEIPT - NOT PAID'
             : payload['isPartPayment'] == true
@@ -316,10 +338,34 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       if (tabName?.trim().isNotEmpty != true &&
           tableLabel?.trim().isNotEmpty == true)
         WindowsPrintLine('Table: ${tableLabel!.trim()}'),
+      if (channel != 'dineIn')
+        WindowsPrintLine(
+          '${channel == 'delivery' ? 'Delivery' : 'Collection'}: ${customerName?.trim().isNotEmpty == true ? customerName!.trim() : 'Customer'}',
+          bold: true,
+        ),
+      if (channel != 'dineIn')
+        WindowsPrintLine(
+          (payload['scheduledForMillis'] as num?) == null
+              ? 'Time: ASAP'
+              : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch((payload['scheduledForMillis'] as num).toInt()))}',
+        ),
+      if (channel == 'delivery' &&
+          (payload['deliveryAddress'] as String?)?.trim().isNotEmpty == true)
+        WindowsPrintLine(
+          'Address: ${(payload['deliveryAddress'] as String).trim()}',
+        ),
       if ((payload['businessDate'] as String?)?.trim().isNotEmpty == true)
         WindowsPrintLine('Business date: ${payload['businessDate'] as String}'),
       const WindowsPrintLine(''),
       ...itemLines,
+      if (payload['isDeliveryNote'] == true)
+        WindowsPrintLine(
+          'Delivery charge',
+          rightText: _money(
+            (payload['deliveryChargeMinor'] as num?)?.toInt() ?? 0,
+            currency,
+          ),
+        ),
       const WindowsPrintLine(''),
     ];
     final net = (payload['netTotalMinor'] as num?)?.toInt();

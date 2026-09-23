@@ -1910,6 +1910,10 @@ class FirestorePosRepository {
       isDelayed: data['isDelayed'] as bool? ?? false,
       note: data['productionNote'] as String? ?? '',
       channel: _orderChannel(data['channel'] as String?),
+      customerName: data['customerName'] as String?,
+      scheduledFor:
+          _dateTime(data['scheduledFor']) ??
+          _dateTimeFromMillis(data['scheduledForMillis']),
       courseName: data['courseName'] as String? ?? 'Standard',
     );
   }
