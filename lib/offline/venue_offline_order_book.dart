@@ -101,8 +101,22 @@ class VenueOfflineOrderBook {
     final matches = existing.where(hasSameIdentity).toList(growable: false);
     if (matches.isEmpty) return null;
     final previous = matches.last;
-    Map<String, Object?> semanticPayload(Map<String, Object?> value) =>
-        Map<String, Object?>.from(value)..remove('remoteCommandId');
+    Map<String, Object?> semanticPayload(Map<String, Object?> value) {
+      final result = Map<String, Object?>.from(value)
+        ..remove('remoteCommandId');
+      if (draft.type == 'order.opened') {
+        // Driver assignment is mutable fulfilment state, not part of the
+        // immutable order identity. Older hub clients did not persist these
+        // two fields on the opening event, so including them in retry
+        // comparison would strand an otherwise valid active delivery after
+        // an app update or hub-session refresh.
+        result
+          ..remove('assignedDriverId')
+          ..remove('assignedDriverName');
+      }
+      return result;
+    }
+
     if (_canonicalJson(semanticPayload(previous.payload)) !=
         _canonicalJson(semanticPayload(draft.payload))) {
       throw const OfflineProjectionException(

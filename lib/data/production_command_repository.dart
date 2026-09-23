@@ -1303,6 +1303,8 @@ class ProductionCommandRepository {
         customerPhone: order.customerPhone,
         deliveryAddress: order.deliveryAddress,
         scheduledFor: order.scheduledFor,
+        assignedDriverId: order.assignedDriverId,
+        assignedDriverName: order.assignedDriverName,
       );
       await _sendHubEvent(
         scope: scope,
@@ -1491,6 +1493,14 @@ class ProductionCommandRepository {
         orderId: order.id,
         tableId: order.tableId,
         tabName: order.tabName,
+        channel: order.channel,
+        customerId: order.customerId,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        deliveryAddress: order.deliveryAddress,
+        scheduledFor: order.scheduledFor,
+        assignedDriverId: order.assignedDriverId,
+        assignedDriverName: order.assignedDriverName,
       );
       var paidThisTime = 0;
       for (var index = 0; index < payments.length; index++) {
@@ -1824,6 +1834,8 @@ class ProductionCommandRepository {
         customerPhone: customerPhone,
         deliveryAddress: deliveryAddress,
         scheduledFor: scheduledFor,
+        assignedDriverId: assignedDriverId,
+        assignedDriverName: assignedDriverName,
       );
       return;
     }

@@ -97,6 +97,8 @@ class VenueHubClientRegistry {
     String? customerPhone,
     String? deliveryAddress,
     DateTime? scheduledFor,
+    String? assignedDriverId,
+    String? assignedDriverName,
   }) async {
     final client = clientFor(scope);
     if (client == null) {
@@ -123,6 +125,10 @@ class VenueHubClientRegistry {
           'deliveryAddress': deliveryAddress!.trim(),
         if (scheduledFor != null)
           'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
+        if (assignedDriverId?.trim().isNotEmpty == true)
+          'assignedDriverId': assignedDriverId!.trim(),
+        if (assignedDriverName?.trim().isNotEmpty == true)
+          'assignedDriverName': assignedDriverName!.trim(),
       },
     );
     _openedOrderIds.add(orderId);
