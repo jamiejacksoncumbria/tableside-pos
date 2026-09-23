@@ -776,7 +776,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
       venueId: scope?.venueId ?? demoVenue.id,
       tabName: tab.name,
       businessDate: DateTime(now.year, now.month, now.day),
-      openedAt: tab.openedAt,
+      openedAt: tab.openedAt ?? now,
       status: OrderStatus.open,
       lines: const [],
     );
