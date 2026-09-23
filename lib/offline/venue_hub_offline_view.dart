@@ -173,6 +173,7 @@ class VenueHubOfflineView {
         'readyForCollection' => FulfilmentStatus.readyForCollection,
         'awaitingDriver' => FulfilmentStatus.awaitingDriver,
         'assigned' => FulfilmentStatus.assigned,
+        'driverDeclined' => FulfilmentStatus.driverDeclined,
         'outForDelivery' => FulfilmentStatus.outForDelivery,
         'collected' => FulfilmentStatus.collected,
         'delivered' => FulfilmentStatus.delivered,
@@ -184,6 +185,9 @@ class VenueHubOfflineView {
       customerName: value['customerName'] as String?,
       customerPhone: value['customerPhone'] as String?,
       deliveryAddress: value['deliveryAddress'] as String?,
+      deliveryAddressLabel: value['deliveryAddressLabel'] as String?,
+      deliveryLatitude: (value['deliveryLatitude'] as num?)?.toDouble(),
+      deliveryLongitude: (value['deliveryLongitude'] as num?)?.toDouble(),
       scheduledFor: DateTime.tryParse(
         value['scheduledForUtc'] as String? ?? '',
       )?.toLocal(),
@@ -267,6 +271,9 @@ class VenueHubOfflineView {
                     area: address['area'] as String? ?? '',
                     addressLines: address['addressLines'] as String? ?? '',
                     notes: address['notes'] as String? ?? '',
+                    isDefault: address['isDefault'] as bool? ?? false,
+                    latitude: (address['latitude'] as num?)?.toDouble(),
+                    longitude: (address['longitude'] as num?)?.toDouble(),
                   );
                 })
                 .toList(growable: false),

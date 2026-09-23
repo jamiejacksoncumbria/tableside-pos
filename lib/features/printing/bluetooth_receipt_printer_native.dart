@@ -190,6 +190,11 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         styles: const PosStyles(align: PosAlign.center, bold: true),
       ),
       ...generator.hr(),
+      if (ticket.channel != 'dineIn')
+        ...generator.text(
+          'Order location: ${ticket.restaurantName} · ${ticket.channel == 'delivery' ? 'DELIVERY' : 'COLLECTION'}',
+          styles: const PosStyles(bold: true),
+        ),
       ...generator.text(location, styles: const PosStyles(bold: true)),
       if (ticket.channel != 'dineIn')
         ...generator.text(
@@ -201,6 +206,12 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       if (ticket.channel == 'delivery' &&
           ticket.deliveryAddress?.trim().isNotEmpty == true)
         ...generator.text('Address: ${ticket.deliveryAddress!.trim()}'),
+      if (ticket.channel == 'delivery' &&
+          ticket.deliveryLatitude != null &&
+          ticket.deliveryLongitude != null)
+        ...generator.text(
+          'Map pin: ${ticket.deliveryLatitude}, ${ticket.deliveryLongitude}',
+        ),
       ...generator.text('Order #${ticket.reference}'),
       ...generator.text('Printed: $printedAt'),
       if (ticket.createdByName?.trim().isNotEmpty == true)
@@ -329,6 +340,10 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         ),
       if (receipt.channel != 'dineIn')
         ...generator.text(
+          'Order location: ${receipt.restaurantName} · ${receipt.channel == 'delivery' ? 'DELIVERY' : 'COLLECTION'}',
+        ),
+      if (receipt.channel != 'dineIn')
+        ...generator.text(
           receipt.scheduledForMillis == null
               ? 'Time: ASAP'
               : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch(receipt.scheduledForMillis!))}',
@@ -336,6 +351,12 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       if (receipt.channel == 'delivery' &&
           receipt.deliveryAddress?.trim().isNotEmpty == true)
         ...generator.text('Address: ${receipt.deliveryAddress!.trim()}'),
+      if (receipt.channel == 'delivery' &&
+          receipt.deliveryLatitude != null &&
+          receipt.deliveryLongitude != null)
+        ...generator.text(
+          'Map pin: ${receipt.deliveryLatitude}, ${receipt.deliveryLongitude}',
+        ),
       if (receipt.businessDate?.trim().isNotEmpty == true)
         ...generator.text('Business date: ${receipt.businessDate}'),
       ...generator.text('Printed: $printedAt'),

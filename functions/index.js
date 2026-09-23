@@ -2079,9 +2079,19 @@ async function manageFulfilmentFor(caller, rawData) {
       query.docs.some((item) => item.id !== reference.id))) {
       throw new HttpsError("already-exists", "A customer already uses one of these phone numbers.");
     }
+    let defaultAddressCount = 0;
     const addresses = Array.isArray(values.addresses)
       ? values.addresses.slice(0, 10).map((raw) => {
           const address = requireObject(raw);
+          const isDefault = address.isDefault === true;
+          if (isDefault) defaultAddressCount += 1;
+          const latitude = address.latitude == null ? null : Number(address.latitude);
+          const longitude = address.longitude == null ? null : Number(address.longitude);
+          if ((latitude != null && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)) ||
+              (longitude != null && (!Number.isFinite(longitude) || longitude < -180 || longitude > 180)) ||
+              ((latitude == null) !== (longitude == null))) {
+            throw new HttpsError("invalid-argument", "Address map coordinates are invalid.");
+          }
           return {
             id: requiredDocumentId(address, "id"),
             label: catalogueTitleCase(requiredText(address, "label", 60)),
@@ -2090,9 +2100,16 @@ async function manageFulfilmentFor(caller, rawData) {
             area: catalogueTitleCase(requiredText(address, "area", 100)),
             addressLines: requiredText(address, "addressLines", 500),
             notes: optionalText(address, "notes", 300),
+            isDefault,
+            latitude,
+            longitude,
           };
         })
       : [];
+    if (defaultAddressCount > 1) {
+      throw new HttpsError("invalid-argument", "Only one customer address can be the default.");
+    }
+    if (addresses.length > 0 && defaultAddressCount === 0) addresses[0].isDefault = true;
     await reference.set({
       venueId,
       displayName: catalogueTitleCase(requiredText(values, "displayName", 120)),
@@ -2118,7 +2135,8 @@ async function manageFulfilmentFor(caller, rawData) {
     const transitions = {
       awaitingPreparation: ["awaitingPreparation", "readyForCollection", "awaitingDriver", "cancelled"],
       awaitingDriver: ["awaitingDriver", "assigned", "readyForCollection", "cancelled"],
-      assigned: ["assigned", "readyForCollection", "outForDelivery", "cancelled"],
+      assigned: ["assigned", "driverDeclined", "readyForCollection", "outForDelivery", "cancelled"],
+      driverDeclined: ["driverDeclined", "assigned", "cancelled"],
       readyForCollection: ["readyForCollection", "collected", "outForDelivery", "cancelled"],
       outForDelivery: ["outForDelivery", "delivered", "cancelled"],
       collected: ["collected"], delivered: ["delivered"], cancelled: ["cancelled"],
@@ -2140,7 +2158,7 @@ async function manageFulfilmentFor(caller, rawData) {
     const driverId = optionalText(values, "driverId", 128) || null;
     if (isDriver && !canManage &&
         (order.data().assignedDriverId !== caller.uid ||
-         !["outForDelivery", "delivered"].includes(status))) {
+         !["driverDeclined", "outForDelivery", "delivered"].includes(status))) {
       throw new HttpsError(
         "permission-denied",
         "A driver may update only their own assigned delivery.",
@@ -2159,12 +2177,39 @@ async function manageFulfilmentFor(caller, rawData) {
       driverName = driver.data().displayName ?? driver.data().email ?? "Driver";
     }
     const batch = db.batch();
+    const driverDeclined = status === "driverDeclined";
     batch.update(orderRef, {
       fulfilmentStatus: status,
       fulfilmentUpdatedAt: FieldValue.serverTimestamp(),
       fulfilmentUpdatedByActor: actor,
+      ...(driverDeclined ? {
+        assignedDriverId: FieldValue.delete(),
+        assignedDriverName: FieldValue.delete(),
+        driverDeclinedAt: FieldValue.serverTimestamp(),
+        driverDeclinedBy: caller.uid,
+      } : {}),
       ...(driverId == null ? {} : {assignedDriverId: driverId, assignedDriverName: driverName}),
     });
+    // Mirror delivery assignment state onto live production tickets so every
+    // KDS receives the decline/assignment alert through its existing stream.
+    const ticketSnapshot = await tenantRef.collection("productionTickets")
+      .where("orderId", "==", documentId).get();
+    for (const ticket of ticketSnapshot.docs) {
+      if (ticket.data().venueId !== venueId) continue;
+      batch.update(ticket.ref, {
+        fulfilmentStatus: status,
+        driverDeclined,
+        ...(driverDeclined ? {
+          assignedDriverId: FieldValue.delete(),
+          assignedDriverName: FieldValue.delete(),
+        } : {}),
+        ...(driverId == null ? {} : {
+          assignedDriverId: driverId,
+          assignedDriverName: driverName,
+          driverDeclined: false,
+        }),
+      });
+    }
     batch.set(tenantRef.collection("notificationEvents").doc(), {
       venueId, type: driverId != null ? "delivery.assigned" : `order.${status}`,
       orderId: documentId,
@@ -2172,8 +2217,10 @@ async function manageFulfilmentFor(caller, rawData) {
         ...(driverId == null ? [] : [driverId]),
         ...(typeof order.data().primaryWaiterId === "string" ? [order.data().primaryWaiterId] : []),
       ],
-      recipientRoles: status === "readyForCollection" ? ["waiter", "cashier", "manager"] : [],
-      title: driverId != null ? "Delivery assigned" : "Order status updated",
+      recipientRoles: driverDeclined ? ["manager", "owner"] :
+        (status === "readyForCollection" ? ["waiter", "cashier", "manager"] : []),
+      title: driverDeclined ? "Driver declined delivery" :
+        (driverId != null ? "Delivery assigned" : "Order status updated"),
       body: `${order.data().customerName ?? "Customer order"}: ${status}`,
       status: "pending", createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
     });
@@ -2575,13 +2622,18 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       tenantRef.collection("venueCustomers").where("venueId", "==", upload.venueId).get(),
     ]);
   const pinByUser = new Map(pins.docs.map((pin) => [pin.data().userId, pin.data()]));
+  const memberUsers = await Promise.all(members.docs.map((member) =>
+    auth.getUser(member.id).catch(() => null)));
+  const memberNameById = new Map(memberUsers.filter(Boolean).map((user) => [
+    user.uid, user.displayName || user.email || user.uid,
+  ]));
   const staff = members.docs.map((member) => {
     const roles = Array.isArray(member.data().roles) ? member.data().roles : [];
     const pin = pinByUser.get(member.id);
     if (pin == null || pin.locked === true || !offlinePinVerifierReady(pin)) return null;
     return {
       staffId: member.id,
-      displayName: member.data().displayName ?? member.id,
+      displayName: member.data().displayName ?? memberNameById.get(member.id) ?? member.id,
       roles,
       permissions: offlinePermissionsForRoles(roles),
       pinVersion: Number(pin.pinVersion ?? 0),
@@ -2926,6 +2978,7 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
   });
   await applyOfflineStockForEvents(tenantRef, upload.venueId, events);
   await materializeOfflineProductionTickets(tenantRef, upload.venueId, events);
+  await materializeOfflineFulfilmentChanges(tenantRef, upload.venueId, events);
   return {acknowledgedEventIds, serverTimeMillis: Date.now()};
 }
 
@@ -3044,7 +3097,7 @@ async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
           details: productionLineDetails(line),
         })),
         showOnOrderFlow: lines.some((line) => line.showOnOrderFlow !== false),
-        hasAllergyAlert: false, isDelayed: held,
+        hasAllergyAlert: false, isDelayed: false,
         source: "venueHub", sourceEventId: event.id,
         createdByStaffId: event.staffId,
         idempotencyKey: ticketId,
@@ -3111,6 +3164,12 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
       customerName: channel === "dineIn" ? null : payload.customerName,
       customerPhone: channel === "dineIn" ? null : payload.customerPhone,
       deliveryAddress: channel === "delivery" ? payload.deliveryAddress : null,
+      deliveryAddressLabel: channel === "delivery"
+        ? payload.deliveryAddressLabel ?? null : null,
+      deliveryLatitude: channel === "delivery"
+        ? payload.deliveryLatitude ?? null : null,
+      deliveryLongitude: channel === "delivery"
+        ? payload.deliveryLongitude ?? null : null,
       scheduledForUtc: payload.scheduledForUtc ?? null,
       assignedDriverId: channel === "delivery"
         ? payload.assignedDriverId ?? null : null,
@@ -3164,11 +3223,18 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
   if (event.type === "order.fulfilmentChanged") {
     const status = payload.status;
     if (!["awaitingPreparation", "readyForCollection", "awaitingDriver", "assigned",
-      "outForDelivery", "collected", "delivered", "cancelled"].includes(status)) {
+      "driverDeclined", "outForDelivery", "collected", "delivered", "cancelled"].includes(status)) {
       throw new HttpsError("invalid-argument", "The offline fulfilment status is invalid.");
     }
     next.fulfilmentStatus = status;
-    if (typeof payload.driverId === "string") next.assignedDriverId = payload.driverId;
+    if (status === "driverDeclined") {
+      next.assignedDriverId = null;
+      next.assignedDriverName = null;
+      next.driverDeclinedAt = eventTime;
+      next.driverDeclinedBy = event.staffId;
+    } else if (typeof payload.driverId === "string") {
+      next.assignedDriverId = payload.driverId;
+    }
     next.fulfilmentUpdatedAt = eventTime;
     next.fulfilmentUpdatedByStaffId = event.staffId;
     return next;
@@ -5130,6 +5196,19 @@ async function addOrderDraftLineFor(caller, rawData) {
   const assignedDriverId = channel === "delivery"
     ? optionalText(data, "assignedDriverId", 128) || null
     : null;
+  const deliveryAddressLabel = channel === "delivery"
+    ? optionalText(data, "deliveryAddressLabel", 60) || null : null;
+  const deliveryLatitude = data.deliveryLatitude == null
+    ? null : Number(data.deliveryLatitude);
+  const deliveryLongitude = data.deliveryLongitude == null
+    ? null : Number(data.deliveryLongitude);
+  if ((deliveryLatitude != null && (!Number.isFinite(deliveryLatitude) ||
+       deliveryLatitude < -90 || deliveryLatitude > 90)) ||
+      (deliveryLongitude != null && (!Number.isFinite(deliveryLongitude) ||
+       deliveryLongitude < -180 || deliveryLongitude > 180)) ||
+      ((deliveryLatitude == null) !== (deliveryLongitude == null))) {
+    throw new HttpsError("invalid-argument", "The delivery map pin is invalid.");
+  }
   if (assignedDriverId != null &&
       !roles.some((role) => role === "owner" || role === "manager")) {
     throw new HttpsError("permission-denied", "Only a manager can assign a delivery driver.");
@@ -5386,6 +5465,9 @@ async function addOrderDraftLineFor(caller, rawData) {
       customerPhone: channel === "dineIn" ? null : requiredText(data, "customerPhone", 40),
       deliveryAddress: channel === "delivery"
         ? requiredText(data, "deliveryAddress", 500) : null,
+      deliveryAddressLabel,
+      deliveryLatitude: channel === "delivery" ? deliveryLatitude : null,
+      deliveryLongitude: channel === "delivery" ? deliveryLongitude : null,
       scheduledForMillis: channel === "dineIn" ? null :
         (Number.isSafeInteger(Number(data.scheduledForMillis))
           ? Number(data.scheduledForMillis) : null),
@@ -6521,6 +6603,9 @@ async function printPreReceiptFor(caller, rawData) {
         customerName: order.data().customerName ?? null,
         customerPhone: order.data().customerPhone ?? null,
         deliveryAddress: order.data().deliveryAddress ?? null,
+        deliveryAddressLabel: order.data().deliveryAddressLabel ?? null,
+        deliveryLatitude: order.data().deliveryLatitude ?? null,
+        deliveryLongitude: order.data().deliveryLongitude ?? null,
         scheduledForMillis: order.data().scheduledForMillis ?? null,
         totalMinor, netTotalMinor: totalMinor - taxTotalMinor, taxTotalMinor,
         taxBreakdown: [], lines: receiptLines, payments,
@@ -6997,6 +7082,9 @@ async function closeOrderFor(caller, rawData) {
       customerName: orderData.customerName ?? null,
       customerPhone: orderData.customerPhone ?? null,
       deliveryAddress: orderData.deliveryAddress ?? null,
+      deliveryAddressLabel: orderData.deliveryAddressLabel ?? null,
+      deliveryLatitude: orderData.deliveryLatitude ?? null,
+      deliveryLongitude: orderData.deliveryLongitude ?? null,
       scheduledForMillis: orderData.scheduledForMillis ?? null,
       splitFromOrderId,
       splitSequence: Number.isInteger(orderData.splitSequence)
@@ -7071,6 +7159,9 @@ async function closeOrderFor(caller, rawData) {
           customerName: orderData.customerName ?? null,
           customerPhone: orderData.customerPhone ?? null,
           deliveryAddress: orderData.deliveryAddress ?? null,
+          deliveryAddressLabel: orderData.deliveryAddressLabel ?? null,
+          deliveryLatitude: orderData.deliveryLatitude ?? null,
+          deliveryLongitude: orderData.deliveryLongitude ?? null,
           scheduledForMillis: orderData.scheduledForMillis ?? null,
           totalMinor,
           netTotalMinor,
@@ -8195,6 +8286,58 @@ async function reprintPrintedJobFor(caller, rawData) {
   });
 }
 
+async function materializeOfflineFulfilmentChanges(tenantRef, venueId, events) {
+  // Fulfilment updates accepted by the authoritative venue hub must reach the
+  // cloud KDS projection too. This keeps remote displays and driver alerts in
+  // step without allowing clients to write production tickets directly.
+  for (const event of events.filter((item) => item.type === "order.fulfilmentChanged")) {
+    const status = event.payload.status;
+    const driverDeclined = status === "driverDeclined";
+    const driverId = typeof event.payload.driverId === "string"
+      ? event.payload.driverId : null;
+    let driverName = null;
+    if (driverId != null) {
+      const driver = await tenantRef.collection("members").doc(driverId).get();
+      driverName = driver.exists
+        ? driver.data().displayName ?? driver.data().email ?? "Driver"
+        : "Driver";
+    }
+    const tickets = await tenantRef.collection("productionTickets")
+      .where("orderId", "==", event.payload.orderId).get();
+    const batch = db.batch();
+    for (const ticket of tickets.docs) {
+      if (ticket.data().venueId !== venueId) continue;
+      batch.update(ticket.ref, {
+        fulfilmentStatus: status,
+        driverDeclined,
+        ...(driverDeclined ? {
+          assignedDriverId: FieldValue.delete(),
+          assignedDriverName: FieldValue.delete(),
+        } : {}),
+        ...(driverId == null ? {} : {
+          assignedDriverId: driverId,
+          assignedDriverName: driverName,
+        }),
+      });
+    }
+    if (driverDeclined) {
+      batch.set(tenantRef.collection("notificationEvents").doc(`offline_driver_declined_${event.id}`), {
+        venueId,
+        type: "order.driverDeclined",
+        orderId: event.payload.orderId,
+        recipientUserIds: [],
+        recipientRoles: ["manager", "owner"],
+        title: "Driver declined delivery",
+        body: "Choose another driver for this delivery.",
+        status: "pending",
+        sourceEventId: event.id,
+        createdAt: FieldValue.serverTimestamp(),
+      }, {merge: false});
+    }
+    await batch.commit();
+  }
+}
+
 // Reprints a live kitchen/bar ticket on a manager-selected printer. The
 // server reconstructs the print payload exclusively from the production
 // ticket and validates the device belongs to this venue and production area,
@@ -8999,6 +9142,9 @@ async function sendOrderToProductionFor(caller, rawData) {
         customerName: existingOrder.data()?.customerName ?? null,
         customerPhone: existingOrder.data()?.customerPhone ?? null,
         deliveryAddress: existingOrder.data()?.deliveryAddress ?? null,
+        deliveryAddressLabel: existingOrder.data()?.deliveryAddressLabel ?? null,
+        deliveryLatitude: existingOrder.data()?.deliveryLatitude ?? null,
+        deliveryLongitude: existingOrder.data()?.deliveryLongitude ?? null,
         scheduledForMillis: ticket.scheduledForMillis,
         productionStartMillis: ticket.productionStartMillis,
         productionArea: ticket.area,
@@ -9060,6 +9206,9 @@ async function sendOrderToProductionFor(caller, rawData) {
               channel,
               customerName: existingOrder.data()?.customerName ?? null,
               deliveryAddress: existingOrder.data()?.deliveryAddress ?? null,
+              deliveryAddressLabel: existingOrder.data()?.deliveryAddressLabel ?? null,
+              deliveryLatitude: existingOrder.data()?.deliveryLatitude ?? null,
+              deliveryLongitude: existingOrder.data()?.deliveryLongitude ?? null,
               scheduledForMillis: ticket.scheduledForMillis,
               isAddition: hasPriorSentLines,
               courseName: ticket.courseName,
@@ -9196,6 +9345,7 @@ async function releaseHeldProductionTicket({tenantId, venueId, ticketId, actor})
     if (!current.exists || current.data().flowStatus !== "held") return false;
     transaction.update(ticketRef, {
       flowStatus: "newOrder",
+      isDelayed: false,
       ticketReleasedAt: FieldValue.serverTimestamp(),
       flowUpdatedAt: FieldValue.serverTimestamp(),
       flowUpdatedByActor: actor,
@@ -9217,6 +9367,9 @@ async function releaseHeldProductionTicket({tenantId, venueId, ticketId, actor})
           channel: current.data().channel ?? "dineIn",
           customerName: current.data().customerName ?? null,
           deliveryAddress: current.data().deliveryAddress ?? null,
+          deliveryAddressLabel: current.data().deliveryAddressLabel ?? null,
+          deliveryLatitude: current.data().deliveryLatitude ?? null,
+          deliveryLongitude: current.data().deliveryLongitude ?? null,
           scheduledForMillis: current.data().scheduledForMillis ?? null,
           courseName: current.data().courseName ?? "Course",
           isAddition: true,
@@ -10070,6 +10223,9 @@ async function printFulfilmentDeliveryNoteFor(caller, rawData) {
       customerName: order.data().customerName ?? null,
       customerPhone: order.data().customerPhone ?? null,
       deliveryAddress: order.data().deliveryAddress ?? null,
+      deliveryAddressLabel: order.data().deliveryAddressLabel ?? null,
+      deliveryLatitude: order.data().deliveryLatitude ?? null,
+      deliveryLongitude: order.data().deliveryLongitude ?? null,
       scheduledForMillis: order.data().scheduledForMillis ?? null,
       lines: receiptLines,
       totalMinor,

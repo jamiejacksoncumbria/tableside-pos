@@ -263,6 +263,7 @@ class VenueOfflineOrderBook {
               'readyForCollection',
               'awaitingDriver',
               'assigned',
+              'driverDeclined',
               'outForDelivery',
               'collected',
               'delivered',

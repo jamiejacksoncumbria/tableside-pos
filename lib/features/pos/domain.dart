@@ -15,6 +15,7 @@ enum FulfilmentStatus {
   readyForCollection,
   awaitingDriver,
   assigned,
+  driverDeclined,
   outForDelivery,
   collected,
   delivered,
@@ -119,6 +120,9 @@ class OrderFlowOrder {
     this.customerName,
     this.scheduledFor,
     this.courseName = 'Standard',
+    this.orderId,
+    this.assignedDriverName,
+    this.driverDeclined = false,
   });
 
   final String id;
@@ -139,6 +143,9 @@ class OrderFlowOrder {
   final String? customerName;
   final DateTime? scheduledFor;
   final String courseName;
+  final String? orderId;
+  final String? assignedDriverName;
+  final bool driverDeclined;
 
   OrderFlowOrder copyWith({OrderFlowStatus? status, bool? isDelayed}) =>
       OrderFlowOrder(
@@ -160,6 +167,9 @@ class OrderFlowOrder {
         customerName: customerName,
         scheduledFor: scheduledFor,
         courseName: courseName,
+        orderId: orderId,
+        assignedDriverName: assignedDriverName,
+        driverDeclined: driverDeclined,
       );
 }
 
@@ -965,6 +975,9 @@ class PosOrder {
     this.customerName,
     this.customerPhone,
     this.deliveryAddress,
+    this.deliveryAddressLabel,
+    this.deliveryLatitude,
+    this.deliveryLongitude,
     this.scheduledFor,
     this.assignedDriverId,
     this.assignedDriverName,
@@ -998,6 +1011,9 @@ class PosOrder {
   final String? customerName;
   final String? customerPhone;
   final String? deliveryAddress;
+  final String? deliveryAddressLabel;
+  final double? deliveryLatitude;
+  final double? deliveryLongitude;
   final DateTime? scheduledFor;
   final String? assignedDriverId;
   final String? assignedDriverName;
@@ -1074,6 +1090,9 @@ class PosOrder {
     String? customerName,
     String? customerPhone,
     String? deliveryAddress,
+    String? deliveryAddressLabel,
+    double? deliveryLatitude,
+    double? deliveryLongitude,
     DateTime? scheduledFor,
     String? assignedDriverId,
     String? assignedDriverName,
@@ -1101,6 +1120,10 @@ class PosOrder {
       customerName: customerName ?? this.customerName,
       customerPhone: customerPhone ?? this.customerPhone,
       deliveryAddress: deliveryAddress ?? this.deliveryAddress,
+      deliveryAddressLabel:
+          deliveryAddressLabel ?? this.deliveryAddressLabel,
+      deliveryLatitude: deliveryLatitude ?? this.deliveryLatitude,
+      deliveryLongitude: deliveryLongitude ?? this.deliveryLongitude,
       scheduledFor: scheduledFor ?? this.scheduledFor,
       assignedDriverId: assignedDriverId ?? this.assignedDriverId,
       assignedDriverName: assignedDriverName ?? this.assignedDriverName,

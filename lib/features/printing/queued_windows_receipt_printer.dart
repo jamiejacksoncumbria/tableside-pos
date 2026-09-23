@@ -197,6 +197,11 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         bold: true,
       ),
       const WindowsPrintLine(''),
+      if (channel != 'dineIn')
+        WindowsPrintLine(
+          'Order location: ${payload['restaurantName'] as String? ?? 'Venue'} · ${channel == 'delivery' ? 'DELIVERY' : 'COLLECTION'}',
+          bold: true,
+        ),
       WindowsPrintLine(location),
       if (channel != 'dineIn')
         WindowsPrintLine(
@@ -209,6 +214,12 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
           (payload['deliveryAddress'] as String?)?.trim().isNotEmpty == true)
         WindowsPrintLine(
           'Address: ${(payload['deliveryAddress'] as String).trim()}',
+        ),
+      if (channel == 'delivery' &&
+          payload['deliveryLatitude'] is num &&
+          payload['deliveryLongitude'] is num)
+        WindowsPrintLine(
+          'Map pin: ${payload['deliveryLatitude']}, ${payload['deliveryLongitude']}',
         ),
       WindowsPrintLine('Order #$reference'),
       if ((payload['createdByName'] as String?)?.trim().isNotEmpty == true)
@@ -345,6 +356,10 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         ),
       if (channel != 'dineIn')
         WindowsPrintLine(
+          'Order location: $businessName · ${channel == 'delivery' ? 'DELIVERY' : 'COLLECTION'}',
+        ),
+      if (channel != 'dineIn')
+        WindowsPrintLine(
           (payload['scheduledForMillis'] as num?) == null
               ? 'Time: ASAP'
               : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch((payload['scheduledForMillis'] as num).toInt()))}',
@@ -353,6 +368,12 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
           (payload['deliveryAddress'] as String?)?.trim().isNotEmpty == true)
         WindowsPrintLine(
           'Address: ${(payload['deliveryAddress'] as String).trim()}',
+        ),
+      if (channel == 'delivery' &&
+          payload['deliveryLatitude'] is num &&
+          payload['deliveryLongitude'] is num)
+        WindowsPrintLine(
+          'Map pin: ${payload['deliveryLatitude']}, ${payload['deliveryLongitude']}',
         ),
       if ((payload['businessDate'] as String?)?.trim().isNotEmpty == true)
         WindowsPrintLine('Business date: ${payload['businessDate'] as String}'),

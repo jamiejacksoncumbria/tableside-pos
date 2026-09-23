@@ -148,6 +148,9 @@ class FulfilmentRepository {
                     area: item['area'] as String? ?? '',
                     addressLines: item['addressLines'] as String? ?? '',
                     notes: item['notes'] as String? ?? '',
+                    isDefault: item['isDefault'] as bool? ?? false,
+                    latitude: (item['latitude'] as num?)?.toDouble(),
+                    longitude: (item['longitude'] as num?)?.toDouble(),
                   );
                 })
                 .toList(growable: false),
@@ -231,6 +234,7 @@ class FulfilmentRepository {
       'readyForCollection' => FulfilmentStatus.readyForCollection,
       'awaitingDriver' => FulfilmentStatus.awaitingDriver,
       'assigned' => FulfilmentStatus.assigned,
+      'driverDeclined' => FulfilmentStatus.driverDeclined,
       'outForDelivery' => FulfilmentStatus.outForDelivery,
       'collected' => FulfilmentStatus.collected,
       'delivered' => FulfilmentStatus.delivered,
@@ -253,6 +257,9 @@ class FulfilmentRepository {
       customerName: data['customerName'] as String?,
       customerPhone: data['customerPhone'] as String?,
       deliveryAddress: data['deliveryAddress'] as String?,
+      deliveryAddressLabel: data['deliveryAddressLabel'] as String?,
+      deliveryLatitude: (data['deliveryLatitude'] as num?)?.toDouble(),
+      deliveryLongitude: (data['deliveryLongitude'] as num?)?.toDouble(),
       scheduledFor: scheduledFor is Timestamp
           ? scheduledFor.toDate()
           : scheduledFor is String
@@ -373,6 +380,9 @@ class FulfilmentRepository {
     'area': value.area,
     'addressLines': value.addressLines,
     'notes': value.notes,
+    'isDefault': value.isDefault,
+    'latitude': value.latitude,
+    'longitude': value.longitude,
   };
 
   List<ServiceWindow> _windows(Object? raw) => (raw as List? ?? const [])

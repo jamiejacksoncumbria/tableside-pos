@@ -79,6 +79,8 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
         channel: payload['channel'] as String? ?? 'dineIn',
         customerName: payload['customerName'] as String?,
         deliveryAddress: payload['deliveryAddress'] as String?,
+        deliveryLatitude: (payload['deliveryLatitude'] as num?)?.toDouble(),
+        deliveryLongitude: (payload['deliveryLongitude'] as num?)?.toDouble(),
         scheduledForMillis: (payload['scheduledForMillis'] as num?)?.toInt(),
         createdByName: payload['createdByName'] as String?,
         isAddition: payload['isAddition'] as bool? ?? false,
@@ -182,6 +184,8 @@ class QueuedBluetoothReceiptPrinter implements NativeReceiptPrinter {
         channel: payload['channel'] as String? ?? 'dineIn',
         customerName: payload['customerName'] as String?,
         deliveryAddress: payload['deliveryAddress'] as String?,
+        deliveryLatitude: (payload['deliveryLatitude'] as num?)?.toDouble(),
+        deliveryLongitude: (payload['deliveryLongitude'] as num?)?.toDouble(),
         scheduledForMillis: (payload['scheduledForMillis'] as num?)?.toInt(),
         deliveryChargeMinor:
             (payload['deliveryChargeMinor'] as num?)?.toInt() ?? 0,

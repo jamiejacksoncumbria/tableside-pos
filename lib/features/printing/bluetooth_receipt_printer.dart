@@ -49,6 +49,8 @@ class BluetoothProductionTicket {
     this.channel = 'dineIn',
     this.customerName,
     this.deliveryAddress,
+    this.deliveryLatitude,
+    this.deliveryLongitude,
     this.scheduledForMillis,
     this.createdByName,
     this.isAddition = false,
@@ -65,6 +67,8 @@ class BluetoothProductionTicket {
   final String channel;
   final String? customerName;
   final String? deliveryAddress;
+  final double? deliveryLatitude;
+  final double? deliveryLongitude;
   final int? scheduledForMillis;
   final String? createdByName;
   final bool isAddition;
@@ -99,6 +103,8 @@ class BluetoothBillReceipt {
     this.channel = 'dineIn',
     this.customerName,
     this.deliveryAddress,
+    this.deliveryLatitude,
+    this.deliveryLongitude,
     this.scheduledForMillis,
     this.deliveryChargeMinor = 0,
     this.businessDate,
@@ -130,6 +136,8 @@ class BluetoothBillReceipt {
   final String channel;
   final String? customerName;
   final String? deliveryAddress;
+  final double? deliveryLatitude;
+  final double? deliveryLongitude;
   final int? scheduledForMillis;
   final int deliveryChargeMinor;
   final String? businessDate;

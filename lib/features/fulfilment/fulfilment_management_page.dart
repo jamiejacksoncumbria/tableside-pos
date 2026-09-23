@@ -102,7 +102,16 @@ class _FulfilmentOrdersTab extends ConsumerWidget {
                   final when = scheduled == null
                       ? 'ASAP'
                       : '${scheduled.day.toString().padLeft(2, '0')}-${scheduled.month.toString().padLeft(2, '0')}-${scheduled.year} ${scheduled.hour.toString().padLeft(2, '0')}:${scheduled.minute.toString().padLeft(2, '0')}';
+                  final driverDeclined =
+                      order.fulfilmentStatus == FulfilmentStatus.driverDeclined;
+                  final driverAssigned =
+                      order.fulfilmentStatus == FulfilmentStatus.assigned;
                   return Card(
+                    color: driverDeclined
+                        ? Colors.purple.shade100
+                        : driverAssigned
+                        ? Colors.green.shade100
+                        : null,
                     child: Padding(
                       padding: const EdgeInsets.all(14),
                       child: Column(
@@ -139,6 +148,11 @@ class _FulfilmentOrdersTab extends ConsumerWidget {
                             Text(order.deliveryAddress!),
                           if (order.assignedDriverName?.isNotEmpty == true)
                             Text('Driver: ${order.assignedDriverName}'),
+                          if (driverDeclined)
+                            const Text(
+                              'Driver declined — choose another driver.',
+                              style: TextStyle(fontWeight: FontWeight.w800),
+                            ),
                           const SizedBox(height: 8),
                           Wrap(
                             spacing: 8,
@@ -165,7 +179,8 @@ class _FulfilmentOrdersTab extends ConsumerWidget {
                                         : 'Change driver',
                                   ),
                                 ),
-                              if (order.fulfilmentStatus ==
+                              if (order.channel == OrderChannel.delivery ||
+                                  order.fulfilmentStatus ==
                                       FulfilmentStatus.readyForCollection ||
                                   order.fulfilmentStatus ==
                                       FulfilmentStatus.outForDelivery)
@@ -173,7 +188,24 @@ class _FulfilmentOrdersTab extends ConsumerWidget {
                                   onPressed: () =>
                                       _printDeliveryNote(context, ref, order),
                                   icon: const Icon(Icons.print_outlined),
-                                  label: const Text('Delivery note'),
+                                  label: Text(
+                                    order.channel == OrderChannel.delivery
+                                        ? 'Driver ticket'
+                                        : 'Collection note',
+                                  ),
+                                ),
+                              if (assignedDriverId != null &&
+                                  order.fulfilmentStatus ==
+                                      FulfilmentStatus.assigned)
+                                FilledButton.tonalIcon(
+                                  onPressed: () => _updateStatus(
+                                    context,
+                                    ref,
+                                    order,
+                                    FulfilmentStatus.driverDeclined,
+                                  ),
+                                  icon: const Icon(Icons.close_rounded),
+                                  label: const Text('Decline delivery'),
                                 ),
                               for (final next in _nextStatuses(order))
                                 FilledButton.tonal(
@@ -343,6 +375,7 @@ class _FulfilmentOrdersTab extends ConsumerWidget {
         FulfilmentStatus.assigned => const [
           FulfilmentStatus.readyForCollection,
         ],
+        FulfilmentStatus.driverDeclined => const [],
         FulfilmentStatus.readyForCollection => [
           order.channel == OrderChannel.delivery
               ? FulfilmentStatus.outForDelivery
@@ -357,6 +390,7 @@ class _FulfilmentOrdersTab extends ConsumerWidget {
     FulfilmentStatus.readyForCollection => 'Ready',
     FulfilmentStatus.awaitingDriver => 'Awaiting driver',
     FulfilmentStatus.assigned => 'Driver assigned',
+    FulfilmentStatus.driverDeclined => 'Driver declined',
     FulfilmentStatus.outForDelivery => 'Out for delivery',
     FulfilmentStatus.collected => 'Collected',
     FulfilmentStatus.delivered => 'Delivered',

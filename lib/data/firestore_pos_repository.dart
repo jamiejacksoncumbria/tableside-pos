@@ -809,6 +809,9 @@ class FirestorePosRepository {
       customerName: data['customerName'] as String?,
       customerPhone: data['customerPhone'] as String?,
       deliveryAddress: data['deliveryAddress'] as String?,
+      deliveryAddressLabel: data['deliveryAddressLabel'] as String?,
+      deliveryLatitude: (data['deliveryLatitude'] as num?)?.toDouble(),
+      deliveryLongitude: (data['deliveryLongitude'] as num?)?.toDouble(),
       scheduledFor:
           _dateTime(data['scheduledFor']) ??
           _dateTimeFromMillis(data['scheduledForMillis']),
@@ -1915,6 +1918,9 @@ class FirestorePosRepository {
           _dateTime(data['scheduledFor']) ??
           _dateTimeFromMillis(data['scheduledForMillis']),
       courseName: data['courseName'] as String? ?? 'Standard',
+      orderId: data['orderId'] as String?,
+      assignedDriverName: data['assignedDriverName'] as String?,
+      driverDeclined: data['driverDeclined'] as bool? ?? false,
     );
   }
 
@@ -1934,6 +1940,7 @@ class FirestorePosRepository {
     'readyForCollection' => FulfilmentStatus.readyForCollection,
     'awaitingDriver' => FulfilmentStatus.awaitingDriver,
     'assigned' => FulfilmentStatus.assigned,
+    'driverDeclined' => FulfilmentStatus.driverDeclined,
     'outForDelivery' => FulfilmentStatus.outForDelivery,
     'collected' => FulfilmentStatus.collected,
     'delivered' => FulfilmentStatus.delivered,

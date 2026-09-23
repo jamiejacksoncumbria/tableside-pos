@@ -81,6 +81,9 @@ class CustomerAddress {
     required this.area,
     required this.addressLines,
     this.notes = '',
+    this.isDefault = false,
+    this.latitude,
+    this.longitude,
   });
 
   final String id;
@@ -90,6 +93,16 @@ class CustomerAddress {
   final String area;
   final String addressLines;
   final String notes;
+  final bool isDefault;
+  final double? latitude;
+  final double? longitude;
+
+  String get oneLine => [
+    addressLines,
+    area,
+    town,
+    country,
+  ].where((part) => part.trim().isNotEmpty).join(', ');
 }
 
 class VenueFulfilmentSettings {

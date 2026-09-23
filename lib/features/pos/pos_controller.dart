@@ -758,12 +758,43 @@ class ActiveOrderController extends Notifier<PosOrder> {
     _selectPersistedOrder(order.id);
   }
 
+  /// Reopens an already-reserved named tab by its authoritative order ID.
+  /// Selecting an existing tile must never call [openNamedTab], because that
+  /// method deliberately creates a new reservation and the hub rejects a
+  /// duplicate name.
+  void openExistingNamedTab(OpenNamedTab tab) {
+    if (_hasUnsavedLocalDraft()) {
+      throw StateError(
+        'Send or remove the unsent items before opening another tab.',
+      );
+    }
+    final scope = ref.read(activeVenueScopeProvider);
+    final now = DateTime.now();
+    state = PosOrder(
+      id: tab.orderId,
+      tenantId: scope?.tenantId ?? demoTenant.id,
+      venueId: scope?.venueId ?? demoVenue.id,
+      tabName: tab.name,
+      businessDate: DateTime(now.year, now.month, now.day),
+      openedAt: tab.openedAt,
+      status: OrderStatus.open,
+      lines: const [],
+    );
+    ref.read(selectedTableProvider.notifier).select('');
+    if (ref.read(trainingModeProvider) == null) {
+      _selectPersistedOrder(tab.orderId);
+    }
+  }
+
   void startFulfilmentOrder({
     required OrderChannel channel,
     required String customerId,
     required String customerName,
     required String customerPhone,
     String? deliveryAddress,
+    String? deliveryAddressLabel,
+    double? deliveryLatitude,
+    double? deliveryLongitude,
     DateTime? scheduledFor,
     String? assignedDriverId,
     String? assignedDriverName,
@@ -804,6 +835,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
       customerName: customerName.trim(),
       customerPhone: customerPhone.trim(),
       deliveryAddress: deliveryAddress?.trim(),
+      deliveryAddressLabel: deliveryAddressLabel?.trim(),
+      deliveryLatitude: deliveryLatitude,
+      deliveryLongitude: deliveryLongitude,
       scheduledFor: scheduledFor,
       assignedDriverId: assignedDriverId,
       assignedDriverName: assignedDriverName,

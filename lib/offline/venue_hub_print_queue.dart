@@ -209,6 +209,16 @@ class VenueHubPrintQueue {
             'productionArea': entry.key,
             'tableLabel': _tableLabel(order.tableId),
             'tabName': order.tabName,
+            'channel': order.channel,
+            'customerName': order.customerName,
+            'deliveryAddress': order.deliveryAddress,
+            'deliveryAddressLabel': order.deliveryAddressLabel,
+            'deliveryLatitude': order.deliveryLatitude,
+            'deliveryLongitude': order.deliveryLongitude,
+            'scheduledForMillis': order
+                .scheduledForUtc
+                ?.toLocal()
+                .millisecondsSinceEpoch,
             'createdByName': createdByName,
             'lines': entry.value
                 .map(
@@ -278,6 +288,16 @@ class VenueHubPrintQueue {
           'currencyCode': snapshot['currencyCode'] ?? 'GBP',
           'tableLabel': _tableLabel(order.tableId),
           'tabName': order.tabName,
+          'channel': order.channel,
+          'customerName': order.customerName,
+          'deliveryAddress': order.deliveryAddress,
+          'deliveryAddressLabel': order.deliveryAddressLabel,
+          'deliveryLatitude': order.deliveryLatitude,
+          'deliveryLongitude': order.deliveryLongitude,
+          'scheduledForMillis': order
+              .scheduledForUtc
+              ?.toLocal()
+              .millisecondsSinceEpoch,
           'businessDate': _businessDate(
             order.payments.lastOrNull?.recordedAtUtc ?? order.openedAtUtc,
           ),

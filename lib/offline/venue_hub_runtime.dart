@@ -195,14 +195,17 @@ class VenueHubRuntime {
       var catalogue = VenueOfflineCatalogue.fromSnapshot(snapshot);
       String staffDisplayName(String staffId) {
         final rawStaff = snapshot['staff'];
-        if (rawStaff is! List) return staffId;
+        if (rawStaff is! List) return 'Staff member';
         for (final raw in rawStaff.whereType<Map>()) {
           if (raw['staffId'] == staffId) {
             final name = raw['displayName'];
             if (name is String && name.trim().isNotEmpty) return name.trim();
           }
         }
-        return staffId;
+        // Never leak a Firebase UID onto a customer or production ticket.
+        // A refreshed hub snapshot normally supplies the staff name; this
+        // neutral fallback is safer and clearer if an old snapshot does not.
+        return 'Staff member';
       }
 
       VenueHubOfflineView.instance.install(snapshot);

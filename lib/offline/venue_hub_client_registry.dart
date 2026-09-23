@@ -96,6 +96,9 @@ class VenueHubClientRegistry {
     String? customerName,
     String? customerPhone,
     String? deliveryAddress,
+    String? deliveryAddressLabel,
+    double? deliveryLatitude,
+    double? deliveryLongitude,
     DateTime? scheduledFor,
     String? assignedDriverId,
     String? assignedDriverName,
@@ -123,6 +126,10 @@ class VenueHubClientRegistry {
           'customerPhone': customerPhone!.trim(),
         if (deliveryAddress?.trim().isNotEmpty == true)
           'deliveryAddress': deliveryAddress!.trim(),
+        if (deliveryAddressLabel?.trim().isNotEmpty == true)
+          'deliveryAddressLabel': deliveryAddressLabel!.trim(),
+        if (deliveryLatitude != null) 'deliveryLatitude': deliveryLatitude,
+        if (deliveryLongitude != null) 'deliveryLongitude': deliveryLongitude,
         if (scheduledFor != null)
           'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
         if (assignedDriverId?.trim().isNotEmpty == true)

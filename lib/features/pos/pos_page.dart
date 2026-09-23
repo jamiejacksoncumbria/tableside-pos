@@ -254,7 +254,6 @@ class _TablesPanel extends ConsumerWidget {
                   ?.where((order) => order.status != OrderStatus.closed)
                   .toList(growable: false) ??
               const <PosOrder>[];
-    final scheme = Theme.of(context).colorScheme;
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Padding(
@@ -320,19 +319,6 @@ class _TablesPanel extends ConsumerWidget {
                   label: const Text('Delivery'),
                 ),
               ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              activeOrder.channel == OrderChannel.collection
-                  ? 'Current collection: ${activeOrder.customerName ?? 'Customer'}'
-                  : activeOrder.channel == OrderChannel.delivery
-                  ? 'Current delivery: ${activeOrder.customerName ?? 'Customer'}'
-                  : activeOrder.tabName == null
-                  ? 'Select a table or open a named tab'
-                  : 'Current tab: ${activeOrder.tabName}',
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
             ),
             const SizedBox(height: 14),
             Expanded(
@@ -421,9 +407,9 @@ class _TablesPanel extends ConsumerWidget {
                                     selected: tab.orderId == activeOrder.id,
                                     onTap: () async {
                                       try {
-                                        await ref
+                                        ref
                                             .read(activeOrderProvider.notifier)
-                                            .openNamedTab(tab.name);
+                                            .openExistingNamedTab(tab);
                                         ref
                                             .read(
                                               selectedTableProvider.notifier,
@@ -2395,6 +2381,17 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                   style: Theme.of(
                     context,
                   ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+            if (order.channel == OrderChannel.delivery &&
+                order.deliveryAddress?.trim().isNotEmpty == true)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '${order.deliveryAddressLabel?.trim().isNotEmpty == true ? '${order.deliveryAddressLabel}: ' : ''}${order.deliveryAddress}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
               ),
             if (order.isSplitOrder)
@@ -4477,8 +4474,12 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
               .where((staff) => staff.roles.contains('driver'))
               .toList(growable: false)
         : const <FulfilmentStaffMember>[];
+    CustomerAddress? selectedAddress = selected.addresses
+        .where((item) => item.isDefault)
+        .firstOrNull;
+    selectedAddress ??= selected.addresses.firstOrNull;
     final address = TextEditingController(
-      text: selected.addresses.firstOrNull?.addressLines ?? '',
+      text: selectedAddress?.oneLine ?? '',
     );
     String? validationError;
     final confirmed = await showAppDialog<bool>(
@@ -4498,13 +4499,57 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
               ),
               if (channel == OrderChannel.delivery) ...[
                 const SizedBox(height: 12),
+                if (selected.addresses.isNotEmpty)
+                  DropdownButtonFormField<CustomerAddress>(
+                    initialValue: selectedAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'Saved delivery address',
+                      prefixIcon: Icon(Icons.location_on_outlined),
+                    ),
+                    items: [
+                      for (final item in selected.addresses)
+                        DropdownMenuItem(
+                          value: item,
+                          child: Text(
+                            '${item.label}${item.isDefault ? ' · Default' : ''}',
+                          ),
+                        ),
+                    ],
+                    onChanged: (value) => setCustomerState(() {
+                      selectedAddress = value;
+                      address.text = value?.oneLine ?? '';
+                    }),
+                  ),
+                if (selected.addresses.isNotEmpty)
+                  const SizedBox(height: 8),
                 TextField(
                   controller: address,
                   maxLines: 3,
                   decoration: const InputDecoration(
-                    labelText: 'Delivery address',
+                    labelText: 'Delivery address / manual override',
                   ),
+                  onChanged: (_) => setCustomerState(() {
+                    if (selectedAddress?.oneLine != address.text.trim()) {
+                      selectedAddress = null;
+                    }
+                  }),
                 ),
+                if (selectedAddress?.notes.trim().isNotEmpty == true)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.directions_outlined),
+                    title: const Text('Driver directions'),
+                    subtitle: Text(selectedAddress!.notes),
+                  ),
+                if (selectedAddress?.latitude != null)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.pin_drop_outlined),
+                    title: const Text('Map pin'),
+                    subtitle: Text(
+                      '${selectedAddress!.latitude}, ${selectedAddress!.longitude}',
+                    ),
+                  ),
                 if (drivers.isNotEmpty) ...[
                   const SizedBox(height: 12),
                   DropdownButtonFormField<FulfilmentStaffMember>(
@@ -4606,6 +4651,15 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
             customerPhone: selected.phoneNumbers.first,
             deliveryAddress: channel == OrderChannel.delivery
                 ? address.text
+                : null,
+            deliveryAddressLabel: channel == OrderChannel.delivery
+                ? selectedAddress?.label
+                : null,
+            deliveryLatitude: channel == OrderChannel.delivery
+                ? selectedAddress?.latitude
+                : null,
+            deliveryLongitude: channel == OrderChannel.delivery
+                ? selectedAddress?.longitude
                 : null,
             scheduledFor: scheduledFor,
             assignedDriverId: selectedDriver?.id,

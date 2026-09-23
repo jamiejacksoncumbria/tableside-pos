@@ -15,6 +15,8 @@ import '../../data/production_command_repository.dart';
 import '../../data/printer_device_repository.dart';
 import '../notifications/notification_centre.dart';
 import '../auth/staff_pin_gate.dart';
+import '../fulfilment/fulfilment_domain.dart';
+import '../fulfilment/fulfilment_repository.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
 import 'order_flow_sound.dart';
@@ -136,6 +138,13 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
           (role) => role == 'owner' || role == 'manager',
         ) ??
         false;
+    final canAssignDrivers = canReprint;
+    final drivers = canAssignDrivers
+        ? (ref.watch(fulfilmentStaffProvider).value ??
+                  const <FulfilmentStaffMember>[])
+              .where((item) => item.roles.contains('driver'))
+              .toList(growable: false)
+        : const <FulfilmentStaffMember>[];
     if (scope != null && flowValue.hasValue) {
       scheduleMicrotask(() {
         if (mounted) _observeOrderAlerts(allOrders);
@@ -336,6 +345,15 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                     redMinutes: widget.redMinutes,
                     onAction: (action) => _applyAction(order, action),
                     onReprint: canReprint ? () => _reprintOrder(order) : null,
+                    onAssignDriver:
+                        canAssignDrivers &&
+                            drivers.isNotEmpty &&
+                            order.channel == OrderChannel.delivery &&
+                            order.orderId != null &&
+                            (order.status == OrderFlowStatus.preparing ||
+                                order.driverDeclined)
+                        ? () => _chooseDriver(order, drivers)
+                        : null,
                     lateAlarmDismissed: _dismissedLateTicketIds.contains(
                       order.id,
                     ),
@@ -387,6 +405,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     final currentRedIds = orders
         .where(
           (order) =>
+              order.driverDeclined ||
               _lateState(
                 order,
                 DateTime.now(),
@@ -709,6 +728,51 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       );
     }
   }
+
+  Future<void> _chooseDriver(
+    OrderFlowOrder order,
+    List<FulfilmentStaffMember> drivers,
+  ) async {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null || order.orderId == null) return;
+    final selected = await showAppDialog<FulfilmentStaffMember>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: const Text('Assign delivery driver'),
+        children: [
+          for (final driver in drivers)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(dialogContext, driver),
+              child: ListTile(
+                leading: const Icon(Icons.delivery_dining_rounded),
+                title: Text(driver.name),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (selected == null || !mounted) return;
+    try {
+      await ref
+          .read(fulfilmentRepositoryProvider)
+          .updateFulfilmentOrder(
+            scope: scope,
+            orderId: order.orderId!,
+            status: FulfilmentStatus.assigned,
+            driverId: selected.id,
+          );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Assign driver from order flow', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Driver was not assigned',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    }
+  }
 }
 
 enum _FlowFilter { all, late, allergy, ready }
@@ -730,6 +794,7 @@ _LateState _lateState(
   int amberMinutes,
   int redMinutes,
 ) {
+  if (order.driverDeclined) return _LateState.normal;
   if (order.status == OrderFlowStatus.held) return _LateState.normal;
   if (order.isDelayed) return _LateState.red;
   if (order.status.isTerminal) return _LateState.normal;
@@ -888,6 +953,7 @@ class _OrderFlowCard extends StatelessWidget {
     required this.redMinutes,
     required this.onAction,
     this.onReprint,
+    this.onAssignDriver,
     required this.itemsExpanded,
     required this.onToggleItems,
     required this.lateAlarmDismissed,
@@ -901,6 +967,7 @@ class _OrderFlowCard extends StatelessWidget {
   final int redMinutes;
   final ValueChanged<_OrderFlowAction> onAction;
   final VoidCallback? onReprint;
+  final VoidCallback? onAssignDriver;
   final bool itemsExpanded;
   final VoidCallback onToggleItems;
   final bool lateAlarmDismissed;
@@ -909,7 +976,8 @@ class _OrderFlowCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final late = _lateState(order, now, amberMinutes, redMinutes);
-    final background = order.status == OrderFlowStatus.held
+    final background = order.driverDeclined ||
+            order.status == OrderFlowStatus.held
         ? Colors.purple.shade700
         : switch (late) {
             _LateState.red => Colors.red.shade800,
@@ -986,7 +1054,50 @@ class _OrderFlowCard extends StatelessWidget {
                           ],
                         ),
                       ),
+                    if (order.driverDeclined && !lateAlarmDismissed)
+                      Container(
+                        padding: const EdgeInsets.only(left: 9),
+                        decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.white54),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'DRIVER DECLINED — CHOOSE ANOTHER',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            _AnimatedAlarmBell(onPressed: onDismissLateAlarm),
+                          ],
+                        ),
+                      ),
                     _PrimaryFlowAction(order: order, onAction: onAction),
+                    if (onAssignDriver != null)
+                      FilledButton.tonalIcon(
+                        onPressed: onAssignDriver,
+                        icon: const Icon(Icons.person_pin_circle_outlined),
+                        label: Text(
+                          order.driverDeclined
+                              ? 'Choose another driver'
+                              : 'Assign driver',
+                        ),
+                      ),
+                    if (order.scheduledFor != null &&
+                        order.status != OrderFlowStatus.held)
+                      _AlertRow(
+                        icon: order.channel == OrderChannel.delivery
+                            ? Icons.delivery_dining_rounded
+                            : Icons.shopping_bag_outlined,
+                        text:
+                            '${order.channel.label} ${order.scheduledFor!.hour.toString().padLeft(2, '0')}:${order.scheduledFor!.minute.toString().padLeft(2, '0')}',
+                        color: Colors.white,
+                      ),
                     if (order.status == OrderFlowStatus.held)
                       _AlertRow(
                         icon: Icons.schedule_rounded,
