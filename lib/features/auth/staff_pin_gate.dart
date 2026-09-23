@@ -197,6 +197,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   final VenueHubClientCache _hubCache = VenueHubClientCache();
   List<VenuePinStaff>? _staff;
   String? _selectedUserId;
+  String? _pinEntryUserId;
   bool _loading = true;
   bool _submitting = false;
   String? _error;
@@ -293,16 +294,21 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   }
 
   Future<void> _enterPin(VenuePinStaff staff) async {
+    setState(() {
+      _pinEntryUserId = staff.userId;
+      _error = null;
+    });
+  }
+
+  /// Verifies a PIN entered on the locked screen.
+  ///
+  /// Staff login deliberately does not use a modal route. Replacing the PIN
+  /// gate with the venue shell while a dialog route is being removed can leave
+  /// Flutter's semantics parent data dirty on desktop and halt every following
+  /// frame. Keeping the keypad in the gate's own render tree gives the unlock
+  /// transition one owner and remains usable with touch or a physical keyboard.
+  Future<void> _verifyPin(VenuePinStaff staff, String pin) async {
     try {
-      final pin = await showAppDialog<String>(
-        context: context,
-        builder: (context) => _PinPadDialog(
-          title: Text('Enter PIN for ${staff.displayName}'),
-          message: 'Enter your six-digit staff PIN.',
-          confirmLabel: 'Unlock',
-        ),
-      );
-      if (pin == null || !mounted) return;
       setState(() => _submitting = true);
       VenueHubBootstrap? bootstrap;
       try {
@@ -495,7 +501,10 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     } on Object catch (error, stackTrace) {
       AppLogger.error('Verify staff PIN', error, stackTrace);
       if (!mounted) return;
-      setState(() => _error = '$error');
+      setState(() {
+        _error = '$error';
+        _pinEntryUserId = null;
+      });
       await _loadStaff();
     } finally {
       if (mounted) setState(() => _submitting = false);
@@ -657,6 +666,9 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     final selected = staff
         .where((item) => item.userId == _selectedUserId)
         .firstOrNull;
+    final pinEntryStaff = staff
+        .where((item) => item.userId == _pinEntryUserId)
+        .firstOrNull;
     final currentUserId = FirebaseAuth.instance.currentUser?.uid;
     return Scaffold(
       appBar: AppBar(
@@ -686,6 +698,21 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
                   padding: const EdgeInsets.all(28),
                   child: _loading
                       ? const Center(child: CircularProgressIndicator())
+                      : pinEntryStaff != null
+                      ? _PinPadPanel(
+                          key: ValueKey(pinEntryStaff.userId),
+                          title: Text(
+                            'Enter PIN for ${pinEntryStaff.displayName}',
+                          ),
+                          message: 'Enter your six-digit staff PIN.',
+                          confirmLabel: 'Unlock',
+                          enabled: !_submitting,
+                          onCancel: () {
+                            if (_submitting) return;
+                            setState(() => _pinEntryUserId = null);
+                          },
+                          onSubmitted: (pin) => _verifyPin(pinEntryStaff, pin),
+                        )
                       : Column(
                           mainAxisSize: MainAxisSize.min,
                           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -993,7 +1020,23 @@ Widget buildStaffPinDialogForTest({
   confirmLabel: confirmLabel,
 );
 
-class _PinPadDialog extends StatefulWidget {
+/// Exposes the inline login keypad so tests can verify the exact transition
+/// from a locked screen to the authenticated application shell.
+@visibleForTesting
+Widget buildStaffPinPanelForTest({
+  required ValueChanged<String> onSubmitted,
+  required VoidCallback onCancel,
+  bool enabled = true,
+}) => _PinPadPanel(
+  title: const Text('Enter PIN'),
+  message: 'Enter your six-digit staff PIN.',
+  confirmLabel: 'Unlock',
+  enabled: enabled,
+  onCancel: onCancel,
+  onSubmitted: onSubmitted,
+);
+
+class _PinPadDialog extends StatelessWidget {
   const _PinPadDialog({
     required this.title,
     required this.message,
@@ -1005,10 +1048,51 @@ class _PinPadDialog extends StatefulWidget {
   final String confirmLabel;
 
   @override
-  State<_PinPadDialog> createState() => _PinPadDialogState();
+  Widget build(BuildContext context) => Dialog(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 390),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 22, 24, 16),
+        child: _PinPadPanel(
+          title: title,
+          message: message,
+          confirmLabel: confirmLabel,
+          onCancel: () => Navigator.of(context).pop(),
+          onSubmitted: (pin) => Navigator.of(context).pop(pin),
+        ),
+      ),
+    ),
+  );
 }
 
-class _PinPadDialogState extends State<_PinPadDialog> {
+/// Reusable PIN keypad whose caller owns navigation and authentication.
+///
+/// The staff-login gate embeds this panel directly, avoiding a dialog route
+/// being removed in the same frame that the entire authenticated shell is
+/// mounted. Other workflows may safely host it inside [_PinPadDialog].
+class _PinPadPanel extends StatefulWidget {
+  const _PinPadPanel({
+    super.key,
+    required this.title,
+    required this.message,
+    required this.confirmLabel,
+    required this.onCancel,
+    required this.onSubmitted,
+    this.enabled = true,
+  });
+
+  final Widget title;
+  final String message;
+  final String confirmLabel;
+  final VoidCallback onCancel;
+  final ValueChanged<String> onSubmitted;
+  final bool enabled;
+
+  @override
+  State<_PinPadPanel> createState() => _PinPadPanelState();
+}
+
+class _PinPadPanelState extends State<_PinPadPanel> {
   String _pin = '';
   bool _submitted = false;
   final FocusNode _keyboardFocus = FocusNode(debugLabel: 'Staff PIN keypad');
@@ -1028,19 +1112,17 @@ class _PinPadDialogState extends State<_PinPadDialog> {
   }
 
   void _digit(String digit) {
-    if (_submitted || _pin.length >= 6) return;
+    if (!widget.enabled || _submitted || _pin.length >= 6) return;
     setState(() => _pin += digit);
     if (_pin.length == 6) _submit();
     _keyboardFocus.requestFocus();
   }
 
   void _submit() {
-    if (_submitted || _pin.length != 6) return;
+    if (!widget.enabled || _submitted || _pin.length != 6) return;
     _submitted = true;
     final completedPin = _pin;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) Navigator.of(context).pop(completedPin);
-    });
+    widget.onSubmitted(completedPin);
   }
 
   void _backspace() {
@@ -1079,7 +1161,7 @@ class _PinPadDialogState extends State<_PinPadDialog> {
       return;
     }
     if (event.logicalKey == LogicalKeyboardKey.escape) {
-      Navigator.of(context).pop();
+      if (widget.enabled) widget.onCancel();
       return;
     }
     if ((event.logicalKey == LogicalKeyboardKey.enter ||
@@ -1090,120 +1172,111 @@ class _PinPadDialogState extends State<_PinPadDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => Dialog(
-    // A regular AlertDialog with scrollable=true relies on intrinsic sizing.
-    // The PIN grid changes state and dismisses itself from a pointer event;
-    // on desktop that combination can leave the intrinsic dialog render box
-    // without a size for one frame and halt all hit testing. This explicitly
-    // sized, internally scrolling dialog remains stable on small tablets and
-    // desktop mouse/keyboard devices.
-    child: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 390),
-      child: KeyboardListener(
-        focusNode: _keyboardFocus,
-        autofocus: true,
-        onKeyEvent: _handleKeyEvent,
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(24, 22, 24, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              DefaultTextStyle(
-                style: Theme.of(context).textTheme.headlineSmall!,
-                child: widget.title,
-              ),
-              const SizedBox(height: 16),
-              Text(widget.message),
-              const SizedBox(height: 18),
-              Semantics(
-                label: '${_pin.length} of 6 PIN digits entered',
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: List.generate(
-                    6,
-                    (index) => Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 7),
-                      child: Icon(
-                        index < _pin.length
-                            ? Icons.circle
-                            : Icons.circle_outlined,
-                        size: 17,
-                      ),
-                    ),
-                  ),
+  Widget build(BuildContext context) => KeyboardListener(
+    focusNode: _keyboardFocus,
+    autofocus: true,
+    onKeyEvent: _handleKeyEvent,
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        DefaultTextStyle(
+          style: Theme.of(context).textTheme.headlineSmall!,
+          child: widget.title,
+        ),
+        const SizedBox(height: 16),
+        Text(widget.message),
+        const SizedBox(height: 18),
+        Semantics(
+          label: '${_pin.length} of 6 PIN digits entered',
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(
+              6,
+              (index) => Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 7),
+                child: Icon(
+                  index < _pin.length ? Icons.circle : Icons.circle_outlined,
+                  size: 17,
                 ),
               ),
-              const SizedBox(height: 18),
-              GridView.count(
-                crossAxisCount: 3,
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                mainAxisSpacing: 8,
-                crossAxisSpacing: 8,
-                childAspectRatio: 1.9,
-                children: [
-                  for (final digit in const [
-                    '1',
-                    '2',
-                    '3',
-                    '4',
-                    '5',
-                    '6',
-                    '7',
-                    '8',
-                    '9',
-                  ])
-                    FilledButton.tonal(
-                      onPressed: () => _digit(digit),
-                      child: Text(
-                        digit,
-                        style: Theme.of(context).textTheme.headlineSmall,
-                      ),
-                    ),
-                  OutlinedButton(
-                    onPressed: _pin.isEmpty
-                        ? null
-                        : () {
-                            setState(() => _pin = '');
-                            _keyboardFocus.requestFocus();
-                          },
-                    child: const Text('Clear'),
-                  ),
-                  FilledButton.tonal(
-                    onPressed: () => _digit('0'),
-                    child: Text(
-                      '0',
-                      style: Theme.of(context).textTheme.headlineSmall,
-                    ),
-                  ),
-                  IconButton.filledTonal(
-                    tooltip: 'Delete last digit',
-                    onPressed: _pin.isEmpty ? null : _backspace,
-                    icon: const Icon(Icons.backspace_rounded),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Wrap(
-                alignment: WrapAlignment.end,
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancel'),
-                  ),
-                  FilledButton(
-                    onPressed: _pin.length == 6 && !_submitted ? _submit : null,
-                    child: Text(widget.confirmLabel),
-                  ),
-                ],
-              ),
-            ],
+            ),
           ),
         ),
-      ),
+        const SizedBox(height: 18),
+        GridView.count(
+          crossAxisCount: 3,
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          mainAxisSpacing: 8,
+          crossAxisSpacing: 8,
+          childAspectRatio: 1.9,
+          children: [
+            for (final digit in const [
+              '1',
+              '2',
+              '3',
+              '4',
+              '5',
+              '6',
+              '7',
+              '8',
+              '9',
+            ])
+              FilledButton.tonal(
+                onPressed: () => _digit(digit),
+                child: Text(
+                  digit,
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+              ),
+            OutlinedButton(
+              onPressed: _pin.isEmpty
+                  ? null
+                  : () {
+                      setState(() => _pin = '');
+                      _keyboardFocus.requestFocus();
+                    },
+              child: const Text('Clear'),
+            ),
+            FilledButton.tonal(
+              onPressed: () => _digit('0'),
+              child: Text(
+                '0',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+            ),
+            IconButton.filledTonal(
+              tooltip: 'Delete last digit',
+              onPressed: _pin.isEmpty ? null : _backspace,
+              icon: const Icon(Icons.backspace_rounded),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Wrap(
+          alignment: WrapAlignment.end,
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            TextButton(
+              onPressed: widget.enabled ? widget.onCancel : null,
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: widget.enabled && _pin.length == 6 && !_submitted
+                  ? _submit
+                  : null,
+              child: widget.enabled
+                  ? Text(widget.confirmLabel)
+                  : const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+            ),
+          ],
+        ),
+      ],
     ),
   );
 }

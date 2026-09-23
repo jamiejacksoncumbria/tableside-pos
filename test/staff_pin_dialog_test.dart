@@ -28,6 +28,30 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets(
+    'inline PIN gate can mount the authenticated interface immediately',
+    (tester) async {
+      tester.view.physicalSize = const Size(1024, 700);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(MaterialApp(home: _InlinePinGateHarness()));
+
+      for (final digit in const ['1', '2', '3', '4', '5', '6']) {
+        await tester.tap(find.text(digit));
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+      }
+      await tester.pumpAndSettle();
+
+      expect(find.text('Venue interface loaded'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      semantics.dispose();
+    },
+  );
 }
 
 class _PinDialogHarness extends StatefulWidget {
@@ -57,6 +81,30 @@ class _PinDialogHarnessState extends State<_PinDialogHarness> {
           if (_pin != null) Text('PIN: $_pin'),
         ],
       ),
+    ),
+  );
+}
+
+class _InlinePinGateHarness extends StatefulWidget {
+  @override
+  State<_InlinePinGateHarness> createState() => _InlinePinGateHarnessState();
+}
+
+class _InlinePinGateHarnessState extends State<_InlinePinGateHarness> {
+  bool _unlocked = false;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(
+      child: _unlocked
+          ? const Text('Venue interface loaded')
+          : ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 390),
+              child: buildStaffPinPanelForTest(
+                onCancel: () {},
+                onSubmitted: (_) => setState(() => _unlocked = true),
+              ),
+            ),
     ),
   );
 }
