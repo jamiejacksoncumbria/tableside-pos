@@ -18,6 +18,9 @@ class ServiceArea {
   const ServiceArea({
     required this.id,
     required this.name,
+    this.country = 'Kuzey Kıbrıs Türk Cumhuriyeti',
+    this.district = '',
+    this.town = '',
     this.deliveryFeeMinor = 0,
     this.minimumOrderMinor = 0,
     this.estimatedMinutes = 45,
@@ -26,6 +29,9 @@ class ServiceArea {
 
   final String id;
   final String name;
+  final String country;
+  final String district;
+  final String town;
   final int deliveryFeeMinor;
   final int minimumOrderMinor;
   final int estimatedMinutes;

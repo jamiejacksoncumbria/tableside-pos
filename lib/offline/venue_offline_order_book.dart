@@ -201,6 +201,7 @@ class VenueOfflineOrderBook {
           }
         }
       }
+      catalogueProvider?.call().validateDeliveryArea(draft.payload);
       return;
     }
     if (orderEvents.isEmpty) {

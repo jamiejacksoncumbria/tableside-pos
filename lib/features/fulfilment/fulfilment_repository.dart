@@ -6,6 +6,7 @@ import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_offline_view.dart';
+import '../auth/staff_pin_gate.dart';
 import '../pos/domain.dart';
 import 'fulfilment_domain.dart';
 
@@ -34,18 +35,21 @@ final venueCustomersProvider = StreamProvider<List<VenueCustomer>>((ref) {
 final fulfilmentOrdersProvider = StreamProvider<List<PosOrder>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <PosOrder>[]);
+  final session = ref.watch(activeStaffPinSessionProvider);
+  final driverOnly = session != null &&
+      session.roles.contains('driver') &&
+      !session.roles.any((role) => role == 'owner' || role == 'manager');
   if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     return VenueHubOfflineView.instance.orderStream.map(
       (orders) => orders
-          .where(
-            (order) =>
-                order.channel != OrderChannel.dineIn &&
-                order.status != OrderStatus.closed,
-          )
+          .where((order) => order.channel != OrderChannel.dineIn)
           .toList(growable: false),
     );
   }
-  return ref.watch(fulfilmentRepositoryProvider).watchFulfilmentOrders(scope);
+  return ref.watch(fulfilmentRepositoryProvider).watchFulfilmentOrders(
+    scope,
+    assignedDriverId: driverOnly ? session.userId : null,
+  );
 });
 
 final fulfilmentStaffProvider = StreamProvider<List<FulfilmentStaffMember>>((
@@ -164,19 +168,23 @@ class FulfilmentRepository {
         return customers;
       });
 
-  Stream<List<PosOrder>> watchFulfilmentOrders(VenueScope scope) => _firestore
-      .collection('tenants/${scope.tenantId}/orders')
-      .where('venueId', isEqualTo: scope.venueId)
+  Stream<List<PosOrder>> watchFulfilmentOrders(
+    VenueScope scope, {
+    String? assignedDriverId,
+  }) {
+    Query<Map<String, dynamic>> query = _firestore
+        .collection('tenants/${scope.tenantId}/orders')
+        .where('venueId', isEqualTo: scope.venueId);
+    if (assignedDriverId != null) {
+      query = query.where('assignedDriverId', isEqualTo: assignedDriverId);
+    }
+    return query
       .snapshots()
       .map((snapshot) {
         final orders = snapshot.docs
             .map(_fulfilmentOrder)
             .whereType<PosOrder>()
-            .where(
-              (order) =>
-                  order.channel != OrderChannel.dineIn &&
-                  order.status != OrderStatus.closed,
-            )
+            .where((order) => order.channel != OrderChannel.dineIn)
             .toList();
         orders.sort((left, right) {
           final leftTime = left.scheduledFor ?? left.openedAt;
@@ -185,6 +193,7 @@ class FulfilmentRepository {
         });
         return orders;
       });
+  }
 
   Stream<List<FulfilmentStaffMember>> watchStaff(VenueScope scope) => _firestore
       .collection('tenants/${scope.tenantId}/members')
@@ -260,6 +269,9 @@ class FulfilmentRepository {
       deliveryAddressLabel: data['deliveryAddressLabel'] as String?,
       deliveryLatitude: (data['deliveryLatitude'] as num?)?.toDouble(),
       deliveryLongitude: (data['deliveryLongitude'] as num?)?.toDouble(),
+      serviceAreaId: data['serviceAreaId'] as String?,
+      serviceAreaName: data['serviceAreaName'] as String?,
+      deliveryFeeMinor: (data['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
       scheduledFor: scheduledFor is Timestamp
           ? scheduledFor.toDate()
           : scheduledFor is String
@@ -366,6 +378,9 @@ class FulfilmentRepository {
   Map<String, Object?> _areaMap(ServiceArea value) => {
     'id': value.id,
     'name': value.name,
+    'country': value.country,
+    'district': value.district,
+    'town': value.town,
     'deliveryFeeMinor': value.deliveryFeeMinor,
     'minimumOrderMinor': value.minimumOrderMinor,
     'estimatedMinutes': value.estimatedMinutes,
@@ -405,6 +420,10 @@ class FulfilmentRepository {
         return ServiceArea(
           id: value['id'] as String? ?? '',
           name: value['name'] as String? ?? 'Area',
+          country:
+              value['country'] as String? ?? 'Kuzey Kıbrıs Türk Cumhuriyeti',
+          district: value['district'] as String? ?? '',
+          town: value['town'] as String? ?? value['name'] as String? ?? '',
           deliveryFeeMinor: (value['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
           minimumOrderMinor: (value['minimumOrderMinor'] as num?)?.toInt() ?? 0,
           estimatedMinutes: (value['estimatedMinutes'] as num?)?.toInt() ?? 45,

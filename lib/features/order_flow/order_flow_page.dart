@@ -102,7 +102,11 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     _allergyAlarm?.cancel();
     _lateAlarm?.cancel();
     _sessionKeepAlive?.cancel();
-    _displayModeController.setActive(false);
+    // Riverpod rejects provider mutations while Flutter is finalising the
+    // widget tree. Clear the KDS keep-awake state immediately after that frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _displayModeController.setActive(false);
+    });
     unawaited(_sound.dispose());
     super.dispose();
   }
@@ -407,12 +411,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
           (order) =>
               order.driverDeclined ||
               _lateState(
-                order,
-                DateTime.now(),
-                widget.amberMinutes,
-                widget.redMinutes,
-              ) ==
-              _LateState.red,
+                    order,
+                    DateTime.now(),
+                    widget.amberMinutes,
+                    widget.redMinutes,
+                  ) ==
+                  _LateState.red,
         )
         .map((order) => order.id)
         .toSet();
@@ -976,8 +980,8 @@ class _OrderFlowCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final late = _lateState(order, now, amberMinutes, redMinutes);
-    final background = order.driverDeclined ||
-            order.status == OrderFlowStatus.held
+    final background =
+        order.driverDeclined || order.status == OrderFlowStatus.held
         ? Colors.purple.shade700
         : switch (late) {
             _LateState.red => Colors.red.shade800,

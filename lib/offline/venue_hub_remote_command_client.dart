@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import '../core/tenant_scope.dart';
 import '../core/app_busy_state.dart';
 import 'venue_hub_client.dart';
+import 'venue_hub_availability.dart';
 
 typedef RemoteHubSubmitter =
     Future<Map<String, Object?>> Function(Map<String, Object?> request);
@@ -134,6 +135,7 @@ class VenueHubRemoteCommandClient {
           'The venue hub returned an invalid durable acknowledgement.',
         );
       }
+      VenueHubAvailability.markOnline();
       return VenueHubEventAcknowledgement(
         eventId: eventId,
         sequence: sequence,
@@ -141,11 +143,31 @@ class VenueHubRemoteCommandClient {
         committedAtUtc: committedAt.toUtc(),
       );
     } on TimeoutException {
+      VenueHubAvailability.markOffline();
       throw StateError(
         'The venue hub did not confirm this command. It was not shown as saved; check the connection before retrying.',
       );
+    } on Object catch (error) {
+      // Business-rule rejections (for example insufficient stock) prove that
+      // the hub is online and responding. Only transport-shaped failures are
+      // allowed to raise the global HUB OFFLINE warning.
+      if (_looksLikeConnectivityFailure(error)) {
+        VenueHubAvailability.markOffline(error.toString());
+      }
+      rethrow;
     } finally {
       RemoteHubWaitState.end();
     }
+  }
+
+  bool _looksLikeConnectivityFailure(Object error) {
+    final message = error.toString().toLowerCase();
+    return message.contains('offline') ||
+        message.contains('unavailable') ||
+        message.contains('connection') ||
+        message.contains('network') ||
+        message.contains('socket') ||
+        message.contains('timed out') ||
+        message.contains('timeout');
   }
 }

@@ -151,14 +151,15 @@ class PrintJobRepository {
     }
     final hubPrinter = VenueHubPrinterClientRegistry.instance;
     if (hubPrinter.requiresHub(scope)) {
-      // An online-only till must not claim the hub's local queue and must not
-      // fall back to the cloud queue while hub authority is active. It can be
-      // enrolled later by a manager without generating false printer alarms.
+      // An online-only till must not claim the hub's local queue. Enrolled
+      // printers claim hub jobs first, then fall through to the transactional
+      // cloud queue for server-created jobs such as delivery notes/reprints.
+      // The two queues use distinct job IDs and each claim is atomic.
       if (!hubPrinter.isDeviceEnrolled(scope)) return null;
       final local = await hubPrinter.claim(scope);
-      return local == null
-          ? null
-          : _fromLocal(tenantId, venueId, deviceId, local);
+      if (local != null) {
+        return _fromLocal(tenantId, venueId, deviceId, local);
+      }
     }
     final data = await _commands.claimDevicePrintJob(
       scope: VenueScope(tenantId: tenantId, venueId: venueId),

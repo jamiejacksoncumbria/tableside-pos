@@ -2172,6 +2172,8 @@ Future<void> _showProductDialog({
   required String defaultTaxRateId,
   MenuProduct? existing,
 }) async {
+  var dialogSections = List<MenuSection>.of(sections);
+  var dialogModifierGroups = List<MenuModifierGroup>.of(modifierGroups);
   final remembered = existing == null
       ? await _ProductFormDefaults.load(scope)
       : null;
@@ -2507,10 +2509,7 @@ Future<void> _showProductDialog({
                           currencyCode: currencyCode,
                           initialVariants: variants,
                           stockProducts: allProducts
-                              .where(
-                                (item) =>
-                                    item.trackStock && item.id != existing?.id,
-                              )
+                              .where((item) => item.id != existing?.id)
                               .toList(growable: false),
                         );
                         if (next != null) {
@@ -2673,7 +2672,7 @@ Future<void> _showProductDialog({
                       style: Theme.of(context).textTheme.labelLarge,
                     ),
                     const SizedBox(height: 4),
-                    if (modifierGroups.isEmpty)
+                    if (dialogModifierGroups.isEmpty)
                       const Text(
                         'Create reusable cooking, spice or drink options first.',
                       )
@@ -2682,7 +2681,7 @@ Future<void> _showProductDialog({
                         spacing: 8,
                         runSpacing: 8,
                         children: [
-                          for (final group in modifierGroups)
+                          for (final group in dialogModifierGroups)
                             FilterChip(
                               label: Text(
                                 '${group.name}${group.isRequired ? ' *' : ''}',
@@ -2698,6 +2697,31 @@ Future<void> _showProductDialog({
                             ),
                         ],
                       ),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          await Navigator.of(dialogContext).push<void>(
+                            MaterialPageRoute(
+                              builder: (_) => ModifierGroupsPage(
+                                currencyCode: currencyCode,
+                              ),
+                            ),
+                          );
+                          ref.invalidate(menuModifierGroupsProvider);
+                          final refreshed = await ref.read(
+                            menuModifierGroupsProvider.future,
+                          );
+                          if (dialogContext.mounted) {
+                            setDialogState(
+                              () => dialogModifierGroups = refreshed,
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.add_rounded),
+                        label: const Text('Add or edit product options'),
+                      ),
+                    ),
                     const SizedBox(height: 18),
                     Text(
                       'Menu sections',
@@ -2708,7 +2732,7 @@ Future<void> _showProductDialog({
                       spacing: 8,
                       runSpacing: 8,
                       children: [
-                        for (final section in sections)
+                        for (final section in dialogSections)
                           FilterChip(
                             label: Text('${section.icon} ${section.name}'),
                             selected: selectedSections.contains(section.id),
@@ -2719,6 +2743,29 @@ Future<void> _showProductDialog({
                             }),
                           ),
                       ],
+                    ),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          await _showSectionDialog(
+                            context: dialogContext,
+                            ref: ref,
+                            scope: scope,
+                            sections: dialogSections,
+                            nextSortOrder: dialogSections.length,
+                          );
+                          ref.invalidate(menuSectionsProvider);
+                          final refreshed = await ref.read(
+                            menuSectionsProvider.future,
+                          );
+                          if (dialogContext.mounted) {
+                            setDialogState(() => dialogSections = refreshed);
+                          }
+                        },
+                        icon: const Icon(Icons.add_rounded),
+                        label: const Text('Add menu section'),
+                      ),
                     ),
                     const SizedBox(height: 18),
                     Text(

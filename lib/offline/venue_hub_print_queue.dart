@@ -215,8 +215,7 @@ class VenueHubPrintQueue {
             'deliveryAddressLabel': order.deliveryAddressLabel,
             'deliveryLatitude': order.deliveryLatitude,
             'deliveryLongitude': order.deliveryLongitude,
-            'scheduledForMillis': order
-                .scheduledForUtc
+            'scheduledForMillis': order.scheduledForUtc
                 ?.toLocal()
                 .millisecondsSinceEpoch,
             'createdByName': createdByName,
@@ -267,6 +266,13 @@ class VenueHubPrintQueue {
         'taxMinor': (current?['taxMinor'] ?? 0) + tax,
       };
     }
+    if (order.channel == 'delivery' && order.deliveryFeeMinor > 0) {
+      net += order.deliveryFeeMinor;
+      taxByName['Delivery fee'] = <String, int>{
+        'basisPoints': 0,
+        'taxMinor': 0,
+      };
+    }
     _jobs.putIfAbsent(
       id,
       () => VenueHubLocalPrintJob(
@@ -294,8 +300,10 @@ class VenueHubPrintQueue {
           'deliveryAddressLabel': order.deliveryAddressLabel,
           'deliveryLatitude': order.deliveryLatitude,
           'deliveryLongitude': order.deliveryLongitude,
-          'scheduledForMillis': order
-              .scheduledForUtc
+          'deliveryChargeMinor': order.deliveryFeeMinor,
+          'serviceAreaId': order.serviceAreaId,
+          'serviceAreaName': order.serviceAreaName,
+          'scheduledForMillis': order.scheduledForUtc
               ?.toLocal()
               .millisecondsSinceEpoch,
           'businessDate': _businessDate(

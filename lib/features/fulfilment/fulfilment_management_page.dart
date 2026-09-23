@@ -11,6 +11,7 @@ import '../notifications/notification_centre.dart';
 import '../auth/staff_pin_gate.dart';
 import '../pos/domain.dart';
 import 'customer_editor.dart';
+import 'delivery_location_catalogue.dart';
 import 'fulfilment_domain.dart';
 import 'fulfilment_repository.dart';
 
@@ -58,13 +59,22 @@ class _FulfilmentManagementPageState
   );
 }
 
-class _FulfilmentOrdersTab extends ConsumerWidget {
+class _FulfilmentOrdersTab extends ConsumerStatefulWidget {
   const _FulfilmentOrdersTab({required this.scope, this.assignedDriverId});
   final VenueScope scope;
   final String? assignedDriverId;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_FulfilmentOrdersTab> createState() =>
+      _FulfilmentOrdersTabState();
+}
+
+class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
+  DateTime _selectedDate = DateTime.now();
+  VenueScope get scope => widget.scope;
+
+  @override
+  Widget build(BuildContext context) {
     final orders = ref.watch(fulfilmentOrdersProvider);
     final session = ref.watch(activeStaffPinSessionProvider);
     final canAssignDrivers =
@@ -84,145 +94,220 @@ class _FulfilmentOrdersTab extends ConsumerWidget {
         return Center(child: Text('Live orders could not be loaded: $error'));
       },
       data: (allItems) {
-        final items = assignedDriverId == null
-            ? allItems
-            : allItems
-                  .where((order) => order.assignedDriverId == assignedDriverId)
-                  .toList(growable: false);
-        return items.isEmpty
-            ? const Center(
-                child: Text('No active collection or delivery orders.'),
-              )
-            : ListView.builder(
-                padding: const EdgeInsets.all(16),
-                itemCount: items.length,
-                itemBuilder: (context, index) {
-                  final order = items[index];
-                  final scheduled = order.scheduledFor;
-                  final when = scheduled == null
-                      ? 'ASAP'
-                      : '${scheduled.day.toString().padLeft(2, '0')}-${scheduled.month.toString().padLeft(2, '0')}-${scheduled.year} ${scheduled.hour.toString().padLeft(2, '0')}:${scheduled.minute.toString().padLeft(2, '0')}';
-                  final driverDeclined =
-                      order.fulfilmentStatus == FulfilmentStatus.driverDeclined;
-                  final driverAssigned =
-                      order.fulfilmentStatus == FulfilmentStatus.assigned;
-                  return Card(
-                    color: driverDeclined
-                        ? Colors.purple.shade100
-                        : driverAssigned
-                        ? Colors.green.shade100
-                        : null,
-                    child: Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Wrap(
-                            spacing: 10,
-                            runSpacing: 8,
-                            crossAxisAlignment: WrapCrossAlignment.center,
-                            children: [
-                              Chip(
-                                avatar: Icon(
-                                  order.channel == OrderChannel.delivery
-                                      ? Icons.delivery_dining
-                                      : Icons.shopping_bag_outlined,
+        final items = allItems
+            .where((order) {
+              if (widget.assignedDriverId != null &&
+                  order.assignedDriverId != widget.assignedDriverId) {
+                return false;
+              }
+              final value = order.scheduledFor ?? order.openedAt;
+              return value.year == _selectedDate.year &&
+                  value.month == _selectedDate.month &&
+                  value.day == _selectedDate.day;
+            })
+            .toList(growable: false);
+        return Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '${_selectedDate.day.toString().padLeft(2, '0')}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.year}',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _chooseDate,
+                    icon: const Icon(Icons.date_range_outlined),
+                    label: const Text('Choose date'),
+                  ),
+                  if (!_isToday(_selectedDate))
+                    TextButton(
+                      onPressed: () => setState(() {
+                        _selectedDate = DateTime.now();
+                      }),
+                      child: const Text('Today'),
+                    ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: items.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'No collection or delivery orders for this date.',
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.all(16),
+                      itemCount: items.length,
+                      itemBuilder: (context, index) {
+                        final order = items[index];
+                        final scheduled = order.scheduledFor;
+                        final when = scheduled == null
+                            ? 'ASAP'
+                            : '${scheduled.day.toString().padLeft(2, '0')}-${scheduled.month.toString().padLeft(2, '0')}-${scheduled.year} ${scheduled.hour.toString().padLeft(2, '0')}:${scheduled.minute.toString().padLeft(2, '0')}';
+                        final driverDeclined =
+                            order.fulfilmentStatus ==
+                            FulfilmentStatus.driverDeclined;
+                        final driverAssigned =
+                            order.fulfilmentStatus == FulfilmentStatus.assigned;
+                        return Card(
+                          color: driverDeclined
+                              ? Colors.purple.shade100
+                              : driverAssigned
+                              ? Colors.green.shade100
+                              : null,
+                          child: Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Wrap(
+                                  spacing: 10,
+                                  runSpacing: 8,
+                                  crossAxisAlignment: WrapCrossAlignment.center,
+                                  children: [
+                                    Chip(
+                                      avatar: Icon(
+                                        order.channel == OrderChannel.delivery
+                                            ? Icons.delivery_dining
+                                            : Icons.shopping_bag_outlined,
+                                      ),
+                                      label: Text(order.channel.label),
+                                    ),
+                                    Text(
+                                      order.customerName ?? 'Customer',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.titleMedium,
+                                    ),
+                                    Chip(
+                                      label: Text(
+                                        _statusLabel(order.fulfilmentStatus),
+                                      ),
+                                    ),
+                                    Text(when),
+                                  ],
                                 ),
-                                label: Text(order.channel.label),
-                              ),
-                              Text(
-                                order.customerName ?? 'Customer',
-                                style: Theme.of(context).textTheme.titleMedium,
-                              ),
-                              Chip(
-                                label: Text(
-                                  _statusLabel(order.fulfilmentStatus),
-                                ),
-                              ),
-                              Text(when),
-                            ],
-                          ),
-                          if (order.customerPhone?.isNotEmpty == true)
-                            Text(order.customerPhone!),
-                          if (order.deliveryAddress?.isNotEmpty == true)
-                            Text(order.deliveryAddress!),
-                          if (order.assignedDriverName?.isNotEmpty == true)
-                            Text('Driver: ${order.assignedDriverName}'),
-                          if (driverDeclined)
-                            const Text(
-                              'Driver declined — choose another driver.',
-                              style: TextStyle(fontWeight: FontWeight.w800),
-                            ),
-                          const SizedBox(height: 8),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              if (order.channel == OrderChannel.delivery &&
-                                  canAssignDrivers)
-                                OutlinedButton.icon(
-                                  onPressed:
-                                      !canAssignDrivers || drivers.isEmpty
-                                      ? null
-                                      : () => _chooseDriver(
+                                if (order.customerPhone?.isNotEmpty == true)
+                                  Text(order.customerPhone!),
+                                if (order.deliveryAddress?.isNotEmpty == true)
+                                  Text(order.deliveryAddress!),
+                                if (order.assignedDriverName?.isNotEmpty ==
+                                    true)
+                                  Text('Driver: ${order.assignedDriverName}'),
+                                if (driverDeclined)
+                                  const Text(
+                                    'Driver declined — choose another driver.',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    if (order.channel ==
+                                            OrderChannel.delivery &&
+                                        canAssignDrivers)
+                                      OutlinedButton.icon(
+                                        onPressed:
+                                            !canAssignDrivers || drivers.isEmpty
+                                            ? null
+                                            : () => _chooseDriver(
+                                                context,
+                                                ref,
+                                                order,
+                                                drivers,
+                                              ),
+                                        icon: const Icon(
+                                          Icons.person_pin_circle_outlined,
+                                        ),
+                                        label: Text(
+                                          order.assignedDriverId == null
+                                              ? 'Assign driver'
+                                              : 'Change driver',
+                                        ),
+                                      ),
+                                    if (order.channel ==
+                                            OrderChannel.delivery ||
+                                        order.fulfilmentStatus ==
+                                            FulfilmentStatus
+                                                .readyForCollection ||
+                                        order.fulfilmentStatus ==
+                                            FulfilmentStatus.outForDelivery)
+                                      OutlinedButton.icon(
+                                        onPressed: () => _printDeliveryNote(
                                           context,
                                           ref,
                                           order,
-                                          drivers,
                                         ),
-                                  icon: const Icon(
-                                    Icons.person_pin_circle_outlined,
-                                  ),
-                                  label: Text(
-                                    order.assignedDriverId == null
-                                        ? 'Assign driver'
-                                        : 'Change driver',
-                                  ),
+                                        icon: const Icon(Icons.print_outlined),
+                                        label: Text(
+                                          order.channel == OrderChannel.delivery
+                                              ? 'Driver ticket'
+                                              : 'Collection note',
+                                        ),
+                                      ),
+                                    if (widget.assignedDriverId != null &&
+                                        order.fulfilmentStatus ==
+                                            FulfilmentStatus.assigned)
+                                      FilledButton.tonalIcon(
+                                        onPressed: () => _updateStatus(
+                                          context,
+                                          ref,
+                                          order,
+                                          FulfilmentStatus.driverDeclined,
+                                        ),
+                                        icon: const Icon(Icons.close_rounded),
+                                        label: const Text('Decline delivery'),
+                                      ),
+                                    for (final next in _nextStatuses(order))
+                                      FilledButton.tonal(
+                                        onPressed: () => _updateStatus(
+                                          context,
+                                          ref,
+                                          order,
+                                          next,
+                                        ),
+                                        child: Text(_statusLabel(next)),
+                                      ),
+                                  ],
                                 ),
-                              if (order.channel == OrderChannel.delivery ||
-                                  order.fulfilmentStatus ==
-                                      FulfilmentStatus.readyForCollection ||
-                                  order.fulfilmentStatus ==
-                                      FulfilmentStatus.outForDelivery)
-                                OutlinedButton.icon(
-                                  onPressed: () =>
-                                      _printDeliveryNote(context, ref, order),
-                                  icon: const Icon(Icons.print_outlined),
-                                  label: Text(
-                                    order.channel == OrderChannel.delivery
-                                        ? 'Driver ticket'
-                                        : 'Collection note',
-                                  ),
-                                ),
-                              if (assignedDriverId != null &&
-                                  order.fulfilmentStatus ==
-                                      FulfilmentStatus.assigned)
-                                FilledButton.tonalIcon(
-                                  onPressed: () => _updateStatus(
-                                    context,
-                                    ref,
-                                    order,
-                                    FulfilmentStatus.driverDeclined,
-                                  ),
-                                  icon: const Icon(Icons.close_rounded),
-                                  label: const Text('Decline delivery'),
-                                ),
-                              for (final next in _nextStatuses(order))
-                                FilledButton.tonal(
-                                  onPressed: () =>
-                                      _updateStatus(context, ref, order, next),
-                                  child: Text(_statusLabel(next)),
-                                ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ],
-                      ),
+                        );
+                      },
                     ),
-                  );
-                },
-              );
+            ),
+          ],
+        );
       },
     );
+  }
+
+  bool _isToday(DateTime value) {
+    final today = DateTime.now();
+    return value.year == today.year &&
+        value.month == today.month &&
+        value.day == today.day;
+  }
+
+  Future<void> _chooseDate() async {
+    final selected = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate,
+      firstDate: DateTime.now().subtract(const Duration(days: 365 * 7)),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+    if (selected != null && mounted) {
+      setState(() => _selectedDate = selected);
+    }
   }
 
   Future<void> _chooseDriver(
@@ -764,59 +849,93 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
   }
 
   Future<void> _addArea(VenueFulfilmentSettings draft) async {
-    final name = TextEditingController();
     final fee = TextEditingController(text: '0.00');
     final minimum = TextEditingController(text: '0.00');
     final minutes = TextEditingController(text: '45');
+    String? district;
+    String? town;
     final save = await showAppDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Add delivery area'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: name,
-                decoration: const InputDecoration(labelText: 'Town / area'),
-              ),
-              TextField(
-                controller: fee,
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Add delivery area'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const TextField(
+                  enabled: false,
+                  decoration: InputDecoration(
+                    labelText: 'Country',
+                    hintText: northernCyprusCountryName,
+                  ),
                 ),
-                decoration: const InputDecoration(labelText: 'Delivery fee'),
-              ),
-              TextField(
-                controller: minimum,
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
+                DropdownButtonFormField<String>(
+                  initialValue: district,
+                  decoration: const InputDecoration(labelText: 'District'),
+                  items: [
+                    for (final value in northernCyprusDeliveryLocations.keys)
+                      DropdownMenuItem(value: value, child: Text(value)),
+                  ],
+                  onChanged: (value) => setDialogState(() {
+                    district = value;
+                    town = null;
+                  }),
                 ),
-                decoration: const InputDecoration(labelText: 'Minimum order'),
-              ),
-              TextField(
-                controller: minutes,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Estimated minutes',
+                DropdownButtonFormField<String>(
+                  key: ValueKey(district),
+                  initialValue: town,
+                  decoration: const InputDecoration(labelText: 'Town'),
+                  items: [
+                    for (final value
+                        in northernCyprusDeliveryLocations[district] ??
+                            const <String>[])
+                      DropdownMenuItem(value: value, child: Text(value)),
+                  ],
+                  onChanged: district == null
+                      ? null
+                      : (value) => setDialogState(() => town = value),
                 ),
-              ),
-            ],
+                TextField(
+                  controller: fee,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(labelText: 'Delivery fee'),
+                ),
+                TextField(
+                  controller: minimum,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(labelText: 'Minimum order'),
+                ),
+                TextField(
+                  controller: minutes,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Estimated minutes',
+                  ),
+                ),
+              ],
+            ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: district == null || town == null
+                  ? null
+                  : () => Navigator.pop(dialogContext, true),
+              child: const Text('Add'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Add'),
-          ),
-        ],
       ),
     );
-    if (save == true && name.text.trim().isNotEmpty && mounted) {
+    if (save == true && district != null && town != null && mounted) {
       final id = '${DateTime.now().microsecondsSinceEpoch}';
       setState(
         () => _draft = _copy(
@@ -825,7 +944,10 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
             ...draft.serviceAreas,
             ServiceArea(
               id: id,
-              name: name.text.trim(),
+              name: town!,
+              country: northernCyprusCountryName,
+              district: district!,
+              town: town!,
               deliveryFeeMinor: _minor(fee.text),
               minimumOrderMinor: _minor(minimum.text),
               estimatedMinutes: int.tryParse(minutes.text) ?? 45,
@@ -834,7 +956,6 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
         ),
       );
     }
-    name.dispose();
     fee.dispose();
     minimum.dispose();
     minutes.dispose();

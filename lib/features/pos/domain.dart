@@ -978,6 +978,9 @@ class PosOrder {
     this.deliveryAddressLabel,
     this.deliveryLatitude,
     this.deliveryLongitude,
+    this.serviceAreaId,
+    this.serviceAreaName,
+    this.deliveryFeeMinor = 0,
     this.scheduledFor,
     this.assignedDriverId,
     this.assignedDriverName,
@@ -1014,6 +1017,9 @@ class PosOrder {
   final String? deliveryAddressLabel;
   final double? deliveryLatitude;
   final double? deliveryLongitude;
+  final String? serviceAreaId;
+  final String? serviceAreaName;
+  final int deliveryFeeMinor;
   final DateTime? scheduledFor;
   final String? assignedDriverId;
   final String? assignedDriverName;
@@ -1022,7 +1028,9 @@ class PosOrder {
 
   bool get isSplitOrder => splitFromOrderId?.trim().isNotEmpty == true;
 
-  int get totalMinor => lines.fold(0, (total, line) => total + line.totalMinor);
+  int get totalMinor =>
+      lines.fold(0, (total, line) => total + line.totalMinor) +
+      (channel == OrderChannel.delivery ? deliveryFeeMinor : 0);
   int get paidMinor =>
       payments.fold(0, (total, payment) => total + payment.baseAmountMinor);
   int get balanceDueMinor => (totalMinor - paidMinor).clamp(0, totalMinor);
@@ -1093,6 +1101,9 @@ class PosOrder {
     String? deliveryAddressLabel,
     double? deliveryLatitude,
     double? deliveryLongitude,
+    String? serviceAreaId,
+    String? serviceAreaName,
+    int? deliveryFeeMinor,
     DateTime? scheduledFor,
     String? assignedDriverId,
     String? assignedDriverName,
@@ -1120,10 +1131,12 @@ class PosOrder {
       customerName: customerName ?? this.customerName,
       customerPhone: customerPhone ?? this.customerPhone,
       deliveryAddress: deliveryAddress ?? this.deliveryAddress,
-      deliveryAddressLabel:
-          deliveryAddressLabel ?? this.deliveryAddressLabel,
+      deliveryAddressLabel: deliveryAddressLabel ?? this.deliveryAddressLabel,
       deliveryLatitude: deliveryLatitude ?? this.deliveryLatitude,
       deliveryLongitude: deliveryLongitude ?? this.deliveryLongitude,
+      serviceAreaId: serviceAreaId ?? this.serviceAreaId,
+      serviceAreaName: serviceAreaName ?? this.serviceAreaName,
+      deliveryFeeMinor: deliveryFeeMinor ?? this.deliveryFeeMinor,
       scheduledFor: scheduledFor ?? this.scheduledFor,
       assignedDriverId: assignedDriverId ?? this.assignedDriverId,
       assignedDriverName: assignedDriverName ?? this.assignedDriverName,

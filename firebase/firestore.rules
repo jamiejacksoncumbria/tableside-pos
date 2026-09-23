@@ -50,6 +50,21 @@ service cloud.firestore {
         && (!isPrinterOnlyHost(tenantId) || hasActivePinAuthorization(tenantId));
     }
 
+    function hasDriverOnlyPinAuthorization(tenantId) {
+      let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
+      return exists(authorizationPath)
+        && get(authorizationPath).data.expiresAt > request.time
+        && get(authorizationPath).data.roles.hasAny(['driver'])
+        && !get(authorizationPath).data.roles.hasAny(['owner', 'manager']);
+    }
+
+    function canReadOrder(tenantId) {
+      let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
+      return canReadOperationalData(tenantId)
+        && (!hasDriverOnlyPinAuthorization(tenantId)
+          || resource.data.assignedDriverId == get(authorizationPath).data.userId);
+    }
+
     function managesTenantWithActivePin(tenantId) {
       let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
       return isMember(tenantId)
@@ -225,20 +240,21 @@ service cloud.firestore {
       match /courses/{courseId} {
         allow read: if canReadOperationalData(tenantId);
         allow write: if false;
+      }
 
-        // Remote devices may only observe their own short-lived command. All
-        // writes and hub acknowledgements pass through trusted server APIs.
-        match /remoteHubCommands/{commandId} {
-          allow read: if canReadOperationalData(tenantId)
-            && (resource.data.hostUid == request.auth.uid
-              || managesVenueWithActivePin(tenantId, venueId));
-          allow write: if false;
-        }
+      // Remote devices may only observe their own short-lived command. These
+      // collections live directly below the venue (not below a course). All
+      // writes and hub acknowledgements pass through trusted server APIs.
+      match /remoteHubCommands/{commandId} {
+        allow read: if canReadOperationalData(tenantId)
+          && (resource.data.hostUid == request.auth.uid
+            || managesVenueWithActivePin(tenantId, venueId));
+        allow write: if false;
+      }
 
-        match /remoteHubState/{stateId} {
-          allow read: if canReadOperationalData(tenantId);
-          allow write: if false;
-        }
+      match /remoteHubState/{stateId} {
+        allow read: if canReadOperationalData(tenantId);
+        allow write: if false;
       }
 
       match /venueCustomers/{customerId} {
@@ -266,7 +282,9 @@ service cloud.firestore {
       }
 
       match /orders/{orderId} {
-        allow read: if canReadOperationalData(tenantId);
+        // A driver-only PIN lease can query only jobs assigned to that driver.
+        // Managers and operational staff retain the normal venue order stream.
+        allow read: if canReadOrder(tenantId);
         allow write: if false;
       }
 

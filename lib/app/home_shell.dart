@@ -178,15 +178,7 @@ class HomeShell extends ConsumerWidget {
               titleSpacing: wide ? 20 : 12,
               title: Row(
                 children: [
-                  CircleAvatar(
-                    radius: 16,
-                    foregroundImage: profile.logoUrl == null
-                        ? null
-                        : NetworkImage(profile.logoUrl!),
-                    child: profile.logoUrl == null
-                        ? const Icon(Icons.storefront_rounded, size: 18)
-                        : null,
-                  ),
+                  _VenueLogo(url: profile.logoUrl),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Column(
@@ -304,20 +296,22 @@ class HomeShell extends ConsumerWidget {
       body: Row(
         children: [
           if (wide)
-            NavigationRail(
-              selectedIndex: index,
-              labelType: NavigationRailLabelType.all,
-              onDestinationSelected: (selected) => ref
-                  .read(homeSectionProvider.notifier)
-                  .select(destinations[selected].section),
-              destinations: [
-                for (final item in destinations)
-                  NavigationRailDestination(
-                    icon: Icon(item.icon),
-                    selectedIcon: Icon(item.icon),
-                    label: Text(item.label),
-                  ),
-              ],
+            SingleChildScrollView(
+              child: NavigationRail(
+                selectedIndex: index,
+                labelType: NavigationRailLabelType.all,
+                onDestinationSelected: (selected) => ref
+                    .read(homeSectionProvider.notifier)
+                    .select(destinations[selected].section),
+                destinations: [
+                  for (final item in destinations)
+                    NavigationRailDestination(
+                      icon: Icon(item.icon),
+                      selectedIcon: Icon(item.icon),
+                      label: Text(item.label),
+                    ),
+                ],
+              ),
             ),
           Expanded(
             // The print worker is intentionally invisible. A default loose
@@ -535,6 +529,31 @@ Future<void> _changeOwnAppearance({
   }
 }
 
+class _VenueLogo extends StatelessWidget {
+  const _VenueLogo({required this.url});
+
+  final String? url;
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback = CircleAvatar(
+      radius: 16,
+      child: const Icon(Icons.storefront_rounded, size: 18),
+    );
+    final value = url?.trim();
+    if (value == null || value.isEmpty) return fallback;
+    return ClipOval(
+      child: Image.network(
+        value,
+        width: 32,
+        height: 32,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => fallback,
+      ),
+    );
+  }
+}
+
 /// Keeps the currently selected service location unmistakable on every screen.
 /// A venue deliberately starts with no table selected to prevent accidental
 /// orders being attached to the first table in the list.
@@ -547,7 +566,18 @@ class _CurrentOrderLocationIndicator extends ConsumerWidget {
     final tabName = order.tabName?.trim();
     final tableId = order.tableId;
     final scheme = Theme.of(context).colorScheme;
-    final (icon, label) = tabName?.isNotEmpty == true
+    final customerName = order.customerName?.trim();
+    final (icon, label) = order.channel == OrderChannel.delivery
+        ? (
+            Icons.delivery_dining_rounded,
+            'Delivery · ${customerName?.isNotEmpty == true ? customerName : 'Customer'}',
+          )
+        : order.channel == OrderChannel.collection
+        ? (
+            Icons.shopping_bag_outlined,
+            'Collection · ${customerName?.isNotEmpty == true ? customerName : 'Customer'}',
+          )
+        : tabName?.isNotEmpty == true
         ? (Icons.person_outline_rounded, 'Current tab: $tabName')
         : tableId == null
         ? (Icons.table_restaurant_outlined, 'No table or tab selected')

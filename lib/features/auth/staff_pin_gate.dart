@@ -929,6 +929,7 @@ class _PasswordReauthenticationDialogState
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    scrollable: true,
     title: const Text('Verify your Firebase account'),
     content: SizedBox(
       width: 420,
@@ -1077,6 +1078,7 @@ class _PinPadDialogState extends State<_PinPadDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    scrollable: true,
     title: widget.title,
     content: KeyboardListener(
       focusNode: _keyboardFocus,
@@ -1114,7 +1116,7 @@ class _PinPadDialogState extends State<_PinPadDialog> {
               physics: const NeverScrollableScrollPhysics(),
               mainAxisSpacing: 8,
               crossAxisSpacing: 8,
-              childAspectRatio: 1.65,
+              childAspectRatio: 1.9,
               children: [
                 for (final digit in const [
                   '1',

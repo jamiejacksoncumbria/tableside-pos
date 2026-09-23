@@ -7,6 +7,7 @@ import '../../core/tenant_scope.dart';
 import '../notifications/notification_centre.dart';
 import 'fulfilment_domain.dart';
 import 'fulfilment_repository.dart';
+import 'delivery_location_catalogue.dart';
 
 /// Creates or edits a venue customer without leaving the current workflow.
 /// Writes remain server mediated so duplicate telephone and permission checks
@@ -139,9 +140,11 @@ Future<VenueCustomer?> showVenueCustomerEditor({
                                           if (edited == null) return;
                                           setDialogState(() {
                                             if (edited.isDefault) {
-                                              for (var other = 0;
-                                                  other < addresses.length;
-                                                  other++) {
+                                              for (
+                                                var other = 0;
+                                                other < addresses.length;
+                                                other++
+                                              ) {
                                                 if (other != index) {
                                                   addresses[other] =
                                                       _withDefault(
@@ -183,16 +186,19 @@ Future<VenueCustomer?> showVenueCustomerEditor({
                           onPressed: saving || addresses.length >= 10
                               ? null
                               : () async {
-                                  final added = await _showCustomerAddressEditor(
-                                    context,
-                                    makeDefault: addresses.isEmpty,
-                                  );
+                                  final added =
+                                      await _showCustomerAddressEditor(
+                                        context,
+                                        makeDefault: addresses.isEmpty,
+                                      );
                                   if (added == null) return;
                                   setDialogState(() {
                                     if (added.isDefault) {
-                                      for (var index = 0;
-                                          index < addresses.length;
-                                          index++) {
+                                      for (
+                                        var index = 0;
+                                        index < addresses.length;
+                                        index++
+                                      ) {
                                         addresses[index] = _withDefault(
                                           addresses[index],
                                           false,
@@ -332,11 +338,19 @@ Future<CustomerAddress?> _showCustomerAddressEditor(
 }) async {
   final key = GlobalKey<FormState>();
   final label = TextEditingController(text: existing?.label ?? 'Home');
-  final country = TextEditingController(
-    text: existing?.country ?? 'North Cyprus',
-  );
+  final country = TextEditingController(text: northernCyprusCountryName);
   final town = TextEditingController(text: existing?.town);
   final area = TextEditingController(text: existing?.area);
+  String? selectedDistrict =
+      northernCyprusDeliveryLocations.containsKey(existing?.area)
+      ? existing!.area
+      : null;
+  String? selectedTown =
+      selectedDistrict != null &&
+          (northernCyprusDeliveryLocations[selectedDistrict] ?? const [])
+              .contains(existing?.town)
+      ? existing!.town
+      : null;
   final lines = TextEditingController(text: existing?.addressLines);
   final notes = TextEditingController(text: existing?.notes);
   final latitude = TextEditingController(
@@ -369,19 +383,46 @@ Future<CustomerAddress?> _showCustomerAddressEditor(
                     validator: _requiredAddressValue,
                   ),
                   TextFormField(
-                    controller: country,
-                    decoration: const InputDecoration(labelText: 'Country'),
-                    validator: _requiredAddressValue,
+                    enabled: false,
+                    decoration: const InputDecoration(
+                      labelText: 'Country',
+                      hintText: northernCyprusCountryName,
+                    ),
                   ),
-                  TextFormField(
-                    controller: town,
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedDistrict,
+                    decoration: const InputDecoration(labelText: 'District'),
+                    items: [
+                      for (final value in northernCyprusDeliveryLocations.keys)
+                        DropdownMenuItem(value: value, child: Text(value)),
+                    ],
+                    validator: (value) =>
+                        value == null ? 'Choose a district.' : null,
+                    onChanged: (value) => setState(() {
+                      selectedDistrict = value;
+                      selectedTown = null;
+                      area.text = value ?? '';
+                      town.clear();
+                    }),
+                  ),
+                  DropdownButtonFormField<String>(
+                    key: ValueKey(selectedDistrict),
+                    initialValue: selectedTown,
                     decoration: const InputDecoration(labelText: 'Town'),
-                    validator: _requiredAddressValue,
-                  ),
-                  TextFormField(
-                    controller: area,
-                    decoration: const InputDecoration(labelText: 'Area'),
-                    validator: _requiredAddressValue,
+                    items: [
+                      for (final value
+                          in northernCyprusDeliveryLocations[selectedDistrict] ??
+                              const <String>[])
+                        DropdownMenuItem(value: value, child: Text(value)),
+                    ],
+                    validator: (value) =>
+                        value == null ? 'Choose a town.' : null,
+                    onChanged: selectedDistrict == null
+                        ? null
+                        : (value) => setState(() {
+                            selectedTown = value;
+                            town.text = value ?? '';
+                          }),
                   ),
                   TextFormField(
                     controller: lines,
@@ -498,9 +539,8 @@ Future<CustomerAddress?> _showCustomerAddressEditor(
   }
 }
 
-String? _requiredAddressValue(String? value) => value?.trim().isEmpty != false
-    ? 'This address field is required.'
-    : null;
+String? _requiredAddressValue(String? value) =>
+    value?.trim().isEmpty != false ? 'This address field is required.' : null;
 
 String? _coordinateError(
   String? value,

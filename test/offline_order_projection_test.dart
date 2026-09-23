@@ -181,6 +181,9 @@ void main() {
           'customerName': 'Jamie Jackson',
           'customerPhone': '+905551234567',
           'deliveryAddress': 'Kyrenia Centre',
+          'serviceAreaId': 'kyrenia',
+          'serviceAreaName': 'Kyrenia',
+          'deliveryFeeMinor': 15000,
           'scheduledForUtc': '2026-09-12T18:30:00.000Z',
         }),
         _event(2, 'order.fulfilmentChanged', {
@@ -212,6 +215,9 @@ void main() {
         'customerId': 'customer-a',
         'customerName': 'Jamie Jackson',
         'deliveryAddress': 'Kyrenia Centre',
+        'serviceAreaId': 'kyrenia',
+        'serviceAreaName': 'Kyrenia',
+        'deliveryFeeMinor': 15000,
       }),
       _event(2, 'order.fulfilmentChanged', {
         'orderId': 'order-a',

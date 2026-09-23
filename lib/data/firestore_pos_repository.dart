@@ -812,6 +812,9 @@ class FirestorePosRepository {
       deliveryAddressLabel: data['deliveryAddressLabel'] as String?,
       deliveryLatitude: (data['deliveryLatitude'] as num?)?.toDouble(),
       deliveryLongitude: (data['deliveryLongitude'] as num?)?.toDouble(),
+      serviceAreaId: data['serviceAreaId'] as String?,
+      serviceAreaName: data['serviceAreaName'] as String?,
+      deliveryFeeMinor: (data['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
       scheduledFor:
           _dateTime(data['scheduledFor']) ??
           _dateTimeFromMillis(data['scheduledForMillis']),

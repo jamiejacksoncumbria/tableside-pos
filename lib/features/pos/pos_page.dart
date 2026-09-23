@@ -2658,6 +2658,26 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                       ),
                     ),
             ),
+            if (order.channel == OrderChannel.delivery &&
+                order.deliveryFeeMinor > 0) ...[
+              const Divider(height: 20),
+              Row(
+                children: [
+                  Text(
+                    order.serviceAreaName?.trim().isNotEmpty == true
+                        ? 'Delivery · ${order.serviceAreaName}'
+                        : 'Delivery fee',
+                  ),
+                  const Spacer(),
+                  Text(
+                    formatMoney(
+                      order.deliveryFeeMinor,
+                      currencyCode: widget.currencyCode,
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const Divider(height: 24),
             Row(
               children: [
@@ -4398,7 +4418,7 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
       _error = null;
     });
     try {
-      await ref.read(activeOrderProvider.notifier).openNamedTab(tab.name);
+      ref.read(activeOrderProvider.notifier).openExistingNamedTab(tab);
       ref.read(selectedTableProvider.notifier).select('');
       if (mounted) Navigator.of(context).pop(true);
     } on Object catch (error, stackTrace) {
@@ -4409,7 +4429,10 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
     }
   }
 
-  Future<void> _startFulfilment(OrderChannel channel) async {
+  Future<void> _startFulfilment(
+    OrderChannel channel,
+    VenueFulfilmentSettings settings,
+  ) async {
     setState(() {
       _saving = true;
       _error = null;
@@ -4441,7 +4464,7 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                 customer.phoneNumbers.any((number) => number.trim().isNotEmpty),
           )
           .toList(growable: false);
-      await _chooseFulfilmentCustomer(channel, customers);
+      await _chooseFulfilmentCustomer(channel, customers, settings);
     } on Object catch (error, stackTrace) {
       AppLogger.error('Start ${channel.label} order', error, stackTrace);
       if (!mounted) return;
@@ -4463,6 +4486,7 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
   Future<void> _chooseFulfilmentCustomer(
     OrderChannel channel,
     List<VenueCustomer> customers,
+    VenueFulfilmentSettings settings,
   ) async {
     final selected = await _pickFulfilmentCustomer(channel, customers);
     if (selected == null || !mounted) return;
@@ -4478,9 +4502,23 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
         .where((item) => item.isDefault)
         .firstOrNull;
     selectedAddress ??= selected.addresses.firstOrNull;
-    final address = TextEditingController(
-      text: selectedAddress?.oneLine ?? '',
-    );
+    final activeAreas = settings.serviceAreas
+        .where((area) => area.active)
+        .toList(growable: false);
+    ServiceArea? selectedArea;
+    if (channel == OrderChannel.delivery && selectedAddress != null) {
+      final addressTerms = {
+        selectedAddress.town.trim().toLowerCase(),
+        selectedAddress.area.trim().toLowerCase(),
+      }..remove('');
+      selectedArea = activeAreas
+          .where(
+            (area) => addressTerms.contains(area.name.trim().toLowerCase()),
+          )
+          .firstOrNull;
+    }
+    selectedArea ??= activeAreas.length == 1 ? activeAreas.first : null;
+    final address = TextEditingController(text: selectedAddress?.oneLine ?? '');
     String? validationError;
     final confirmed = await showAppDialog<bool>(
       context: context,
@@ -4518,10 +4556,19 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                     onChanged: (value) => setCustomerState(() {
                       selectedAddress = value;
                       address.text = value?.oneLine ?? '';
+                      final terms = {
+                        value?.town.trim().toLowerCase() ?? '',
+                        value?.area.trim().toLowerCase() ?? '',
+                      }..remove('');
+                      selectedArea = activeAreas
+                          .where(
+                            (area) =>
+                                terms.contains(area.name.trim().toLowerCase()),
+                          )
+                          .firstOrNull;
                     }),
                   ),
-                if (selected.addresses.isNotEmpty)
-                  const SizedBox(height: 8),
+                if (selected.addresses.isNotEmpty) const SizedBox(height: 8),
                 TextField(
                   controller: address,
                   maxLines: 3,
@@ -4533,6 +4580,25 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                       selectedAddress = null;
                     }
                   }),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<ServiceArea>(
+                  initialValue: selectedArea,
+                  decoration: const InputDecoration(
+                    labelText: 'Delivery town / area',
+                    prefixIcon: Icon(Icons.map_outlined),
+                  ),
+                  items: [
+                    for (final area in activeAreas)
+                      DropdownMenuItem(
+                        value: area,
+                        child: Text(
+                          '${area.name} · ${(area.deliveryFeeMinor / 100).toStringAsFixed(2)}',
+                        ),
+                      ),
+                  ],
+                  onChanged: (value) =>
+                      setCustomerState(() => selectedArea = value),
                 ),
                 if (selectedAddress?.notes.trim().isNotEmpty == true)
                   ListTile(
@@ -4629,6 +4695,14 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                   );
                   return;
                 }
+                if (channel == OrderChannel.delivery && selectedArea == null) {
+                  setCustomerState(
+                    () => validationError = activeAreas.isEmpty
+                        ? 'A manager must configure at least one delivery area.'
+                        : 'Choose the delivery town / area.',
+                  );
+                  return;
+                }
                 Navigator.pop(customerContext, true);
               },
               child: const Text('Start order'),
@@ -4661,10 +4735,22 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
             deliveryLongitude: channel == OrderChannel.delivery
                 ? selectedAddress?.longitude
                 : null,
+            serviceAreaId: channel == OrderChannel.delivery
+                ? selectedArea?.id
+                : null,
+            serviceAreaName: channel == OrderChannel.delivery
+                ? selectedArea?.name
+                : null,
+            deliveryFeeMinor: channel == OrderChannel.delivery
+                ? selectedArea?.deliveryFeeMinor ?? 0
+                : 0,
             scheduledFor: scheduledFor,
             assignedDriverId: selectedDriver?.id,
             assignedDriverName: selectedDriver?.name,
           );
+      // Collection and delivery orders have no table tile to select again.
+      // Move straight to the menu so staff can begin adding the order.
+      ref.read(posCompactTabProvider.notifier).select(1);
       await WidgetsBinding.instance.endOfFrame;
       if (mounted) Navigator.of(context).pop(true);
     }
@@ -4748,8 +4834,13 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                                       '${customer.phoneNumbers.join(' · ')}${address == null ? '' : '\n${address.area}, ${address.town}'}',
                                     ),
                                     isThreeLine: address != null,
-                                    trailing: const Icon(
-                                      Icons.chevron_right_rounded,
+                                    trailing: IconButton(
+                                      tooltip: 'Edit customer or add address',
+                                      onPressed: () => Navigator.pop(
+                                        pickerContext,
+                                        _EditFulfilmentCustomer(customer),
+                                      ),
+                                      icon: const Icon(Icons.edit_outlined),
                                     ),
                                     onTap: () =>
                                         Navigator.pop(pickerContext, customer),
@@ -4783,6 +4874,17 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
         },
       );
       if (selected is VenueCustomer) return selected;
+      if (selected is _EditFulfilmentCustomer && mounted) {
+        final scope = ref.read(activeVenueScopeProvider);
+        if (scope == null) return null;
+        return await showVenueCustomerEditor(
+          context: context,
+          ref: ref,
+          scope: scope,
+          existing: selected.customer,
+          requireAddress: channel == OrderChannel.delivery,
+        );
+      }
       if (selected is _CreateFulfilmentCustomer && mounted) {
         final scope = ref.read(activeVenueScopeProvider);
         if (scope == null) return null;
@@ -4815,7 +4917,7 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
           );
           return;
         }
-        unawaited(_startFulfilment(channel));
+        unawaited(_startFulfilment(channel, value));
       },
       loading: () => setState(
         () => _error = 'Venue collection and delivery settings are loading.',
@@ -5053,6 +5155,12 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
 
 class _CreateFulfilmentCustomer {
   const _CreateFulfilmentCustomer();
+}
+
+class _EditFulfilmentCustomer {
+  const _EditFulfilmentCustomer(this.customer);
+
+  final VenueCustomer customer;
 }
 
 Future<void> _showNamedTabDialog(BuildContext context, WidgetRef ref) async {

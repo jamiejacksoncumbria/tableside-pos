@@ -99,6 +99,9 @@ class OfflineOrderProjection {
     this.deliveryAddressLabel,
     this.deliveryLatitude,
     this.deliveryLongitude,
+    this.serviceAreaId,
+    this.serviceAreaName,
+    this.deliveryFeeMinor = 0,
     this.scheduledForUtc,
     this.fulfilmentStatus = 'awaitingPreparation',
     this.assignedDriverId,
@@ -124,12 +127,16 @@ class OfflineOrderProjection {
   final String? deliveryAddressLabel;
   final double? deliveryLatitude;
   final double? deliveryLongitude;
+  final String? serviceAreaId;
+  final String? serviceAreaName;
+  final int deliveryFeeMinor;
   final DateTime? scheduledForUtc;
   final String fulfilmentStatus;
   final String? assignedDriverId;
 
   int get totalMinor =>
-      lines.values.fold(0, (sum, line) => sum + line.totalMinor);
+      lines.values.fold(0, (sum, line) => sum + line.totalMinor) +
+      (channel == 'delivery' ? deliveryFeeMinor : 0);
   int get paidMinor =>
       payments.fold(0, (sum, payment) => sum + payment.baseAmountMinor);
   int get balanceDueMinor => totalMinor - paidMinor;
@@ -153,6 +160,9 @@ class OfflineOrderProjection {
     'deliveryAddressLabel': deliveryAddressLabel,
     'deliveryLatitude': deliveryLatitude,
     'deliveryLongitude': deliveryLongitude,
+    'serviceAreaId': serviceAreaId,
+    'serviceAreaName': serviceAreaName,
+    'deliveryFeeMinor': deliveryFeeMinor,
     'scheduledForUtc': scheduledForUtc?.toIso8601String(),
     'fulfilmentStatus': fulfilmentStatus,
     'assignedDriverId': assignedDriverId,
@@ -214,6 +224,9 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
   String? deliveryAddressLabel;
   double? deliveryLatitude;
   double? deliveryLongitude;
+  String? serviceAreaId;
+  String? serviceAreaName;
+  var deliveryFeeMinor = 0;
   DateTime? scheduledForUtc;
   var fulfilmentStatus = 'awaitingPreparation';
   String? assignedDriverId;
@@ -263,8 +276,14 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         customerPhone = event.payload['customerPhone'] as String?;
         deliveryAddress = event.payload['deliveryAddress'] as String?;
         deliveryAddressLabel = event.payload['deliveryAddressLabel'] as String?;
-        deliveryLatitude = (event.payload['deliveryLatitude'] as num?)?.toDouble();
-        deliveryLongitude = (event.payload['deliveryLongitude'] as num?)?.toDouble();
+        deliveryLatitude = (event.payload['deliveryLatitude'] as num?)
+            ?.toDouble();
+        deliveryLongitude = (event.payload['deliveryLongitude'] as num?)
+            ?.toDouble();
+        serviceAreaId = event.payload['serviceAreaId'] as String?;
+        serviceAreaName = event.payload['serviceAreaName'] as String?;
+        deliveryFeeMinor =
+            (event.payload['deliveryFeeMinor'] as num?)?.toInt() ?? 0;
         final scheduled = event.payload['scheduledForUtc'] as String?;
         scheduledForUtc = scheduled == null
             ? null
@@ -374,6 +393,14 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
             'A driver may update only their own assigned delivery.',
           );
         }
+        if (channel == 'delivery' &&
+            (serviceAreaId?.trim().isEmpty != false ||
+                serviceAreaName?.trim().isEmpty != false ||
+                deliveryFeeMinor < 0)) {
+          throw const OfflineProjectionException(
+            'A delivery order needs a valid delivery area and fee.',
+          );
+        }
         fulfilmentStatus = status;
         assignedDriverId = status == 'driverDeclined'
             ? null
@@ -468,6 +495,9 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     deliveryAddressLabel: deliveryAddressLabel,
     deliveryLatitude: deliveryLatitude,
     deliveryLongitude: deliveryLongitude,
+    serviceAreaId: serviceAreaId,
+    serviceAreaName: serviceAreaName,
+    deliveryFeeMinor: deliveryFeeMinor,
     scheduledForUtc: scheduledForUtc,
     fulfilmentStatus: fulfilmentStatus,
     assignedDriverId: assignedDriverId,

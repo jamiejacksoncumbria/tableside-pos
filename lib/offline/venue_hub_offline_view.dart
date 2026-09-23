@@ -188,6 +188,9 @@ class VenueHubOfflineView {
       deliveryAddressLabel: value['deliveryAddressLabel'] as String?,
       deliveryLatitude: (value['deliveryLatitude'] as num?)?.toDouble(),
       deliveryLongitude: (value['deliveryLongitude'] as num?)?.toDouble(),
+      serviceAreaId: value['serviceAreaId'] as String?,
+      serviceAreaName: value['serviceAreaName'] as String?,
+      deliveryFeeMinor: (value['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
       scheduledFor: DateTime.tryParse(
         value['scheduledForUtc'] as String? ?? '',
       )?.toLocal(),
@@ -326,6 +329,10 @@ class VenueHubOfflineView {
           return ServiceArea(
             id: area['id'] as String? ?? '',
             name: area['name'] as String? ?? 'Area',
+            country:
+                area['country'] as String? ?? 'Kuzey Kıbrıs Türk Cumhuriyeti',
+            district: area['district'] as String? ?? '',
+            town: area['town'] as String? ?? area['name'] as String? ?? '',
             deliveryFeeMinor: (area['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
             minimumOrderMinor:
                 (area['minimumOrderMinor'] as num?)?.toInt() ?? 0,

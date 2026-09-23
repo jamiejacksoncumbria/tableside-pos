@@ -1169,6 +1169,9 @@ class ProductionCommandRepository {
         deliveryAddressLabel: order.deliveryAddressLabel,
         deliveryLatitude: order.deliveryLatitude,
         deliveryLongitude: order.deliveryLongitude,
+        serviceAreaId: order.serviceAreaId,
+        serviceAreaName: order.serviceAreaName,
+        deliveryFeeMinor: order.deliveryFeeMinor,
         scheduledFor: order.scheduledFor,
         assignedDriverId: order.assignedDriverId,
         assignedDriverName: order.assignedDriverName,
@@ -1208,6 +1211,9 @@ class ProductionCommandRepository {
       'deliveryAddressLabel': order.deliveryAddressLabel,
       'deliveryLatitude': order.deliveryLatitude,
       'deliveryLongitude': order.deliveryLongitude,
+      'serviceAreaId': order.serviceAreaId,
+      'serviceAreaName': order.serviceAreaName,
+      'deliveryFeeMinor': order.deliveryFeeMinor,
       'scheduledForMillis': order.scheduledFor?.millisecondsSinceEpoch,
       'primaryWaiterId': order.primaryWaiterId,
       'primaryWaiterName': order.primaryWaiterName,
@@ -1311,6 +1317,9 @@ class ProductionCommandRepository {
         deliveryAddressLabel: order.deliveryAddressLabel,
         deliveryLatitude: order.deliveryLatitude,
         deliveryLongitude: order.deliveryLongitude,
+        serviceAreaId: order.serviceAreaId,
+        serviceAreaName: order.serviceAreaName,
+        deliveryFeeMinor: order.deliveryFeeMinor,
         scheduledFor: order.scheduledFor,
         assignedDriverId: order.assignedDriverId,
         assignedDriverName: order.assignedDriverName,
@@ -1492,6 +1501,7 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required PosOrder order,
     required List<BillPaymentInput> payments,
+    required String baseCurrencyCode,
     required bool printReceipt,
     required String requestId,
   }) async {
@@ -1510,6 +1520,9 @@ class ProductionCommandRepository {
         deliveryAddressLabel: order.deliveryAddressLabel,
         deliveryLatitude: order.deliveryLatitude,
         deliveryLongitude: order.deliveryLongitude,
+        serviceAreaId: order.serviceAreaId,
+        serviceAreaName: order.serviceAreaName,
+        deliveryFeeMinor: order.deliveryFeeMinor,
         scheduledFor: order.scheduledFor,
         assignedDriverId: order.assignedDriverId,
         assignedDriverName: order.assignedDriverName,
@@ -1555,7 +1568,10 @@ class ProductionCommandRepository {
       return BillCloseResult(
         billId: 'offline-${order.id}',
         totalMinor: order.totalMinor,
-        currencyCode: payments.firstOrNull?.tenderedCurrencyCode ?? 'GBP',
+        // Bill values, outstanding balance and change are always denominated
+        // in the venue's reporting currency. The currency tendered by the
+        // customer belongs only on the individual payment entry.
+        currencyCode: baseCurrencyCode.trim().toUpperCase(),
         receiptNumber: receiptNumber,
         alreadyClosed: false,
         receiptPrintRequested: printReceipt && closed,
@@ -1832,6 +1848,9 @@ class ProductionCommandRepository {
     String? deliveryAddressLabel,
     double? deliveryLatitude,
     double? deliveryLongitude,
+    String? serviceAreaId,
+    String? serviceAreaName,
+    int deliveryFeeMinor = 0,
     DateTime? scheduledFor,
     String? assignedDriverId,
     String? assignedDriverName,
@@ -1851,6 +1870,9 @@ class ProductionCommandRepository {
         deliveryAddressLabel: deliveryAddressLabel,
         deliveryLatitude: deliveryLatitude,
         deliveryLongitude: deliveryLongitude,
+        serviceAreaId: serviceAreaId,
+        serviceAreaName: serviceAreaName,
+        deliveryFeeMinor: deliveryFeeMinor,
         scheduledFor: scheduledFor,
         assignedDriverId: assignedDriverId,
         assignedDriverName: assignedDriverName,
@@ -1877,6 +1899,12 @@ class ProductionCommandRepository {
           'deliveryAddressLabel': deliveryAddressLabel!.trim(),
         if (deliveryLatitude != null) 'deliveryLatitude': deliveryLatitude,
         if (deliveryLongitude != null) 'deliveryLongitude': deliveryLongitude,
+        if (serviceAreaId?.trim().isNotEmpty == true)
+          'serviceAreaId': serviceAreaId!.trim(),
+        if (serviceAreaName?.trim().isNotEmpty == true)
+          'serviceAreaName': serviceAreaName!.trim(),
+        if (channel == OrderChannel.delivery)
+          'deliveryFeeMinor': deliveryFeeMinor,
         if (scheduledFor != null)
           'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
         if (assignedDriverId?.trim().isNotEmpty == true)

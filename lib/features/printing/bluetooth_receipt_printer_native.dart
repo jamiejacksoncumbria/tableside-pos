@@ -362,7 +362,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       ...generator.text('Printed: $printedAt'),
       ...generator.hr(),
       ...itemBytes,
-      if (receipt.isDeliveryNote)
+      if (receipt.channel == 'delivery' && receipt.deliveryChargeMinor > 0)
         ...generator.row([
           PosColumn(text: 'Delivery charge', width: 7),
           PosColumn(

@@ -379,7 +379,8 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         WindowsPrintLine('Business date: ${payload['businessDate'] as String}'),
       const WindowsPrintLine(''),
       ...itemLines,
-      if (payload['isDeliveryNote'] == true)
+      if (channel == 'delivery' &&
+          ((payload['deliveryChargeMinor'] as num?)?.toInt() ?? 0) > 0)
         WindowsPrintLine(
           'Delivery charge',
           rightText: _money(

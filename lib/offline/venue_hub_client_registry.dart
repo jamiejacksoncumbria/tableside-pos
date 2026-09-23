@@ -10,6 +10,7 @@ import 'venue_hub_bootstrap.dart';
 import 'venue_hub_client.dart';
 import 'venue_hub_device_credential.dart';
 import 'venue_hub_offline_view.dart';
+import 'venue_hub_availability.dart';
 
 /// Process-local routing authority for operational POS commands.
 ///
@@ -99,6 +100,9 @@ class VenueHubClientRegistry {
     String? deliveryAddressLabel,
     double? deliveryLatitude,
     double? deliveryLongitude,
+    String? serviceAreaId,
+    String? serviceAreaName,
+    int deliveryFeeMinor = 0,
     DateTime? scheduledFor,
     String? assignedDriverId,
     String? assignedDriverName,
@@ -130,6 +134,12 @@ class VenueHubClientRegistry {
           'deliveryAddressLabel': deliveryAddressLabel!.trim(),
         if (deliveryLatitude != null) 'deliveryLatitude': deliveryLatitude,
         if (deliveryLongitude != null) 'deliveryLongitude': deliveryLongitude,
+        if (serviceAreaId?.trim().isNotEmpty == true)
+          'serviceAreaId': serviceAreaId!.trim(),
+        if (serviceAreaName?.trim().isNotEmpty == true)
+          'serviceAreaName': serviceAreaName!.trim(),
+        if (channel == OrderChannel.delivery)
+          'deliveryFeeMinor': deliveryFeeMinor,
         if (scheduledFor != null)
           'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
         if (assignedDriverId?.trim().isNotEmpty == true)
@@ -235,11 +245,13 @@ class VenueHubClientRegistry {
       _sessionExpiresAtUtc = login.expiresAtUtc;
       VenueHubOfflineView.instance.install(await _client!.fetchCatalogue());
       _startOrderStream();
+      VenueHubAvailability.markOnline();
       return login;
     } catch (error) {
       loginClient.close();
       _connectionFailure = error.toString();
       _clearSession(preserveAuthority: true);
+      VenueHubAvailability.markOffline(error.toString());
       rethrow;
     }
   }

@@ -620,6 +620,7 @@ async function manageMenuConfigurationFor(caller, rawData) {
   const collection = db.collection(`tenants/${tenantId}/${collectionName}`);
   const reference = documentId == null ? collection.doc() : collection.doc(documentId);
   const actor = actorSnapshot(await auth.getUser(caller.uid));
+  let componentSnapshotsToEnable = [];
 
   if (operation === "reorder") {
     if (resource !== "section" || documentId != null) {
@@ -1139,13 +1140,18 @@ async function manageMenuConfigurationFor(caller, rawData) {
       : await db.getAll(...componentIds.map((id) =>
           db.doc(`tenants/${tenantId}/products/${id}`)));
     if (componentSnapshots.some((item) => !item.exists ||
-        item.data().venueId !== venueId || item.data().trackStock !== true ||
-        item.data().archived === true)) {
+        item.data().venueId !== venueId || item.data().archived === true)) {
       throw new HttpsError(
         "failed-precondition",
-        "Every ingredient must be a stock-tracked product at this venue.",
+        "Every ingredient must be an active product at this venue.",
       );
     }
+    // Choosing a product as an ingredient opts it into stock tracking. A zero
+    // opening balance is deliberate: normal sales fail closed until stock is
+    // entered, while an audited manager override can permit a genuine negative.
+    componentSnapshotsToEnable = componentSnapshots.filter(
+      (item) => item.data().trackStock !== true,
+    );
     const componentById = new Map(componentSnapshots.map((item) => [item.id, item.data()]));
     const hydrateComponents = (components) => components.map((item) => ({
       ...item,
@@ -1294,6 +1300,21 @@ async function manageMenuConfigurationFor(caller, rawData) {
   };
   try {
     await reference.set(writeData, {merge: documentId != null});
+    await Promise.all(componentSnapshotsToEnable.map((component) =>
+      component.ref.set({
+        trackStock: true,
+        stockOnHand: Number.isFinite(Number(component.data().stockOnHand))
+          ? Number(component.data().stockOnHand) : 0,
+        stockUnit: typeof component.data().stockUnit === "string" &&
+          component.data().stockUnit.trim().length > 0
+          ? component.data().stockUnit : "each",
+        stockPerSale: Number.isFinite(Number(component.data().stockPerSale)) &&
+          Number(component.data().stockPerSale) > 0
+          ? Number(component.data().stockPerSale) : 1,
+        updatedAt: FieldValue.serverTimestamp(),
+        updatedByActor: actor,
+      }, {merge: true}),
+    ));
   } catch (error) {
     if (uploadedImagePath != null) {
       try {
@@ -1330,7 +1351,14 @@ async function manageMenuConfigurationFor(caller, rawData) {
     await writer.close();
   }
   await writeAudit(caller.uid, "saveMenuConfiguration", reference.id, {
-    tenantId, venueId, resource, operation: documentId == null ? "create" : "update", actor,
+    tenantId,
+    venueId,
+    resource,
+    operation: documentId == null ? "create" : "update",
+    actor,
+    autoEnabledStockProductIds: componentSnapshotsToEnable.map(
+      (component) => component.id,
+    ),
   });
   return {documentId: reference.id, saved: true};
 }
@@ -1414,6 +1442,13 @@ async function manageVenueConfigurationFor(caller, rawData) {
           return {
             id: requiredDocumentId(area, "id"),
             name: catalogueTitleCase(requiredText(area, "name", 100)),
+            country: catalogueTitleCase(
+              optionalText(area, "country", 100) || "Kuzey Kıbrıs Türk Cumhuriyeti",
+            ),
+            district: catalogueTitleCase(optionalText(area, "district", 100) || ""),
+            town: catalogueTitleCase(
+              optionalText(area, "town", 100) || requiredText(area, "name", 100),
+            ),
             deliveryFeeMinor: requiredNonNegativeInteger(
               area.deliveryFeeMinor ?? 0, "deliveryFeeMinor", 100000000,
             ),
@@ -3116,8 +3151,12 @@ function offlineBillFromProjectedOrder(
     const net = Math.round(gross * 10000 / (10000 + basisPoints));
     return {...line, lineTotalMinor: gross, netMinor: net, taxMinor: gross - net};
   });
-  const grossTotalMinor = lines.reduce((sum, line) => sum + line.lineTotalMinor, 0);
-  const netTotalMinor = lines.reduce((sum, line) => sum + line.netMinor, 0);
+  const deliveryFeeMinor = order.channel === "delivery"
+    ? Number(order.deliveryFeeMinor ?? 0) : 0;
+  const lineGrossMinor = lines.reduce((sum, line) => sum + line.lineTotalMinor, 0);
+  const grossTotalMinor = lineGrossMinor + deliveryFeeMinor;
+  const netTotalMinor = lines.reduce((sum, line) => sum + line.netMinor, 0) +
+    deliveryFeeMinor;
   const closedAt = order.closedAt instanceof Date ? order.closedAt : new Date();
   return {
     venueId: upload.venueId, orderId,
@@ -3126,6 +3165,12 @@ function offlineBillFromProjectedOrder(
     currencyCode: lines[0]?.currencyCode ?? "GBP",
     tableId: order.tableId ?? null, tableLabel: order.tableLabel ?? null,
     tabName: order.tabName ?? null, lines, payments: order.payments,
+    channel: order.channel ?? "dineIn",
+    customerName: order.customerName ?? null,
+    deliveryAddress: order.deliveryAddress ?? null,
+    serviceAreaId: order.serviceAreaId ?? null,
+    serviceAreaName: order.serviceAreaName ?? null,
+    deliveryFeeMinor,
     grossTotalMinor, totalMinor: grossTotalMinor, netTotalMinor,
     taxTotalMinor: grossTotalMinor - netTotalMinor,
     businessDate: billBusinessDate(
@@ -3170,6 +3215,10 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
         ? payload.deliveryLatitude ?? null : null,
       deliveryLongitude: channel === "delivery"
         ? payload.deliveryLongitude ?? null : null,
+      serviceAreaId: channel === "delivery" ? payload.serviceAreaId ?? null : null,
+      serviceAreaName: channel === "delivery" ? payload.serviceAreaName ?? null : null,
+      deliveryFeeMinor: channel === "delivery"
+        ? Number(payload.deliveryFeeMinor ?? 0) : 0,
       scheduledForUtc: payload.scheduledForUtc ?? null,
       assignedDriverId: channel === "delivery"
         ? payload.assignedDriverId ?? null : null,
@@ -5183,6 +5232,8 @@ async function addOrderDraftLineFor(caller, rawData) {
   const tableId = optionalText(data, "tableId", 180) || null;
   const tabName = optionalText(data, "tabName", 80) || null;
   const channel = optionalText(data, "channel", 20) || "dineIn";
+  const requestedServiceAreaId = channel === "delivery"
+    ? requiredDocumentId(data, "serviceAreaId") : null;
   if (!["dineIn", "collection", "delivery"].includes(channel) ||
       (channel === "dineIn" && (tableId == null) === (tabName == null)) ||
       (channel !== "dineIn" && (tableId != null || tabName != null))) {
@@ -5240,6 +5291,27 @@ async function addOrderDraftLineFor(caller, rawData) {
         (channel === "delivery" && venue.data().deliveryEnabled !== true)) {
       throw new HttpsError("failed-precondition", `${channel} ordering is not enabled at this venue.`);
     }
+    const serviceArea = channel === "delivery"
+      ? (Array.isArray(venue.data().serviceAreas) ? venue.data().serviceAreas : [])
+          .find((area) => area?.id === requestedServiceAreaId && area?.active !== false)
+      : null;
+    if (channel === "delivery" && serviceArea == null) {
+      throw new HttpsError(
+        "failed-precondition", "Choose an active delivery town or area.",
+      );
+    }
+    const serviceAreaName = serviceArea == null
+      ? null : requiredText(serviceArea, "name", 100);
+    const deliveryFeeMinor = serviceArea == null
+      ? 0 : requiredNonNegativeInteger(
+          serviceArea.deliveryFeeMinor ?? 0, "deliveryFeeMinor", 100000000,
+        );
+    const serviceAreaMinimumOrderMinor = serviceArea == null
+      ? 0 : requiredNonNegativeInteger(
+          serviceArea.minimumOrderMinor ?? 0,
+          "minimumOrderMinor",
+          100000000,
+        );
     let assignedDriverName = null;
     if (driver != null) {
       const driverRoles = driver.exists && Array.isArray(driver.data().roles)
@@ -5284,6 +5356,12 @@ async function addOrderDraftLineFor(caller, rawData) {
       }
       if ((current.channel ?? "dineIn") !== channel) {
         throw new HttpsError("failed-precondition", "This order belongs to another sales channel.");
+      }
+      if (channel === "delivery" &&
+          (current.serviceAreaId ?? null) !== requestedServiceAreaId) {
+        throw new HttpsError(
+          "failed-precondition", "This delivery order belongs to another delivery area.",
+        );
       }
       priorLines = Array.isArray(current.lines) ? current.lines : [];
       // A lost HTTP response must never result in the same tap being added
@@ -5468,6 +5546,11 @@ async function addOrderDraftLineFor(caller, rawData) {
       deliveryAddressLabel,
       deliveryLatitude: channel === "delivery" ? deliveryLatitude : null,
       deliveryLongitude: channel === "delivery" ? deliveryLongitude : null,
+      serviceAreaId: channel === "delivery" ? requestedServiceAreaId : null,
+      serviceAreaName: channel === "delivery" ? serviceAreaName : null,
+      deliveryFeeMinor: channel === "delivery" ? deliveryFeeMinor : 0,
+      serviceAreaMinimumOrderMinor: channel === "delivery"
+        ? serviceAreaMinimumOrderMinor : 0,
       scheduledForMillis: channel === "dineIn" ? null :
         (Number.isSafeInteger(Number(data.scheduledForMillis))
           ? Number(data.scheduledForMillis) : null),
@@ -6850,7 +6933,28 @@ async function closeOrderFor(caller, rawData) {
           : [],
       };
     });
-    const totalMinor = lines.reduce((total, line) => total + line.lineTotalMinor, 0);
+    const deliveryFeeMinor = orderData.channel === "delivery"
+      ? requiredNonNegativeInteger(
+          orderData.deliveryFeeMinor ?? 0, "deliveryFeeMinor", 100000000,
+        )
+      : 0;
+    const lineTotalMinor = lines.reduce(
+      (total, line) => total + line.lineTotalMinor, 0,
+    );
+    const minimumOrderMinor = orderData.channel === "delivery"
+      ? requiredNonNegativeInteger(
+          orderData.serviceAreaMinimumOrderMinor ?? 0,
+          "minimumOrderMinor",
+          100000000,
+        )
+      : 0;
+    if (lineTotalMinor < minimumOrderMinor) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The food and drink total is below this delivery area's minimum order.",
+      );
+    }
+    const totalMinor = lineTotalMinor + deliveryFeeMinor;
     if (!Number.isSafeInteger(totalMinor) || totalMinor <= 0) {
       throw new HttpsError("failed-precondition", "This order has no payable total.");
     }
@@ -6869,6 +6973,17 @@ async function closeOrderFor(caller, rawData) {
       current.netMinor += line.netMinor;
       current.taxMinor += line.taxMinor;
       taxByRate.set(taxKey, current);
+    }
+    if (deliveryFeeMinor > 0) {
+      const deliveryTaxKey = "delivery_fee_zero_rate";
+      taxByRate.set(deliveryTaxKey, {
+        taxRateId: null,
+        taxRateName: "Delivery fee",
+        taxRateBasisPoints: 0,
+        grossMinor: deliveryFeeMinor,
+        netMinor: deliveryFeeMinor,
+        taxMinor: 0,
+      });
     }
     const taxBreakdown = [...taxByRate.values()].sort(
       (left, right) => left.taxRateBasisPoints - right.taxRateBasisPoints,
@@ -7085,6 +7200,9 @@ async function closeOrderFor(caller, rawData) {
       deliveryAddressLabel: orderData.deliveryAddressLabel ?? null,
       deliveryLatitude: orderData.deliveryLatitude ?? null,
       deliveryLongitude: orderData.deliveryLongitude ?? null,
+      serviceAreaId: orderData.serviceAreaId ?? null,
+      serviceAreaName: orderData.serviceAreaName ?? null,
+      deliveryFeeMinor,
       scheduledForMillis: orderData.scheduledForMillis ?? null,
       splitFromOrderId,
       splitSequence: Number.isInteger(orderData.splitSequence)
@@ -7162,6 +7280,10 @@ async function closeOrderFor(caller, rawData) {
           deliveryAddressLabel: orderData.deliveryAddressLabel ?? null,
           deliveryLatitude: orderData.deliveryLatitude ?? null,
           deliveryLongitude: orderData.deliveryLongitude ?? null,
+          deliveryChargeMinor: deliveryFeeMinor,
+          serviceAreaId: orderData.serviceAreaId ?? null,
+          serviceAreaName: orderData.serviceAreaName ?? null,
+          deliveryFeeMinor,
           scheduledForMillis: orderData.scheduledForMillis ?? null,
           totalMinor,
           netTotalMinor,
@@ -10197,7 +10319,9 @@ async function printFulfilmentDeliveryNoteFor(caller, rawData) {
   const itemsTotalMinor = receiptLines.reduce(
     (sum, line) => sum + Number(line.lineTotalMinor), 0,
   );
-  const deliveryChargeMinor = Number(order.data().deliveryChargeMinor ?? 0);
+  const deliveryChargeMinor = Number(
+    order.data().deliveryFeeMinor ?? order.data().deliveryChargeMinor ?? 0,
+  );
   const totalMinor = itemsTotalMinor +
     (Number.isSafeInteger(deliveryChargeMinor) ? deliveryChargeMinor : 0);
   const jobId = `deliveryNote_${orderId}_${requestId}_${targetDeviceId}`;

@@ -21,6 +21,7 @@ class VenueOfflineCatalogue {
     required this.products,
     required this.modifierGroups,
     required this.routedProductionAreas,
+    required this.deliveryAreas,
   });
 
   factory VenueOfflineCatalogue.fromSnapshot(Map<String, Object?> snapshot) {
@@ -29,6 +30,7 @@ class VenueOfflineCatalogue {
     final rawProducts = snapshot['products'];
     final rawGroups = snapshot['modifierGroups'];
     final rawRoutes = snapshot['printerRoutes'] ?? const <Object?>[];
+    final rawDeliveryAreas = snapshot['serviceAreas'] ?? const <Object?>[];
     final cloudLastSequence = snapshot['cloudLastSequence'] ?? 0;
     if (version is! int ||
         version < 1 ||
@@ -37,6 +39,7 @@ class VenueOfflineCatalogue {
         rawProducts is! List ||
         rawGroups is! List ||
         rawRoutes is! List ||
+        rawDeliveryAreas is! List ||
         cloudLastSequence is! int ||
         cloudLastSequence < 0) {
       throw const VenueOfflineCatalogueException(
@@ -70,6 +73,23 @@ class VenueOfflineCatalogue {
         }
       }
     }
+    final deliveryAreas = <String, OfflineDeliveryArea>{};
+    for (final raw in rawDeliveryAreas) {
+      final value = _map(raw, 'delivery area');
+      if (value['active'] == false) continue;
+      final area = OfflineDeliveryArea(
+        id: _requiredText(value, 'id'),
+        name: _requiredText(value, 'name'),
+        deliveryFeeMinor: (value['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
+        minimumOrderMinor: (value['minimumOrderMinor'] as num?)?.toInt() ?? 0,
+      );
+      if (area.deliveryFeeMinor < 0 || area.minimumOrderMinor < 0) {
+        throw const VenueOfflineCatalogueException(
+          'A delivery area has invalid prices.',
+        );
+      }
+      deliveryAreas[area.id] = area;
+    }
     return VenueOfflineCatalogue._(
       version: version,
       currencyCode: currencyCode,
@@ -87,6 +107,7 @@ class VenueOfflineCatalogue {
             )
             .map((route) => route['productionArea'] as String),
       ),
+      deliveryAreas: UnmodifiableMapView(deliveryAreas),
     );
   }
 
@@ -96,6 +117,20 @@ class VenueOfflineCatalogue {
   final Map<String, OfflineCatalogueProduct> products;
   final Map<String, OfflineModifierGroup> modifierGroups;
   final Set<String> routedProductionAreas;
+  final Map<String, OfflineDeliveryArea> deliveryAreas;
+
+  void validateDeliveryArea(Map<String, Object?> payload) {
+    if (payload['channel'] != 'delivery') return;
+    final areaId = payload['serviceAreaId'];
+    final area = areaId is String ? deliveryAreas[areaId] : null;
+    if (area == null ||
+        payload['serviceAreaName'] != area.name ||
+        payload['deliveryFeeMinor'] != area.deliveryFeeMinor) {
+      throw const VenueOfflineCatalogueException(
+        'Choose an active delivery town or area from the venue settings.',
+      );
+    }
+  }
 
   void validatePrintRoutes(
     OfflineOrderProjection order,
@@ -384,6 +419,20 @@ class VenueOfflineCatalogue {
           : 'immediate',
     };
   }
+}
+
+class OfflineDeliveryArea {
+  const OfflineDeliveryArea({
+    required this.id,
+    required this.name,
+    required this.deliveryFeeMinor,
+    required this.minimumOrderMinor,
+  });
+
+  final String id;
+  final String name;
+  final int deliveryFeeMinor;
+  final int minimumOrderMinor;
 }
 
 class OfflineCatalogueProduct {

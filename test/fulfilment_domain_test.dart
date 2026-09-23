@@ -42,4 +42,32 @@ void main() {
     expect(collectionOnly.isAvailableFor(OrderChannel.collection), isTrue);
     expect(collectionOnly.isAvailableFor(OrderChannel.delivery), isFalse);
   });
+
+  test('delivery fee is included once in the reporting-currency total', () {
+    final order = PosOrder(
+      id: 'delivery-1',
+      tenantId: 'tenant',
+      venueId: 'venue',
+      businessDate: DateTime(2026, 9, 23),
+      openedAt: DateTime(2026, 9, 23, 18),
+      status: OrderStatus.open,
+      channel: OrderChannel.delivery,
+      serviceAreaId: 'girne',
+      serviceAreaName: 'Girne',
+      deliveryFeeMinor: 15000,
+      lines: const <OrderLine>[
+        OrderLine(
+          id: 'line-1',
+          productId: 'product-a',
+          productName: 'Chicken Curry',
+          quantity: 1,
+          unitPriceMinor: 80000,
+          productionArea: ProductionArea.kitchen,
+          trackStock: false,
+        ),
+      ],
+    );
+
+    expect(order.totalMinor, 95000);
+  });
 }

@@ -11,6 +11,7 @@ import '../core/firebase_runtime_config.dart';
 import '../core/shorebird_update_host.dart';
 import '../features/auth/auth_gate.dart';
 import '../offline/venue_hub_remote_command_client.dart';
+import '../offline/venue_hub_availability.dart';
 import 'home_shell.dart';
 
 class TableSideCYApp extends ConsumerWidget {
@@ -29,120 +30,164 @@ class TableSideCYApp extends ConsumerWidget {
       themeMode: themeMode,
       builder: (context, child) => ValueListenableBuilder<int>(
         valueListenable: RemoteHubWaitState.pending,
-        builder: (context, pending, _) => ValueListenableBuilder<int>(
-          valueListenable: AppBusyState.pending,
-          builder: (context, busy, _) {
-            final showStaging =
-                FirebaseRuntimeConfig.enabled && AppEnvironment.isStaging;
-            final topInset = MediaQuery.paddingOf(context).top;
-            return Stack(
-              children: [
-                ?child,
-                if (showStaging)
-                  Positioned(
-                    top: topInset + 4,
-                    left: 12,
-                    child: IgnorePointer(
-                      child: Material(
-                        elevation: 12,
-                        color: const Color(0xffff9800),
-                        borderRadius: BorderRadius.circular(7),
-                        child: const Padding(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 5,
-                          ),
-                          child: Text(
-                            'STAGING · TEST DATA ONLY',
-                            style: TextStyle(
-                              color: Colors.black,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 0.6,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                if (pending > 0)
-                  Positioned(
-                    top: topInset + (showStaging ? 42 : 8),
-                    left: 16,
-                    right: 16,
-                    child: Material(
-                      elevation: 8,
-                      color: Theme.of(context).colorScheme.tertiaryContainer,
-                      borderRadius: BorderRadius.circular(12),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 12,
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const SizedBox.square(
-                              dimension: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2.5,
+        builder: (context, pending, _) => ValueListenableBuilder<String?>(
+          valueListenable: VenueHubAvailability.issue,
+          builder: (context, hubIssue, _) => ValueListenableBuilder<int>(
+            valueListenable: AppBusyState.pending,
+            builder: (context, busy, _) {
+              final showStaging =
+                  FirebaseRuntimeConfig.enabled && AppEnvironment.isStaging;
+              final topInset = MediaQuery.paddingOf(context).top;
+              return _HubOfflineDialogHost(
+                issue: hubIssue,
+                child: Stack(
+                  children: [
+                    ?child,
+                    if (showStaging)
+                      Positioned(
+                        top: topInset + 4,
+                        left: 12,
+                        child: IgnorePointer(
+                          child: Material(
+                            elevation: 12,
+                            color: const Color(0xffff9800),
+                            borderRadius: BorderRadius.circular(7),
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 5,
                               ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
                               child: Text(
-                                pending == 1
-                                    ? 'Waiting for venue hub…'
-                                    : 'Waiting for venue hub… ($pending commands)',
-                                style: Theme.of(context).textTheme.titleSmall,
+                                'STAGING · TEST DATA ONLY',
+                                style: TextStyle(
+                                  color: Colors.black,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 0.6,
+                                ),
                               ),
                             ),
-                          ],
+                          ),
                         ),
                       ),
-                    ),
-                  ),
-                ShorebirdUpdateHost(
-                  top:
-                      topInset +
-                      (showStaging ? 42 : 8) +
-                      (pending > 0 ? 58 : 0),
-                ),
-                if (busy > 0) ...[
-                  const Positioned.fill(
-                    child: ModalBarrier(
-                      dismissible: false,
-                      color: Color(0x66000000),
-                    ),
-                  ),
-                  Positioned.fill(
-                    child: Center(
-                      child: Card(
-                        elevation: 12,
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 24,
-                            vertical: 20,
+                    if (pending > 0)
+                      Positioned(
+                        top: topInset + (showStaging ? 42 : 8),
+                        left: 16,
+                        right: 16,
+                        child: Material(
+                          elevation: 8,
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.tertiaryContainer,
+                          borderRadius: BorderRadius.circular(12),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 12,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const SizedBox.square(
+                                  dimension: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.5,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    pending == 1
+                                        ? 'Waiting for venue hub…'
+                                        : 'Waiting for venue hub… ($pending commands)',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleSmall,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const CircularProgressIndicator(),
-                              const SizedBox(height: 14),
-                              Text(
-                                'Please wait…',
-                                style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                      ),
+                    if (hubIssue != null)
+                      Positioned(
+                        top: topInset + (showStaging ? 42 : 8),
+                        left: 16,
+                        right: 16,
+                        child: Material(
+                          elevation: 10,
+                          color: Theme.of(context).colorScheme.errorContainer,
+                          borderRadius: BorderRadius.circular(12),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 10,
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.hub_outlined),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'HUB OFFLINE · Join the same Wi-Fi as the hub and check it is running.',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelLarge
+                                        ?.copyWith(fontWeight: FontWeight.w900),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ShorebirdUpdateHost(
+                      top:
+                          topInset +
+                          (showStaging ? 42 : 8) +
+                          (pending > 0 ? 58 : 0),
+                    ),
+                    if (busy > 0) ...[
+                      const Positioned.fill(
+                        child: ModalBarrier(
+                          dismissible: false,
+                          color: Color(0x66000000),
+                        ),
+                      ),
+                      Positioned.fill(
+                        child: Center(
+                          child: Card(
+                            elevation: 12,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 24,
+                                vertical: 20,
                               ),
-                            ],
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const CircularProgressIndicator(),
+                                  const SizedBox(height: 14),
+                                  Text(
+                                    'Please wait…',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleSmall,
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
                         ),
                       ),
-                    ),
-                  ),
-                ],
-              ],
-            );
-          },
+                    ],
+                  ],
+                ),
+              );
+            },
+          ),
         ),
       ),
       home: FirebaseRuntimeConfig.enabled
@@ -150,6 +195,72 @@ class TableSideCYApp extends ConsumerWidget {
           : const HomeShell(),
     );
   }
+}
+
+/// Repeats the hub explanation at most once per minute while the fault remains
+/// active. The banner stays visible after dismissing the dialog.
+class _HubOfflineDialogHost extends StatefulWidget {
+  const _HubOfflineDialogHost({required this.issue, required this.child});
+
+  final String? issue;
+  final Widget child;
+
+  @override
+  State<_HubOfflineDialogHost> createState() => _HubOfflineDialogHostState();
+}
+
+class _HubOfflineDialogHostState extends State<_HubOfflineDialogHost> {
+  DateTime? _lastShown;
+  bool _dialogOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleIfNeeded();
+  }
+
+  @override
+  void didUpdateWidget(covariant _HubOfflineDialogHost oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.issue != widget.issue) _scheduleIfNeeded();
+  }
+
+  void _scheduleIfNeeded() {
+    if (widget.issue == null || _dialogOpen) return;
+    final now = DateTime.now();
+    if (_lastShown != null && now.difference(_lastShown!).inSeconds < 60) {
+      Future<void>.delayed(const Duration(minutes: 1), () {
+        if (mounted) _scheduleIfNeeded();
+      });
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted || widget.issue == null || _dialogOpen) return;
+      _dialogOpen = true;
+      _lastShown = DateTime.now();
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.cloud_off_rounded),
+          title: const Text('Venue hub is offline'),
+          content: const Text(
+            'This device cannot safely save orders until it reconnects to the venue hub. Join the same Wi-Fi as the hub and check that the hub app is running.',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Dismiss'),
+            ),
+          ],
+        ),
+      );
+      _dialogOpen = false;
+      if (mounted && widget.issue != null) _scheduleIfNeeded();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 class _FirebaseBootstrapGate extends StatefulWidget {

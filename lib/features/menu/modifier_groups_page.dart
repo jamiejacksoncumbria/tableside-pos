@@ -23,9 +23,7 @@ class ModifierGroupsPage extends ConsumerWidget {
     final stockProducts = ref
         .watch(menuProductsProvider)
         .when(
-          data: (products) => products
-              .where((product) => product.trackStock)
-              .toList(growable: false),
+          data: (products) => products,
           loading: () => const <MenuProduct>[],
           error: (_, _) => const <MenuProduct>[],
         );
