@@ -20,7 +20,11 @@ class AppBusyState {
     try {
       return await operation();
     } finally {
-      end();
+      // Let the awaiting UI receive its result and close its dialog/sheet
+      // before removing the barrier. Releasing synchronously exposes the
+      // completed button during the route's reverse animation, which allows a
+      // very fast second tap and looks as if the operation has not finished.
+      Future<void>.delayed(const Duration(milliseconds: 400), end);
     }
   }
 }

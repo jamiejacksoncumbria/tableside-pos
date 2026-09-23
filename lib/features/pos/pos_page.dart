@@ -15,6 +15,8 @@ import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/training_mode.dart';
 import '../../data/production_command_repository.dart';
+import '../../offline/venue_hub_client_registry.dart';
+import '../../offline/venue_hub_offline_view.dart';
 import '../auth/staff_pin_gate.dart';
 import '../fulfilment/customer_editor.dart';
 import '../fulfilment/fulfilment_domain.dart';
@@ -2781,6 +2783,7 @@ Future<void> _showCheckoutSheet(
   );
   final exchangeRateController = TextEditingController(text: '1');
   final currencyChoices = checkoutTenderCurrencies(baseCurrencyCode);
+  _CompletedCheckout? completed;
   await showModalBottomSheet<void>(
     context: pageContext,
     showDragHandle: true,
@@ -3495,22 +3498,14 @@ Future<void> _showCheckoutSheet(
                                       printReceipt: printReceipt,
                                     );
                                 if (!sheetContext.mounted) return;
-                                Navigator.of(sheetContext).pop();
-                                if (!pageContext.mounted) return;
-                                showAppNotification(
-                                  pageContext,
-                                  ref: ref,
-                                  title: isTraining
-                                      ? 'Training payment simulated'
-                                      : result.alreadyClosed
-                                      ? 'Bill was already closed'
-                                      : result.orderClosed
-                                      ? 'Payment recorded · bill closed'
-                                      : 'Partial payment recorded',
-                                  message:
-                                      '${result.orderClosed ? 'Receipt' : 'Payment receipt'} ${result.receiptNumber}. Paid now ${formatMoney(result.paidThisTimeMinor, currencyCode: result.currencyCode)}; balance ${formatMoney(result.balanceDueMinor, currencyCode: result.currencyCode)}.${result.receiptPrintRequested ? (result.receiptPrintQueued ? ' Printing has been queued.' : ' No dedicated receipt printer is configured.') : ''}',
-                                  level: AppNotificationLevel.success,
+                                completed = _CompletedCheckout(
+                                  result: result,
+                                  payments: List<_CheckoutPaymentDraft>.of(
+                                    paymentEntries,
+                                  ),
+                                  training: isTraining,
                                 );
+                                Navigator.of(sheetContext).pop();
                               } on Object catch (error, stackTrace) {
                                 AppLogger.error(
                                   'Close bill',
@@ -3556,7 +3551,207 @@ Future<void> _showCheckoutSheet(
     exchangeRateController.dispose();
     voucherCodeController.dispose();
   });
+  final checkoutResult = completed;
+  if (checkoutResult != null && pageContext.mounted) {
+    // Wait until the bottom sheet has detached its semantics tree before
+    // presenting the payment result route.
+    await Future<void>.delayed(const Duration(milliseconds: 320));
+    if (!pageContext.mounted) return;
+    await _showPaymentSummary(
+      pageContext,
+      order: order,
+      completed: checkoutResult,
+    );
+  }
 }
+
+class _CompletedCheckout {
+  const _CompletedCheckout({
+    required this.result,
+    required this.payments,
+    required this.training,
+  });
+
+  final BillCloseResult result;
+  final List<_CheckoutPaymentDraft> payments;
+  final bool training;
+}
+
+Future<void> _showPaymentSummary(
+  BuildContext context, {
+  required PosOrder order,
+  required _CompletedCheckout completed,
+}) async {
+  final result = completed.result;
+  await showAppDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) => AlertDialog(
+      scrollable: true,
+      icon: Icon(
+        result.orderClosed
+            ? Icons.check_circle_rounded
+            : Icons.payments_outlined,
+        color: Theme.of(dialogContext).colorScheme.primary,
+        size: 38,
+      ),
+      title: Text(
+        completed.training
+            ? 'Training payment completed'
+            : result.orderClosed
+            ? 'Payment completed'
+            : 'Partial payment completed',
+      ),
+      content: SizedBox(
+        width: 560,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Receipt ${result.receiptNumber}'),
+            const SizedBox(height: 12),
+            Text('Items', style: Theme.of(dialogContext).textTheme.titleSmall),
+            for (final line in order.lines)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text('${line.quantity} × ${line.productName}'),
+                subtitle: line.productionDetails.isEmpty
+                    ? null
+                    : Text(line.productionDetails.join(' · ')),
+                trailing: Text(
+                  formatMoney(
+                    line.totalMinor,
+                    currencyCode: result.currencyCode,
+                  ),
+                ),
+              ),
+            const Divider(),
+            _PaymentSummaryRow(
+              label: 'Total bill',
+              value: formatMoney(
+                result.totalMinor,
+                currencyCode: result.currencyCode,
+              ),
+              emphasize: true,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Payment made now',
+              style: Theme.of(dialogContext).textTheme.titleSmall,
+            ),
+            for (final payment in completed.payments)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(
+                  payment.method == PaymentMethod.cash
+                      ? Icons.payments_outlined
+                      : payment.method == PaymentMethod.voucher
+                      ? Icons.card_giftcard_rounded
+                      : Icons.credit_card_rounded,
+                ),
+                title: Text(
+                  '${_paymentMethodLabel(payment.method)} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
+                ),
+                subtitle: payment.tenderedCurrencyCode == result.currencyCode
+                    ? null
+                    : Text(
+                        'Applied ${formatMoney(payment.baseAmountMinor, currencyCode: result.currencyCode)} at rate ${payment.exchangeRateToBase}',
+                      ),
+                trailing: payment.cashChangeBaseMinor > 0
+                    ? Text(
+                        'Change\n${formatMoney(payment.cashChangeBaseMinor, currencyCode: result.currencyCode)}',
+                        textAlign: TextAlign.end,
+                      )
+                    : null,
+              ),
+            const Divider(),
+            _PaymentSummaryRow(
+              label: 'Paid now',
+              value: formatMoney(
+                result.paidThisTimeMinor,
+                currencyCode: result.currencyCode,
+              ),
+            ),
+            _PaymentSummaryRow(
+              label: 'Paid in total',
+              value: formatMoney(
+                result.paidTotalMinor,
+                currencyCode: result.currencyCode,
+              ),
+            ),
+            _PaymentSummaryRow(
+              label: 'Balance remaining',
+              value: formatMoney(
+                result.balanceDueMinor,
+                currencyCode: result.currencyCode,
+              ),
+              emphasize: result.balanceDueMinor > 0,
+            ),
+            if (result.receiptPrintRequested) ...[
+              const SizedBox(height: 10),
+              Text(
+                result.receiptPrintQueued
+                    ? 'The receipt has been queued for printing.'
+                    : 'The receipt was requested, but no active receipt printer route was available.',
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        FilledButton.icon(
+          onPressed: () => Navigator.pop(dialogContext),
+          icon: const Icon(Icons.done_rounded),
+          label: const Text('Done'),
+        ),
+      ],
+    ),
+  );
+}
+
+class _PaymentSummaryRow extends StatelessWidget {
+  const _PaymentSummaryRow({
+    required this.label,
+    required this.value,
+    this.emphasize = false,
+  });
+
+  final String label;
+  final String value;
+  final bool emphasize;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: emphasize
+                ? const TextStyle(fontWeight: FontWeight.w700)
+                : null,
+          ),
+        ),
+        Text(
+          value,
+          style: emphasize
+              ? const TextStyle(fontWeight: FontWeight.w700)
+              : null,
+        ),
+      ],
+    ),
+  );
+}
+
+String _paymentMethodLabel(PaymentMethod method) => switch (method) {
+  PaymentMethod.cash => 'Cash',
+  PaymentMethod.cardTerminal => 'Card',
+  PaymentMethod.voucher => 'Voucher',
+  PaymentMethod.online => 'Online',
+};
 
 class _CheckoutPaymentDraft {
   const _CheckoutPaymentDraft({
@@ -4054,9 +4249,25 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
       _error = null;
     });
     try {
-      final loadedCustomers = await ref
-          .read(venueCustomersProvider.future)
-          .timeout(const Duration(seconds: 10));
+      final scope = ref.read(activeVenueScopeProvider);
+      if (scope == null) throw StateError('Select a venue first.');
+      final cached = ref.read(venueCustomersProvider).value;
+      late final List<VenueCustomer> loadedCustomers;
+      if (cached != null) {
+        loadedCustomers = cached;
+      } else if (!kIsWeb &&
+          VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+        // Hub snapshots are replayable state. Reading them directly avoids
+        // waiting for a broadcast stream to emit a change that may never be
+        // needed while the cached customer list is already complete.
+        loadedCustomers = VenueHubOfflineView.instance.customers;
+      } else {
+        loadedCustomers = await ref
+            .read(fulfilmentRepositoryProvider)
+            .watchCustomers(scope)
+            .first
+            .timeout(const Duration(seconds: 10));
+      }
       if (!mounted) return;
       final customers = loadedCustomers
           .where(
