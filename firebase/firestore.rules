@@ -140,6 +140,23 @@ service cloud.firestore {
         // time zones, unique venue names, and deletion safeguards cannot be
         // bypassed by a client.
         allow write: if false;
+
+        // Remote devices may observe only a command submitted by their own
+        // Firebase host identity. The authoritative venue hub remains the
+        // only writer through the signed server APIs, and collection listing
+        // is deliberately denied to prevent command enumeration.
+        match /remoteHubCommands/{commandId} {
+          allow get: if canReadOperationalData(tenantId)
+            && resource.data.hostUid == request.auth.uid;
+          allow list, write: if false;
+        }
+
+        // The short-lived hub heartbeat is operational connectivity state.
+        // It contains no order payload and remains server-owned.
+        match /remoteHubState/{stateId} {
+          allow read: if canReadOperationalData(tenantId);
+          allow write: if false;
+        }
       }
 
       match /menuSections/{sectionId} {
@@ -238,21 +255,6 @@ service cloud.firestore {
       // contain contact/address data, so both are PIN-scoped and server-only
       // for writes; a modified client cannot bypass duplicate checks/audits.
       match /courses/{courseId} {
-        allow read: if canReadOperationalData(tenantId);
-        allow write: if false;
-      }
-
-      // Remote devices may only observe their own short-lived command. These
-      // collections live directly below the venue (not below a course). All
-      // writes and hub acknowledgements pass through trusted server APIs.
-      match /remoteHubCommands/{commandId} {
-        allow read: if canReadOperationalData(tenantId)
-          && (resource.data.hostUid == request.auth.uid
-            || managesVenueWithActivePin(tenantId, venueId));
-        allow write: if false;
-      }
-
-      match /remoteHubState/{stateId} {
         allow read: if canReadOperationalData(tenantId);
         allow write: if false;
       }
