@@ -62,6 +62,7 @@ class VenueHubRuntime {
   StreamSubscription? _pendingSubscription;
   Timer? _authorityTimer;
   Timer? _remoteCommandTimer;
+  Timer? _remoteHeartbeatTimer;
   VenueHubRuntimeStatus _status = const VenueHubRuntimeStatus(
     state: VenueHubRuntimeState.stopped,
     pendingEvents: 0,
@@ -367,7 +368,7 @@ class VenueHubRuntime {
                     payload: <String, Object?>{
                       'action': action,
                       'jobId': jobId,
-                      if (reason != null) 'reason': reason,
+                      'reason': ?reason,
                     },
                   ),
                   hubEpoch: bootstrap.hubEpoch,
@@ -422,6 +423,7 @@ class VenueHubRuntime {
         },
       );
       var remoteTickRunning = false;
+      var remoteHeartbeatRunning = false;
       var remoteCloudAvailable = true;
       VenueHubStaffGrant? remoteGrant(Map<String, Object?> command) {
         final staffId = command['staffId'];
@@ -462,13 +464,6 @@ class VenueHubRuntime {
         if (remoteTickRunning || _activeScope != scope) return;
         remoteTickRunning = true;
         try {
-          await _repository.heartbeatRemoteHub(
-            scope: scope,
-            deviceId: deviceId,
-            hubEpoch: bootstrap.hubEpoch,
-            credential: credential,
-            pendingLocalEvents: (await _ledger.pending()).length,
-          );
           final commands = await _repository.claimRemoteHubCommands(
             scope: scope,
             deviceId: deviceId,
@@ -555,10 +550,47 @@ class VenueHubRuntime {
         }
       }
 
+      // Heartbeats must not share the command-processing lock. A claimed
+      // command can legitimately take several seconds to validate, commit,
+      // print and acknowledge. Coupling the two made Firebase declare a live
+      // hub offline while it was busy, which incorrectly blocked POS devices
+      // using mobile data or another internet connection.
+      Future<void> remoteHeartbeat() async {
+        if (remoteHeartbeatRunning || _activeScope != scope) return;
+        remoteHeartbeatRunning = true;
+        try {
+          await _repository.heartbeatRemoteHub(
+            scope: scope,
+            deviceId: deviceId,
+            hubEpoch: bootstrap.hubEpoch,
+            credential: credential,
+            pendingLocalEvents: (await _ledger.pending()).length,
+          );
+          if (!remoteCloudAvailable) {
+            AppLogger.info('Venue hub remote command connection restored.');
+            remoteCloudAvailable = true;
+          }
+        } catch (_) {
+          if (remoteCloudAvailable) {
+            AppLogger.info(
+              'Venue hub internet heartbeat is offline; same-network LAN orders remain available.',
+            );
+            remoteCloudAvailable = false;
+          }
+        } finally {
+          remoteHeartbeatRunning = false;
+        }
+      }
+
       _remoteCommandTimer = Timer.periodic(
         const Duration(seconds: 5),
         (_) => unawaited(remoteTick()),
       );
+      _remoteHeartbeatTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => unawaited(remoteHeartbeat()),
+      );
+      unawaited(remoteHeartbeat());
       unawaited(remoteTick());
       _pendingSubscription = _ledger.watchPending().listen(
         (events) {
@@ -694,6 +726,8 @@ class VenueHubRuntime {
     _authorityTimer = null;
     _remoteCommandTimer?.cancel();
     _remoteCommandTimer = null;
+    _remoteHeartbeatTimer?.cancel();
+    _remoteHeartbeatTimer = null;
     await _pendingSubscription?.cancel();
     _pendingSubscription = null;
     _sync?.dispose();

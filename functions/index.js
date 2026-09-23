@@ -2306,7 +2306,11 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
 
 const remoteHubCommandTtlMs = 25 * 1000;
 const remoteHubClaimLeaseMs = 15 * 1000;
-const remoteHubHeartbeatTtlMs = 15 * 1000;
+// Heartbeats arrive every five seconds on a dedicated hub loop. A 30-second
+// lease tolerates normal mobile/broadband latency without allowing remote POS
+// commands to rely on a hub that has actually stopped. Commands still expire
+// independently after 25 seconds unless the authoritative hub commits them.
+const remoteHubHeartbeatTtlMs = 30 * 1000;
 const remoteHubEventTypes = new Set([
   "order.opened", "order.itemAdded", "order.itemQuantityChanged",
   "order.sent", "order.fulfilmentChanged", "payment.recorded",
@@ -2353,7 +2357,7 @@ async function submitRemoteHubCommandFor(caller, rawData) {
       heartbeatExpiresAt == null || heartbeatExpiresAt.getTime() <= Date.now()) {
     throw new HttpsError(
       "unavailable",
-      "The venue hub is offline. Join the venue network or wait for the hub to reconnect.",
+      "The venue hub internet heartbeat is offline. Remote devices may use any network once the hub reconnects; same-network devices can continue over LAN.",
     );
   }
   if (!pin.exists || pin.data()?.locked === true) {

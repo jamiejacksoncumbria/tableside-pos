@@ -14,6 +14,14 @@ import '../offline/venue_hub_remote_command_client.dart';
 import '../offline/venue_hub_availability.dart';
 import 'home_shell.dart';
 
+// MaterialApp's builder is above its Navigator in the element tree. The root
+// key gives global connectivity notices a context owned by the Navigator
+// overlay instead of attempting showDialog with the builder's invalid parent
+// context.
+final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>(
+  debugLabel: 'TableSide root navigator',
+);
+
 class TableSideCYApp extends ConsumerWidget {
   const TableSideCYApp({super.key});
 
@@ -23,6 +31,7 @@ class TableSideCYApp extends ConsumerWidget {
       appThemeControllerProvider.select((selection) => selection.effectiveMode),
     );
     return MaterialApp(
+      navigatorKey: _rootNavigatorKey,
       title: AppEnvironment.isStaging ? 'TableSideCY STAGING' : 'TableSideCY',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light(),
@@ -131,7 +140,7 @@ class TableSideCYApp extends ConsumerWidget {
                                 const SizedBox(width: 10),
                                 Expanded(
                                   child: Text(
-                                    'HUB OFFLINE · Join the same Wi-Fi as the hub and check it is running.',
+                                    'HUB UNAVAILABLE · LAN devices should join the venue Wi-Fi; remote devices need the hub internet heartbeat.',
                                     style: Theme.of(context)
                                         .textTheme
                                         .labelLarge
@@ -236,15 +245,23 @@ class _HubOfflineDialogHostState extends State<_HubOfflineDialogHost> {
     }
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted || widget.issue == null || _dialogOpen) return;
+      final dialogContext = _rootNavigatorKey.currentState?.overlay?.context;
+      if (dialogContext == null) {
+        Future<void>.delayed(
+          const Duration(milliseconds: 250),
+          _scheduleIfNeeded,
+        );
+        return;
+      }
       _dialogOpen = true;
       _lastShown = DateTime.now();
       await showDialog<void>(
-        context: context,
+        context: dialogContext,
         builder: (dialogContext) => AlertDialog(
           icon: const Icon(Icons.cloud_off_rounded),
-          title: const Text('Venue hub is offline'),
+          title: const Text('Venue hub is unavailable'),
           content: const Text(
-            'This device cannot safely save orders until it reconnects to the venue hub. Join the same Wi-Fi as the hub and check that the hub app is running.',
+            'This device cannot safely save orders until the hub responds. Devices on the venue network can use the local hub even without internet. Devices on another Wi-Fi or mobile data work through Firebase whenever the hub internet heartbeat is live.',
           ),
           actions: [
             FilledButton(
