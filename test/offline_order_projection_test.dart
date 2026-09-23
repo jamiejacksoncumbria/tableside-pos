@@ -207,6 +207,31 @@ void main() {
     },
   );
 
+  test(
+    'legacy delivery orders remain replayable after service-area upgrade',
+    () {
+      final projection = projectOfflineOrder([
+        _event(1, 'order.opened', {
+          'orderId': 'order-a',
+          'channel': 'delivery',
+          'customerId': 'customer-a',
+          'customerName': 'Legacy Customer',
+          'deliveryAddress': 'Old free-text address',
+        }),
+        _event(2, 'order.fulfilmentChanged', {
+          'orderId': 'order-a',
+          'status': 'readyForCollection',
+          'managerAuthorized': true,
+        }, staffId: 'manager-a'),
+      ]);
+
+      expect(projection.channel, 'delivery');
+      expect(projection.serviceAreaId, isNull);
+      expect(projection.deliveryFeeMinor, 0);
+      expect(projection.fulfilmentStatus, 'readyForCollection');
+    },
+  );
+
   test('an unassigned driver cannot claim an offline delivery', () {
     final events = [
       _event(1, 'order.opened', {

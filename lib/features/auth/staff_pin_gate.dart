@@ -980,6 +980,19 @@ class _PasswordReauthenticationDialogState
   );
 }
 
+/// Exposes the production PIN entry surface to widget tests without making
+/// its mutable state part of the application API.
+@visibleForTesting
+Widget buildStaffPinDialogForTest({
+  String title = 'Enter PIN',
+  String message = 'Enter your six-digit staff PIN.',
+  String confirmLabel = 'Unlock',
+}) => _PinPadDialog(
+  title: Text(title),
+  message: message,
+  confirmLabel: confirmLabel,
+);
+
 class _PinPadDialog extends StatefulWidget {
   const _PinPadDialog({
     required this.title,
@@ -1077,101 +1090,120 @@ class _PinPadDialogState extends State<_PinPadDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    scrollable: true,
-    title: widget.title,
-    content: KeyboardListener(
-      focusNode: _keyboardFocus,
-      autofocus: true,
-      onKeyEvent: _handleKeyEvent,
-      child: SizedBox(
-        width: 330,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(widget.message),
-            const SizedBox(height: 18),
-            Semantics(
-              label: '${_pin.length} of 6 PIN digits entered',
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(
-                  6,
-                  (index) => Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 7),
-                    child: Icon(
-                      index < _pin.length
-                          ? Icons.circle
-                          : Icons.circle_outlined,
-                      size: 17,
+  Widget build(BuildContext context) => Dialog(
+    // A regular AlertDialog with scrollable=true relies on intrinsic sizing.
+    // The PIN grid changes state and dismisses itself from a pointer event;
+    // on desktop that combination can leave the intrinsic dialog render box
+    // without a size for one frame and halt all hit testing. This explicitly
+    // sized, internally scrolling dialog remains stable on small tablets and
+    // desktop mouse/keyboard devices.
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 390),
+      child: KeyboardListener(
+        focusNode: _keyboardFocus,
+        autofocus: true,
+        onKeyEvent: _handleKeyEvent,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(24, 22, 24, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              DefaultTextStyle(
+                style: Theme.of(context).textTheme.headlineSmall!,
+                child: widget.title,
+              ),
+              const SizedBox(height: 16),
+              Text(widget.message),
+              const SizedBox(height: 18),
+              Semantics(
+                label: '${_pin.length} of 6 PIN digits entered',
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List.generate(
+                    6,
+                    (index) => Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 7),
+                      child: Icon(
+                        index < _pin.length
+                            ? Icons.circle
+                            : Icons.circle_outlined,
+                        size: 17,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-            const SizedBox(height: 18),
-            GridView.count(
-              crossAxisCount: 3,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: 8,
-              crossAxisSpacing: 8,
-              childAspectRatio: 1.9,
-              children: [
-                for (final digit in const [
-                  '1',
-                  '2',
-                  '3',
-                  '4',
-                  '5',
-                  '6',
-                  '7',
-                  '8',
-                  '9',
-                ])
+              const SizedBox(height: 18),
+              GridView.count(
+                crossAxisCount: 3,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+                childAspectRatio: 1.9,
+                children: [
+                  for (final digit in const [
+                    '1',
+                    '2',
+                    '3',
+                    '4',
+                    '5',
+                    '6',
+                    '7',
+                    '8',
+                    '9',
+                  ])
+                    FilledButton.tonal(
+                      onPressed: () => _digit(digit),
+                      child: Text(
+                        digit,
+                        style: Theme.of(context).textTheme.headlineSmall,
+                      ),
+                    ),
+                  OutlinedButton(
+                    onPressed: _pin.isEmpty
+                        ? null
+                        : () {
+                            setState(() => _pin = '');
+                            _keyboardFocus.requestFocus();
+                          },
+                    child: const Text('Clear'),
+                  ),
                   FilledButton.tonal(
-                    onPressed: () => _digit(digit),
+                    onPressed: () => _digit('0'),
                     child: Text(
-                      digit,
+                      '0',
                       style: Theme.of(context).textTheme.headlineSmall,
                     ),
                   ),
-                OutlinedButton(
-                  onPressed: _pin.isEmpty
-                      ? null
-                      : () {
-                          setState(() => _pin = '');
-                          _keyboardFocus.requestFocus();
-                        },
-                  child: const Text('Clear'),
-                ),
-                FilledButton.tonal(
-                  onPressed: () => _digit('0'),
-                  child: Text(
-                    '0',
-                    style: Theme.of(context).textTheme.headlineSmall,
+                  IconButton.filledTonal(
+                    tooltip: 'Delete last digit',
+                    onPressed: _pin.isEmpty ? null : _backspace,
+                    icon: const Icon(Icons.backspace_rounded),
                   ),
-                ),
-                IconButton.filledTonal(
-                  tooltip: 'Delete last digit',
-                  onPressed: _pin.isEmpty ? null : _backspace,
-                  icon: const Icon(Icons.backspace_rounded),
-                ),
-              ],
-            ),
-          ],
+                ],
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Cancel'),
+                  ),
+                  FilledButton(
+                    onPressed: _pin.length == 6 && !_submitted ? _submit : null,
+                    child: Text(widget.confirmLabel),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.of(context).pop(),
-        child: const Text('Cancel'),
-      ),
-      FilledButton(
-        onPressed: _pin.length == 6 && !_submitted ? _submit : null,
-        child: Text(widget.confirmLabel),
-      ),
-    ],
   );
 }

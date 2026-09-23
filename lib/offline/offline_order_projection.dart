@@ -393,14 +393,10 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
             'A driver may update only their own assigned delivery.',
           );
         }
-        if (channel == 'delivery' &&
-            (serviceAreaId?.trim().isEmpty != false ||
-                serviceAreaName?.trim().isEmpty != false ||
-                deliveryFeeMinor < 0)) {
-          throw const OfflineProjectionException(
-            'A delivery order needs a valid delivery area and fee.',
-          );
-        }
+        // Historic delivery events predate structured service areas. They
+        // must remain replayable so an upgraded hub can start and complete
+        // those orders. New order.opened commands are still fail-closed by
+        // VenueOfflineCatalogue.validateDeliveryArea before being committed.
         fulfilmentStatus = status;
         assignedDriverId = status == 'driverDeclined'
             ? null
