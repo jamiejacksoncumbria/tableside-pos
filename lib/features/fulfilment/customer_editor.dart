@@ -4,7 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
+import '../../offline/venue_hub_offline_view.dart';
 import '../notifications/notification_centre.dart';
+import '../auth/session_providers.dart';
 import 'fulfilment_domain.dart';
 import 'fulfilment_repository.dart';
 import 'delivery_location_catalogue.dart';
@@ -32,6 +34,19 @@ Future<VenueCustomer?> showVenueCustomerEditor({
   );
   final email = TextEditingController(text: existing?.email);
   final addresses = <CustomerAddress>[...?existing?.addresses];
+  final venues = ref.read(venuesProvider(scope.tenantId)).value;
+  final venue = venues?.where((item) => item.id == scope.venueId).firstOrNull;
+  final offlineView = VenueHubOfflineView.instance;
+  final venueCountry = venue?.country.trim().isNotEmpty == true
+      ? venue!.country.trim()
+      : offlineView.venueCountry;
+  final venueLocations = venue?.deliveryLocations.isNotEmpty == true
+      ? venue!.deliveryLocations
+      : offlineView.deliveryLocations.isNotEmpty
+      ? offlineView.deliveryLocations
+      : venueCountry == northernCyprusCountryName
+      ? northernCyprusDeliveryLocations
+      : const <String, List<String>>{};
 
   try {
     return await showAppDialog<VenueCustomer>(
@@ -136,6 +151,9 @@ Future<VenueCustomer?> showVenueCustomerEditor({
                                               await _showCustomerAddressEditor(
                                                 context,
                                                 existing: addresses[index],
+                                                countryName: venueCountry,
+                                                deliveryLocations:
+                                                    venueLocations,
                                               );
                                           if (edited == null) return;
                                           setDialogState(() {
@@ -190,6 +208,8 @@ Future<VenueCustomer?> showVenueCustomerEditor({
                                       await _showCustomerAddressEditor(
                                         context,
                                         makeDefault: addresses.isEmpty,
+                                        countryName: venueCountry,
+                                        deliveryLocations: venueLocations,
                                       );
                                   if (added == null) return;
                                   setDialogState(() {
@@ -335,20 +355,22 @@ Future<CustomerAddress?> _showCustomerAddressEditor(
   BuildContext context, {
   CustomerAddress? existing,
   bool makeDefault = false,
+  required String countryName,
+  required Map<String, List<String>> deliveryLocations,
 }) async {
   final key = GlobalKey<FormState>();
   final label = TextEditingController(text: existing?.label ?? 'Home');
-  final country = TextEditingController(text: northernCyprusCountryName);
+  final country = TextEditingController(text: countryName);
   final town = TextEditingController(text: existing?.town);
   final area = TextEditingController(text: existing?.area);
-  String? selectedDistrict =
-      northernCyprusDeliveryLocations.containsKey(existing?.area)
+  String? selectedDistrict = deliveryLocations.containsKey(existing?.area)
       ? existing!.area
       : null;
   String? selectedTown =
       selectedDistrict != null &&
-          (northernCyprusDeliveryLocations[selectedDistrict] ?? const [])
-              .contains(existing?.town)
+          (deliveryLocations[selectedDistrict] ?? const []).contains(
+            existing?.town,
+          )
       ? existing!.town
       : null;
   final lines = TextEditingController(text: existing?.addressLines);
@@ -382,18 +404,15 @@ Future<CustomerAddress?> _showCustomerAddressEditor(
                     ),
                     validator: _requiredAddressValue,
                   ),
-                  TextFormField(
-                    enabled: false,
-                    decoration: const InputDecoration(
-                      labelText: 'Country',
-                      hintText: northernCyprusCountryName,
-                    ),
+                  InputDecorator(
+                    decoration: const InputDecoration(labelText: 'Country'),
+                    child: Text(countryName),
                   ),
                   DropdownButtonFormField<String>(
                     initialValue: selectedDistrict,
                     decoration: const InputDecoration(labelText: 'District'),
                     items: [
-                      for (final value in northernCyprusDeliveryLocations.keys)
+                      for (final value in deliveryLocations.keys)
                         DropdownMenuItem(value: value, child: Text(value)),
                     ],
                     validator: (value) =>
@@ -411,7 +430,7 @@ Future<CustomerAddress?> _showCustomerAddressEditor(
                     decoration: const InputDecoration(labelText: 'Town'),
                     items: [
                       for (final value
-                          in northernCyprusDeliveryLocations[selectedDistrict] ??
+                          in deliveryLocations[selectedDistrict] ??
                               const <String>[])
                         DropdownMenuItem(value: value, child: Text(value)),
                     ],

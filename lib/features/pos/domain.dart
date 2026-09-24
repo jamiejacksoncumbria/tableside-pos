@@ -244,6 +244,8 @@ class Venue {
     required this.tenantId,
     required this.name,
     required this.timeZone,
+    this.country = 'Kuzey Kıbrıs Türk Cumhuriyeti',
+    this.deliveryLocations = const <String, List<String>>{},
     this.notificationRetentionSeconds = 5,
     this.backgroundLockSeconds = 120,
     int orderFlowAmberMinutes = 15,
@@ -269,6 +271,8 @@ class Venue {
   final String tenantId;
   final String name;
   final String timeZone;
+  final String country;
+  final Map<String, List<String>> deliveryLocations;
   final int notificationRetentionSeconds;
   final int backgroundLockSeconds;
   final String defaultThemeMode;

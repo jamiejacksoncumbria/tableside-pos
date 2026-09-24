@@ -11,6 +11,7 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
 import '../../offline/venue_hub_bootstrap.dart';
+import '../../offline/hub_port_diagnostic.dart';
 import '../../offline/venue_hub_device_credential.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_runtime.dart';
@@ -349,6 +350,13 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     if (mounted) setState(() => _message = 'Venue hub stopped.');
   });
 
+  Future<void> _diagnosePort() => _run('Diagnose venue hub port', () async {
+    final port = int.tryParse(_port.text.trim()) ?? 8443;
+    final host = _host.text.trim();
+    final result = await diagnoseVenueHubPort(host, port);
+    if (mounted) setState(() => _message = result);
+  });
+
   Future<void> _run(String action, Future<void> Function() operation) async {
     if (_busy) return;
     if (mounted) setState(() => _busy = true);
@@ -564,6 +572,12 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                                 : AndroidVenueHubService.openBatterySettings,
                             icon: const Icon(Icons.battery_saver_outlined),
                             label: const Text('Battery settings'),
+                          ),
+                        if (defaultTargetPlatform == TargetPlatform.windows)
+                          OutlinedButton.icon(
+                            onPressed: _busy ? null : _diagnosePort,
+                            icon: const Icon(Icons.security_rounded),
+                            label: const Text('Check port / firewall'),
                           ),
                       ],
                     ],

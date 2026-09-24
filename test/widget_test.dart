@@ -39,4 +39,19 @@ void main() {
     expect(find.text('TableSideCY Hospitality'), findsOneWidget);
     expect(find.text('Tables & tabs'), findsOneWidget);
   });
+
+  testWidgets('POS menu remains bounded in a short web-style viewport', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 500);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const ProviderScope(child: TableSideCYApp()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('New order'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

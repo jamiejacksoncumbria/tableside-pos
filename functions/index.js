@@ -2752,6 +2752,8 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
     ).toUpperCase(),
     tenantName: tenant.data()?.displayName ?? tenant.data()?.legalName ?? "",
     venueName: venue.data()?.name ?? tenant.data()?.displayName ?? "",
+    venueCountry: venue.data()?.country ?? "Kuzey Kıbrıs Türk Cumhuriyeti",
+    deliveryLocations: venue.data()?.deliveryLocations ?? {},
     venueTimeZone: venue.data()?.timeZone ?? "Europe/London",
     venueUtcOffsetMinutes: timeZoneOffsetMinutes(
       venue.data()?.timeZone ?? "Europe/London",
@@ -4699,6 +4701,75 @@ async function listSupportedCurrenciesFor(caller) {
   return {currencyCodes: supportedCurrencyCodes};
 }
 
+// Platform-owned location catalogue. Venues select a country from here and
+// receive an immutable locality snapshot, so ordinary venue managers cannot
+// silently invent countries/regions while an offline hub is authoritative.
+async function listPlatformLocationsFor(caller) {
+  await requirePlatformAdmin(caller);
+  const snapshot = await db.collection("platformLocations").limit(1000).get();
+  const locations = snapshot.docs.map((document) => ({
+    id: document.id,
+    country: document.data().country ?? "",
+    district: document.data().district ?? "",
+    town: document.data().town ?? "",
+  })).filter((value) => value.country && value.district && value.town);
+  locations.sort((a, b) =>
+    `${a.country}\u0000${a.district}\u0000${a.town}`.localeCompare(
+      `${b.country}\u0000${b.district}\u0000${b.town}`,
+    ));
+  return {locations};
+}
+
+async function savePlatformLocationFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const country = catalogueTitleCase(requiredText(data, "country", 100));
+  const district = catalogueTitleCase(requiredText(data, "district", 100));
+  const town = catalogueTitleCase(requiredText(data, "town", 100));
+  const key = `${country}\u0000${district}\u0000${town}`.toLocaleLowerCase("en");
+  const snapshot = await db.collection("platformLocations").limit(1000).get();
+  const duplicate = snapshot.docs.find((document) => {
+    const value = document.data();
+    return `${value.country ?? ""}\u0000${value.district ?? ""}\u0000${value.town ?? ""}`
+      .toLocaleLowerCase("en") === key;
+  });
+  if (duplicate != null) return {id: duplicate.id, country, district, town};
+  const reference = db.collection("platformLocations").doc();
+  await reference.create({
+    country, district, town,
+    createdAt: FieldValue.serverTimestamp(),
+    createdBy: caller.uid,
+  });
+  await writeAudit(caller.uid, "savePlatformLocation", reference.id, {
+    country, district, town,
+  });
+  return {id: reference.id, country, district, town};
+}
+
+async function deletePlatformLocationFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const locationId = requiredDocumentId(data, "locationId");
+  await db.doc(`platformLocations/${locationId}`).delete();
+  await writeAudit(caller.uid, "deletePlatformLocation", locationId);
+  return {deleted: true};
+}
+
+async function locationSnapshotForCountry(country) {
+  const snapshot = await db.collection("platformLocations")
+    .where("country", "==", country).limit(1000).get();
+  const grouped = {};
+  for (const document of snapshot.docs) {
+    const district = document.data().district;
+    const town = document.data().town;
+    if (typeof district !== "string" || typeof town !== "string") continue;
+    grouped[district] ??= [];
+    if (!grouped[district].includes(town)) grouped[district].push(town);
+  }
+  for (const towns of Object.values(grouped)) towns.sort((a, b) => a.localeCompare(b));
+  return grouped;
+}
+
 async function listTenantVenuesFor(caller, rawData) {
   await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
@@ -4714,6 +4785,7 @@ async function listTenantVenuesFor(caller, rawData) {
       id: document.id,
       name: document.data().name ?? "Unnamed venue",
       timeZone: document.data().timeZone ?? "Europe/London",
+      country: document.data().country ?? "Kuzey Kıbrıs Türk Cumhuriyeti",
     })),
   };
 }
@@ -4744,6 +4816,8 @@ async function createTenantFor(caller, rawData) {
   const currencyCode = validCurrencyCode(data);
   const venueName = requiredText(data, "venueName");
   const timeZone = validTimeZone(data);
+  const country = catalogueTitleCase(requiredText(data, "country", 100));
+  const deliveryLocations = await locationSnapshotForCountry(country);
   const ownerUid = requiredText(data, "ownerUid", 128);
   const [owner, creator] = await Promise.all([
     auth.getUser(ownerUid),
@@ -4770,6 +4844,8 @@ async function createTenantFor(caller, rawData) {
       name: venueName,
       nameKey: venueNameKey(venueName),
       timeZone,
+      country,
+      deliveryLocations,
       notificationRetentionSeconds: 5,
       defaultThemeMode: "light",
       backgroundLockSeconds: 120,
@@ -4838,6 +4914,8 @@ async function createVenueFor(caller, rawData) {
   const name = requiredText(data, "name");
   const nameKey = venueNameKey(name);
   const timeZone = validTimeZone(data);
+  const country = catalogueTitleCase(requiredText(data, "country", 100));
+  const deliveryLocations = await locationSnapshotForCountry(country);
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc();
   await db.runTransaction(async (transaction) => {
@@ -4853,6 +4931,8 @@ async function createVenueFor(caller, rawData) {
       name,
       nameKey,
       timeZone,
+      country,
+      deliveryLocations,
       notificationRetentionSeconds: 5,
       defaultThemeMode: "light",
       backgroundLockSeconds: 120,
@@ -4865,7 +4945,7 @@ async function createVenueFor(caller, rawData) {
     });
   });
   await writeAudit(caller.uid, "createVenue", venueRef.id, {tenantId});
-  return {id: venueRef.id, name, timeZone};
+  return {id: venueRef.id, name, timeZone, country};
 }
 
 async function updateVenueFor(caller, rawData) {
@@ -4876,6 +4956,8 @@ async function updateVenueFor(caller, rawData) {
   const name = requiredText(data, "name");
   const nameKey = venueNameKey(name);
   const timeZone = validTimeZone(data);
+  const country = catalogueTitleCase(requiredText(data, "country", 100));
+  const deliveryLocations = await locationSnapshotForCountry(country);
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
   await db.runTransaction(async (transaction) => {
@@ -4894,12 +4976,14 @@ async function updateVenueFor(caller, rawData) {
       name,
       nameKey,
       timeZone,
+      country,
+      deliveryLocations,
       updatedAt: FieldValue.serverTimestamp(),
       updatedBy: caller.uid,
     }, {merge: true});
   });
   await writeAudit(caller.uid, "updateVenue", venueId, {tenantId});
-  return {id: venueId, name, timeZone};
+  return {id: venueId, name, timeZone, country};
 }
 
 // Any future tenant-root collection that stores a venueId must be added here
@@ -10221,7 +10305,7 @@ async function invokePlatformAction(action, caller, data) {
         .get();
       const onboardingActions = new Set([
         "listAuthUsers", "listTenants", "listSupportedTimeZones",
-        "listSupportedCurrencies", "createTenant",
+        "listSupportedCurrencies", "listPlatformLocations", "createTenant",
       ]);
       const configuredInitialEmail = initialPlatformAdminEmail.value().trim().toLowerCase();
       const callerEmail = typeof caller.token.email === "string"
@@ -10259,6 +10343,12 @@ async function invokePlatformAction(action, caller, data) {
       return listSupportedTimeZonesFor(actingCaller);
     case "listSupportedCurrencies":
       return listSupportedCurrenciesFor(actingCaller);
+    case "listPlatformLocations":
+      return listPlatformLocationsFor(actingCaller);
+    case "savePlatformLocation":
+      return savePlatformLocationFor(actingCaller, data);
+    case "deletePlatformLocation":
+      return deletePlatformLocationFor(actingCaller, data);
     case "listTenantVenues":
       return listTenantVenuesFor(actingCaller, data);
     case "listUserMemberships":

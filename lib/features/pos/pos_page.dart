@@ -553,10 +553,11 @@ class _TableButton extends ConsumerWidget {
     final openGreen = Theme.of(context).brightness == Brightness.dark
         ? Colors.green.shade700
         : Colors.green.shade600;
-    final background = isOpen
-        ? openGreen
-        : selected
+    // Blue always means selected. Green means open but not selected.
+    final background = selected
         ? scheme.primary
+        : isOpen
+        ? openGreen
         : scheme.surfaceContainerHighest;
     final foreground = isOpen || selected ? Colors.white : scheme.onSurface;
     final width = compact ? 72.0 : 104.0;
@@ -575,12 +576,7 @@ class _TableButton extends ConsumerWidget {
           decoration: BoxDecoration(
             color: background,
             borderRadius: BorderRadius.circular(14),
-            border: selected
-                ? Border.all(
-                    color: isOpen ? Colors.white : scheme.primary,
-                    width: 2,
-                  )
-                : null,
+            border: selected ? Border.all(color: Colors.white, width: 2) : null,
           ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -674,7 +670,9 @@ class _NamedTabButton extends ConsumerWidget {
     // Every item here represents a live named tab. Make that operational
     // state as obvious as an open table, not merely the currently selected
     // tab.
-    final background = Colors.green.shade600;
+    final background = selected
+        ? Theme.of(context).colorScheme.primary
+        : Colors.green.shade600;
     final foreground = Colors.white;
     return Semantics(
       button: true,
@@ -689,6 +687,7 @@ class _NamedTabButton extends ConsumerWidget {
           decoration: BoxDecoration(
             color: background,
             borderRadius: BorderRadius.circular(12),
+            border: selected ? Border.all(color: Colors.white, width: 2) : null,
           ),
           child: Row(
             children: [
@@ -1200,288 +1199,328 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              AnimatedSize(
-                duration: const Duration(milliseconds: 180),
-                curve: Curves.easeOut,
-                child: _compactLayout && _menuControlsCollapsed
-                    ? const SizedBox.shrink()
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
+              Flexible(
+                fit: FlexFit.loose,
+                child: SingleChildScrollView(
+                  primary: false,
+                  child: AnimatedSize(
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeOut,
+                    child: _compactLayout && _menuControlsCollapsed
+                        ? const SizedBox.shrink()
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Flexible(
-                                child: Text(
-                                  'New order',
-                                  style: Theme.of(context).textTheme.titleLarge,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                flex: 2,
-                                child: TextField(
-                                  controller: _searchController,
-                                  textInputAction: TextInputAction.search,
-                                  decoration: InputDecoration(
-                                    isDense: true,
-                                    labelText: 'Quick product search',
-                                    hintText: 'Search products or categories',
-                                    prefixIcon: const Icon(
-                                      Icons.search_rounded,
+                              Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      'New order',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.titleLarge,
                                     ),
-                                    suffixIcon: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        IconButton(
-                                          tooltip: 'Open touch keyboard',
-                                          onPressed: _showSearchTouchKeyboard,
-                                          icon: const Icon(
-                                            Icons.keyboard_alt_outlined,
-                                          ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    flex: 2,
+                                    child: TextField(
+                                      controller: _searchController,
+                                      textInputAction: TextInputAction.search,
+                                      decoration: InputDecoration(
+                                        isDense: true,
+                                        labelText: 'Quick product search',
+                                        hintText:
+                                            'Search products or categories',
+                                        prefixIcon: const Icon(
+                                          Icons.search_rounded,
                                         ),
-                                        if (searchQuery.isNotEmpty)
-                                          IconButton(
-                                            tooltip: 'Clear search',
-                                            onPressed: _searchController.clear,
-                                            icon: const Icon(
-                                              Icons.close_rounded,
+                                        suffixIcon: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            IconButton(
+                                              tooltip: 'Open touch keyboard',
+                                              onPressed:
+                                                  _showSearchTouchKeyboard,
+                                              icon: const Icon(
+                                                Icons.keyboard_alt_outlined,
+                                              ),
                                             ),
-                                          ),
-                                      ],
+                                            if (searchQuery.isNotEmpty)
+                                              IconButton(
+                                                tooltip: 'Clear search',
+                                                onPressed:
+                                                    _searchController.clear,
+                                                icon: const Icon(
+                                                  Icons.close_rounded,
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
                                     ),
                                   ),
-                                ),
-                              ),
-                              IconButton(
-                                tooltip: useCategoryTiles
-                                    ? 'Use scrolling category bars'
-                                    : 'Use category tiles',
-                                onPressed: () => _changeCategoryView(
-                                  scope,
-                                  useCategoryTiles ? 'bars' : 'tiles',
-                                ),
-                                icon: Icon(
-                                  useCategoryTiles
-                                      ? Icons.view_stream_outlined
-                                      : Icons.grid_view_rounded,
-                                ),
-                              ),
-                              PopupMenuButton<String>(
-                                tooltip: 'Sort products',
-                                initialValue: productSort,
-                                onSelected: (value) =>
-                                    _changeProductSort(scope, value),
-                                icon: Icon(
-                                  productSort == 'alphabetical'
-                                      ? Icons.sort_by_alpha_rounded
-                                      : productSort == 'priceDesc'
-                                      ? Icons.south_rounded
-                                      : Icons.north_rounded,
-                                ),
-                                itemBuilder: (_) => const [
-                                  PopupMenuItem(
-                                    value: 'alphabetical',
-                                    child: Text('Alphabetical (A–Z)'),
+                                  IconButton(
+                                    tooltip: useCategoryTiles
+                                        ? 'Use scrolling category bars'
+                                        : 'Use category tiles',
+                                    onPressed: () => _changeCategoryView(
+                                      scope,
+                                      useCategoryTiles ? 'bars' : 'tiles',
+                                    ),
+                                    icon: Icon(
+                                      useCategoryTiles
+                                          ? Icons.view_stream_outlined
+                                          : Icons.grid_view_rounded,
+                                    ),
                                   ),
-                                  PopupMenuItem(
-                                    value: 'priceAsc',
-                                    child: Text('Price: low to high'),
-                                  ),
-                                  PopupMenuItem(
-                                    value: 'priceDesc',
-                                    child: Text('Price: high to low'),
+                                  PopupMenuButton<String>(
+                                    tooltip: 'Sort products',
+                                    initialValue: productSort,
+                                    onSelected: (value) =>
+                                        _changeProductSort(scope, value),
+                                    icon: Icon(
+                                      productSort == 'alphabetical'
+                                          ? Icons.sort_by_alpha_rounded
+                                          : productSort == 'priceDesc'
+                                          ? Icons.south_rounded
+                                          : Icons.north_rounded,
+                                    ),
+                                    itemBuilder: (_) => const [
+                                      PopupMenuItem(
+                                        value: 'alphabetical',
+                                        child: Text('Alphabetical (A–Z)'),
+                                      ),
+                                      PopupMenuItem(
+                                        value: 'priceAsc',
+                                        child: Text('Price: low to high'),
+                                      ),
+                                      PopupMenuItem(
+                                        value: 'priceDesc',
+                                        child: Text('Price: high to low'),
+                                      ),
+                                    ],
                                   ),
                                 ],
                               ),
-                            ],
-                          ),
-                          if (useCategoryTiles &&
-                              _tileCategoryOpen &&
-                              searchQuery.isEmpty) ...[
-                            const SizedBox(height: 4),
-                            SizedBox(
-                              height: 40,
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: TextButton.icon(
-                                  onPressed: () => setState(() {
-                                    if (effectiveSubsection != null) {
-                                      ref
-                                          .read(
-                                            activeSubsectionProvider.notifier,
-                                          )
-                                          .select(null);
-                                    } else {
-                                      _tileCategoryOpen = false;
-                                    }
-                                  }),
-                                  icon: const Icon(Icons.arrow_back_rounded),
-                                  label: Text(
-                                    effectiveSubsection != null
-                                        ? section?.name ?? 'Category'
-                                        : 'Categories',
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 14),
-                          if (!useCategoryTiles)
-                            _HorizontalMenuScroller(
-                              controller: _sectionScrollController,
-                              child: Row(
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.only(right: 8),
-                                    child: ChoiceChip(
-                                      avatar: const Icon(
-                                        Icons.local_fire_department_rounded,
-                                      ),
-                                      label: const Text('Popular'),
-                                      selected: showPopular,
-                                      onSelected: (_) {
-                                        ref
-                                            .read(
-                                              activeSectionProvider.notifier,
-                                            )
-                                            .select(popularMenuSectionId);
-                                        ref
-                                            .read(
-                                              activeSubsectionProvider.notifier,
-                                            )
-                                            .select(null);
-                                      },
-                                    ),
-                                  ),
-                                  Padding(
-                                    padding: const EdgeInsets.only(right: 8),
-                                    child: ChoiceChip(
-                                      label: const Text('All'),
-                                      selected:
-                                          !showPopular &&
-                                          effectiveSection == null,
-                                      onSelected: (_) {
-                                        ref
-                                            .read(
-                                              activeSectionProvider.notifier,
-                                            )
-                                            .select(null);
-                                        ref
-                                            .read(
-                                              activeSubsectionProvider.notifier,
-                                            )
-                                            .select(null);
-                                      },
-                                    ),
-                                  ),
-                                  for (final item in topLevelSections)
-                                    Padding(
-                                      padding: const EdgeInsets.only(right: 8),
-                                      child: ChoiceChip(
-                                        label: Text(
-                                          '${item.icon} ${item.name}',
-                                        ),
-                                        selected: item.id == effectiveSection,
-                                        onSelected: (_) {
-                                          ref
-                                              .read(
-                                                activeSectionProvider.notifier,
-                                              )
-                                              .select(item.id);
+                              if (useCategoryTiles &&
+                                  _tileCategoryOpen &&
+                                  searchQuery.isEmpty) ...[
+                                const SizedBox(height: 4),
+                                SizedBox(
+                                  height: 40,
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: TextButton.icon(
+                                      onPressed: () => setState(() {
+                                        if (effectiveSubsection != null) {
                                           ref
                                               .read(
                                                 activeSubsectionProvider
                                                     .notifier,
                                               )
                                               .select(null);
-                                        },
+                                        } else {
+                                          _tileCategoryOpen = false;
+                                        }
+                                      }),
+                                      icon: const Icon(
+                                        Icons.arrow_back_rounded,
+                                      ),
+                                      label: Text(
+                                        effectiveSubsection != null
+                                            ? section?.name ?? 'Category'
+                                            : 'Categories',
                                       ),
                                     ),
-                                ],
-                              ),
-                            ),
-                          if (!useCategoryTiles && subsections.isNotEmpty) ...[
-                            const SizedBox(height: 10),
-                            _HorizontalMenuScroller(
-                              controller: _subsectionScrollController,
-                              child: Row(
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.only(right: 8),
-                                    child: FilterChip(
-                                      label: Text('All ${section?.name ?? ''}'),
-                                      selected: effectiveSubsection == null,
-                                      onSelected: (_) => ref
-                                          .read(
-                                            activeSubsectionProvider.notifier,
-                                          )
-                                          .select(null),
-                                    ),
                                   ),
-                                  for (final item in subsections)
-                                    Padding(
-                                      padding: const EdgeInsets.only(right: 8),
-                                      child: FilterChip(
-                                        label: Text(
-                                          '${item.icon} ${item.name}',
+                                ),
+                              ],
+                              const SizedBox(height: 14),
+                              if (!useCategoryTiles)
+                                _HorizontalMenuScroller(
+                                  controller: _sectionScrollController,
+                                  child: Row(
+                                    children: [
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          right: 8,
                                         ),
-                                        selected:
-                                            item.id == effectiveSubsection,
-                                        onSelected: (_) => ref
+                                        child: ChoiceChip(
+                                          avatar: const Icon(
+                                            Icons.local_fire_department_rounded,
+                                          ),
+                                          label: const Text('Popular'),
+                                          selected: showPopular,
+                                          onSelected: (_) {
+                                            ref
+                                                .read(
+                                                  activeSectionProvider
+                                                      .notifier,
+                                                )
+                                                .select(popularMenuSectionId);
+                                            ref
+                                                .read(
+                                                  activeSubsectionProvider
+                                                      .notifier,
+                                                )
+                                                .select(null);
+                                          },
+                                        ),
+                                      ),
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          right: 8,
+                                        ),
+                                        child: ChoiceChip(
+                                          label: const Text('All'),
+                                          selected:
+                                              !showPopular &&
+                                              effectiveSection == null,
+                                          onSelected: (_) {
+                                            ref
+                                                .read(
+                                                  activeSectionProvider
+                                                      .notifier,
+                                                )
+                                                .select(null);
+                                            ref
+                                                .read(
+                                                  activeSubsectionProvider
+                                                      .notifier,
+                                                )
+                                                .select(null);
+                                          },
+                                        ),
+                                      ),
+                                      for (final item in topLevelSections)
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            right: 8,
+                                          ),
+                                          child: ChoiceChip(
+                                            label: Text(
+                                              '${item.icon} ${item.name}',
+                                            ),
+                                            selected:
+                                                item.id == effectiveSection,
+                                            onSelected: (_) {
+                                              ref
+                                                  .read(
+                                                    activeSectionProvider
+                                                        .notifier,
+                                                  )
+                                                  .select(item.id);
+                                              ref
+                                                  .read(
+                                                    activeSubsectionProvider
+                                                        .notifier,
+                                                  )
+                                                  .select(null);
+                                            },
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              if (!useCategoryTiles &&
+                                  subsections.isNotEmpty) ...[
+                                const SizedBox(height: 10),
+                                _HorizontalMenuScroller(
+                                  controller: _subsectionScrollController,
+                                  child: Row(
+                                    children: [
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                          right: 8,
+                                        ),
+                                        child: FilterChip(
+                                          label: Text(
+                                            'All ${section?.name ?? ''}',
+                                          ),
+                                          selected: effectiveSubsection == null,
+                                          onSelected: (_) => ref
+                                              .read(
+                                                activeSubsectionProvider
+                                                    .notifier,
+                                              )
+                                              .select(null),
+                                        ),
+                                      ),
+                                      for (final item in subsections)
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            right: 8,
+                                          ),
+                                          child: FilterChip(
+                                            label: Text(
+                                              '${item.icon} ${item.name}',
+                                            ),
+                                            selected:
+                                                item.id == effectiveSubsection,
+                                            onSelected: (_) => ref
+                                                .read(
+                                                  activeSubsectionProvider
+                                                      .notifier,
+                                                )
+                                                .select(item.id),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                              if (useCategoryTiles &&
+                                  _tileCategoryOpen &&
+                                  searchQuery.isEmpty &&
+                                  effectiveSubsection == null &&
+                                  subsections.isNotEmpty) ...[
+                                const SizedBox(height: 10),
+                                Text(
+                                  'Subcategories',
+                                  style: Theme.of(context).textTheme.labelLarge,
+                                ),
+                                const SizedBox(height: 6),
+                                _CategoryTilePanel(
+                                  children: [
+                                    for (final item in subsections)
+                                      _CategoryTile(
+                                        textIcon: item.icon,
+                                        label: item.name,
+                                        selected: false,
+                                        onTap: () => ref
                                             .read(
                                               activeSubsectionProvider.notifier,
                                             )
                                             .select(item.id),
                                       ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                          ],
-                          if (useCategoryTiles &&
-                              _tileCategoryOpen &&
-                              searchQuery.isEmpty &&
-                              effectiveSubsection == null &&
-                              subsections.isNotEmpty) ...[
-                            const SizedBox(height: 10),
-                            Text(
-                              'Subcategories',
-                              style: Theme.of(context).textTheme.labelLarge,
-                            ),
-                            const SizedBox(height: 6),
-                            _CategoryTilePanel(
-                              children: [
-                                for (final item in subsections)
-                                  _CategoryTile(
-                                    textIcon: item.icon,
-                                    label: item.name,
-                                    selected: false,
-                                    onTap: () => ref
-                                        .read(activeSubsectionProvider.notifier)
-                                        .select(item.id),
-                                  ),
+                                  ],
+                                ),
                               ],
-                            ),
-                          ],
-                          if (!showTileCategoryBrowser) ...[
-                            const SizedBox(height: 14),
-                            Text(
-                              searchQuery.isNotEmpty
-                                  ? 'Search results for “${_searchController.text.trim()}”'
-                                  : effectiveSubsection == null
-                                  ? section?.name ?? 'All menu items'
-                                  : subsections
-                                        .firstWhere(
-                                          (item) =>
-                                              item.id == effectiveSubsection,
-                                        )
-                                        .name,
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                            const SizedBox(height: 10),
-                          ],
-                        ],
-                      ),
+                              if (!showTileCategoryBrowser) ...[
+                                const SizedBox(height: 14),
+                                Text(
+                                  searchQuery.isNotEmpty
+                                      ? 'Search results for “${_searchController.text.trim()}”'
+                                      : effectiveSubsection == null
+                                      ? section?.name ?? 'All menu items'
+                                      : subsections
+                                            .firstWhere(
+                                              (item) =>
+                                                  item.id ==
+                                                  effectiveSubsection,
+                                            )
+                                            .name,
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.titleMedium,
+                                ),
+                                const SizedBox(height: 10),
+                              ],
+                            ],
+                          ),
+                  ),
+                ),
               ),
               Expanded(
                 child: showTileCategoryBrowser
@@ -2356,11 +2395,15 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
           children: [
             Row(
               children: [
-                Text(
-                  orderLocationLabel,
-                  style: Theme.of(context).textTheme.titleLarge,
+                Expanded(
+                  child: Text(
+                    orderLocationLabel,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
                 ),
-                const Spacer(),
+                const SizedBox(width: 8),
                 _StatusChip(status: order.status),
               ],
             ),
@@ -3747,6 +3790,7 @@ Future<void> _showCheckoutSheet(
       pageContext,
       order: order,
       completed: checkoutResult,
+      baseCurrencyCode: baseCurrencyCode,
     );
   }
 }
@@ -3767,8 +3811,12 @@ Future<void> _showPaymentSummary(
   BuildContext context, {
   required PosOrder order,
   required _CompletedCheckout completed,
+  required String baseCurrencyCode,
 }) async {
   final result = completed.result;
+  // Headline bill values are always denominated in the venue's functional
+  // currency. A foreign currency belongs only to the payment that used it.
+  final reportingCurrency = baseCurrencyCode.trim().toUpperCase();
   await showAppDialog<void>(
     context: context,
     barrierDismissible: false,
@@ -3806,10 +3854,7 @@ Future<void> _showPaymentSummary(
                     ? null
                     : Text(line.productionDetails.join(' · ')),
                 trailing: Text(
-                  formatMoney(
-                    line.totalMinor,
-                    currencyCode: result.currencyCode,
-                  ),
+                  formatMoney(line.totalMinor, currencyCode: reportingCurrency),
                 ),
               ),
             const Divider(),
@@ -3817,7 +3862,7 @@ Future<void> _showPaymentSummary(
               label: 'Total bill',
               value: formatMoney(
                 result.totalMinor,
-                currencyCode: result.currencyCode,
+                currencyCode: reportingCurrency,
               ),
               emphasize: true,
             ),
@@ -3840,14 +3885,14 @@ Future<void> _showPaymentSummary(
                 title: Text(
                   '${_paymentMethodLabel(payment.method)} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
                 ),
-                subtitle: payment.tenderedCurrencyCode == result.currencyCode
+                subtitle: payment.tenderedCurrencyCode == reportingCurrency
                     ? null
                     : Text(
-                        'Applied ${formatMoney(payment.baseAmountMinor, currencyCode: result.currencyCode)} at rate ${payment.exchangeRateToBase}',
+                        'Applied ${formatMoney(payment.baseAmountMinor, currencyCode: reportingCurrency)} at rate ${payment.exchangeRateToBase}',
                       ),
                 trailing: payment.cashChangeBaseMinor > 0
                     ? Text(
-                        'Change\n${formatMoney(payment.cashChangeBaseMinor, currencyCode: result.currencyCode)}',
+                        'Change\n${formatMoney(payment.cashChangeBaseMinor, currencyCode: reportingCurrency)}',
                         textAlign: TextAlign.end,
                       )
                     : null,
@@ -3857,21 +3902,21 @@ Future<void> _showPaymentSummary(
               label: 'Paid now',
               value: formatMoney(
                 result.paidThisTimeMinor,
-                currencyCode: result.currencyCode,
+                currencyCode: reportingCurrency,
               ),
             ),
             _PaymentSummaryRow(
               label: 'Paid in total',
               value: formatMoney(
                 result.paidTotalMinor,
-                currencyCode: result.currencyCode,
+                currencyCode: reportingCurrency,
               ),
             ),
             _PaymentSummaryRow(
               label: 'Balance remaining',
               value: formatMoney(
                 result.balanceDueMinor,
-                currencyCode: result.currencyCode,
+                currencyCode: reportingCurrency,
               ),
               emphasize: result.balanceDueMinor > 0,
             ),
@@ -4350,6 +4395,25 @@ Future<void> _showFulfilmentOrderDialog(
   if (started == true && context.mounted) onStarted?.call();
 }
 
+bool _serviceAreaMatchesAddress(
+  ServiceArea serviceArea,
+  CustomerAddress address,
+) {
+  String normalized(String value) => value.trim().toLowerCase();
+  final addressTown = normalized(address.town);
+  final addressDistrict = normalized(address.area);
+  final areaTown = normalized(serviceArea.town);
+  final areaDistrict = normalized(serviceArea.district);
+  final areaName = normalized(serviceArea.name);
+  // New records match the structured district + town pair. The name fallback
+  // keeps existing venues working where older service areas stored only town.
+  return (areaTown.isNotEmpty &&
+          areaTown == addressTown &&
+          (areaDistrict.isEmpty || areaDistrict == addressDistrict)) ||
+      areaName == addressTown ||
+      (areaName == addressDistrict && areaTown.isEmpty);
+}
+
 /// Stable route used by every new-order entry point.
 ///
 /// This deliberately is not a dialog. The old implementation stacked the
@@ -4507,14 +4571,8 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
         .toList(growable: false);
     ServiceArea? selectedArea;
     if (channel == OrderChannel.delivery && selectedAddress != null) {
-      final addressTerms = {
-        selectedAddress.town.trim().toLowerCase(),
-        selectedAddress.area.trim().toLowerCase(),
-      }..remove('');
       selectedArea = activeAreas
-          .where(
-            (area) => addressTerms.contains(area.name.trim().toLowerCase()),
-          )
+          .where((area) => _serviceAreaMatchesAddress(area, selectedAddress!))
           .firstOrNull;
     }
     selectedArea ??= activeAreas.length == 1 ? activeAreas.first : null;
@@ -4556,14 +4614,11 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                     onChanged: (value) => setCustomerState(() {
                       selectedAddress = value;
                       address.text = value?.oneLine ?? '';
-                      final terms = {
-                        value?.town.trim().toLowerCase() ?? '',
-                        value?.area.trim().toLowerCase() ?? '',
-                      }..remove('');
                       selectedArea = activeAreas
                           .where(
                             (area) =>
-                                terms.contains(area.name.trim().toLowerCase()),
+                                value != null &&
+                                _serviceAreaMatchesAddress(area, value),
                           )
                           .firstOrNull;
                     }),

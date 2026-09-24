@@ -379,7 +379,11 @@ class HomeShell extends ConsumerWidget {
                     destinations: [
                       for (final item in compactDestinations)
                         NavigationDestination(
-                          icon: Icon(item.icon),
+                          // Explicit centring prevents short labels/icons from
+                          // inheriting asymmetric space on narrow Android
+                          // navigation bars.
+                          icon: Center(child: Icon(item.icon)),
+                          selectedIcon: Center(child: Icon(item.icon)),
                           label: item.label,
                         ),
                     ],

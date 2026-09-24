@@ -108,6 +108,12 @@ class FirestorePosRepository {
                   tenantId: tenantId,
                   name: data['name'] as String? ?? 'Unnamed venue',
                   timeZone: data['timeZone'] as String? ?? 'UTC',
+                  country:
+                      data['country'] as String? ??
+                      'Kuzey Kıbrıs Türk Cumhuriyeti',
+                  deliveryLocations: _deliveryLocations(
+                    data['deliveryLocations'],
+                  ),
                   receiptName: data['receiptName'] as String? ?? '',
                   address: data['address'] as String? ?? '',
                   phoneNumbers: (data['phoneNumbers'] as List? ?? const [])
@@ -153,6 +159,17 @@ class FirestorePosRepository {
               })
               .toList(growable: false),
         );
+  }
+
+  Map<String, List<String>> _deliveryLocations(Object? raw) {
+    if (raw is! Map) return const <String, List<String>>{};
+    return <String, List<String>>{
+      for (final entry in raw.entries)
+        if (entry.key is String && entry.value is List)
+          entry.key as String: (entry.value as List).whereType<String>().toList(
+            growable: false,
+          ),
+    };
   }
 
   int _notificationRetentionSeconds(Object? value) {

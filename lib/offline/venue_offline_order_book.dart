@@ -6,6 +6,26 @@ import 'offline_event_ledger.dart';
 import 'offline_order_projection.dart';
 import 'venue_offline_catalogue.dart';
 
+/// Returns the business identity used when a client repeats an already
+/// committed operation. Exposed for regression tests because weakening this
+/// comparison can duplicate payments, while making it too broad strands
+/// legitimate remote POS reconnects.
+Map<String, Object?> offlineRetrySemanticPayload(
+  String eventType,
+  Map<String, Object?> value,
+) {
+  final result = Map<String, Object?>.from(value)..remove('remoteCommandId');
+  if (eventType == 'order.opened') {
+    return <String, Object?>{
+      'orderId': result['orderId'],
+      'tableId': result['tableId'],
+      'tabName': result['tabName'],
+      'channel': result['channel'] ?? 'dineIn',
+    };
+  }
+  return result;
+}
+
 /// Serialises financial mutations and validates each proposed command before
 /// it enters the append-only ledger. On restart, the complete encrypted event
 /// chain is replayed so a separate mutable cache never becomes the authority.
@@ -101,24 +121,12 @@ class VenueOfflineOrderBook {
     final matches = existing.where(hasSameIdentity).toList(growable: false);
     if (matches.isEmpty) return null;
     final previous = matches.last;
-    Map<String, Object?> semanticPayload(Map<String, Object?> value) {
-      final result = Map<String, Object?>.from(value)
-        ..remove('remoteCommandId');
-      if (draft.type == 'order.opened') {
-        // Driver assignment is mutable fulfilment state, not part of the
-        // immutable order identity. Older hub clients did not persist these
-        // two fields on the opening event, so including them in retry
-        // comparison would strand an otherwise valid active delivery after
-        // an app update or hub-session refresh.
-        result
-          ..remove('assignedDriverId')
-          ..remove('assignedDriverName');
-      }
-      return result;
-    }
-
-    if (_canonicalJson(semanticPayload(previous.payload)) !=
-        _canonicalJson(semanticPayload(draft.payload))) {
+    if (_canonicalJson(
+          offlineRetrySemanticPayload(draft.type, previous.payload),
+        ) !=
+        _canonicalJson(
+          offlineRetrySemanticPayload(draft.type, draft.payload),
+        )) {
       throw const OfflineProjectionException(
         'An offline retry key was reused with different data.',
       );

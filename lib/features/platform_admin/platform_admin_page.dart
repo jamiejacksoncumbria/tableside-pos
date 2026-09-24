@@ -63,6 +63,11 @@ class PlatformAdminPage extends ConsumerWidget {
               icon: const Icon(Icons.person_add_alt_1_outlined),
               label: const Text('Create staff account'),
             ),
+            OutlinedButton.icon(
+              onPressed: () => _showPlatformLocations(context, ref),
+              icon: const Icon(Icons.public_rounded),
+              label: const Text('Countries & towns'),
+            ),
           ],
         ),
         if (userItems.isEmpty && !users.isLoading) ...[
@@ -196,6 +201,12 @@ Future<void> _showCreateRestaurantDialog(
   if (timeZones == null || !context.mounted) return;
   final currencyCodes = await _loadSupportedCurrencyCodes(context, repository);
   if (currencyCodes == null || !context.mounted) return;
+  final locations = await _loadPlatformLocations(context, repository);
+  if (locations == null || !context.mounted) return;
+  final countries = <String>{
+    'Kuzey Kıbrıs Türk Cumhuriyeti',
+    ...locations.map((item) => item.country),
+  }.toList()..sort();
 
   final formKey = GlobalKey<FormState>();
   final tradingName = TextEditingController();
@@ -204,6 +215,7 @@ Future<void> _showCreateRestaurantDialog(
   var timeZone = _preferredTimeZone(timeZones);
   var currencyCode = _preferredCurrencyCode(currencyCodes);
   var ownerUid = users.first.uid;
+  var country = countries.first;
   var submitting = false;
 
   await showAppDialog<void>(
@@ -230,6 +242,23 @@ Future<void> _showCreateRestaurantDialog(
                   TextFormField(
                     controller: legalName,
                     decoration: const InputDecoration(labelText: 'Legal name'),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: country,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Venue country',
+                      helperText:
+                          'Controls customer addresses and delivery locations',
+                    ),
+                    items: [
+                      for (final option in countries)
+                        DropdownMenuItem(value: option, child: Text(option)),
+                    ],
+                    onChanged: submitting
+                        ? null
+                        : (value) => setDialogState(() => country = value!),
                   ),
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
@@ -315,6 +344,7 @@ Future<void> _showCreateRestaurantDialog(
                         venueName: venueName.text.trim(),
                         timeZone: timeZone,
                         ownerUid: ownerUid,
+                        country: country,
                       );
                       ref.invalidate(platformTenantsProvider);
                       if (context.mounted) Navigator.pop(context);
@@ -609,10 +639,18 @@ Future<PlatformVenueSummary?> _showVenueDialog(
   final repository = ref.read(platformAdminRepositoryProvider);
   final timeZones = await _loadSupportedTimeZones(context, repository);
   if (timeZones == null || !context.mounted) return null;
+  final locations = await _loadPlatformLocations(context, repository);
+  if (locations == null || !context.mounted) return null;
+  final countries = <String>{
+    'Kuzey Kıbrıs Türk Cumhuriyeti',
+    ...locations.map((item) => item.country),
+    if (venue != null) venue.country,
+  }.toList()..sort();
 
   final formKey = GlobalKey<FormState>();
   final name = TextEditingController(text: venue?.name ?? '');
   var timeZone = _preferredTimeZone(timeZones, venue?.timeZone);
+  var country = venue?.country ?? countries.first;
   var saving = false;
   final saved = await showAppDialog<PlatformVenueSummary>(
     context: context,
@@ -630,6 +668,19 @@ Future<PlatformVenueSummary?> _showVenueDialog(
                   controller: name,
                   decoration: const InputDecoration(labelText: 'Venue name'),
                   validator: (value) => _requiredField(value, 'Venue name'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: country,
+                  isExpanded: true,
+                  decoration: const InputDecoration(labelText: 'Country'),
+                  items: [
+                    for (final option in countries)
+                      DropdownMenuItem(value: option, child: Text(option)),
+                  ],
+                  onChanged: saving
+                      ? null
+                      : (value) => setDialogState(() => country = value!),
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
@@ -668,12 +719,14 @@ Future<PlatformVenueSummary?> _showVenueDialog(
                               tenantId: tenantId,
                               name: name.text.trim(),
                               timeZone: timeZone,
+                              country: country,
                             )
                           : await repository.updateVenue(
                               tenantId: tenantId,
                               venueId: venue.id,
                               name: name.text.trim(),
                               timeZone: timeZone,
+                              country: country,
                             );
                       ref.invalidate(platformTenantsProvider);
                       if (context.mounted) Navigator.pop(context, savedVenue);
@@ -865,6 +918,163 @@ Future<List<String>?> _loadSupportedCurrencyCodes(
       );
     }
     return null;
+  }
+}
+
+Future<List<PlatformLocationEntry>?> _loadPlatformLocations(
+  BuildContext context,
+  PlatformAdminRepository repository,
+) async {
+  try {
+    return await repository.listPlatformLocations();
+  } on Object catch (error, stackTrace) {
+    AppLogger.error('Load platform locations', error, stackTrace);
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not load countries and towns: $error')),
+      );
+    }
+    return null;
+  }
+}
+
+Future<void> _showPlatformLocations(BuildContext context, WidgetRef ref) async {
+  final repository = ref.read(platformAdminRepositoryProvider);
+  var locations = await _loadPlatformLocations(context, repository);
+  if (locations == null || !context.mounted) return;
+  await showAppDialog<void>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: const Text('Countries, districts & towns'),
+        content: SizedBox(
+          width: 620,
+          height: 480,
+          child: locations!.isEmpty
+              ? const Center(
+                  child: Text(
+                    'No custom locations yet. North Cyprus remains available by default.',
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: locations!.length,
+                  itemBuilder: (_, index) {
+                    final item = locations![index];
+                    return ListTile(
+                      leading: const Icon(Icons.location_on_outlined),
+                      title: Text(item.town),
+                      subtitle: Text('${item.district} · ${item.country}'),
+                      trailing: IconButton(
+                        tooltip: 'Remove location',
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () async {
+                          await repository.deletePlatformLocation(item.id);
+                          if (!context.mounted) return;
+                          setDialogState(
+                            () => locations = [
+                              for (final value in locations!)
+                                if (value.id != item.id) value,
+                            ],
+                          );
+                        },
+                      ),
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Close'),
+          ),
+          FilledButton.icon(
+            onPressed: () async {
+              final added = await _addPlatformLocation(context, repository);
+              if (added != null && context.mounted) {
+                setDialogState(() {
+                  locations = [...locations!, added]
+                    ..sort(
+                      (a, b) => '${a.country}${a.district}${a.town}'.compareTo(
+                        '${b.country}${b.district}${b.town}',
+                      ),
+                    );
+                });
+              }
+            },
+            icon: const Icon(Icons.add_location_alt_outlined),
+            label: const Text('Add location'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+Future<PlatformLocationEntry?> _addPlatformLocation(
+  BuildContext context,
+  PlatformAdminRepository repository,
+) async {
+  final country = TextEditingController();
+  final district = TextEditingController();
+  final town = TextEditingController();
+  final key = GlobalKey<FormState>();
+  try {
+    final save = await showAppDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Add platform location'),
+        content: Form(
+          key: key,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextFormField(
+                controller: country,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Country'),
+                validator: (value) => _requiredField(value, 'Country'),
+              ),
+              TextFormField(
+                controller: district,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'City / district'),
+                validator: (value) => _requiredField(value, 'City / district'),
+              ),
+              TextFormField(
+                controller: town,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Town / area'),
+                validator: (value) => _requiredField(value, 'Town / area'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (key.currentState?.validate() == true) {
+                Navigator.pop(dialogContext, true);
+              }
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+    if (save != true) return null;
+    return await repository.savePlatformLocation(
+      country: country.text,
+      district: district.text,
+      town: town.text,
+    );
+  } finally {
+    country.dispose();
+    district.dispose();
+    town.dispose();
   }
 }
 

@@ -117,6 +117,32 @@ class PlatformAdminRepository {
     return _supportedCurrencyCodes!;
   }
 
+  Future<List<PlatformLocationEntry>> listPlatformLocations() async {
+    final data = await _call('listPlatformLocations');
+    return List<Object?>.from(data['locations'] as List? ?? const [])
+        .map(
+          (value) => PlatformLocationEntry.fromMap(
+            Map<String, Object?>.from(value as Map),
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  Future<PlatformLocationEntry> savePlatformLocation({
+    required String country,
+    required String district,
+    required String town,
+  }) async => PlatformLocationEntry.fromMap(
+    await _call('savePlatformLocation', {
+      'country': country,
+      'district': district,
+      'town': town,
+    }),
+  );
+
+  Future<void> deletePlatformLocation(String locationId) =>
+      _call('deletePlatformLocation', {'locationId': locationId});
+
   Future<List<PlatformVenueSummary>> listTenantVenues(String tenantId) async {
     final data = await _call('listTenantVenues', {'tenantId': tenantId});
     final values = List<Object?>.from(data['venues'] as List? ?? const []);
@@ -149,6 +175,7 @@ class PlatformAdminRepository {
     required String venueName,
     required String timeZone,
     required String ownerUid,
+    required String country,
     String currencyCode = 'GBP',
   }) async {
     await _call('createTenant', {
@@ -158,6 +185,7 @@ class PlatformAdminRepository {
       'venueName': venueName,
       'timeZone': timeZone,
       'ownerUid': ownerUid,
+      'country': country,
     });
   }
 
@@ -179,11 +207,13 @@ class PlatformAdminRepository {
     required String tenantId,
     required String name,
     required String timeZone,
+    required String country,
   }) async {
     final data = await _call('createVenue', {
       'tenantId': tenantId,
       'name': name,
       'timeZone': timeZone,
+      'country': country,
     });
     return PlatformVenueSummary.fromMap(data);
   }
@@ -193,12 +223,14 @@ class PlatformAdminRepository {
     required String venueId,
     required String name,
     required String timeZone,
+    required String country,
   }) async {
     final data = await _call('updateVenue', {
       'tenantId': tenantId,
       'venueId': venueId,
       'name': name,
       'timeZone': timeZone,
+      'country': country,
     });
     return PlatformVenueSummary.fromMap(data);
   }
@@ -407,6 +439,7 @@ class PlatformVenueSummary {
     required this.id,
     required this.name,
     required this.timeZone,
+    required this.country,
   });
 
   factory PlatformVenueSummary.fromMap(Map<String, Object?> data) {
@@ -414,12 +447,36 @@ class PlatformVenueSummary {
       id: data['id'] as String? ?? '',
       name: data['name'] as String? ?? 'Unnamed venue',
       timeZone: data['timeZone'] as String? ?? 'Europe/London',
+      country: data['country'] as String? ?? 'Kuzey Kıbrıs Türk Cumhuriyeti',
     );
   }
 
   final String id;
   final String name;
   final String timeZone;
+  final String country;
+}
+
+class PlatformLocationEntry {
+  const PlatformLocationEntry({
+    required this.id,
+    required this.country,
+    required this.district,
+    required this.town,
+  });
+
+  factory PlatformLocationEntry.fromMap(Map<String, Object?> data) =>
+      PlatformLocationEntry(
+        id: data['id'] as String? ?? '',
+        country: data['country'] as String? ?? '',
+        district: data['district'] as String? ?? '',
+        town: data['town'] as String? ?? '',
+      );
+
+  final String id;
+  final String country;
+  final String district;
+  final String town;
 }
 
 class PlatformStaffMembership {

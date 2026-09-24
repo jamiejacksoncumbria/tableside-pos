@@ -87,6 +87,21 @@ class VenueHubOfflineView {
 
   List<PosOrder> get currentOrders => _currentOrders;
 
+  String get venueCountry =>
+      _snapshot?['venueCountry'] as String? ?? 'Kuzey Kıbrıs Türk Cumhuriyeti';
+
+  Map<String, List<String>> get deliveryLocations {
+    final raw = _snapshot?['deliveryLocations'];
+    if (raw is! Map) return const <String, List<String>>{};
+    return <String, List<String>>{
+      for (final entry in raw.entries)
+        if (entry.key is String && entry.value is List)
+          entry.key as String: (entry.value as List).whereType<String>().toList(
+            growable: false,
+          ),
+    };
+  }
+
   void installOrders(List<Map<String, Object?>> values) {
     _currentOrders = values
         .map(_order)

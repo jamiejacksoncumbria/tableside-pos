@@ -854,6 +854,14 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
     final minutes = TextEditingController(text: '45');
     String? district;
     String? town;
+    final country = widget.venue.country.trim().isEmpty
+        ? northernCyprusCountryName
+        : widget.venue.country.trim();
+    final locations = widget.venue.deliveryLocations.isNotEmpty
+        ? widget.venue.deliveryLocations
+        : country == northernCyprusCountryName
+        ? northernCyprusDeliveryLocations
+        : const <String, List<String>>{};
     final save = await showAppDialog<bool>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -863,18 +871,15 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const TextField(
-                  enabled: false,
-                  decoration: InputDecoration(
-                    labelText: 'Country',
-                    hintText: northernCyprusCountryName,
-                  ),
+                InputDecorator(
+                  decoration: const InputDecoration(labelText: 'Country'),
+                  child: Text(country),
                 ),
                 DropdownButtonFormField<String>(
                   initialValue: district,
                   decoration: const InputDecoration(labelText: 'District'),
                   items: [
-                    for (final value in northernCyprusDeliveryLocations.keys)
+                    for (final value in locations.keys)
                       DropdownMenuItem(value: value, child: Text(value)),
                   ],
                   onChanged: (value) => setDialogState(() {
@@ -887,9 +892,7 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
                   initialValue: town,
                   decoration: const InputDecoration(labelText: 'Town'),
                   items: [
-                    for (final value
-                        in northernCyprusDeliveryLocations[district] ??
-                            const <String>[])
+                    for (final value in locations[district] ?? const <String>[])
                       DropdownMenuItem(value: value, child: Text(value)),
                   ],
                   onChanged: district == null
@@ -945,7 +948,7 @@ class _ChannelsTabState extends ConsumerState<_ChannelsTab> {
             ServiceArea(
               id: id,
               name: town!,
-              country: northernCyprusCountryName,
+              country: country,
               district: district!,
               town: town!,
               deliveryFeeMinor: _minor(fee.text),
