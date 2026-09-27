@@ -307,6 +307,12 @@ class VenueOfflineOrderBook {
             'An empty order has no receipt to print.',
           );
         }
+        if (draft.payload['isDeliveryNote'] == true &&
+            current.channel == 'dineIn') {
+          throw const OfflineProjectionException(
+            'A dine-in order does not have a delivery or collection note.',
+          );
+        }
         catalogueProvider?.call().validateReceiptRoute(printRequired: true);
         break;
       default:

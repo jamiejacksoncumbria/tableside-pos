@@ -5320,6 +5320,7 @@ async function addOrderDraftLineFor(caller, rawData) {
   const tableId = optionalText(data, "tableId", 180) || null;
   const tabName = optionalText(data, "tabName", 80) || null;
   const channel = optionalText(data, "channel", 20) || "dineIn";
+  const channelAvailabilityOverride = data.channelAvailabilityOverride === true;
   const requestedServiceAreaId = channel === "delivery"
     ? requiredDocumentId(data, "serviceAreaId") : null;
   if (!["dineIn", "collection", "delivery"].includes(channel) ||
@@ -5469,7 +5470,9 @@ async function addOrderDraftLineFor(caller, rawData) {
     const productData = product.data();
     if ((channel === "collection" && productData.availableForCollection === false) ||
         (channel === "delivery" && productData.availableForDelivery === false)) {
-      throw new HttpsError("failed-precondition", `This product is unavailable for ${channel}.`);
+      if (!channelAvailabilityOverride) {
+        throw new HttpsError("failed-precondition", `This product is unavailable for ${channel}.`);
+      }
     }
     const modifierGroupIds = configuredModifierGroupIds(productData);
     const modifierGroups = await Promise.all(
@@ -5614,6 +5617,7 @@ async function addOrderDraftLineFor(caller, rawData) {
       deviceObservedAtMillis: clientObservedAtMillis,
       clockSkewMillis,
       addedByActor: actor,
+      channelAvailabilityOverride,
     };
     const current = existingOrder.exists ? existingOrder.data() : null;
     const tableLabel = tableRef == null
@@ -5675,6 +5679,7 @@ async function addOrderDraftLineFor(caller, rawData) {
       serverObservedAtMillis: addedAtMillis,
       deviceObservedAtMillis: clientObservedAtMillis,
       clockSkewMillis,
+      channelAvailabilityOverride,
       venueTimeZone,
       actor,
       createdAt: FieldValue.serverTimestamp(),
@@ -9111,7 +9116,9 @@ async function sendOrderToProductionFor(caller, rawData) {
       }
       if ((channel === "collection" && product.availableForCollection === false) ||
           (channel === "delivery" && product.availableForDelivery === false)) {
-        throw new HttpsError("failed-precondition", `A selected product is unavailable for ${channel}.`);
+        if (line.channelAvailabilityOverride !== true) {
+          throw new HttpsError("failed-precondition", `A selected product is unavailable for ${channel}.`);
+        }
       }
       const configuration = canonicalLineConfiguration({
         productData: product,

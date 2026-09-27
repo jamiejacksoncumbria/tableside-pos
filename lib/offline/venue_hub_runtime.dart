@@ -68,10 +68,12 @@ class VenueHubRuntime {
     pendingEvents: 0,
   );
   VenueScope? _activeScope;
+  VenueHubBootstrap? _activeBootstrap;
 
   VenueHubRuntimeStatus get status => _status;
   Stream<VenueHubRuntimeStatus> get statuses => _statuses.stream;
   VenueScope? get activeScope => _activeScope;
+  VenueHubBootstrap? get activeBootstrap => _activeBootstrap;
 
   /// Waits for this process's hub listener to become usable.
   ///
@@ -242,6 +244,7 @@ class VenueHubRuntime {
       await printQueue.initialize();
       _printQueue = printQueue;
       _activeScope = scope;
+      _activeBootstrap = bootstrap;
       Future<void> installFreshSnapshot(Map<String, Object?> refreshed) async {
         if (refreshed['hubEpoch'] != bootstrap.hubEpoch ||
             refreshed['version'] is! int) {
@@ -293,10 +296,12 @@ class VenueHubRuntime {
             );
           } else if (event.type == 'receipt.requested') {
             final orderId = event.payload['orderId'] as String;
+            final isDeliveryNote = event.payload['isDeliveryNote'] == true;
             await printQueue.enqueueReceipt(
               order: await orderBook.order(orderId),
               printRequired: true,
-              isPreReceipt: true,
+              isPreReceipt: !isDeliveryNote,
+              isDeliveryNote: isDeliveryNote,
               jobSuffix: event.id,
             );
           }
@@ -737,6 +742,7 @@ class VenueHubRuntime {
     _installFreshSnapshot = null;
     _refreshAuthorityNow = null;
     _activeScope = null;
+    _activeBootstrap = null;
     await _server.stop();
     await AndroidVenueHubService.stop();
     _emit(

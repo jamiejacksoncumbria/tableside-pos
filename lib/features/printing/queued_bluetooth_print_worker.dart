@@ -32,7 +32,9 @@ class QueuedNativePrintWorker {
   final PrinterDeviceRepository _devices;
   final LocalPrinterDeviceIdentity _identity;
   DateTime? _lastHeartbeatAt;
+  DateTime? _heartbeatRetryAfter;
   VenueScope? _heartbeatScope;
+  bool _cloudHeartbeatOffline = false;
 
   String? get _requiredTransport {
     // `Platform` from dart:io throws at runtime in a browser. Web is a POS
@@ -56,6 +58,7 @@ class QueuedNativePrintWorker {
   /// heartbeat write, so this is safe to call on the shared app shell timer.
   Future<void> maintainHeartbeat(VenueScope scope) async {
     final now = DateTime.now();
+    if (_heartbeatRetryAfter?.isAfter(now) == true) return;
     if (_heartbeatScope == scope &&
         _lastHeartbeatAt != null &&
         now.difference(_lastHeartbeatAt!) < const Duration(seconds: 30)) {
@@ -96,8 +99,23 @@ class QueuedNativePrintWorker {
       );
       _lastHeartbeatAt = now;
       _heartbeatScope = scope;
-    } on Object catch (error, stackTrace) {
-      AppLogger.error('Maintain printer device heartbeat', error, stackTrace);
+      _heartbeatRetryAfter = null;
+      if (_cloudHeartbeatOffline) {
+        AppLogger.info('Printer device cloud heartbeat restored.');
+        _cloudHeartbeatOffline = false;
+      }
+    } on Object catch (error) {
+      // Internet loss is an expected operating mode for a venue hub. Back off
+      // cloud-only presence updates while the encrypted LAN queue continues;
+      // otherwise a ten-second timer floods the diagnostics with identical
+      // socket stacks and can contend with local printing.
+      _heartbeatRetryAfter = now.add(const Duration(minutes: 2));
+      if (!_cloudHeartbeatOffline) {
+        AppLogger.info(
+          'Printer cloud heartbeat is offline; local hub printing remains active. ($error)',
+        );
+        _cloudHeartbeatOffline = true;
+      }
     }
   }
 

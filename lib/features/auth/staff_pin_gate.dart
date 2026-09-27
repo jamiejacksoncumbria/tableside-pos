@@ -320,6 +320,19 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       } catch (error, stackTrace) {
         AppLogger.error('Refresh venue hub discovery', error, stackTrace);
         bootstrap = await _hubCache.readBootstrap(widget.scope);
+        // The hub host already passed cloud authority checks when its runtime
+        // started. Prefer that in-memory authority if the router loses its
+        // internet link before PIN entry and the older disk cache is absent or
+        // still says disabled. This never helps a different, unenrolled
+        // device bypass hub authentication.
+        final runningBootstrap =
+            VenueHubRuntime.instance.activeScope == widget.scope
+            ? VenueHubRuntime.instance.activeBootstrap
+            : null;
+        if (runningBootstrap?.enabled == true &&
+            (bootstrap == null || !bootstrap.enabled)) {
+          bootstrap = runningBootstrap;
+        }
       }
       if (bootstrap == null) {
         throw StateError(

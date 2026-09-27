@@ -311,9 +311,11 @@ class ActiveOrderController extends Notifier<PosOrder> {
     MenuProduct product, {
     ProductConfigurationSelection selection =
         const ProductConfigurationSelection(),
+    bool channelAvailabilityOverride = false,
   }) async {
     if (!state.canAddProduct(product) ||
-        !product.isAvailableFor(state.channel)) {
+        (!product.isAvailableFor(state.channel) &&
+            !channelAvailabilityOverride)) {
       AppLogger.info(
         'Stock prevented adding ${product.id} to active order ${state.id}.',
       );
@@ -401,7 +403,12 @@ class ActiveOrderController extends Notifier<PosOrder> {
     try {
       await ref
           .read(productionCommandRepositoryProvider)
-          .addDraftLine(scope: scope, order: state, line: line);
+          .addDraftLine(
+            scope: scope,
+            order: state,
+            line: line,
+            channelAvailabilityOverride: channelAvailabilityOverride,
+          );
       // From the very first item, the Firestore order is the shared source of
       // truth. It remains a draft until the waiter presses Send.
       _selectPersistedOrder(state.id);

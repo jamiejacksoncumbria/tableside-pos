@@ -242,6 +242,7 @@ class VenueHubPrintQueue {
     required OfflineOrderProjection order,
     required bool printRequired,
     bool isPreReceipt = false,
+    bool isDeliveryNote = false,
     String? jobSuffix,
   }) => _run(() async {
     if (!printRequired) return;
@@ -287,6 +288,7 @@ class VenueHubPrintQueue {
         payload: <String, Object?>{
           'type': 'receipt',
           'isPreReceipt': isPreReceipt,
+          'isDeliveryNote': isDeliveryNote,
           'receiptNumber':
               order.receiptNumber ?? 'OFF-$hubEpoch-${order.lastSequence}',
           'restaurantName':

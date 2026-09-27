@@ -1153,6 +1153,7 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required PosOrder order,
     required OrderLine line,
+    bool channelAvailabilityOverride = false,
   }) async {
     final hub = VenueHubClientRegistry.instance;
     if (hub.requiresHub(scope)) {
@@ -1185,6 +1186,7 @@ class ProductionCommandRepository {
           'productId': line.productId,
           'quantity': line.quantity,
           'channel': order.channel.name,
+          if (channelAvailabilityOverride) 'channelAvailabilityOverride': true,
           if (line.variantId?.trim().isNotEmpty == true)
             'variantId': line.variantId!.trim(),
           'modifierSelections': _modifierSelections(line),
@@ -1218,6 +1220,7 @@ class ProductionCommandRepository {
       'primaryWaiterId': order.primaryWaiterId,
       'primaryWaiterName': order.primaryWaiterName,
       'assignedDriverId': order.assignedDriverId,
+      if (channelAvailabilityOverride) 'channelAvailabilityOverride': true,
       'clientObservedAtMillis': DateTime.now().toUtc().millisecondsSinceEpoch,
       'line': {
         'id': line.id,
@@ -2008,6 +2011,15 @@ class ProductionCommandRepository {
     required String orderId,
     required String targetDeviceId,
   }) async {
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'receipt.requested',
+        payload: <String, Object?>{'orderId': orderId, 'isDeliveryNote': true},
+      );
+      return;
+    }
     await _call('printFulfilmentDeliveryNote', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,

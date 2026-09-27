@@ -285,11 +285,18 @@ class VenueOfflineCatalogue {
       );
     }
     final channel = payload['channel'] as String? ?? 'dineIn';
+    final channelAvailabilityOverride =
+        payload['channelAvailabilityOverride'] == true;
     if ((channel == 'collection' && !product.availableForCollection) ||
         (channel == 'delivery' && !product.availableForDelivery)) {
-      throw VenueOfflineCatalogueException(
-        'This product is unavailable for $channel.',
-      );
+      if (channelAvailabilityOverride) {
+        // Staff explicitly confirmed this exception in the POS. Preserve it
+        // in the immutable hub event so the decision remains auditable.
+      } else {
+        throw VenueOfflineCatalogueException(
+          'This product is unavailable for $channel.',
+        );
+      }
     }
     final quantity = _positiveInt(payload, 'quantity');
     final lineId = _requiredText(payload, 'lineId');
@@ -417,6 +424,7 @@ class VenueOfflineCatalogue {
       'courseReleasePolicy': channel == 'dineIn'
           ? product.courseReleasePolicy
           : 'immediate',
+      if (channelAvailabilityOverride) 'channelAvailabilityOverride': true,
     };
   }
 }

@@ -349,13 +349,18 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                     redMinutes: widget.redMinutes,
                     onAction: (action) => _applyAction(order, action),
                     onReprint: canReprint ? () => _reprintOrder(order) : null,
+                    onPrintDriverTicket:
+                        canReprint &&
+                            order.channel == OrderChannel.delivery &&
+                            order.orderId != null
+                        ? () => _printDriverTicket(order)
+                        : null,
                     onAssignDriver:
                         canAssignDrivers &&
                             drivers.isNotEmpty &&
                             order.channel == OrderChannel.delivery &&
                             order.orderId != null &&
-                            (order.status == OrderFlowStatus.preparing ||
-                                order.driverDeclined)
+                            !order.status.isTerminal
                         ? () => _chooseDriver(order, drivers)
                         : null,
                     lateAlarmDismissed: _dismissedLateTicketIds.contains(
@@ -777,6 +782,73 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       );
     }
   }
+
+  /// Prints the address-bearing driver copy from the live order rather than
+  /// the kitchen ticket. The server reconstructs prices, customer details and
+  /// the delivery address, so the KDS cannot alter financial information.
+  Future<void> _printDriverTicket(OrderFlowOrder order) async {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null || order.orderId == null) return;
+    try {
+      final devices = await PrinterDeviceRepository(FirebaseFirestore.instance)
+          .watchVenueDevices(tenantId: scope.tenantId, venueId: scope.venueId)
+          .first
+          .timeout(const Duration(seconds: 10));
+      if (!mounted) return;
+      final printers = devices
+          .where(
+            (device) =>
+                device.active && device.productionAreas.contains('receipt'),
+          )
+          .toList(growable: false);
+      if (printers.isEmpty) {
+        throw StateError('No active receipt printer is registered here.');
+      }
+      final selected = await showAppDialog<PrinterDevice>(
+        context: context,
+        builder: (dialogContext) => SimpleDialog(
+          title: const Text('Print driver ticket'),
+          children: [
+            for (final printer in printers)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(dialogContext, printer),
+                child: ListTile(
+                  leading: const Icon(Icons.print_outlined),
+                  title: Text(printer.name),
+                  subtitle: Text(printer.platform),
+                ),
+              ),
+          ],
+        ),
+      );
+      if (selected == null || !mounted) return;
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .printFulfilmentDeliveryNote(
+            scope: scope,
+            orderId: order.orderId!,
+            targetDeviceId: selected.id,
+          );
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Driver ticket queued',
+        message: 'The driver copy was sent to ${selected.name}.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Print driver ticket from order flow', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not print driver ticket',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    }
+  }
 }
 
 enum _FlowFilter { all, late, allergy, ready }
@@ -957,6 +1029,7 @@ class _OrderFlowCard extends StatelessWidget {
     required this.redMinutes,
     required this.onAction,
     this.onReprint,
+    this.onPrintDriverTicket,
     this.onAssignDriver,
     required this.itemsExpanded,
     required this.onToggleItems,
@@ -971,6 +1044,7 @@ class _OrderFlowCard extends StatelessWidget {
   final int redMinutes;
   final ValueChanged<_OrderFlowAction> onAction;
   final VoidCallback? onReprint;
+  final VoidCallback? onPrintDriverTicket;
   final VoidCallback? onAssignDriver;
   final bool itemsExpanded;
   final VoidCallback onToggleItems;
@@ -1137,6 +1211,7 @@ class _OrderFlowCard extends StatelessWidget {
                       order: order,
                       onAction: onAction,
                       onReprint: onReprint,
+                      onPrintDriverTicket: onPrintDriverTicket,
                     ),
                   ],
                 ),
@@ -1420,11 +1495,13 @@ class _OrderActions extends StatelessWidget {
     required this.order,
     required this.onAction,
     this.onReprint,
+    this.onPrintDriverTicket,
   });
 
   final OrderFlowOrder order;
   final ValueChanged<_OrderFlowAction> onAction;
   final VoidCallback? onReprint;
+  final VoidCallback? onPrintDriverTicket;
 
   @override
   Widget build(BuildContext context) {
@@ -1461,6 +1538,8 @@ class _OrderActions extends StatelessWidget {
       onSelected: (value) {
         if (value == 'reprint') {
           onReprint?.call();
+        } else if (value == 'driverTicket') {
+          onPrintDriverTicket?.call();
         } else if (value is _OrderFlowAction) {
           onAction(value);
         }
@@ -1490,6 +1569,17 @@ class _OrderActions extends StatelessWidget {
             ),
           ),
         ],
+        if (onPrintDriverTicket != null)
+          const PopupMenuItem<Object>(
+            value: 'driverTicket',
+            child: Row(
+              children: [
+                Icon(Icons.receipt_long_outlined, size: 19),
+                SizedBox(width: 10),
+                Text('Print driver ticket'),
+              ],
+            ),
+          ),
       ],
     );
   }

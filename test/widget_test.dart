@@ -54,4 +54,20 @@ void main() {
     expect(find.text('New order'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('web product search preserves keyboard text', (tester) async {
+    tester.view.physicalSize = const Size(900, 650);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const ProviderScope(child: TableSideCYApp()));
+    await tester.pumpAndSettle();
+
+    final search = find.byType(TextField).first;
+    await tester.enterText(search, 'draft');
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(search).controller?.text, 'draft');
+    expect(tester.takeException(), isNull);
+  });
 }

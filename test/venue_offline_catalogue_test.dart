@@ -67,6 +67,35 @@ void main() {
     expect(payload['itemNote'], '');
   });
 
+  test('delivery-only exclusion requires an explicit staff override', () async {
+    final snapshot = _snapshot();
+    final product =
+        (snapshot['products'] as List).first as Map<String, Object?>;
+    product['availableForDelivery'] = false;
+    final catalogue = VenueOfflineCatalogue.fromSnapshot(snapshot);
+    final basePayload = <String, Object?>{
+      'orderId': 'order-a',
+      'lineId': 'line-a',
+      'productId': 'steak',
+      'quantity': 1,
+      'channel': 'delivery',
+      'variantId': 'large',
+      'modifierSelections': [
+        {'groupId': 'cooking', 'optionId': 'medium'},
+      ],
+    };
+
+    await expectLater(
+      catalogue.validateEvent('order.itemAdded', basePayload, grant),
+      throwsA(isA<VenueOfflineCatalogueException>()),
+    );
+    final accepted = await catalogue.validateEvent('order.itemAdded', {
+      ...basePayload,
+      'channelAvailabilityOverride': true,
+    }, grant);
+    expect(accepted['channelAvailabilityOverride'], isTrue);
+  });
+
   test('required printing fails closed without a matching route', () {
     final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
     final order = projectOfflineOrder([
