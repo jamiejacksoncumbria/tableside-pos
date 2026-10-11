@@ -29,6 +29,7 @@ class VenueHubAutoStartHost extends StatefulWidget {
 class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
   static const _secrets = FlutterSecureStorage();
   bool _started = false;
+  Timer? _retryTimer;
 
   @override
   void initState() {
@@ -40,6 +41,7 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
   void didUpdateWidget(covariant VenueHubAutoStartHost oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.scope != widget.scope) {
+      _retryTimer?.cancel();
       _started = false;
       unawaited(_start());
     }
@@ -47,6 +49,8 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
 
   Future<void> _start() async {
     if (_started) return;
+    _retryTimer?.cancel();
+    _retryTimer = null;
     _started = true;
     try {
       final cache = VenueHubClientCache();
@@ -192,7 +196,25 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
       AppLogger.info('Venue offline hub auto-started for this venue.');
     } catch (error, stackTrace) {
       AppLogger.error('Auto-start venue offline hub', error, stackTrace);
+      // Startup can race Wi-Fi acquisition, Firebase token refresh, or a
+      // previous listener releasing port 8443. A one-shot failure previously
+      // left the designated hub stopped for the rest of the app session while
+      // every client correctly failed closed. Retry without requiring staff to
+      // restart the app; configuration errors remain visible in the log.
+      _started = false;
+      if (mounted) {
+        _retryTimer = Timer(
+          const Duration(seconds: 15),
+          () => unawaited(_start()),
+        );
+      }
     }
+  }
+
+  @override
+  void dispose() {
+    _retryTimer?.cancel();
+    super.dispose();
   }
 
   @override

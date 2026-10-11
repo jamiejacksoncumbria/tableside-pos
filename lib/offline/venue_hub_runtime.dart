@@ -469,12 +469,17 @@ class VenueHubRuntime {
         if (remoteTickRunning || _activeScope != scope) return;
         remoteTickRunning = true;
         try {
-          final commands = await _repository.claimRemoteHubCommands(
-            scope: scope,
-            deviceId: deviceId,
-            hubEpoch: bootstrap.hubEpoch,
-            credential: credential,
-          );
+          // Never let a half-open HTTP connection permanently hold the poll
+          // lock. The next timer cycle must be able to prove hub liveness and
+          // claim work after a router or Cloud Functions connection recovers.
+          final commands = await _repository
+              .claimRemoteHubCommands(
+                scope: scope,
+                deviceId: deviceId,
+                hubEpoch: bootstrap.hubEpoch,
+                credential: credential,
+              )
+              .timeout(const Duration(seconds: 12));
           if (!remoteCloudAvailable) {
             AppLogger.info('Venue hub remote command connection restored.');
             remoteCloudAvailable = true;
@@ -503,23 +508,25 @@ class VenueHubRuntime {
                 ),
                 trustedNowUtc: TrustedClock.instance.nowUtc(),
               );
-              await _repository.completeRemoteHubCommand(
-                scope: scope,
-                deviceId: deviceId,
-                hubEpoch: bootstrap.hubEpoch,
-                credential: credential,
-                commandId: commandId,
-                claimToken: claimToken,
-                accepted: true,
-                result: <String, Object?>{
-                  'eventId': acknowledgement.eventId,
-                  'sequence': acknowledgement.sequence,
-                  'eventHash': acknowledgement.eventHash,
-                  'committedAtUtc': acknowledgement.committedAtUtc
-                      .toUtc()
-                      .toIso8601String(),
-                },
-              );
+              await _repository
+                  .completeRemoteHubCommand(
+                    scope: scope,
+                    deviceId: deviceId,
+                    hubEpoch: bootstrap.hubEpoch,
+                    credential: credential,
+                    commandId: commandId,
+                    claimToken: claimToken,
+                    accepted: true,
+                    result: <String, Object?>{
+                      'eventId': acknowledgement.eventId,
+                      'sequence': acknowledgement.sequence,
+                      'eventHash': acknowledgement.eventHash,
+                      'committedAtUtc': acknowledgement.committedAtUtc
+                          .toUtc()
+                          .toIso8601String(),
+                    },
+                  )
+                  .timeout(const Duration(seconds: 12));
               unawaited(_sync!.flush());
             } catch (error, stackTrace) {
               AppLogger.error(
@@ -528,16 +535,18 @@ class VenueHubRuntime {
                 stackTrace,
               );
               try {
-                await _repository.completeRemoteHubCommand(
-                  scope: scope,
-                  deviceId: deviceId,
-                  hubEpoch: bootstrap.hubEpoch,
-                  credential: credential,
-                  commandId: commandId,
-                  claimToken: claimToken,
-                  accepted: false,
-                  rejectionMessage: error.toString(),
-                );
+                await _repository
+                    .completeRemoteHubCommand(
+                      scope: scope,
+                      deviceId: deviceId,
+                      hubEpoch: bootstrap.hubEpoch,
+                      credential: credential,
+                      commandId: commandId,
+                      claimToken: claimToken,
+                      accepted: false,
+                      rejectionMessage: error.toString(),
+                    )
+                    .timeout(const Duration(seconds: 12));
               } catch (_) {
                 // The short claim lease makes an ambiguous completion retryable.
               }
@@ -564,13 +573,15 @@ class VenueHubRuntime {
         if (remoteHeartbeatRunning || _activeScope != scope) return;
         remoteHeartbeatRunning = true;
         try {
-          await _repository.heartbeatRemoteHub(
-            scope: scope,
-            deviceId: deviceId,
-            hubEpoch: bootstrap.hubEpoch,
-            credential: credential,
-            pendingLocalEvents: (await _ledger.pending()).length,
-          );
+          await _repository
+              .heartbeatRemoteHub(
+                scope: scope,
+                deviceId: deviceId,
+                hubEpoch: bootstrap.hubEpoch,
+                credential: credential,
+                pendingLocalEvents: (await _ledger.pending()).length,
+              )
+              .timeout(const Duration(seconds: 12));
           if (!remoteCloudAvailable) {
             AppLogger.info('Venue hub remote command connection restored.');
             remoteCloudAvailable = true;
@@ -595,7 +606,11 @@ class VenueHubRuntime {
         const Duration(seconds: 5),
         (_) => unawaited(remoteHeartbeat()),
       );
-      unawaited(remoteHeartbeat());
+      // Attempt the first presence update before reporting startup complete.
+      // Failure remains non-fatal (LAN operation is deliberately independent
+      // of internet availability), while success immediately opens the safe
+      // remote-command path instead of waiting for the first timer tick.
+      await remoteHeartbeat();
       unawaited(remoteTick());
       _pendingSubscription = _ledger.watchPending().listen(
         (events) {

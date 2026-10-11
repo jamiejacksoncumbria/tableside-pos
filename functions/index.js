@@ -2306,11 +2306,17 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
 
 const remoteHubCommandTtlMs = 25 * 1000;
 const remoteHubClaimLeaseMs = 15 * 1000;
-// Heartbeats arrive every five seconds on a dedicated hub loop. A 30-second
-// lease tolerates normal mobile/broadband latency without allowing remote POS
-// commands to rely on a hub that has actually stopped. Commands still expire
+// Heartbeats arrive every five seconds on a dedicated hub loop. The lease
+// tolerates normal mobile/broadband latency without allowing a remote command
+// to be reported as saved by an unavailable hub. Commands still expire
 // independently after 25 seconds unless the authoritative hub commits them.
-const remoteHubHeartbeatTtlMs = 30 * 1000;
+// Remote command polling is itself a signed, device-bound proof that the
+// authoritative hub is alive. Keep a comfortably larger lease than the
+// five-second poll cadence so a slow Cloud Functions cold start or a brief
+// broadband interruption cannot make healthy clients see a false OFFLINE
+// state. Commands still expire independently and are never reported as saved
+// until the hub durably commits them, so this tolerance cannot bypass the hub.
+const remoteHubHeartbeatTtlMs = 75 * 1000;
 const remoteHubEventTypes = new Set([
   "order.opened", "order.itemAdded", "order.itemQuantityChanged",
   "order.sent", "order.fulfilmentChanged", "payment.recorded",
@@ -2323,6 +2329,23 @@ function remoteHubQueue(tenantId, venueId) {
 
 function remoteHubStateRef(tenantId, venueId) {
   return db.doc(`tenants/${tenantId}/venues/${venueId}/remoteHubState/status`);
+}
+
+async function recordRemoteHubPresence(upload, pendingLocalEvents = null) {
+  const expiresAt = new Date(Date.now() + remoteHubHeartbeatTtlMs);
+  const presence = {
+    hubDeviceId: upload.body.deviceId,
+    hubEpoch: upload.hubEpoch,
+    status: "online",
+    lastHeartbeatAt: FieldValue.serverTimestamp(),
+    heartbeatExpiresAt: expiresAt,
+  };
+  if (Number.isSafeInteger(pendingLocalEvents) && pendingLocalEvents >= 0) {
+    presence.pendingLocalEvents = pendingLocalEvents;
+  }
+  await remoteHubStateRef(upload.tenantId, upload.venueId)
+    .set(presence, {merge: true});
+  return expiresAt;
 }
 
 async function submitRemoteHubCommandFor(caller, rawData) {
@@ -2396,20 +2419,22 @@ async function submitRemoteHubCommandFor(caller, rawData) {
 
 async function heartbeatRemoteHubFor(caller, rawData) {
   const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/remote-heartbeat");
-  const expiresAt = new Date(Date.now() + remoteHubHeartbeatTtlMs);
-  await remoteHubStateRef(upload.tenantId, upload.venueId).set({
-    hubDeviceId: upload.body.deviceId,
-    hubEpoch: upload.hubEpoch,
-    status: "online",
-    pendingLocalEvents: Number(upload.body.pendingLocalEvents ?? 0),
-    lastHeartbeatAt: FieldValue.serverTimestamp(),
-    heartbeatExpiresAt: expiresAt,
-  }, {merge: true});
+  const pendingLocalEvents = Number(upload.body.pendingLocalEvents ?? 0);
+  const expiresAt = await recordRemoteHubPresence(
+    upload,
+    Number.isSafeInteger(pendingLocalEvents) && pendingLocalEvents >= 0
+      ? pendingLocalEvents : 0,
+  );
   return {heartbeatExpiresAt: expiresAt.toISOString()};
 }
 
 async function claimRemoteHubCommandsFor(caller, rawData) {
   const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/remote-claim");
+  // A successful signed poll proves exactly the same liveness properties as
+  // the dedicated heartbeat. Refreshing presence here closes a failure mode
+  // where command polling remained healthy but one stuck heartbeat request
+  // caused every remote POS to be rejected as if the hub were offline.
+  await recordRemoteHubPresence(upload);
   const maximum = Math.min(Math.max(Number(upload.body.maximum ?? 10), 1), 25);
   const candidates = await remoteHubQueue(upload.tenantId, upload.venueId)
     .where("status", "in", ["pending", "claimed"])
