@@ -14,16 +14,22 @@ class VenueHubClientCache {
   String _key(VenueScope scope, String kind) =>
       'tableside.hubCache.${scope.tenantId}.${scope.venueId}.$kind';
 
-  Future<void> saveBootstrap(VenueScope scope, VenueHubBootstrap value) =>
-      _preferences.setString(
+  Future<void> saveBootstrap(VenueScope scope, VenueHubBootstrap value) async {
+    try {
+      await _preferences.setString(
         _key(scope, 'bootstrap'),
         jsonEncode(value.toJson()),
       );
+    } on Object {
+      // Discovery caching is best-effort. A local storage fault must never
+      // turn a successful cloud response into a failed venue load.
+    }
+  }
 
   Future<VenueHubBootstrap?> readBootstrap(VenueScope scope) async {
-    final raw = await _preferences.getString(_key(scope, 'bootstrap'));
-    if (raw == null) return null;
     try {
+      final raw = await _preferences.getString(_key(scope, 'bootstrap'));
+      if (raw == null) return null;
       final value = jsonDecode(raw);
       return value is Map
           ? VenueHubBootstrap.fromJson(Map<String, Object?>.from(value))
@@ -33,8 +39,9 @@ class VenueHubClientCache {
     }
   }
 
-  Future<void> saveStaff(VenueScope scope, List<VenuePinStaff> staff) =>
-      _preferences.setString(
+  Future<void> saveStaff(VenueScope scope, List<VenuePinStaff> staff) async {
+    try {
+      await _preferences.setString(
         _key(scope, 'staff'),
         jsonEncode(
           staff
@@ -51,11 +58,16 @@ class VenueHubClientCache {
               .toList(growable: false),
         ),
       );
+    } on Object {
+      // The online staff list remains authoritative and usable even if this
+      // optional offline-discovery cache cannot be written.
+    }
+  }
 
   Future<List<VenuePinStaff>> readStaff(VenueScope scope) async {
-    final raw = await _preferences.getString(_key(scope, 'staff'));
-    if (raw == null) return const [];
     try {
+      final raw = await _preferences.getString(_key(scope, 'staff'));
+      if (raw == null) return const [];
       final value = jsonDecode(raw);
       if (value is! List) return const [];
       return value

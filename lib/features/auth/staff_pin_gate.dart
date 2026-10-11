@@ -262,6 +262,9 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     });
     try {
       final staff = await _repository.listVenuePinStaff(widget.scope);
+      // The cache is optional. Its implementation absorbs local-storage
+      // failures so a successfully loaded cloud list always opens the PIN
+      // screen instead of being misclassified as an offline failure.
       await _hubCache.saveStaff(widget.scope, staff);
       if (!mounted) return;
       final currentUserId = FirebaseAuth.instance.currentUser?.uid;
