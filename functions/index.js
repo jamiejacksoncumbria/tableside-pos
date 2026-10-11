@@ -2304,7 +2304,7 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
   };
 }
 
-const remoteHubCommandTtlMs = 25 * 1000;
+const remoteHubCommandTtlMs = 45 * 1000;
 const remoteHubClaimLeaseMs = 15 * 1000;
 // Heartbeats arrive every five seconds on a dedicated hub loop. The lease
 // tolerates normal mobile/broadband latency without allowing a remote command
@@ -2418,6 +2418,78 @@ async function submitRemoteHubCommandFor(caller, rawData) {
     });
   });
   return {commandId, expiresAt: expiresAt.toISOString(), documentPath: commandRef.path};
+}
+
+/// Waits on the server-owned command document for the authoritative hub's
+/// terminal acknowledgement. Remote clients previously listened to this
+/// document directly; that introduced a second security/cache path which
+/// could miss an accepted update even though the hub completed it. Keeping
+/// both submission and acknowledgement behind the PIN-protected POS API makes
+/// the result deterministic without allowing the API itself to accept work.
+async function waitForRemoteHubCommandFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const commandId = requiredDocumentId(data, "commandId");
+  const [{membership}, initial] = await Promise.all([
+    requireTenantOperationalMember(caller, tenantId),
+    remoteHubQueue(tenantId, venueId).doc(commandId).get(),
+  ]);
+  const venueIds = Array.isArray(membership.venueIds) ? membership.venueIds : [];
+  if (venueIds.length > 0 && !venueIds.includes(venueId)) {
+    throw new HttpsError("permission-denied", "This staff member is not assigned to this venue.");
+  }
+  if (!initial.exists || initial.data().hostUid !== caller.hostUid ||
+      initial.data().staffId !== caller.uid) {
+    throw new HttpsError("not-found", "The remote venue command was not found.");
+  }
+  const commandRef = initial.ref;
+  const responseFor = (snapshot) => {
+    const value = snapshot.data() ?? {};
+    return {
+      commandId: snapshot.id,
+      status: String(value.status ?? "pending"),
+      result: value.status === "accepted" && value.result != null ? value.result : null,
+      rejectionMessage: value.status === "rejected"
+        ? String(value.rejectionMessage ?? "The venue hub rejected this command.") : null,
+    };
+  };
+  if (["accepted", "rejected", "expired"].includes(initial.data().status)) {
+    return responseFor(initial);
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let latest = initial;
+    let unsubscribe = () => {};
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      unsubscribe();
+      callback();
+    };
+    const timer = setTimeout(() => {
+      finish(() => resolve(responseFor(latest)));
+    }, 42000);
+    unsubscribe = commandRef.onSnapshot(
+      (snapshot) => {
+        if (!snapshot.exists) {
+          finish(() => reject(new HttpsError("not-found", "The remote venue command disappeared.")));
+          return;
+        }
+        latest = snapshot;
+        const value = snapshot.data();
+        if (value.hostUid !== caller.hostUid || value.staffId !== caller.uid) {
+          finish(() => reject(new HttpsError("permission-denied", "The remote venue command owner changed.")));
+          return;
+        }
+        if (["accepted", "rejected", "expired"].includes(value.status)) {
+          finish(() => resolve(responseFor(snapshot)));
+        }
+      },
+      (error) => finish(() => reject(error)),
+    );
+  });
 }
 
 async function heartbeatRemoteHubFor(caller, rawData) {
@@ -10542,6 +10614,8 @@ async function invokePosAction(action, caller, data) {
       return getOfflineHubSnapshotFor(caller, data);
     case "submitRemoteHubCommand":
       return submitRemoteHubCommandFor(actingCaller, data);
+    case "waitForRemoteHubCommand":
+      return waitForRemoteHubCommandFor(actingCaller, data);
     case "heartbeatRemoteHub":
       return heartbeatRemoteHubFor(caller, data);
     case "claimRemoteHubCommands":

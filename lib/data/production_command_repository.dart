@@ -1970,6 +1970,7 @@ class ProductionCommandRepository {
       payload: payload,
       businessTimestampUtc: businessTimestampUtc,
       submit: (request) => _call('submitRemoteHubCommand', request),
+      waitForStatus: (request) => _call('waitForRemoteHubCommand', request),
     );
   }
 
@@ -2107,6 +2108,7 @@ class ProductionCommandRepository {
     'listVenuePinStaff',
     'refreshStaffPinSession',
     'submitRemoteHubCommand',
+    'waitForRemoteHubCommand',
     'releaseDueFulfilmentTickets',
   };
 

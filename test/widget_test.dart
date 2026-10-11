@@ -53,6 +53,14 @@ void main() {
 
     expect(find.text('New order'), findsOneWidget);
     expect(tester.takeException(), isNull);
+
+    // The order footer contains totals, payment history and three action
+    // rows. It must become internally scrollable rather than overflowing on a
+    // shallow tablet/browser viewport.
+    await tester.tap(find.byType(Tab).last);
+    await tester.pumpAndSettle();
+    expect(find.text('No table selected'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('web product search preserves keyboard text', (tester) async {

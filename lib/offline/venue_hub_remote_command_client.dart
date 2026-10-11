@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
 import '../core/tenant_scope.dart';
@@ -9,6 +8,8 @@ import 'venue_hub_client.dart';
 import 'venue_hub_availability.dart';
 
 typedef RemoteHubSubmitter =
+    Future<Map<String, Object?>> Function(Map<String, Object?> request);
+typedef RemoteHubStatusWaiter =
     Future<Map<String, Object?>> Function(Map<String, Object?> request);
 
 /// Global, process-local indicator used by the shell to make the durability
@@ -25,12 +26,8 @@ class RemoteHubWaitState {
 }
 
 class VenueHubRemoteCommandClient {
-  VenueHubRemoteCommandClient({
-    FirebaseFirestore? firestore,
-    this.timeout = const Duration(seconds: 32),
-  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+  VenueHubRemoteCommandClient({this.timeout = const Duration(seconds: 50)});
 
-  final FirebaseFirestore _firestore;
   final Duration timeout;
 
   Future<VenueHubEventAcknowledgement> send({
@@ -39,6 +36,7 @@ class VenueHubRemoteCommandClient {
     required String eventType,
     required Map<String, Object?> payload,
     required RemoteHubSubmitter submit,
+    required RemoteHubStatusWaiter waitForStatus,
     DateTime? businessTimestampUtc,
   }) async {
     return AppBusyState.guard(
@@ -48,6 +46,7 @@ class VenueHubRemoteCommandClient {
         eventType: eventType,
         payload: payload,
         submit: submit,
+        waitForStatus: waitForStatus,
         businessTimestampUtc: businessTimestampUtc,
       ),
     );
@@ -59,6 +58,7 @@ class VenueHubRemoteCommandClient {
     required String eventType,
     required Map<String, Object?> payload,
     required RemoteHubSubmitter submit,
+    required RemoteHubStatusWaiter waitForStatus,
     DateTime? businessTimestampUtc,
   }) async {
     final commandId =
@@ -84,28 +84,15 @@ class VenueHubRemoteCommandClient {
           'The venue command server returned an invalid acknowledgement.',
         );
       }
-      final reference = _firestore
-          .collection('tenants')
-          .doc(scope.tenantId)
-          .collection('venues')
-          .doc(scope.venueId)
-          .collection('remoteHubCommands')
-          .doc(commandId);
-      final snapshot = await reference
-          .snapshots()
-          .firstWhere((value) {
-            final status = value.data()?['status'];
-            return status == 'accepted' ||
-                status == 'rejected' ||
-                status == 'expired';
-          })
-          .timeout(timeout);
-      final value = snapshot.data();
-      if (value == null) {
-        throw StateError(
-          'The venue hub command disappeared before confirmation.',
-        );
-      }
+      // Read the terminal state through the authenticated POS API rather than
+      // a direct Firestore listener. This avoids platform cache/listener
+      // differences while preserving the important invariant: only the
+      // enrolled hub can move this document to `accepted`.
+      final value = await waitForStatus(<String, Object?>{
+        'tenantId': scope.tenantId,
+        'venueId': scope.venueId,
+        'commandId': commandId,
+      }).timeout(timeout);
       if (value['status'] != 'accepted') {
         final message = value['rejectionMessage'];
         throw StateError(
