@@ -148,28 +148,52 @@ class _PosPageState extends ConsumerState<PosPage>
                         ref.read(posCompactTabProvider.notifier).select(index),
                     tabs: [
                       const Tab(
-                        icon: Icon(Icons.table_restaurant_rounded),
-                        text: 'Tables',
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.table_restaurant_rounded, size: 20),
+                            SizedBox(width: 6),
+                            Text('Tables'),
+                          ],
+                        ),
                       ),
                       const Tab(
-                        icon: Icon(Icons.restaurant_menu_rounded),
-                        text: 'Menu',
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.restaurant_menu_rounded, size: 20),
+                            SizedBox(width: 6),
+                            Text('Menu'),
+                          ],
+                        ),
                       ),
                       Tab(
-                        icon: shownCount == 0
-                            ? const Icon(Icons.receipt_long_rounded)
-                            : Badge.count(
-                                count: shownCount,
-                                backgroundColor: badgeColor,
-                                child: const Icon(Icons.receipt_long_rounded),
-                              ),
-                        text: 'Order',
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            shownCount == 0
+                                ? const Icon(
+                                    Icons.receipt_long_rounded,
+                                    size: 20,
+                                  )
+                                : Badge.count(
+                                    count: shownCount,
+                                    backgroundColor: badgeColor,
+                                    child: const Icon(
+                                      Icons.receipt_long_rounded,
+                                      size: 20,
+                                    ),
+                                  ),
+                            const SizedBox(width: 6),
+                            const Text('Order'),
+                          ],
+                        ),
                       ),
                     ],
                   );
                 },
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 6),
               Expanded(
                 child: TabBarView(
                   controller: _compactTabController,
@@ -2457,7 +2481,10 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        // Keep the order controls usable on medium-height tablets. The line
+        // list remains the flexible region, while compact vertical spacing
+        // prevents the fixed totals and action controls overflowing below it.
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2468,7 +2495,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                     orderLocationLabel,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleLarge,
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -2569,7 +2596,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 ),
               ),
             ],
-            const Divider(height: 24),
+            const Divider(height: 16),
             if (_selectedLineIds.isNotEmpty && canAdjustSale) ...[
               Wrap(
                 spacing: 8,
@@ -2789,7 +2816,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 ],
               ),
             ],
-            const Divider(height: 24),
+            const Divider(height: 16),
             Row(
               children: [
                 Text('Total', style: Theme.of(context).textTheme.titleMedium),
@@ -2843,11 +2870,14 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                   style: Theme.of(context).textTheme.labelSmall,
                 ),
             ],
-            const SizedBox(height: 12),
+            const SizedBox(height: 6),
             Row(
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
                     onPressed:
                         order.isSplitOrder ||
                             order.payments.isNotEmpty ||
@@ -2867,6 +2897,9 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
                     onPressed: hasUnsentLines
                         ? () => _showPendingOrderItems(
                             context,
@@ -2882,11 +2915,14 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 ),
               ],
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 4),
             Row(
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
                     onPressed:
                         isTraining || order.lines.isEmpty || hasUnsentLines
                         ? null
@@ -2929,6 +2965,9 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
                     onPressed:
                         order.lines.isEmpty ||
                             hasUnsentLines ||
@@ -2946,10 +2985,13 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 ),
               ],
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 4),
             SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
                 onPressed: !hasUnsentLines
                     ? null
                     : () async {

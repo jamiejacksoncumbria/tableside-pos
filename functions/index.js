@@ -2365,22 +2365,25 @@ async function submitRemoteHubCommandFor(caller, rawData) {
   if (Buffer.byteLength(encodedPayload, "utf8") > 64 * 1024) {
     throw new HttpsError("invalid-argument", "The remote venue command is too large.");
   }
-  const [{membership}, venue, state, pin] = await Promise.all([
+  const [{membership}, venue, pin] = await Promise.all([
     requireTenantOperationalMember(caller, tenantId),
     db.doc(`tenants/${tenantId}/venues/${venueId}`).get(),
-    remoteHubStateRef(tenantId, venueId).get(),
     db.doc(`tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`).get(),
   ]);
   const hub = venue.data()?.offlineHub;
-  const heartbeatExpiresAt = state.data()?.heartbeatExpiresAt?.toDate?.();
+  // Do not use the advisory heartbeat document as an admission lock. Mobile
+  // networks, suspended timers and a busy Functions instance can delay an
+  // otherwise healthy hub heartbeat beyond its display lease. The command
+  // queue itself is the authoritative liveness check: a command has a short
+  // expiry and is reported as successful only after the enrolled hub claims,
+  // validates and durably commits it. If the hub is genuinely unreachable the
+  // command expires and the POS never presents the operation as saved.
   if (!venue.exists || venue.data()?.status === "deleting" ||
       hub?.enabled !== true || hub.epoch !== hubEpoch ||
-      state.data()?.hubEpoch !== hubEpoch ||
-      state.data()?.hubDeviceId !== hub.deviceId ||
-      heartbeatExpiresAt == null || heartbeatExpiresAt.getTime() <= Date.now()) {
+      typeof hub.deviceId !== "string" || hub.deviceId.length === 0) {
     throw new HttpsError(
       "unavailable",
-      "The venue hub internet heartbeat is offline. Remote devices may use any network once the hub reconnects; same-network devices can continue over LAN.",
+      "The venue hub is not enrolled for remote commands at this venue.",
     );
   }
   if (!pin.exists || pin.data()?.locked === true) {

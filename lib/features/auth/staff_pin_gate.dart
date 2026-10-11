@@ -1200,9 +1200,9 @@ class _PinPadPanelState extends State<_PinPadPanel> {
           style: Theme.of(context).textTheme.headlineSmall!,
           child: widget.title,
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 10),
         Text(widget.message),
-        const SizedBox(height: 18),
+        const SizedBox(height: 10),
         Semantics(
           label: '${_pin.length} of 6 PIN digits entered',
           child: Row(
@@ -1210,23 +1210,23 @@ class _PinPadPanelState extends State<_PinPadPanel> {
             children: List.generate(
               6,
               (index) => Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 7),
+                padding: const EdgeInsets.symmetric(horizontal: 5),
                 child: Icon(
                   index < _pin.length ? Icons.circle : Icons.circle_outlined,
-                  size: 17,
+                  size: 15,
                 ),
               ),
             ),
           ),
         ),
-        const SizedBox(height: 18),
+        const SizedBox(height: 10),
         GridView.count(
           crossAxisCount: 3,
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          mainAxisSpacing: 8,
-          crossAxisSpacing: 8,
-          childAspectRatio: 1.9,
+          mainAxisSpacing: 5,
+          crossAxisSpacing: 5,
+          childAspectRatio: 2.35,
           children: [
             for (final digit in const [
               '1',
@@ -1243,7 +1243,7 @@ class _PinPadPanelState extends State<_PinPadPanel> {
                 onPressed: () => _digit(digit),
                 child: Text(
                   digit,
-                  style: Theme.of(context).textTheme.headlineSmall,
+                  style: Theme.of(context).textTheme.titleLarge,
                 ),
               ),
             OutlinedButton(
@@ -1257,10 +1257,7 @@ class _PinPadPanelState extends State<_PinPadPanel> {
             ),
             FilledButton.tonal(
               onPressed: () => _digit('0'),
-              child: Text(
-                '0',
-                style: Theme.of(context).textTheme.headlineSmall,
-              ),
+              child: Text('0', style: Theme.of(context).textTheme.titleLarge),
             ),
             IconButton.filledTonal(
               tooltip: 'Delete last digit',
@@ -1269,7 +1266,7 @@ class _PinPadPanelState extends State<_PinPadPanel> {
             ),
           ],
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 8),
         Wrap(
           alignment: WrapAlignment.end,
           spacing: 8,
