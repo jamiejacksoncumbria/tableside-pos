@@ -621,6 +621,16 @@ class VenueHubRuntime {
       // using mobile data or another internet connection.
       Future<void> remoteHeartbeat() async {
         if (remoteHeartbeatRunning || _activeScope != scope) return;
+        // A successful signed command poll refreshes exactly the same server
+        // presence document. Avoid a second billed Function invocation while
+        // polling is healthy; this dedicated heartbeat is only the fallback
+        // when the polling path has not succeeded recently.
+        final lastClaimSuccess = _lastRemoteClaimSuccessAtUtc;
+        if (lastClaimSuccess != null &&
+            DateTime.now().toUtc().difference(lastClaimSuccess) <
+                const Duration(seconds: 25)) {
+          return;
+        }
         remoteHeartbeatRunning = true;
         try {
           await _repository
@@ -651,11 +661,13 @@ class VenueHubRuntime {
       }
 
       _remoteCommandTimer = Timer.periodic(
-        const Duration(seconds: 5),
+        // Ten seconds keeps remote tills responsive while halving idle cloud
+        // invocations. Same-network tills continue to use the LAN hub directly.
+        const Duration(seconds: 10),
         (_) => unawaited(remoteTick()),
       );
       _remoteHeartbeatTimer = Timer.periodic(
-        const Duration(seconds: 5),
+        const Duration(seconds: 30),
         (_) => unawaited(remoteHeartbeat()),
       );
       // Attempt the first presence update before reporting startup complete.

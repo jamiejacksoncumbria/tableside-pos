@@ -81,10 +81,11 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
         }
       }
     });
-    _retryTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    _retryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       unawaited(worker.maintainHeartbeat(scope));
-      // The timer is a safety net for a platform stream interruption. Normal
-      // jobs wake the worker immediately through the queue subscription.
+      // The Firestore/encrypted-queue stream wakes normal jobs immediately.
+      // This slower scan is only a safety net for a platform stream
+      // interruption, avoiding a billed empty claim every ten seconds.
       unawaited(_processAvailable(scope));
     });
     unawaited(worker.maintainHeartbeat(scope));

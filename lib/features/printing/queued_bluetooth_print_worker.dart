@@ -62,7 +62,7 @@ class QueuedNativePrintWorker {
     if (_heartbeatRetryAfter?.isAfter(now) == true) return;
     if (_heartbeatScope == scope &&
         _lastHeartbeatAt != null &&
-        now.difference(_lastHeartbeatAt!) < const Duration(seconds: 30)) {
+        now.difference(_lastHeartbeatAt!) < const Duration(seconds: 60)) {
       return;
     }
     try {
@@ -182,7 +182,7 @@ class QueuedNativePrintWorker {
     if (!hubMode &&
         (_heartbeatScope != scope ||
             _lastHeartbeatAt == null ||
-            now.difference(_lastHeartbeatAt!) >= const Duration(seconds: 30))) {
+            now.difference(_lastHeartbeatAt!) >= const Duration(seconds: 60))) {
       await _devices.heartbeat(
         scope: scope,
         deviceId: deviceId,

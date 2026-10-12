@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../core/safe_dialog.dart';
+import '../../core/safe_modal_bottom_sheet.dart';
 import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
 import '../../core/money.dart';
@@ -3196,7 +3197,7 @@ Future<void> _showCheckoutSheet(
   final exchangeRateController = TextEditingController(text: '1');
   final currencyChoices = checkoutTenderCurrencies(baseCurrencyCode);
   _CompletedCheckout? completed;
-  await showModalBottomSheet<void>(
+  await showAppModalBottomSheet<void>(
     context: pageContext,
     showDragHandle: true,
     isScrollControlled: true,

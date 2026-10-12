@@ -34,7 +34,11 @@ class _PrintDeliveryMonitorHostState
     extends ConsumerState<PrintDeliveryMonitorHost> {
   static const _queueAlertAfter = Duration(seconds: 15);
   static const _claimedAlertAfter = Duration(seconds: 45);
-  static const _offlineAfter = Duration(seconds: 90);
+  // Printer presence is intentionally written at most once per minute to
+  // control cloud invocation/write costs. Allow two missed heartbeats plus
+  // scheduling/network jitter before declaring an otherwise healthy device
+  // offline.
+  static const _offlineAfter = Duration(seconds: 150);
 
   final PrintJobRepository _jobs = PrintJobRepository(
     FirebaseFirestore.instance,
