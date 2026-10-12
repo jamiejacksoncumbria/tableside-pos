@@ -151,6 +151,14 @@ class VenueHubRemoteCommandClient {
           // server from creating a tight acknowledgement polling loop.
           await Future<void>.delayed(const Duration(milliseconds: 100));
         } catch (error) {
+          // A terminal response is not a transport failure, even when its
+          // business-rule message contains words such as "offline" (for
+          // example an offline idempotency-key rejection). Surface the exact
+          // hub decision immediately instead of polling the same rejected
+          // command until the 90-second deadline.
+          if (value?['status'] == 'rejected' || value?['status'] == 'expired') {
+            rethrow;
+          }
           if (!_looksLikeConnectivityFailure(error)) rethrow;
           lastWaitError = error;
           AppLogger.info(

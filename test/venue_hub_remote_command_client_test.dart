@@ -63,6 +63,44 @@ void main() {
     );
   });
 
+  test('surfaces a terminal hub rejection without retrying it', () async {
+    final client = VenueHubRemoteCommandClient(
+      timeout: const Duration(seconds: 3),
+    );
+    var waits = 0;
+
+    await expectLater(
+      client.send(
+        scope: scope,
+        hubEpoch: 3,
+        eventType: 'order.itemAdded',
+        payload: const <String, Object?>{'orderId': 'order-a'},
+        submit: (request) async => <String, Object?>{
+          'commandId': request['commandId'],
+        },
+        waitForStatus: (_) async {
+          waits++;
+          return const <String, Object?>{
+            'status': 'rejected',
+            'stage': 'hubRejected',
+            // "offline" previously caused this business rejection to be
+            // mistaken for a broken network connection.
+            'rejectionMessage':
+                'An offline retry key was reused with different data.',
+          };
+        },
+      ),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          'An offline retry key was reused with different data.',
+        ),
+      ),
+    );
+    expect(waits, 1);
+  });
+
   test('resumes the same command after an acknowledgement outage', () async {
     final client = VenueHubRemoteCommandClient(
       timeout: const Duration(seconds: 3),
