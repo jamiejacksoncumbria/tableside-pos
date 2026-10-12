@@ -429,7 +429,11 @@ class VenueHubRuntime {
       );
       var remoteTickRunning = false;
       var remoteHeartbeatRunning = false;
-      var remoteCloudAvailable = true;
+      // Track the two cloud loops independently. A healthy heartbeat must not
+      // hide a broken claim poll (or vice versa); doing so previously reduced
+      // the only useful diagnostic to a generic one-line "offline" message.
+      var remoteClaimAvailable = true;
+      var remoteHeartbeatAvailable = true;
       VenueHubStaffGrant? remoteGrant(Map<String, Object?> command) {
         final staffId = command['staffId'];
         final expectedPinVersion = command['pinVersion'];
@@ -480,9 +484,9 @@ class VenueHubRuntime {
                 credential: credential,
               )
               .timeout(const Duration(seconds: 12));
-          if (!remoteCloudAvailable) {
-            AppLogger.info('Venue hub remote command connection restored.');
-            remoteCloudAvailable = true;
+          if (!remoteClaimAvailable) {
+            AppLogger.info('Venue hub secure command polling restored.');
+            remoteClaimAvailable = true;
           }
           for (final command in commands) {
             final commandId = command['commandId'];
@@ -590,12 +594,14 @@ class VenueHubRuntime {
               );
             }
           }
-        } catch (_) {
-          if (remoteCloudAvailable) {
-            AppLogger.info(
-              'Venue hub remote command connection is offline; LAN orders remain available.',
+        } catch (error, stackTrace) {
+          if (remoteClaimAvailable) {
+            AppLogger.error(
+              'Poll secure remote venue commands; LAN orders remain available',
+              error,
+              stackTrace,
             );
-            remoteCloudAvailable = false;
+            remoteClaimAvailable = false;
           }
         } finally {
           remoteTickRunning = false;
@@ -620,16 +626,18 @@ class VenueHubRuntime {
                 pendingLocalEvents: (await _ledger.pending()).length,
               )
               .timeout(const Duration(seconds: 12));
-          if (!remoteCloudAvailable) {
-            AppLogger.info('Venue hub remote command connection restored.');
-            remoteCloudAvailable = true;
+          if (!remoteHeartbeatAvailable) {
+            AppLogger.info('Venue hub internet heartbeat restored.');
+            remoteHeartbeatAvailable = true;
           }
-        } catch (_) {
-          if (remoteCloudAvailable) {
-            AppLogger.info(
-              'Venue hub internet heartbeat is offline; same-network LAN orders remain available.',
+        } catch (error, stackTrace) {
+          if (remoteHeartbeatAvailable) {
+            AppLogger.error(
+              'Publish venue hub internet heartbeat; same-network LAN orders remain available',
+              error,
+              stackTrace,
             );
-            remoteCloudAvailable = false;
+            remoteHeartbeatAvailable = false;
           }
         } finally {
           remoteHeartbeatRunning = false;
@@ -685,12 +693,10 @@ class VenueHubRuntime {
       Future<void> refreshAuthority() async {
         if (refreshingAuthority) return;
         refreshingAuthority = true;
-        var cloudResponded = false;
         try {
           final raw = await _repository
               .fetchOfflineHubBootstrap(scope: scope)
               .timeout(const Duration(seconds: 8));
-          cloudResponded = true;
           final current = VenueHubBootstrap.fromJson(raw);
           if (!current.enabled ||
               current.hubEpoch != bootstrap.hubEpoch ||
@@ -742,12 +748,19 @@ class VenueHubRuntime {
           }
           await installFreshSnapshot(refreshed);
         } catch (error, stackTrace) {
-          // Cloud loss is expected; continue with the last authenticated
-          // encrypted snapshot until connectivity returns.
-          if (cloudResponded) {
-            AppLogger.error('Refresh venue hub authority', error, stackTrace);
-            await stop();
-          }
+          // A timeout, malformed response, or snapshot refresh failure is not
+          // evidence that cloud authority was revoked. Stopping here used to
+          // kill command polling permanently because the auto-start host still
+          // believed the runtime was running. Retain the last authenticated,
+          // encrypted snapshot and retry. Explicit, successfully parsed
+          // authority changes are handled above and still stop immediately.
+          // Every cloud command remains protected by the server's current hub
+          // credential and epoch checks, so this does not create a bypass.
+          AppLogger.error(
+            'Refresh venue hub authority; retaining last verified authority',
+            error,
+            stackTrace,
+          );
         } finally {
           refreshingAuthority = false;
         }

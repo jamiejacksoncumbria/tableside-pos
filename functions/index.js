@@ -2313,7 +2313,7 @@ const remoteHubClaimLeaseMs = 15 * 1000;
 // Heartbeats arrive every five seconds on a dedicated hub loop. The lease
 // tolerates normal mobile/broadband latency without allowing a remote command
 // to be reported as saved by an unavailable hub. Commands still expire
-// independently after 25 seconds unless the authoritative hub commits them.
+// independently unless the authoritative hub commits them.
 // Remote command polling is itself a signed, device-bound proof that the
 // authoritative hub is alive. Keep a comfortably larger lease than the
 // five-second poll cadence so a slow Cloud Functions cold start or a brief
@@ -2560,6 +2560,17 @@ async function claimRemoteHubCommandsFor(caller, rawData) {
     });
     if (result != null) claimed.push(result);
   }
+  // Keep this diagnostic deliberately free of signed envelopes, claim tokens,
+  // command payloads and staff data. It lets support distinguish a live hub
+  // polling an empty queue from a hub process that has stopped polling.
+  console.info("Remote hub claim poll completed", {
+    tenantId: upload.tenantId,
+    venueId: upload.venueId,
+    deviceId: upload.body.deviceId,
+    hubEpoch: upload.hubEpoch,
+    candidateCount: candidates.size,
+    claimedCount: claimed.length,
+  });
   return {commands: claimed};
 }
 
