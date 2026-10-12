@@ -420,8 +420,10 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           (sum, payment) => sum + payment.baseAmountMinor,
         );
         if (alreadyPaid + amountMinor > total) {
-          throw const OfflineProjectionException(
-            'The payment exceeds the outstanding balance.',
+          throw OfflineProjectionException(
+            'The payment exceeds the outstanding balance '
+            '(attempted $amountMinor minor units; '
+            'remaining ${total - alreadyPaid}).',
           );
         }
         payments.add(

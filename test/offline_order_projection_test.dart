@@ -103,7 +103,13 @@ void main() {
     ];
     expect(
       () => projectOfflineOrder(overpayment),
-      throwsA(isA<OfflineProjectionException>()),
+      throwsA(
+        isA<OfflineProjectionException>().having(
+          (error) => error.message,
+          'message',
+          contains('attempted 1001 minor units; remaining 1000'),
+        ),
+      ),
     );
 
     final stale = [

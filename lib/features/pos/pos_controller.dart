@@ -1082,8 +1082,51 @@ class ActiveOrderController extends Notifier<PosOrder> {
             printReceipt: printReceipt,
             requestId: _pendingPaymentRequestId!,
           );
-    } on Object {
+    } on Object catch (error, stackTrace) {
       _locallyClosingOrderId = null;
+      final message = error.toString().toLowerCase();
+      if (message.contains('payment exceeds the outstanding balance')) {
+        // A remote till can briefly hold an older Firestore projection after
+        // the hub has already committed a payment. Never reduce or repeat the
+        // payment automatically. Wait for the signed hub event to project,
+        // reload the authoritative bill, and require staff to review it.
+        PosOrder? refreshed;
+        for (var attempt = 0; attempt < 6; attempt++) {
+          try {
+            refreshed = await ref
+                .read(firestorePosRepositoryProvider)
+                .fetchOrder(scope: scope, orderId: order.id);
+          } catch (refreshError, refreshStackTrace) {
+            AppLogger.error(
+              'Refresh bill after hub balance conflict',
+              refreshError,
+              refreshStackTrace,
+            );
+          }
+          if (refreshed != null &&
+              (refreshed.paidMinor != order.paidMinor ||
+                  refreshed.balanceDueMinor != order.balanceDueMinor)) {
+            state = refreshed;
+            break;
+          }
+          if (attempt < 5) {
+            await Future<void>.delayed(const Duration(milliseconds: 500));
+          }
+        }
+        _pendingPaymentRequestId = null;
+        _pendingPaymentFingerprint = null;
+        AppLogger.error('Hub payment balance conflict', error, stackTrace);
+        if (refreshed != null &&
+            (refreshed.paidMinor != order.paidMinor ||
+                refreshed.balanceDueMinor != order.balanceDueMinor)) {
+          throw StateError(
+            'The bill balance changed on another device. The latest balance has been loaded; review it before taking another payment.',
+          );
+        }
+        throw StateError(
+          'The venue hub has a newer bill balance that has not synchronised yet. No payment was recorded; wait a moment and reopen the order.',
+        );
+      }
       rethrow;
     }
     _pendingPaymentRequestId = null;
