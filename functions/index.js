@@ -2304,7 +2304,11 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
   };
 }
 
-const remoteHubCommandTtlMs = 45 * 1000;
+// Remote commands remain recoverable long enough for a hub restart or a short
+// broadband interruption. This is not an acceptance timeout: the POS only
+// reports success after the hub's signed durable event reaches one of the two
+// acknowledgement paths below.
+const remoteHubCommandTtlMs = 2 * 60 * 1000;
 const remoteHubClaimLeaseMs = 15 * 1000;
 // Heartbeats arrive every five seconds on a dedicated hub loop. The lease
 // tolerates normal mobile/broadband latency without allowing a remote command
@@ -2412,7 +2416,9 @@ async function submitRemoteHubCommandFor(caller, rawData) {
       hostUid: caller.hostUid, staffId: caller.uid,
       pinVersion: Number(pin.data()?.pinVersion ?? 0),
       membershipVersion: Number(membership.membershipVersion ?? 1),
-      status: "pending", createdAt: FieldValue.serverTimestamp(), expiresAt,
+      status: "pending", stage: "queued",
+      protocolVersion: 2,
+      createdAt: FieldValue.serverTimestamp(), expiresAt,
       businessTimestampUtc: typeof data.businessTimestampUtc === "string"
         ? data.businessTimestampUtc : null,
     });
@@ -2449,6 +2455,9 @@ async function waitForRemoteHubCommandFor(caller, rawData) {
     return {
       commandId: snapshot.id,
       status: String(value.status ?? "pending"),
+      stage: String(value.stage ?? value.status ?? "pending"),
+      claimedByDeviceId: typeof value.claimedByDeviceId === "string"
+        ? value.claimedByDeviceId : null,
       result: value.status === "accepted" && value.result != null ? value.result : null,
       rejectionMessage: value.status === "rejected"
         ? String(value.rejectionMessage ?? "The venue hub rejected this command.") : null,
@@ -2470,7 +2479,7 @@ async function waitForRemoteHubCommandFor(caller, rawData) {
     };
     const timer = setTimeout(() => {
       finish(() => resolve(responseFor(latest)));
-    }, 42000);
+    }, 8000);
     unsubscribe = commandRef.onSnapshot(
       (snapshot) => {
         if (!snapshot.exists) {
@@ -2533,7 +2542,8 @@ async function claimRemoteHubCommandsFor(caller, rawData) {
           (claimExpiresAt == null || claimExpiresAt.getTime() > Date.now())) return null;
       const claimToken = randomBytes(24).toString("base64url");
       transaction.update(candidate.ref, {
-        status: "claimed", claimedByDeviceId: upload.body.deviceId,
+        status: "claimed", stage: "claimed",
+        claimedByDeviceId: upload.body.deviceId,
         claimTokenHash: createHash("sha256").update(claimToken).digest("base64"),
         claimedAt: FieldValue.serverTimestamp(),
         claimExpiresAt: new Date(Date.now() + remoteHubClaimLeaseMs),
@@ -2574,6 +2584,7 @@ async function completeRemoteHubCommandFor(caller, rawData) {
     }
     transaction.update(commandRef, {
       status: accepted ? "accepted" : "rejected",
+      stage: accepted ? "hubCommitted" : "hubRejected",
       completedAt: FieldValue.serverTimestamp(),
       result: accepted ? result : null,
       rejectionMessage: accepted ? null : String(upload.body.rejectionMessage ?? "The venue hub rejected this command.").slice(0, 500),
@@ -2961,6 +2972,16 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
   const nonceRef = tenantRef.collection("offlineHubUploadNonces").doc(nonceId);
   const eventRefs = events.map((event) =>
     tenantRef.collection("offlineHubEvents").doc(event.id));
+  // Every remotely submitted command is also embedded in the immutable hub
+  // event that represents its durable local commit. Reading those command
+  // documents in the same transaction lets cloud ingestion acknowledge a
+  // committed command even when the hub's immediate completion HTTP request
+  // was interrupted. This removes the dangerous commit/acknowledgement gap.
+  const remoteCommandIds = [...new Set(events.map((event) =>
+    event.payload.remoteCommandId).filter((id) => typeof id === "string"))];
+  for (const commandId of remoteCommandIds) requiredDocumentId({commandId}, "commandId");
+  const remoteCommandRefs = remoteCommandIds.map((commandId) =>
+    remoteHubQueue(upload.tenantId, upload.venueId).doc(commandId));
   const securityEventTypes = new Set([
     "security.pinAttempt", "security.printQueueManaged",
   ]);
@@ -2975,12 +2996,15 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
       transaction.get(stateRef), transaction.get(nonceRef), transaction.get(venueRef),
       ...eventRefs.map((ref) => transaction.get(ref)),
       ...orderRefs.map((ref) => transaction.get(ref)),
+      ...remoteCommandRefs.map((ref) => transaction.get(ref)),
     ]);
     const state = reads[0];
     const priorNonce = reads[1];
     const venue = reads[2];
     const existing = reads.slice(3, 3 + eventRefs.length);
-    const orderSnapshots = reads.slice(3 + eventRefs.length);
+    const orderStart = 3 + eventRefs.length;
+    const orderSnapshots = reads.slice(orderStart, orderStart + orderRefs.length);
+    const remoteCommandSnapshots = reads.slice(orderStart + orderRefs.length);
     if (priorNonce.exists) {
       throw new HttpsError("already-exists", "This signed upload was already used.");
     }
@@ -3109,6 +3133,42 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
             projected, orderId, upload, venueTimeZone, businessDayCutoffMinutes,
           ), {merge: false});
       }
+    }
+    for (let index = 0; index < remoteCommandIds.length; index += 1) {
+      const commandId = remoteCommandIds[index];
+      const command = remoteCommandSnapshots[index];
+      if (!command.exists) {
+        throw new HttpsError("data-loss", "A committed remote command is missing from the queue.");
+      }
+      const commandData = command.data();
+      const event = events.find((candidate) =>
+        candidate.payload.remoteCommandId === commandId);
+      if (event == null || commandData.hubEpoch !== upload.hubEpoch ||
+          commandData.eventType !== event.type || commandData.staffId !== event.staffId) {
+        throw new HttpsError("data-loss", "A committed remote command does not match its signed hub event.");
+      }
+      if (commandData.status === "rejected") {
+        throw new HttpsError("data-loss", "A rejected remote command was later committed by the hub.");
+      }
+      const result = {
+        eventId: event.id,
+        sequence: event.sequence,
+        eventHash: event.eventHash,
+        committedAtUtc: event.createdAtUtc,
+      };
+      if (commandData.status === "accepted" &&
+          commandData.result?.eventId !== result.eventId) {
+        throw new HttpsError("data-loss", "A remote command conflicts with an earlier acknowledgement.");
+      }
+      transaction.set(remoteCommandRefs[index], {
+        status: "accepted",
+        stage: "cloudProjected",
+        result,
+        completedAt: FieldValue.serverTimestamp(),
+        acknowledgedByEventUpload: true,
+        claimTokenHash: FieldValue.delete(),
+        claimExpiresAt: FieldValue.delete(),
+      }, {merge: true});
     }
     transaction.create(nonceRef, {
       credentialId: upload.credentialId,

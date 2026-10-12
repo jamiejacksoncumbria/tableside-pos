@@ -37,12 +37,22 @@ class VenueHubCloudSync {
   final Duration maximumRetryDelay;
   Timer? _retryTimer;
   bool _flushing = false;
+  bool _flushRequested = false;
   bool _disposed = false;
   int _consecutiveFailures = 0;
 
   Future<int> flush() async {
-    if (_disposed || _flushing || _retryTimer?.isActive == true) return 0;
+    if (_disposed) return 0;
+    if (_flushing) {
+      // Do not lose a wake-up when an event is committed after the active
+      // upload read its batch. The current flush cannot see that event, so it
+      // must run once more as soon as it releases the serial upload lock.
+      _flushRequested = true;
+      return 0;
+    }
+    if (_retryTimer?.isActive == true) return 0;
     _flushing = true;
+    _flushRequested = false;
     var synced = 0;
     try {
       while (!_disposed) {
@@ -99,6 +109,10 @@ class VenueHubCloudSync {
       }
     } finally {
       _flushing = false;
+      if (_flushRequested && !_disposed && _retryTimer?.isActive != true) {
+        _flushRequested = false;
+        unawaited(flush());
+      }
     }
     return synced;
   }

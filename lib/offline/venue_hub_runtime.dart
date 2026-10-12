@@ -488,7 +488,11 @@ class VenueHubRuntime {
             final commandId = command['commandId'];
             final claimToken = command['claimToken'];
             if (commandId is! String || claimToken is! String) continue;
+            VenueHubCommandAcknowledgement? acknowledgement;
             try {
+              AppLogger.info(
+                'Remote hub command $commandId: claimed; validating locally.',
+              );
               final grant = remoteGrant(command);
               final eventType = command['eventType'];
               final payload = command['payload'];
@@ -497,7 +501,7 @@ class VenueHubRuntime {
                   'The staff permission snapshot changed before the command was accepted.',
                 );
               }
-              final acknowledgement = await processor.processRemote(
+              acknowledgement = await processor.processRemote(
                 commandId: commandId,
                 eventType: eventType,
                 payload: Map<String, Object?>.from(payload),
@@ -508,29 +512,16 @@ class VenueHubRuntime {
                 ),
                 trustedNowUtc: TrustedClock.instance.nowUtc(),
               );
-              await _repository
-                  .completeRemoteHubCommand(
-                    scope: scope,
-                    deviceId: deviceId,
-                    hubEpoch: bootstrap.hubEpoch,
-                    credential: credential,
-                    commandId: commandId,
-                    claimToken: claimToken,
-                    accepted: true,
-                    result: <String, Object?>{
-                      'eventId': acknowledgement.eventId,
-                      'sequence': acknowledgement.sequence,
-                      'eventHash': acknowledgement.eventHash,
-                      'committedAtUtc': acknowledgement.committedAtUtc
-                          .toUtc()
-                          .toIso8601String(),
-                    },
-                  )
-                  .timeout(const Duration(seconds: 12));
-              unawaited(_sync!.flush());
+              AppLogger.info(
+                'Remote hub command $commandId: durably committed as '
+                '${acknowledgement.eventId}.',
+              );
             } catch (error, stackTrace) {
+              // A failure before the durable event exists is a genuine
+              // business rejection. It is safe to tell the originating POS
+              // that nothing was committed.
               AppLogger.error(
-                'Process remote venue command',
+                'Reject remote venue command $commandId before commit',
                 error,
                 stackTrace,
               );
@@ -547,9 +538,56 @@ class VenueHubRuntime {
                       rejectionMessage: error.toString(),
                     )
                     .timeout(const Duration(seconds: 12));
-              } catch (_) {
-                // The short claim lease makes an ambiguous completion retryable.
+              } catch (acknowledgementError, acknowledgementStack) {
+                AppLogger.error(
+                  'Report rejected remote command $commandId',
+                  acknowledgementError,
+                  acknowledgementStack,
+                );
               }
+              continue;
+            }
+
+            // From this point onward the operation is irrevocably committed
+            // in the encrypted ledger. A network failure must never send it
+            // down the rejection path. Start the durable event uploader first;
+            // cloud ingestion can independently acknowledge this command if
+            // the immediate completion request is lost.
+            final committedAcknowledgement = acknowledgement;
+            unawaited(_sync!.flush());
+            try {
+              await _repository
+                  .completeRemoteHubCommand(
+                    scope: scope,
+                    deviceId: deviceId,
+                    hubEpoch: bootstrap.hubEpoch,
+                    credential: credential,
+                    commandId: commandId,
+                    claimToken: claimToken,
+                    accepted: true,
+                    result: <String, Object?>{
+                      'eventId': committedAcknowledgement.eventId,
+                      'sequence': committedAcknowledgement.sequence,
+                      'eventHash': committedAcknowledgement.eventHash,
+                      'committedAtUtc': committedAcknowledgement.committedAtUtc
+                          .toUtc()
+                          .toIso8601String(),
+                    },
+                  )
+                  .timeout(const Duration(seconds: 12));
+              AppLogger.info(
+                'Remote hub command $commandId: cloud acknowledgement delivered.',
+              );
+            } catch (error, stackTrace) {
+              // The local commit remains authoritative and retryable. The
+              // encrypted outbox upload above will project the same immutable
+              // event and mark its remote command accepted transactionally.
+              AppLogger.error(
+                'Deliver acknowledgement for committed remote command '
+                '$commandId; durable outbox will retry',
+                error,
+                stackTrace,
+              );
             }
           }
         } catch (_) {
