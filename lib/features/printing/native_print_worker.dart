@@ -41,6 +41,11 @@ class NativePrintWorker {
     );
     if (job == null) return PrintWorkerResult.noWork;
 
+    AppLogger.info(
+      'Printer job claimed: job=${job.id}, target=${job.targetDeviceId}, '
+      'area=${job.productionArea ?? 'unknown'}, attempt=${job.attempts}.',
+    );
+
     try {
       await printer.printTicket(
         payload: job.payload,
@@ -51,6 +56,7 @@ class NativePrintWorker {
         deviceCredential: deviceCredential,
         printed: true,
       );
+      AppLogger.info('Printer job completed: job=${job.id}, printed=true.');
       return PrintWorkerResult.printed;
     } on Object catch (error, stackTrace) {
       AppLogger.error('Print ticket ${job.idempotencyKey}', error, stackTrace);

@@ -142,54 +142,63 @@ class _PosPageState extends ConsumerState<PosPage>
                       .fold<int>(0, (total, line) => total + line.quantity);
                   final shownCount = pending > 0 ? pending : sent;
                   final badgeColor = pending > 0 ? Colors.red : Colors.green;
-                  return TabBar(
-                    controller: _compactTabController,
-                    onTap: (index) =>
-                        ref.read(posCompactTabProvider.notifier).select(index),
-                    tabs: [
-                      const Tab(
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.table_restaurant_rounded, size: 20),
-                            SizedBox(width: 6),
-                            Text('Tables'),
-                          ],
+                  return SizedBox(
+                    // Keep navigation touchable while returning vertical room
+                    // to the table, product and order workspaces on tablets.
+                    height: 38,
+                    child: TabBar(
+                      controller: _compactTabController,
+                      dividerHeight: 0,
+                      labelPadding: const EdgeInsets.symmetric(horizontal: 4),
+                      labelStyle: Theme.of(context).textTheme.labelLarge,
+                      onTap: (index) => ref
+                          .read(posCompactTabProvider.notifier)
+                          .select(index),
+                      tabs: [
+                        const Tab(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.table_restaurant_rounded, size: 17),
+                              SizedBox(width: 4),
+                              Text('Tables'),
+                            ],
+                          ),
                         ),
-                      ),
-                      const Tab(
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.restaurant_menu_rounded, size: 20),
-                            SizedBox(width: 6),
-                            Text('Menu'),
-                          ],
+                        const Tab(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.restaurant_menu_rounded, size: 17),
+                              SizedBox(width: 4),
+                              Text('Menu'),
+                            ],
+                          ),
                         ),
-                      ),
-                      Tab(
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            shownCount == 0
-                                ? const Icon(
-                                    Icons.receipt_long_rounded,
-                                    size: 20,
-                                  )
-                                : Badge.count(
-                                    count: shownCount,
-                                    backgroundColor: badgeColor,
-                                    child: const Icon(
+                        Tab(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              shownCount == 0
+                                  ? const Icon(
                                       Icons.receipt_long_rounded,
-                                      size: 20,
+                                      size: 17,
+                                    )
+                                  : Badge.count(
+                                      count: shownCount,
+                                      backgroundColor: badgeColor,
+                                      child: const Icon(
+                                        Icons.receipt_long_rounded,
+                                        size: 17,
+                                      ),
                                     ),
-                                  ),
-                            const SizedBox(width: 6),
-                            const Text('Order'),
-                          ],
+                              const SizedBox(width: 4),
+                              const Text('Order'),
+                            ],
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   );
                 },
               ),

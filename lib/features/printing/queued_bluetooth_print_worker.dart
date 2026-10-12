@@ -35,6 +35,7 @@ class QueuedNativePrintWorker {
   DateTime? _heartbeatRetryAfter;
   VenueScope? _heartbeatScope;
   bool _cloudHeartbeatOffline = false;
+  String? _lastReadinessDiagnostic;
 
   String? get _requiredTransport {
     // `Platform` from dart:io throws at runtime in a browser. Web is a POS
@@ -122,8 +123,9 @@ class QueuedNativePrintWorker {
   Future<PrintWorkerResult> processNext(VenueScope scope) async {
     final user = FirebaseAuth.instance.currentUser;
     final requiredTransport = _requiredTransport;
-    if (user == null || requiredTransport == null) {
-      return PrintWorkerResult.noWork;
+    if (user == null) return _notReady('Firebase host account is signed out.');
+    if (requiredTransport == null) {
+      return _notReady('This platform cannot run a native printer worker.');
     }
     var deviceId = await _identity.deviceIdForScope(scope);
     var deviceCredential = await _identity.credential(scope);
@@ -142,12 +144,17 @@ class QueuedNativePrintWorker {
       }
     }
     if ((deviceCredential == null || deviceCredential.isEmpty) && !hubMode) {
-      return PrintWorkerResult.noWork;
+      return _notReady(
+        'No venue-scoped printer credential is stored for device $deviceId.',
+      );
     }
     if (deviceId.isEmpty) {
-      return PrintWorkerResult.noWork;
+      return _notReady('The local printer device ID is empty.');
     }
-    if (hubMode) {
+    if (hubMode && (deviceCredential == null || deviceCredential.isEmpty)) {
+      // Local encrypted jobs do not need a bearer credential. Keep a marker
+      // only when no real credential exists; a real credential is required to
+      // drain legacy/server-created cloud jobs after the local queue is empty.
       deviceCredential = 'venue-hub-device-credential';
     } else {
       final device = await _devices.getDevice(
@@ -158,8 +165,17 @@ class QueuedNativePrintWorker {
           !device.active ||
           device.venueId != scope.venueId ||
           !device.transports.contains(requiredTransport)) {
-        return PrintWorkerResult.noWork;
+        return _notReady(
+          'Printer registration is missing, inactive, assigned to another venue, or lacks transport $requiredTransport. device=$deviceId.',
+        );
       }
+    }
+
+    final readyDiagnostic =
+        'Printer worker ready: device=$deviceId, transport=$requiredTransport, hubMode=$hubMode.';
+    if (_lastReadinessDiagnostic != readyDiagnostic) {
+      AppLogger.info(readyDiagnostic);
+      _lastReadinessDiagnostic = readyDiagnostic;
     }
 
     final now = DateTime.now();
@@ -191,6 +207,15 @@ class QueuedNativePrintWorker {
       AppLogger.error('Process queued native print job', error, stackTrace);
       return PrintWorkerResult.failed;
     }
+  }
+
+  PrintWorkerResult _notReady(String reason) {
+    final diagnostic = 'Printer worker idle: $reason';
+    if (_lastReadinessDiagnostic != diagnostic) {
+      AppLogger.info(diagnostic);
+      _lastReadinessDiagnostic = diagnostic;
+    }
+    return PrintWorkerResult.noWork;
   }
 }
 

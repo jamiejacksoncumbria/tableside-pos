@@ -705,13 +705,18 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       ),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+          // PIN entry must fit without scrolling on short POS tablets. The
+          // staff picker keeps its roomier layout, while the keypad removes
+          // decorative padding and sizes its keys from the actual viewport.
+          padding: EdgeInsets.all(pinEntryStaff == null ? 24 : 8),
           child: Center(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 760),
+              constraints: BoxConstraints(
+                maxWidth: pinEntryStaff == null ? 760 : 430,
+              ),
               child: Card(
                 child: Padding(
-                  padding: const EdgeInsets.all(28),
+                  padding: EdgeInsets.all(pinEntryStaff == null ? 28 : 12),
                   child: _loading
                       ? const Center(child: CircularProgressIndicator())
                       : pinEntryStaff != null
@@ -1188,108 +1193,135 @@ class _PinPadPanelState extends State<_PinPadPanel> {
   }
 
   @override
-  Widget build(BuildContext context) => KeyboardListener(
-    focusNode: _keyboardFocus,
-    autofocus: true,
-    onKeyEvent: _handleKeyEvent,
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        DefaultTextStyle(
-          style: Theme.of(context).textTheme.headlineSmall!,
-          child: widget.title,
-        ),
-        const SizedBox(height: 10),
-        Text(widget.message),
-        const SizedBox(height: 10),
-        Semantics(
-          label: '${_pin.length} of 6 PIN digits entered',
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(
-              6,
-              (index) => Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 5),
-                child: Icon(
-                  index < _pin.length ? Icons.circle : Icons.circle_outlined,
-                  size: 15,
+  Widget build(BuildContext context) {
+    final viewport = MediaQuery.sizeOf(context);
+    final compact = viewport.height < 700 || viewport.width < 600;
+    final gap = compact ? 4.0 : 10.0;
+    final keySpacing = compact ? 4.0 : 5.0;
+    final keyHeight = compact ? 38.0 : 48.0;
+    final keyStyle = ButtonStyle(
+      minimumSize: const WidgetStatePropertyAll(Size.zero),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      padding: const WidgetStatePropertyAll(EdgeInsets.zero),
+      visualDensity: compact ? VisualDensity.compact : VisualDensity.standard,
+    );
+    return KeyboardListener(
+      focusNode: _keyboardFocus,
+      autofocus: true,
+      onKeyEvent: _handleKeyEvent,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          DefaultTextStyle(
+            style: compact
+                ? Theme.of(context).textTheme.titleLarge!
+                : Theme.of(context).textTheme.headlineSmall!,
+            child: widget.title,
+          ),
+          SizedBox(height: gap),
+          Text(widget.message),
+          SizedBox(height: gap),
+          Semantics(
+            label: '${_pin.length} of 6 PIN digits entered',
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(
+                6,
+                (index) => Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 5),
+                  child: Icon(
+                    index < _pin.length ? Icons.circle : Icons.circle_outlined,
+                    size: compact ? 12 : 15,
+                  ),
                 ),
               ),
             ),
           ),
-        ),
-        const SizedBox(height: 10),
-        GridView.count(
-          crossAxisCount: 3,
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          mainAxisSpacing: 5,
-          crossAxisSpacing: 5,
-          childAspectRatio: 2.35,
-          children: [
-            for (final digit in const [
-              '1',
-              '2',
-              '3',
-              '4',
-              '5',
-              '6',
-              '7',
-              '8',
-              '9',
-            ])
-              FilledButton.tonal(
-                onPressed: () => _digit(digit),
-                child: Text(
-                  digit,
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
+          SizedBox(height: gap),
+          SizedBox(
+            height: (keyHeight * 4) + (keySpacing * 3),
+            child: GridView.builder(
+              itemCount: 12,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                mainAxisExtent: keyHeight,
+                mainAxisSpacing: keySpacing,
+                crossAxisSpacing: keySpacing,
               ),
-            OutlinedButton(
-              onPressed: _pin.isEmpty
-                  ? null
-                  : () {
-                      setState(() => _pin = '');
-                      _keyboardFocus.requestFocus();
-                    },
-              child: const Text('Clear'),
-            ),
-            FilledButton.tonal(
-              onPressed: () => _digit('0'),
-              child: Text('0', style: Theme.of(context).textTheme.titleLarge),
-            ),
-            IconButton.filledTonal(
-              tooltip: 'Delete last digit',
-              onPressed: _pin.isEmpty ? null : _backspace,
-              icon: const Icon(Icons.backspace_rounded),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Wrap(
-          alignment: WrapAlignment.end,
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            TextButton(
-              onPressed: widget.enabled ? widget.onCancel : null,
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: widget.enabled && _pin.length == 6 && !_submitted
-                  ? _submit
-                  : null,
-              child: widget.enabled
-                  ? Text(widget.confirmLabel)
-                  : const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+              itemBuilder: (context, index) {
+                if (index < 9) {
+                  final digit = '${index + 1}';
+                  return FilledButton.tonal(
+                    style: keyStyle,
+                    onPressed: () => _digit(digit),
+                    child: Text(
+                      digit,
+                      style: compact
+                          ? Theme.of(context).textTheme.titleMedium
+                          : Theme.of(context).textTheme.titleLarge,
                     ),
+                  );
+                }
+                if (index == 9) {
+                  return OutlinedButton(
+                    style: keyStyle,
+                    onPressed: _pin.isEmpty
+                        ? null
+                        : () {
+                            setState(() => _pin = '');
+                            _keyboardFocus.requestFocus();
+                          },
+                    child: const Text('Clear'),
+                  );
+                }
+                if (index == 10) {
+                  return FilledButton.tonal(
+                    style: keyStyle,
+                    onPressed: () => _digit('0'),
+                    child: Text(
+                      '0',
+                      style: compact
+                          ? Theme.of(context).textTheme.titleMedium
+                          : Theme.of(context).textTheme.titleLarge,
+                    ),
+                  );
+                }
+                return IconButton.filledTonal(
+                  style: keyStyle,
+                  tooltip: 'Delete last digit',
+                  onPressed: _pin.isEmpty ? null : _backspace,
+                  icon: const Icon(Icons.backspace_rounded),
+                );
+              },
             ),
-          ],
-        ),
-      ],
-    ),
-  );
+          ),
+          SizedBox(height: compact ? 4 : 8),
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              TextButton(
+                onPressed: widget.enabled ? widget.onCancel : null,
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: widget.enabled && _pin.length == 6 && !_submitted
+                    ? _submit
+                    : null,
+                child: widget.enabled
+                    ? Text(widget.confirmLabel)
+                    : const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }

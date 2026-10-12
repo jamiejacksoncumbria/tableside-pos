@@ -7,7 +7,9 @@ void main() {
   testWidgets(
     'PIN pad remains laid out and submits on a compact touch screen',
     (tester) async {
-      tester.view.physicalSize = const Size(600, 430);
+      // A representative landscape POS tablet viewport. The keypad must fit
+      // without relying on vertical scrolling or clipping.
+      tester.view.physicalSize = const Size(600, 360);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
@@ -32,7 +34,7 @@ void main() {
   testWidgets(
     'inline PIN gate can mount the authenticated interface immediately',
     (tester) async {
-      tester.view.physicalSize = const Size(1024, 700);
+      tester.view.physicalSize = const Size(800, 480);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);

@@ -69,11 +69,15 @@ class VenueHubRuntime {
   );
   VenueScope? _activeScope;
   VenueHubBootstrap? _activeBootstrap;
+  DateTime? _lastRemoteClaimAttemptAtUtc;
+  DateTime? _lastRemoteClaimSuccessAtUtc;
 
   VenueHubRuntimeStatus get status => _status;
   Stream<VenueHubRuntimeStatus> get statuses => _statuses.stream;
   VenueScope? get activeScope => _activeScope;
   VenueHubBootstrap? get activeBootstrap => _activeBootstrap;
+  DateTime? get lastRemoteClaimAttemptAtUtc => _lastRemoteClaimAttemptAtUtc;
+  DateTime? get lastRemoteClaimSuccessAtUtc => _lastRemoteClaimSuccessAtUtc;
 
   /// Waits for this process's hub listener to become usable.
   ///
@@ -472,6 +476,7 @@ class VenueHubRuntime {
       Future<void> remoteTick() async {
         if (remoteTickRunning || _activeScope != scope) return;
         remoteTickRunning = true;
+        _lastRemoteClaimAttemptAtUtc = DateTime.now().toUtc();
         try {
           // Never let a half-open HTTP connection permanently hold the poll
           // lock. The next timer cycle must be able to prove hub liveness and
@@ -484,6 +489,7 @@ class VenueHubRuntime {
                 credential: credential,
               )
               .timeout(const Duration(seconds: 12));
+          _lastRemoteClaimSuccessAtUtc = DateTime.now().toUtc();
           if (!remoteClaimAvailable) {
             AppLogger.info('Venue hub secure command polling restored.');
             remoteClaimAvailable = true;
@@ -809,6 +815,8 @@ class VenueHubRuntime {
     _refreshAuthorityNow = null;
     _activeScope = null;
     _activeBootstrap = null;
+    _lastRemoteClaimAttemptAtUtc = null;
+    _lastRemoteClaimSuccessAtUtc = null;
     await _server.stop();
     await AndroidVenueHubService.stop();
     _emit(

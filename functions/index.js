@@ -2335,7 +2335,9 @@ function remoteHubStateRef(tenantId, venueId) {
   return db.doc(`tenants/${tenantId}/venues/${venueId}/remoteHubState/status`);
 }
 
-async function recordRemoteHubPresence(upload, pendingLocalEvents = null) {
+async function recordRemoteHubPresence(
+  upload, pendingLocalEvents = null, {claimPoll = false} = {},
+) {
   const expiresAt = new Date(Date.now() + remoteHubHeartbeatTtlMs);
   const presence = {
     hubDeviceId: upload.body.deviceId,
@@ -2346,6 +2348,10 @@ async function recordRemoteHubPresence(upload, pendingLocalEvents = null) {
   };
   if (Number.isSafeInteger(pendingLocalEvents) && pendingLocalEvents >= 0) {
     presence.pendingLocalEvents = pendingLocalEvents;
+  }
+  if (claimPoll) {
+    presence.lastClaimPollAt = FieldValue.serverTimestamp();
+    presence.lastClaimPollDeviceId = upload.body.deviceId;
   }
   await remoteHubStateRef(upload.tenantId, upload.venueId)
     .set(presence, {merge: true});
@@ -2437,9 +2443,10 @@ async function waitForRemoteHubCommandFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const commandId = requiredDocumentId(data, "commandId");
-  const [{membership}, initial] = await Promise.all([
+  const [{membership}, initial, hubState] = await Promise.all([
     requireTenantOperationalMember(caller, tenantId),
     remoteHubQueue(tenantId, venueId).doc(commandId).get(),
+    remoteHubStateRef(tenantId, venueId).get(),
   ]);
   const venueIds = Array.isArray(membership.venueIds) ? membership.venueIds : [];
   if (venueIds.length > 0 && !venueIds.includes(venueId)) {
@@ -2452,6 +2459,8 @@ async function waitForRemoteHubCommandFor(caller, rawData) {
   const commandRef = initial.ref;
   const responseFor = (snapshot) => {
     const value = snapshot.data() ?? {};
+    const lastClaimPollAt = hubState.data()?.lastClaimPollAt?.toDate?.();
+    const lastHeartbeatAt = hubState.data()?.lastHeartbeatAt?.toDate?.();
     return {
       commandId: snapshot.id,
       status: String(value.status ?? "pending"),
@@ -2461,6 +2470,10 @@ async function waitForRemoteHubCommandFor(caller, rawData) {
       result: value.status === "accepted" && value.result != null ? value.result : null,
       rejectionMessage: value.status === "rejected"
         ? String(value.rejectionMessage ?? "The venue hub rejected this command.") : null,
+      lastHubClaimPollAt: lastClaimPollAt?.toISOString?.() ?? null,
+      lastHubHeartbeatAt: lastHeartbeatAt?.toISOString?.() ?? null,
+      activeHubDeviceId: typeof hubState.data()?.hubDeviceId === "string"
+        ? hubState.data().hubDeviceId : null,
     };
   };
   if (["accepted", "rejected", "expired"].includes(initial.data().status)) {
@@ -2518,7 +2531,7 @@ async function claimRemoteHubCommandsFor(caller, rawData) {
   // the dedicated heartbeat. Refreshing presence here closes a failure mode
   // where command polling remained healthy but one stuck heartbeat request
   // caused every remote POS to be rejected as if the hub were offline.
-  await recordRemoteHubPresence(upload);
+  await recordRemoteHubPresence(upload, null, {claimPoll: true});
   const maximum = Math.min(Math.max(Number(upload.body.maximum ?? 10), 1), 25);
   const candidates = await remoteHubQueue(upload.tenantId, upload.venueId)
     .where("status", "in", ["pending", "claimed"])
@@ -2563,14 +2576,16 @@ async function claimRemoteHubCommandsFor(caller, rawData) {
   // Keep this diagnostic deliberately free of signed envelopes, claim tokens,
   // command payloads and staff data. It lets support distinguish a live hub
   // polling an empty queue from a hub process that has stopped polling.
-  console.info("Remote hub claim poll completed", {
-    tenantId: upload.tenantId,
-    venueId: upload.venueId,
-    deviceId: upload.body.deviceId,
-    hubEpoch: upload.hubEpoch,
-    candidateCount: candidates.size,
-    claimedCount: claimed.length,
-  });
+  if (candidates.size > 0) {
+    console.info("Remote hub claim poll found work", {
+      tenantId: upload.tenantId,
+      venueId: upload.venueId,
+      deviceId: upload.body.deviceId,
+      hubEpoch: upload.hubEpoch,
+      candidateCount: candidates.size,
+      claimedCount: claimed.length,
+    });
+  }
   return {commands: claimed};
 }
 

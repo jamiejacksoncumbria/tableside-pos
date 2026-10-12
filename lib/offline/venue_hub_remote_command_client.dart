@@ -126,8 +126,13 @@ class VenueHubRemoteCommandClient {
           }).timeout(pollTimeout);
           final status = value['status'];
           final stage = value['stage'] ?? status;
+          final hubPoll = value['lastHubClaimPollAt'] ?? 'never';
+          final hubHeartbeat = value['lastHubHeartbeatAt'] ?? 'never';
+          final claimedBy = value['claimedByDeviceId'] ?? 'none';
           AppLogger.info(
-            'Remote hub command $commandId: status=$status, stage=$stage.',
+            'Remote hub command $commandId: status=$status, stage=$stage, '
+            'claimedBy=$claimedBy, lastHubPoll=$hubPoll, '
+            'lastHubHeartbeat=$hubHeartbeat.',
           );
           if (status == 'accepted') break;
           if (status == 'rejected' || status == 'expired') {
@@ -157,9 +162,13 @@ class VenueHubRemoteCommandClient {
       }
       if (value?['status'] != 'accepted') {
         final stage = value?['stage'] ?? value?['status'] ?? 'unknown';
+        final lastPoll = value?['lastHubClaimPollAt'] ?? 'never';
+        final lastHeartbeat = value?['lastHubHeartbeatAt'] ?? 'never';
         throw StateError(
           'The venue hub did not confirm command $commandId before the safe '
-                  'deadline (last stage: $stage). ${lastWaitError ?? ''}'
+                  'deadline (last stage: $stage; last secure hub poll: '
+                  '$lastPoll; last heartbeat: $lastHeartbeat). '
+                  '${lastWaitError ?? ''}'
               .trim(),
         );
       }

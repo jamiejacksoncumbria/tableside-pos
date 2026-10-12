@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../features/pos/domain.dart';
 import '../core/tenant_scope.dart';
+import '../core/app_logger.dart';
 import 'production_command_repository.dart';
 import '../offline/venue_hub_runtime.dart';
 import '../offline/venue_hub_client_registry.dart';
@@ -145,12 +146,17 @@ class PrintJobRepository {
     final localScope = runtime.activeScope;
     if (localScope?.tenantId == tenantId && localScope?.venueId == venueId) {
       final local = await runtime.claimLocalPrintJob(deviceId);
-      return local == null
-          ? null
-          : _fromLocal(tenantId, venueId, deviceId, local);
+      if (local != null) {
+        return _fromLocal(tenantId, venueId, deviceId, local);
+      }
+      // Server-created delivery notes, reprints and tickets queued before the
+      // hub migration still live in the transactional cloud queue. Returning
+      // here used to strand those jobs forever on the hub even though its test
+      // print worked. Fall through with the real venue-scoped device
+      // credential; cloud claim validation remains unchanged.
     }
     final hubPrinter = VenueHubPrinterClientRegistry.instance;
-    if (hubPrinter.requiresHub(scope)) {
+    if (localScope != scope && hubPrinter.requiresHub(scope)) {
       // An online-only till must not claim the hub's local queue. Enrolled
       // printers claim hub jobs first, then fall through to the transactional
       // cloud queue for server-created jobs such as delivery notes/reprints.
@@ -160,6 +166,15 @@ class PrintJobRepository {
       if (local != null) {
         return _fromLocal(tenantId, venueId, deviceId, local);
       }
+    }
+    if (deviceCredential == 'venue-hub-device-credential') {
+      // This marker can claim only the local encrypted queue. Never submit it
+      // to Firebase as though it were a device credential: the server must
+      // continue to require the manager-enrolled secret for cloud jobs.
+      AppLogger.info(
+        'Printer cloud queue skipped: device $deviceId has no enrolled venue credential.',
+      );
+      return null;
     }
     final data = await _commands.claimDevicePrintJob(
       scope: VenueScope(tenantId: tenantId, venueId: venueId),
