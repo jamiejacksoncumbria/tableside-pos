@@ -228,12 +228,24 @@ class VenueHubRemoteCommandClient {
   }
 
   bool _looksLikeConnectivityFailure(Object error) {
+    // A timeout is always a transport failure. Other errors are classified by
+    // precise transport phrases rather than broad words such as "offline" or
+    // "unavailable". Business-rule exception names can legitimately contain
+    // those words (for example OfflineProjectionException) even though the hub
+    // replied successfully, and must never flip the terminal to HUB OFFLINE.
+    if (error is TimeoutException) return true;
     final message = error.toString().toLowerCase();
-    return message.contains('offline') ||
-        message.contains('unavailable') ||
-        message.contains('connection') ||
-        message.contains('network') ||
-        message.contains('socket') ||
+    return message.contains('socketexception') ||
+        message.contains('clientexception') ||
+        message.contains('connection refused') ||
+        message.contains('connection reset') ||
+        message.contains('connection closed') ||
+        message.contains('connection interrupted') ||
+        message.contains('failed host lookup') ||
+        message.contains('network is unreachable') ||
+        message.contains('network connection') ||
+        message.contains('venue hub is offline') ||
+        message.contains('venue hub is unavailable') ||
         message.contains('timed out') ||
         message.contains('timeout');
   }

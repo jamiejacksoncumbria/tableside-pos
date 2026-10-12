@@ -1624,57 +1624,81 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                 ),
                 Expanded(
                   child: showTileCategoryBrowser
-                      ? SingleChildScrollView(
-                          child: Wrap(
-                            spacing: 10,
-                            runSpacing: 10,
-                            children: [
-                              _CategoryTile(
-                                icon: Icons.local_fire_department_rounded,
-                                label: 'Popular',
-                                selected: showPopular,
-                                onTap: () => setState(() {
-                                  ref
-                                      .read(activeSectionProvider.notifier)
-                                      .select(popularMenuSectionId);
-                                  ref
-                                      .read(activeSubsectionProvider.notifier)
-                                      .select(null);
-                                  _tileCategoryOpen = true;
-                                }),
+                      ? LayoutBuilder(
+                          builder: (context, constraints) {
+                            const spacing = 10.0;
+                            final columns = posCategoryGridColumnCount(
+                              constraints.maxWidth,
+                            );
+                            final tileWidth =
+                                (constraints.maxWidth -
+                                    (spacing * (columns - 1))) /
+                                columns;
+                            return SingleChildScrollView(
+                              child: Wrap(
+                                spacing: spacing,
+                                runSpacing: spacing,
+                                children: [
+                                  _CategoryTile(
+                                    width: tileWidth,
+                                    icon: Icons.local_fire_department_rounded,
+                                    label: 'Popular',
+                                    selected: showPopular,
+                                    onTap: () => setState(() {
+                                      ref
+                                          .read(activeSectionProvider.notifier)
+                                          .select(popularMenuSectionId);
+                                      ref
+                                          .read(
+                                            activeSubsectionProvider.notifier,
+                                          )
+                                          .select(null);
+                                      _tileCategoryOpen = true;
+                                    }),
+                                  ),
+                                  _CategoryTile(
+                                    width: tileWidth,
+                                    icon: Icons.apps_rounded,
+                                    label: 'All',
+                                    selected:
+                                        !showPopular &&
+                                        effectiveSection == null,
+                                    onTap: () => setState(() {
+                                      ref
+                                          .read(activeSectionProvider.notifier)
+                                          .select(null);
+                                      ref
+                                          .read(
+                                            activeSubsectionProvider.notifier,
+                                          )
+                                          .select(null);
+                                      _tileCategoryOpen = true;
+                                    }),
+                                  ),
+                                  for (final item in topLevelSections)
+                                    _CategoryTile(
+                                      width: tileWidth,
+                                      textIcon: item.icon,
+                                      label: item.name,
+                                      selected: item.id == effectiveSection,
+                                      onTap: () => setState(() {
+                                        ref
+                                            .read(
+                                              activeSectionProvider.notifier,
+                                            )
+                                            .select(item.id);
+                                        ref
+                                            .read(
+                                              activeSubsectionProvider.notifier,
+                                            )
+                                            .select(null);
+                                        _tileCategoryOpen = true;
+                                      }),
+                                    ),
+                                ],
                               ),
-                              _CategoryTile(
-                                icon: Icons.apps_rounded,
-                                label: 'All',
-                                selected:
-                                    !showPopular && effectiveSection == null,
-                                onTap: () => setState(() {
-                                  ref
-                                      .read(activeSectionProvider.notifier)
-                                      .select(null);
-                                  ref
-                                      .read(activeSubsectionProvider.notifier)
-                                      .select(null);
-                                  _tileCategoryOpen = true;
-                                }),
-                              ),
-                              for (final item in topLevelSections)
-                                _CategoryTile(
-                                  textIcon: item.icon,
-                                  label: item.name,
-                                  selected: item.id == effectiveSection,
-                                  onTap: () => setState(() {
-                                    ref
-                                        .read(activeSectionProvider.notifier)
-                                        .select(item.id);
-                                    ref
-                                        .read(activeSubsectionProvider.notifier)
-                                        .select(null);
-                                    _tileCategoryOpen = true;
-                                  }),
-                                ),
-                            ],
-                          ),
+                            );
+                          },
                         )
                       : loading
                       ? const Center(child: CircularProgressIndicator())
@@ -1753,6 +1777,7 @@ class _CategoryTile extends StatelessWidget {
     required this.onTap,
     this.icon,
     this.textIcon,
+    this.width = 150,
   });
 
   final String label;
@@ -1760,12 +1785,13 @@ class _CategoryTile extends StatelessWidget {
   final VoidCallback onTap;
   final IconData? icon;
   final String? textIcon;
+  final double width;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return SizedBox(
-      width: 150,
+      width: width,
       height: 58,
       child: Material(
         color: selected ? scheme.primaryContainer : scheme.surfaceContainerHigh,
@@ -1799,6 +1825,19 @@ class _CategoryTile extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Chooses a compact, predictable category grid for the available menu width.
+///
+/// Tablet layouts deliberately use five columns. Wider desktop layouts can
+/// use more, while phone layouts retain a readable minimum tile width.
+@visibleForTesting
+int posCategoryGridColumnCount(double width) {
+  if (width >= 1200) return (width / 160).floor().clamp(6, 8);
+  if (width >= 600) return 5;
+  if (width >= 440) return 4;
+  if (width >= 300) return 3;
+  return 2;
 }
 
 class _CategoryTilePanel extends StatelessWidget {

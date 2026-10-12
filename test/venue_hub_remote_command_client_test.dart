@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tableside_pos/core/tenant_scope.dart';
+import 'package:tableside_pos/offline/venue_hub_availability.dart';
 import 'package:tableside_pos/offline/venue_hub_remote_command_client.dart';
 
 void main() {
@@ -64,6 +65,7 @@ void main() {
   });
 
   test('surfaces a terminal hub rejection without retrying it', () async {
+    VenueHubAvailability.markOnline();
     final client = VenueHubRemoteCommandClient(
       timeout: const Duration(seconds: 3),
     );
@@ -99,6 +101,11 @@ void main() {
       ),
     );
     expect(waits, 1);
+    expect(
+      VenueHubAvailability.issue.value,
+      isNull,
+      reason: 'A hub business rejection proves that the hub is online.',
+    );
   });
 
   test('resumes the same command after an acknowledgement outage', () async {
