@@ -431,18 +431,19 @@ class VenueHubRuntime {
       // RTDB is the sole internet-presence and wake channel. A failure here is
       // non-fatal for the local HTTPS hub: LAN terminals must remain usable
       // during a venue internet outage, while remote commands fail closed.
-      VenueHubRealtimePresence? activeRealtimePresence;
+      // Keep the presence object attached even when its first cloud session
+      // request fails. The local HTTPS hub must remain available on the LAN,
+      // while the verified authority refresh below can retry only the RTDB
+      // connection without restarting the hub or re-opening its local ledger.
+      final activeRealtimePresence = _realtimePresence ??=
+          VenueHubRealtimePresence(repository: _repository);
       try {
-        final presence = _realtimePresence ??= VenueHubRealtimePresence(
-          repository: _repository,
-        );
-        await presence.start(
+        await activeRealtimePresence.start(
           scope: scope,
           deviceId: deviceId,
           hubEpoch: bootstrap.hubEpoch,
           credential: credential,
         );
-        activeRealtimePresence = presence;
       } on Object catch (error, stackTrace) {
         AppLogger.error(
           'Start venue hub realtime presence; remote commands are unavailable but LAN remains active',
@@ -637,19 +638,21 @@ class VenueHubRuntime {
       }
 
       await _realtimeSignalSubscription?.cancel();
-      if (activeRealtimePresence case final presence?) {
-        // The persistent RTDB stream wakes the hub only when cloud work exists,
-        // eliminating idle heartbeat and claim Function invocations.
-        _realtimeSignalSubscription = presence.commandSignals.listen(
-          (_) => unawaited(remoteTick()),
-          onError: (Object error, StackTrace stackTrace) {
-            AppLogger.error(
-              'Receive realtime hub wake signal',
-              error,
-              stackTrace,
-            );
-          },
-        );
+      // The stream controller survives a failed initial connection. Attaching
+      // now means a later authenticated retry can immediately wake the same
+      // command processor without rebuilding the venue runtime.
+      _realtimeSignalSubscription = activeRealtimePresence.commandSignals
+          .listen(
+            (_) => unawaited(remoteTick()),
+            onError: (Object error, StackTrace stackTrace) {
+              AppLogger.error(
+                'Receive realtime hub wake signal',
+                error,
+                stackTrace,
+              );
+            },
+          );
+      if (activeRealtimePresence.connected.value) {
         // Recover commands queued just before the realtime listener connected.
         unawaited(remoteTick());
       }
@@ -702,6 +705,27 @@ class VenueHubRuntime {
             );
             await stop();
             return;
+          }
+          if (!activeRealtimePresence.connected.value) {
+            try {
+              // Retry only while disconnected. Healthy hubs remain on their
+              // persistent RTDB socket, so this adds no steady-state Function
+              // polling or heartbeat cost.
+              await activeRealtimePresence.start(
+                scope: scope,
+                deviceId: deviceId,
+                hubEpoch: bootstrap.hubEpoch,
+                credential: credential,
+              );
+              AppLogger.info('Venue hub realtime presence session restored.');
+              unawaited(remoteTick());
+            } catch (error, stackTrace) {
+              AppLogger.error(
+                'Retry venue hub realtime presence; LAN remains available',
+                error,
+                stackTrace,
+              );
+            }
           }
           processor.installCredentials(current.credentials);
           late Map<String, Object?> refreshed;
