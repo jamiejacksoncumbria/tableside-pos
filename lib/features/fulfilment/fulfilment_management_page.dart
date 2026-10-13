@@ -70,8 +70,25 @@ class _FulfilmentOrdersTab extends ConsumerStatefulWidget {
 }
 
 class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
-  DateTime _selectedDate = DateTime.now();
+  late DateTimeRange _dateRange;
+  FulfilmentStatus? _statusFilter;
+  String _searchQuery = '';
+  bool _showFilters = false;
+  final TextEditingController _searchController = TextEditingController();
   VenueScope get scope => widget.scope;
+
+  @override
+  void initState() {
+    super.initState();
+    final today = DateUtils.dateOnly(DateTime.now());
+    _dateRange = DateTimeRange(start: today, end: today);
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -101,35 +118,173 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
                 return false;
               }
               final value = order.scheduledFor ?? order.openedAt;
-              return value.year == _selectedDate.year &&
-                  value.month == _selectedDate.month &&
-                  value.day == _selectedDate.day;
+              final date = DateUtils.dateOnly(value.toLocal());
+              if (date.isBefore(_dateRange.start) ||
+                  date.isAfter(_dateRange.end)) {
+                return false;
+              }
+              if (_statusFilter != null &&
+                  order.fulfilmentStatus != _statusFilter) {
+                return false;
+              }
+              final query = _searchQuery.trim().toLowerCase();
+              if (query.isEmpty) return true;
+              return <String?>[
+                order.customerName,
+                order.customerPhone,
+                order.deliveryAddress,
+                order.deliveryAddressLabel,
+                order.serviceAreaName,
+                order.assignedDriverName,
+                order.id,
+                order.channel.label,
+                _statusLabel(order.fulfilmentStatus),
+              ].whereType<String>().any(
+                (value) => value.toLowerCase().contains(query),
+              );
             })
-            .toList(growable: false);
+            .toList(growable: false)
+          ..sort((left, right) {
+            final leftTime = left.scheduledFor ?? left.openedAt;
+            final rightTime = right.scheduledFor ?? right.openedAt;
+            return leftTime.compareTo(rightTime);
+          });
         return Column(
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Expanded(
-                    child: Text(
-                      '${_selectedDate.day.toString().padLeft(2, '0')}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.year}',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${_rangeLabel(_dateRange)} · ${items.length} order${items.length == 1 ? '' : 's'}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton.tonalIcon(
+                        onPressed: () => setState(
+                          () => _showFilters = !_showFilters,
+                        ),
+                        icon: Icon(
+                          _showFilters
+                              ? Icons.filter_alt_off_outlined
+                              : Icons.filter_alt_outlined,
+                        ),
+                        label: Text(
+                          _showFilters ? 'Hide filters' : 'Show filters',
+                        ),
+                      ),
+                    ],
                   ),
-                  TextButton.icon(
-                    onPressed: _chooseDate,
-                    icon: const Icon(Icons.date_range_outlined),
-                    label: const Text('Choose date'),
+                  AnimatedSize(
+                    duration: const Duration(milliseconds: 180),
+                    alignment: Alignment.topCenter,
+                    child: !_showFilters
+                        ? const SizedBox.shrink()
+                        : Padding(
+                            padding: const EdgeInsets.only(top: 12),
+                            child: Card.filled(
+                              margin: EdgeInsets.zero,
+                              child: Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: Column(
+                                  children: [
+                                    TextField(
+                                      controller: _searchController,
+                                      onChanged: (value) => setState(
+                                        () => _searchQuery = value,
+                                      ),
+                                      decoration: const InputDecoration(
+                                        labelText: 'Search orders',
+                                        hintText:
+                                            'Customer, phone, address, driver…',
+                                        prefixIcon: Icon(Icons.search_rounded),
+                                        isDense: true,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 10),
+                                    LayoutBuilder(
+                                      builder: (context, constraints) {
+                                        final compact =
+                                            constraints.maxWidth < 620;
+                                        final status = DropdownButtonFormField<
+                                          FulfilmentStatus?
+                                        >(
+                                          initialValue: _statusFilter,
+                                          isExpanded: true,
+                                          decoration: const InputDecoration(
+                                            labelText: 'Status',
+                                            isDense: true,
+                                          ),
+                                          items: [
+                                            const DropdownMenuItem(
+                                              value: null,
+                                              child: Text('All statuses'),
+                                            ),
+                                            for (final value
+                                                in FulfilmentStatus.values)
+                                              DropdownMenuItem(
+                                                value: value,
+                                                child: Text(
+                                                  _statusLabel(value),
+                                                ),
+                                              ),
+                                          ],
+                                          onChanged: (value) => setState(
+                                            () => _statusFilter = value,
+                                          ),
+                                        );
+                                        final dates = OutlinedButton.icon(
+                                          onPressed: _chooseDateRange,
+                                          icon: const Icon(
+                                            Icons.date_range_outlined,
+                                          ),
+                                          label: Text(
+                                            _rangeLabel(_dateRange),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        );
+                                        final clear = TextButton.icon(
+                                          onPressed: _resetFilters,
+                                          icon: const Icon(
+                                            Icons.restart_alt_rounded,
+                                          ),
+                                          label: const Text('Reset'),
+                                        );
+                                        if (compact) {
+                                          return Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.stretch,
+                                            children: [
+                                              status,
+                                              const SizedBox(height: 10),
+                                              dates,
+                                              clear,
+                                            ],
+                                          );
+                                        }
+                                        return Row(
+                                          children: [
+                                            Expanded(child: status),
+                                            const SizedBox(width: 10),
+                                            Expanded(child: dates),
+                                            clear,
+                                          ],
+                                        );
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
                   ),
-                  if (!_isToday(_selectedDate))
-                    TextButton(
-                      onPressed: () => setState(() {
-                        _selectedDate = DateTime.now();
-                      }),
-                      child: const Text('Today'),
-                    ),
                 ],
               ),
             ),
@@ -137,7 +292,7 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
               child: items.isEmpty
                   ? const Center(
                       child: Text(
-                        'No collection or delivery orders for this date.',
+                        'No collection or delivery orders match these filters.',
                       ),
                     )
                   : ListView.builder(
@@ -291,23 +446,39 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
     );
   }
 
-  bool _isToday(DateTime value) {
-    final today = DateTime.now();
-    return value.year == today.year &&
-        value.month == today.month &&
-        value.day == today.day;
-  }
+  String _dateLabel(DateTime value) =>
+      '${value.day.toString().padLeft(2, '0')}-${value.month.toString().padLeft(2, '0')}-${value.year}';
 
-  Future<void> _chooseDate() async {
-    final selected = await showDatePicker(
+  String _rangeLabel(DateTimeRange range) =>
+      DateUtils.isSameDay(range.start, range.end)
+      ? _dateLabel(range.start)
+      : '${_dateLabel(range.start)} – ${_dateLabel(range.end)}';
+
+  Future<void> _chooseDateRange() async {
+    final selected = await showDateRangePicker(
       context: context,
-      initialDate: _selectedDate,
+      initialDateRange: _dateRange,
       firstDate: DateTime.now().subtract(const Duration(days: 365 * 7)),
       lastDate: DateTime.now().add(const Duration(days: 365)),
     );
     if (selected != null && mounted) {
-      setState(() => _selectedDate = selected);
+      setState(
+        () => _dateRange = DateTimeRange(
+          start: DateUtils.dateOnly(selected.start),
+          end: DateUtils.dateOnly(selected.end),
+        ),
+      );
     }
+  }
+
+  void _resetFilters() {
+    final today = DateUtils.dateOnly(DateTime.now());
+    setState(() {
+      _dateRange = DateTimeRange(start: today, end: today);
+      _statusFilter = null;
+      _searchQuery = '';
+      _searchController.clear();
+    });
   }
 
   Future<void> _chooseDriver(

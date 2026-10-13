@@ -253,7 +253,7 @@ class _OperationalNotificationHostState
           .collection('tenants/${scope.tenantId}/notificationEvents')
           .where('venueId', isEqualTo: scope.venueId)
           .limit(100)
-          .snapshots(),
+          .snapshots(includeMetadataChanges: true),
       builder: (context, snapshot) {
         if (snapshot.hasError) {
           AppLogger.error(
@@ -264,6 +264,13 @@ class _OperationalNotificationHostState
         }
         final documents = snapshot.data?.docs ?? const [];
         if (!_seeded) {
+          // Do not seed from an empty/stale local cache. Wait for the server
+          // snapshot, then mark every existing record as historic. Otherwise
+          // the later server response looks like a burst of new alerts each
+          // time a staff member logs in.
+          if (snapshot.data?.metadata.isFromCache == true) {
+            return const SizedBox.shrink();
+          }
           _seen.addAll(documents.map((document) => document.id));
           _seeded = true;
           return const SizedBox.shrink();
