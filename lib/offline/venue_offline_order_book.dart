@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import '../core/app_logger.dart';
 import 'offline_event.dart';
 import 'offline_event_ledger.dart';
 import 'offline_order_projection.dart';
@@ -193,17 +194,58 @@ class VenueOfflineOrderBook {
   /// outlive damaged or replaced local storage without changing hub ownership.
   Future<void> installCloudBaselines(Map<String, Object?> snapshot) async {
     final rawOrders = snapshot['openOrders'];
-    if (rawOrders is! List || rawOrders.isEmpty) return;
+    if (rawOrders is! List) return;
     final existing = await _ledger.eventsForVenue(
       tenantId: tenantId,
       venueId: venueId,
       hubEpoch: hubEpoch,
     );
-    final installed = existing
-        .where((event) => event.type == 'order.cloudBaseline')
-        .map((event) => event.payload['orderId'])
-        .whereType<String>()
-        .toSet();
+    final localByOrder = <String, List<OfflineEvent>>{};
+    for (final event in existing.where(_isOrderEvent)) {
+      final orderId = event.payload['orderId'];
+      if (orderId is! String || orderId.isEmpty) continue;
+      localByOrder.putIfAbsent(orderId, () => []).add(event);
+    }
+
+    // A cloud order can still be open while its valid local close is waiting
+    // to sync. Never layer a recovery baseline over an order the append-only
+    // local ledger can already reconstruct: doing so would duplicate its
+    // balance authority. Schema 3 briefly allowed that redundant event, so
+    // quarantine only that baseline during upgrade while preserving every
+    // sale, payment and close event.
+    final reconstructable = <String>{};
+    for (final entry in localByOrder.entries) {
+      final withoutBaselines = entry.value
+          .where((event) => event.type != 'order.cloudBaseline')
+          .toList(growable: false);
+      if (withoutBaselines.isEmpty) continue;
+      try {
+        projectOfflineOrder(withoutBaselines);
+        reconstructable.add(entry.key);
+      } on OfflineProjectionException {
+        // An incomplete replacement-hub chain may genuinely require its
+        // signed cloud baseline, so it remains fail-closed and is not removed.
+      }
+    }
+
+    final installed = <String>{};
+    for (final event in existing.where(
+      (event) => event.type == 'order.cloudBaseline',
+    )) {
+      final orderId = event.payload['orderId'];
+      if (orderId is! String || orderId.isEmpty) continue;
+      if (reconstructable.contains(orderId)) {
+        await _ledger.quarantine(
+          event.id,
+          'Redundant cloud baseline for a reconstructable local order.',
+        );
+        AppLogger.info(
+          'Quarantined redundant cloud order baseline: order=$orderId.',
+        );
+      } else {
+        installed.add(orderId);
+      }
+    }
     for (final raw in rawOrders) {
       if (raw is! Map) continue;
       final baseline = Map<String, Object?>.from(raw);
@@ -213,6 +255,7 @@ class VenueOfflineOrderBook {
           orderId.isEmpty ||
           sourceEpoch == null ||
           sourceEpoch > hubEpoch ||
+          reconstructable.contains(orderId) ||
           installed.contains(orderId)) {
         continue;
       }
