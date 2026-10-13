@@ -702,6 +702,31 @@ class ProductionCommandRepository {
     });
   }
 
+  Future<Map<String, Object?>> issueRealtimeHubSession({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+  }) async {
+    final body = <String, Object?>{'deviceId': deviceId};
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: '/v1/realtime-session',
+      hubEpoch: hubEpoch,
+      sentAtUtc: DateTime.now().toUtc(),
+      body: body,
+    );
+    return _call('issueRealtimeHubSession', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+  }
+
   Future<List<Map<String, Object?>>> claimRemoteHubCommands({
     required VenueScope scope,
     required String deviceId,
@@ -2099,6 +2124,7 @@ class ProductionCommandRepository {
     'getOfflineHubSnapshot',
     'ingestOfflineHubEvents',
     'heartbeatRemoteHub',
+    'issueRealtimeHubSession',
     'claimRemoteHubCommands',
     'completeRemoteHubCommand',
     'heartbeatPrinterDevice',

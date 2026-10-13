@@ -14,6 +14,7 @@ import 'venue_hub_offline_pin.dart';
 import 'venue_hub_server.dart';
 import 'venue_hub_staff_sessions.dart';
 import 'venue_hub_print_queue.dart';
+import 'venue_hub_realtime_presence.dart';
 import 'venue_hub_platform.dart';
 import 'venue_hub_offline_view.dart';
 import 'venue_offline_catalogue.dart';
@@ -57,6 +58,7 @@ class VenueHubRuntime {
       StreamController<VenueHubRuntimeStatus>.broadcast();
   VenueHubCloudSync? _sync;
   VenueHubPrintQueue? _printQueue;
+  VenueHubRealtimePresence? _realtimePresence;
   Future<void> Function(Map<String, Object?> snapshot)? _installFreshSnapshot;
   Future<void> Function()? _refreshAuthorityNow;
   StreamSubscription? _pendingSubscription;
@@ -431,6 +433,27 @@ class VenueHubRuntime {
           return VenueHubCloudUploadResult(acknowledgedEventIds: acknowledged);
         },
       );
+      // Realtime presence is introduced alongside the existing cloud poller.
+      // Until the RTDB instance, rules, and scoped-token endpoint are deployed
+      // everywhere, failure here is non-fatal and the signed polling fallback
+      // continues to preserve remote ordering.
+      try {
+        final presence = _realtimePresence ??= VenueHubRealtimePresence(
+          repository: _repository,
+        );
+        await presence.start(
+          scope: scope,
+          deviceId: deviceId,
+          hubEpoch: bootstrap.hubEpoch,
+          credential: credential,
+        );
+      } on Object catch (error, stackTrace) {
+        AppLogger.error(
+          'Start venue hub realtime presence; signed polling remains active',
+          error,
+          stackTrace,
+        );
+      }
       var remoteTickRunning = false;
       var remoteHeartbeatRunning = false;
       // Track the two cloud loops independently. A healthy heartbeat must not
@@ -817,6 +840,7 @@ class VenueHubRuntime {
     _remoteCommandTimer = null;
     _remoteHeartbeatTimer?.cancel();
     _remoteHeartbeatTimer = null;
+    await _realtimePresence?.stop();
     await _pendingSubscription?.cancel();
     _pendingSubscription = null;
     _sync?.dispose();

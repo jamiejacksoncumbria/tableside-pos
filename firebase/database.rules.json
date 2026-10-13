@@ -1,0 +1,25 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "hubAuthorities": {
+      "$tenantId": {
+        "$venueId": {
+          ".read": false,
+          ".write": false
+        }
+      }
+    },
+    "hubPresence": {
+      "$tenantId": {
+        "$venueId": {
+          "$deviceId": {
+            ".read": "auth != null && auth.token.tablesideHub === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId",
+            ".write": "auth != null && auth.token.tablesideHub === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId && auth.token.deviceId === $deviceId && root.child('hubAuthorities').child($tenantId).child($venueId).child('enabled').val() === true && root.child('hubAuthorities').child($tenantId).child($venueId).child('deviceId').val() === $deviceId && root.child('hubAuthorities').child($tenantId).child($venueId).child('hubEpoch').val() === auth.token.hubEpoch",
+            ".validate": "newData.hasChildren(['online', 'hubEpoch']) && newData.child('online').isBoolean() && newData.child('hubEpoch').isNumber() && newData.child('hubEpoch').val() === auth.token.hubEpoch"
+          }
+        }
+      }
+    }
+  }
+}

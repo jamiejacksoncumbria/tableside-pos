@@ -6,6 +6,7 @@ import {getApps, initializeApp} from "firebase-admin/app";
 import {getAppCheck} from "firebase-admin/app-check";
 import {getAuth} from "firebase-admin/auth";
 import {getMessaging} from "firebase-admin/messaging";
+import {getDatabase} from "firebase-admin/database";
 import {getStorage} from "firebase-admin/storage";
 import {FieldValue, getFirestore} from "firebase-admin/firestore";
 import {
@@ -28,6 +29,7 @@ const initialPlatformAdminEmail = defineString("INITIAL_PLATFORM_ADMIN_EMAIL");
 // Monitor first: old Windows/web clients must not be locked out while their
 // attestation provider is being registered and verified.
 const requireAppCheck = defineBoolean("REQUIRE_APP_CHECK", {default: false});
+const realtimeDatabaseUrl = defineString("TABLESIDE_REALTIME_DATABASE_URL", {default: ""});
 const supportedTimeZones = Object.freeze(Intl.supportedValuesOf("timeZone"));
 const supportedTimeZoneSet = new Set(supportedTimeZones);
 const supportedCurrencyCodes = Object.freeze(Intl.supportedValuesOf("currency"));
@@ -1807,6 +1809,9 @@ async function manageVenueConfigurationFor(caller, rawData) {
     if (currentHub?.enabled === true && currentHub.deviceId === deviceId &&
         currentHub.credentialId === credentialId && currentHub.endpoint === hubEndpoint &&
         Number.isSafeInteger(Number(currentHub.epoch)) && Number(currentHub.epoch) > 0) {
+      await syncRealtimeHubAuthority(tenantId, venueId, {
+        enabled: true, deviceId, hubEpoch: Number(currentHub.epoch),
+      });
       result = {saved: true, enabled: true, hubEpoch: Number(currentHub.epoch)};
     } else {
     const takeoverReason = currentHub?.enabled === true
@@ -1867,6 +1872,9 @@ async function manageVenueConfigurationFor(caller, rawData) {
       });
       return {epoch};
     });
+    await syncRealtimeHubAuthority(tenantId, venueId, {
+      enabled: true, deviceId, hubEpoch: activation.epoch,
+    });
     result = {saved: true, enabled: true, hubEpoch: activation.epoch};
     }
   } else if (resource === "offlineHubDeactivation") {
@@ -1896,6 +1904,9 @@ async function manageVenueConfigurationFor(caller, rawData) {
         createdAt: FieldValue.serverTimestamp(),
       });
       return {epoch};
+    });
+    await syncRealtimeHubAuthority(tenantId, venueId, {
+      enabled: false, hubEpoch: deactivation.epoch,
     });
     result = {saved: true, enabled: false, hubEpoch: deactivation.epoch};
   } else {
@@ -2525,6 +2536,50 @@ async function heartbeatRemoteHubFor(caller, rawData) {
   return {heartbeatExpiresAt: expiresAt.toISOString()};
 }
 
+function configuredRealtimeDatabase() {
+  const url = realtimeDatabaseUrl.value().trim();
+  if (url.length === 0 || !/^https:\/\/[a-z0-9.-]+\/?$/u.test(url)) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Realtime hub presence is not configured for this Firebase environment.",
+    );
+  }
+  return {database: getDatabase(undefined, url), url: url.replace(/\/$/u, "")};
+}
+
+async function syncRealtimeHubAuthority(tenantId, venueId, authority) {
+  const url = realtimeDatabaseUrl.value().trim();
+  if (url.length === 0) return;
+  const configured = configuredRealtimeDatabase();
+  await configured.database
+    .ref(`hubAuthorities/${tenantId}/${venueId}`)
+    .set(authority);
+}
+
+async function issueRealtimeHubSessionFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/realtime-session");
+  const configured = configuredRealtimeDatabase();
+  // Backfill the server-owned authority record for hubs activated before the
+  // realtime-presence rollout. Rules consult this record on every write, so a
+  // replaced hub cannot keep publishing presence with a still-valid token.
+  await syncRealtimeHubAuthority(upload.tenantId, upload.venueId, {
+    enabled: true,
+    deviceId: upload.deviceId,
+    hubEpoch: upload.hubEpoch,
+  });
+  const scopedUid = `hub_${createHash("sha256")
+    .update(`${upload.tenantId}:${upload.venueId}:${upload.deviceId}`)
+    .digest("hex").slice(0, 48)}`;
+  const customToken = await auth.createCustomToken(scopedUid, {
+    tablesideHub: true,
+    tenantId: upload.tenantId,
+    venueId: upload.venueId,
+    deviceId: upload.deviceId,
+    hubEpoch: upload.hubEpoch,
+  });
+  return {customToken, databaseUrl: configured.url, hubEpoch: upload.hubEpoch};
+}
+
 async function claimRemoteHubCommandsFor(caller, rawData) {
   const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/remote-claim");
   // A successful signed poll proves exactly the same liveness properties as
@@ -2703,7 +2758,7 @@ async function verifiedOfflineHubUpload(
   )) {
     throw new HttpsError("unauthenticated", "The hub upload signature is invalid.");
   }
-  return {body, tenantId, venueId, hubEpoch, credentialId, nonce};
+  return {body, tenantId, venueId, deviceId, hubEpoch, credentialId, nonce};
 }
 
 function offlinePermissionsForRoles(roles) {
@@ -10662,6 +10717,7 @@ async function invokePosAction(action, caller, data) {
     "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
     "getTrustedTime", "getOfflineHubBootstrap", "ingestOfflineHubEvents",
     "getOfflineHubSnapshot", "heartbeatRemoteHub", "claimRemoteHubCommands",
+    "issueRealtimeHubSession",
     "completeRemoteHubCommand",
   ]);
   const actingCaller = sessionBootstrapActions.has(action)
@@ -10704,6 +10760,8 @@ async function invokePosAction(action, caller, data) {
       return waitForRemoteHubCommandFor(actingCaller, data);
     case "heartbeatRemoteHub":
       return heartbeatRemoteHubFor(caller, data);
+    case "issueRealtimeHubSession":
+      return issueRealtimeHubSessionFor(caller, data);
     case "claimRemoteHubCommands":
       return claimRemoteHubCommandsFor(caller, data);
     case "completeRemoteHubCommand":

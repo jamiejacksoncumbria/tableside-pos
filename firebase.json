@@ -15,6 +15,9 @@
   "storage": {
     "rules": "firebase/storage.rules"
   },
+  "database": {
+    "rules": "firebase/database.rules.json"
+  },
   "hosting": {
     "public": "build/web",
     "ignore": [

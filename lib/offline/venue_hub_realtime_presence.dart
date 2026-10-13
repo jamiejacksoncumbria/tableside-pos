@@ -1,0 +1,154 @@
+import 'dart:async';
+
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart';
+
+import '../core/app_logger.dart';
+import '../core/tenant_scope.dart';
+import '../data/production_command_repository.dart';
+import 'venue_hub_device_credential.dart';
+
+/// Maintains server-observed hub presence without a periodic Cloud Function.
+class VenueHubRealtimePresence {
+  VenueHubRealtimePresence({ProductionCommandRepository? repository})
+    : _repository = repository ?? ProductionCommandRepository();
+
+  static const _secondaryAppName = 'tableside-hub-presence';
+  final ProductionCommandRepository _repository;
+  final ValueNotifier<bool> connected = ValueNotifier<bool>(false);
+  StreamSubscription<DatabaseEvent>? _connectionSubscription;
+  DatabaseReference? _presence;
+  OnDisconnect? _onDisconnect;
+  Timer? _leaseTimer;
+  FirebaseApp? _app;
+
+  Future<void> start({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+  }) async {
+    await stop();
+    final session = await _repository.issueRealtimeHubSession(
+      scope: scope,
+      deviceId: deviceId,
+      hubEpoch: hubEpoch,
+      credential: credential,
+    );
+    final token = session['customToken'];
+    final databaseUrl = session['databaseUrl'];
+    if (token is! String ||
+        token.isEmpty ||
+        databaseUrl is! String ||
+        !databaseUrl.startsWith('https://')) {
+      throw StateError('The server returned an invalid realtime hub session.');
+    }
+
+    final primary = Firebase.app();
+    FirebaseApp app;
+    try {
+      app = Firebase.app(_secondaryAppName);
+    } on FirebaseException {
+      app = await Firebase.initializeApp(
+        name: _secondaryAppName,
+        options: primary.options.copyWith(databaseURL: databaseUrl),
+      );
+    }
+    _app = app;
+    await FirebaseAuth.instanceFor(app: app).signInWithCustomToken(token);
+    final database = FirebaseDatabase.instanceFor(
+      app: app,
+      databaseURL: databaseUrl,
+    );
+    final presence = database.ref(
+      'hubPresence/${scope.tenantId}/${scope.venueId}/$deviceId',
+    );
+    _presence = presence;
+    _connectionSubscription = database
+        .ref('.info/connected')
+        .onValue
+        .listen(
+          (event) async {
+            final online = event.snapshot.value == true;
+            if (!online) {
+              connected.value = false;
+              return;
+            }
+            try {
+              final disconnect = presence.onDisconnect();
+              _onDisconnect = disconnect;
+              // Arm the server-side disconnect write before publishing online.
+              // If power or networking fails after this point, Firebase marks
+              // the hub offline without waiting for a Cloud Function timer.
+              await disconnect.set(<String, Object?>{
+                'online': false,
+                'hubEpoch': hubEpoch,
+                'disconnectedAt': ServerValue.timestamp,
+              });
+              await presence.set(<String, Object?>{
+                'online': true,
+                'hubEpoch': hubEpoch,
+                'connectedAt': ServerValue.timestamp,
+                'lastReadyAt': ServerValue.timestamp,
+              });
+              connected.value = true;
+              AppLogger.info('Venue hub realtime presence connected.');
+            } on Object catch (error, stackTrace) {
+              connected.value = false;
+              AppLogger.error(
+                'Publish venue hub realtime presence',
+                error,
+                stackTrace,
+              );
+            }
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            connected.value = false;
+            AppLogger.error('Venue hub realtime presence', error, stackTrace);
+          },
+        );
+    _leaseTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      if (!connected.value || _presence != presence) return;
+      try {
+        await presence.update(<String, Object?>{
+          'online': true,
+          'hubEpoch': hubEpoch,
+          'lastReadyAt': ServerValue.timestamp,
+        });
+      } on Object catch (error, stackTrace) {
+        connected.value = false;
+        AppLogger.error('Refresh venue hub realtime lease', error, stackTrace);
+      }
+    });
+  }
+
+  Future<void> stop() async {
+    _leaseTimer?.cancel();
+    _leaseTimer = null;
+    await _connectionSubscription?.cancel();
+    _connectionSubscription = null;
+    try {
+      await _onDisconnect?.cancel();
+      await _presence?.update(<String, Object?>{
+        'online': false,
+        'disconnectedAt': ServerValue.timestamp,
+      });
+    } on Object {
+      // The server-side onDisconnect remains armed if cleanup cannot run.
+    }
+    _onDisconnect = null;
+    _presence = null;
+    connected.value = false;
+    final app = _app;
+    _app = null;
+    if (app != null) {
+      try {
+        await FirebaseAuth.instanceFor(app: app).signOut();
+      } on Object {
+        // The scoped identity cannot access another venue or hub epoch.
+      }
+    }
+  }
+}

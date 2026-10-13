@@ -22,6 +22,8 @@ dependencies:
   firebase_core: ^4.15.0
   firebase_storage: ^13.6.0
   firebase_messaging: ^16.7.0
+  # Persistent presence and wake signals replace billed heartbeat polling.
+  firebase_database: ^12.6.0
   # Shorebird patches installed Android, iOS, and Windows releases. Web uses
   # Firebase Hosting deployment because browsers load the hosted build.
   shorebird_code_push: ^2.0.7
