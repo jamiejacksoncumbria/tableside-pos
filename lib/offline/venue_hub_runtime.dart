@@ -59,6 +59,7 @@ class VenueHubRuntime {
   VenueHubCloudSync? _sync;
   VenueHubPrintQueue? _printQueue;
   VenueHubRealtimePresence? _realtimePresence;
+  StreamSubscription<void>? _realtimeSignalSubscription;
   Future<void> Function(Map<String, Object?> snapshot)? _installFreshSnapshot;
   Future<void> Function()? _refreshAuthorityNow;
   StreamSubscription? _pendingSubscription;
@@ -437,6 +438,7 @@ class VenueHubRuntime {
       // Until the RTDB instance, rules, and scoped-token endpoint are deployed
       // everywhere, failure here is non-fatal and the signed polling fallback
       // continues to preserve remote ordering.
+      VenueHubRealtimePresence? activeRealtimePresence;
       try {
         final presence = _realtimePresence ??= VenueHubRealtimePresence(
           repository: _repository,
@@ -447,6 +449,7 @@ class VenueHubRuntime {
           hubEpoch: bootstrap.hubEpoch,
           credential: credential,
         );
+        activeRealtimePresence = presence;
       } on Object catch (error, stackTrace) {
         AppLogger.error(
           'Start venue hub realtime presence; signed polling remains active',
@@ -455,6 +458,7 @@ class VenueHubRuntime {
         );
       }
       var remoteTickRunning = false;
+      var remoteTickRequested = false;
       var remoteHeartbeatRunning = false;
       // Track the two cloud loops independently. A healthy heartbeat must not
       // hide a broken claim poll (or vice versa); doing so previously reduced
@@ -497,7 +501,13 @@ class VenueHubRuntime {
       }
 
       Future<void> remoteTick() async {
-        if (remoteTickRunning || _activeScope != scope) return;
+        if (_activeScope != scope) return;
+        if (remoteTickRunning) {
+          // Coalesce wake signals without losing one that arrives while a
+          // previous claim batch is still validating or committing.
+          remoteTickRequested = true;
+          return;
+        }
         remoteTickRunning = true;
         _lastRemoteClaimAttemptAtUtc = DateTime.now().toUtc();
         try {
@@ -634,6 +644,10 @@ class VenueHubRuntime {
           }
         } finally {
           remoteTickRunning = false;
+          if (remoteTickRequested && _activeScope == scope) {
+            remoteTickRequested = false;
+            unawaited(remoteTick());
+          }
         }
       }
 
@@ -683,21 +697,34 @@ class VenueHubRuntime {
         }
       }
 
-      _remoteCommandTimer = Timer.periodic(
-        // Ten seconds keeps remote tills responsive while halving idle cloud
-        // invocations. Same-network tills continue to use the LAN hub directly.
-        const Duration(seconds: 10),
-        (_) => unawaited(remoteTick()),
-      );
-      _remoteHeartbeatTimer = Timer.periodic(
-        const Duration(seconds: 30),
-        (_) => unawaited(remoteHeartbeat()),
-      );
-      // Attempt the first presence update before reporting startup complete.
-      // Failure remains non-fatal (LAN operation is deliberately independent
-      // of internet availability), while success immediately opens the safe
-      // remote-command path instead of waiting for the first timer tick.
-      await remoteHeartbeat();
+      await _realtimeSignalSubscription?.cancel();
+      if (activeRealtimePresence case final presence?) {
+        // The persistent RTDB stream wakes the hub only when cloud work exists,
+        // eliminating idle heartbeat and claim Function invocations.
+        _realtimeSignalSubscription = presence.commandSignals.listen(
+          (_) => unawaited(remoteTick()),
+          onError: (Object error, StackTrace stackTrace) {
+            AppLogger.error(
+              'Receive realtime hub wake signal',
+              error,
+              stackTrace,
+            );
+          },
+        );
+      } else {
+        // Safe rollout fallback for environments where RTDB has not yet been
+        // provisioned. Remove this after all deployments have migrated.
+        _remoteCommandTimer = Timer.periodic(
+          const Duration(seconds: 10),
+          (_) => unawaited(remoteTick()),
+        );
+        _remoteHeartbeatTimer = Timer.periodic(
+          const Duration(seconds: 30),
+          (_) => unawaited(remoteHeartbeat()),
+        );
+        await remoteHeartbeat();
+      }
+      // Recover commands queued just before the realtime listener connected.
       unawaited(remoteTick());
       _pendingSubscription = _ledger.watchPending().listen(
         (events) {
@@ -840,6 +867,8 @@ class VenueHubRuntime {
     _remoteCommandTimer = null;
     _remoteHeartbeatTimer?.cancel();
     _remoteHeartbeatTimer = null;
+    await _realtimeSignalSubscription?.cancel();
+    _realtimeSignalSubscription = null;
     await _realtimePresence?.stop();
     await _pendingSubscription?.cancel();
     _pendingSubscription = null;

@@ -18,11 +18,18 @@ class VenueHubRealtimePresence {
   static const _secondaryAppName = 'tableside-hub-presence';
   final ProductionCommandRepository _repository;
   final ValueNotifier<bool> connected = ValueNotifier<bool>(false);
+  final StreamController<void> _commandSignals =
+      StreamController<void>.broadcast();
   StreamSubscription<DatabaseEvent>? _connectionSubscription;
+  StreamSubscription<DatabaseEvent>? _signalSubscription;
   DatabaseReference? _presence;
   OnDisconnect? _onDisconnect;
   Timer? _leaseTimer;
   FirebaseApp? _app;
+
+  /// Emits only a wake-up hint; the hub still claims and validates each
+  /// command through the signed POS API before committing it locally.
+  Stream<void> get commandSignals => _commandSignals.stream;
 
   Future<void> start({
     required VenueScope scope,
@@ -66,6 +73,19 @@ class VenueHubRealtimePresence {
       'hubPresence/${scope.tenantId}/${scope.venueId}/$deviceId',
     );
     _presence = presence;
+    _signalSubscription = database
+        .ref('hubSignals/${scope.tenantId}/${scope.venueId}')
+        .onValue
+        .listen(
+          (_) => _commandSignals.add(null),
+          onError: (Object error, StackTrace stackTrace) {
+            AppLogger.error(
+              'Listen for realtime hub commands',
+              error,
+              stackTrace,
+            );
+          },
+        );
     _connectionSubscription = database
         .ref('.info/connected')
         .onValue
@@ -129,6 +149,8 @@ class VenueHubRealtimePresence {
     _leaseTimer = null;
     await _connectionSubscription?.cancel();
     _connectionSubscription = null;
+    await _signalSubscription?.cancel();
+    _signalSubscription = null;
     try {
       await _onDisconnect?.cancel();
       await _presence?.update(<String, Object?>{

@@ -20,6 +20,14 @@
           }
         }
       }
+    },
+    "hubSignals": {
+      "$tenantId": {
+        "$venueId": {
+          ".read": "auth != null && auth.token.tablesideHub === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId && root.child('hubAuthorities').child($tenantId).child($venueId).child('enabled').val() === true && root.child('hubAuthorities').child($tenantId).child($venueId).child('deviceId').val() === auth.token.deviceId && root.child('hubAuthorities').child($tenantId).child($venueId).child('hubEpoch').val() === auth.token.hubEpoch",
+          ".write": false
+        }
+      }
     }
   }
 }

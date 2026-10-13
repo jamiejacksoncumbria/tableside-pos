@@ -6,7 +6,7 @@ import {getApps, initializeApp} from "firebase-admin/app";
 import {getAppCheck} from "firebase-admin/app-check";
 import {getAuth} from "firebase-admin/auth";
 import {getMessaging} from "firebase-admin/messaging";
-import {getDatabase} from "firebase-admin/database";
+import {getDatabase, ServerValue} from "firebase-admin/database";
 import {getStorage} from "firebase-admin/storage";
 import {FieldValue, getFirestore} from "firebase-admin/firestore";
 import {
@@ -2407,6 +2407,31 @@ async function submitRemoteHubCommandFor(caller, rawData) {
       "The venue hub is not enrolled for remote commands at this venue.",
     );
   }
+  const realtimeUrl = realtimeDatabaseUrl.value().trim();
+  if (realtimeUrl.length > 0) {
+    try {
+      const presence = await configuredRealtimeDatabase().database
+        .ref(`hubPresence/${tenantId}/${venueId}/${hub.deviceId}`).get();
+      const presenceValue = presence.val();
+      const lastReadyAt = Number(presenceValue?.lastReadyAt ?? 0);
+      if (presenceValue?.online !== true || presenceValue?.hubEpoch !== hubEpoch ||
+          !Number.isSafeInteger(lastReadyAt) || Date.now() - lastReadyAt > 75 * 1000) {
+        throw new HttpsError(
+          "unavailable",
+          "The venue hub is offline. Join the venue network or wait for it to reconnect.",
+        );
+      }
+    } catch (error) {
+      if (error instanceof HttpsError) throw error;
+      console.error("Could not read realtime venue hub presence", {
+        tenantId, venueId, error: String(error),
+      });
+      throw new HttpsError(
+        "unavailable",
+        "The venue hub presence service is unavailable. Nothing was accepted.",
+      );
+    }
+  }
   if (!pin.exists || pin.data()?.locked === true) {
     throw new HttpsError("unauthenticated", "The staff PIN is unavailable or locked.");
   }
@@ -2440,6 +2465,24 @@ async function submitRemoteHubCommandFor(caller, rawData) {
         ? data.businessTimestampUtc : null,
     });
   });
+  if (realtimeUrl.length > 0) {
+    try {
+      await configuredRealtimeDatabase().database
+        .ref(`hubSignals/${tenantId}/${venueId}`)
+        .set({commandId, hubEpoch, signaledAt: ServerValue.TIMESTAMP});
+    } catch (error) {
+      // The Firestore command is idempotent and remains safe to signal again
+      // when the client retries this same command ID. Never claim success if
+      // the authoritative hub was not actually woken.
+      console.error("Could not signal realtime venue hub command", {
+        tenantId, venueId, commandId, error: String(error),
+      });
+      throw new HttpsError(
+        "unavailable",
+        "The venue hub command channel is unavailable. Nothing was confirmed.",
+      );
+    }
+  }
   return {commandId, expiresAt: expiresAt.toISOString(), documentPath: commandRef.path};
 }
 
@@ -2586,7 +2629,12 @@ async function claimRemoteHubCommandsFor(caller, rawData) {
   // the dedicated heartbeat. Refreshing presence here closes a failure mode
   // where command polling remained healthy but one stuck heartbeat request
   // caused every remote POS to be rejected as if the hub were offline.
-  await recordRemoteHubPresence(upload, null, {claimPoll: true});
+  // Older deployments still use the Firestore presence document. Once RTDB
+  // is configured, the persistent connection is the liveness authority and
+  // this claim call is made only in response to a realtime wake signal.
+  if (realtimeDatabaseUrl.value().trim().length === 0) {
+    await recordRemoteHubPresence(upload, null, {claimPoll: true});
+  }
   const maximum = Math.min(Math.max(Number(upload.body.maximum ?? 10), 1), 25);
   const candidates = await remoteHubQueue(upload.tenantId, upload.venueId)
     .where("status", "in", ["pending", "claimed"])
