@@ -14,7 +14,7 @@ import {
 } from "firebase-functions/v2/firestore";
 import {HttpsError, onRequest} from "firebase-functions/v2/https";
 import {onSchedule} from "firebase-functions/v2/scheduler";
-import {defineBoolean, defineString} from "firebase-functions/params";
+import {databaseURL, defineBoolean, defineString} from "firebase-functions/params";
 import {setGlobalOptions} from "firebase-functions/v2";
 
 if (getApps().length === 0) {
@@ -29,7 +29,6 @@ const initialPlatformAdminEmail = defineString("INITIAL_PLATFORM_ADMIN_EMAIL");
 // Monitor first: old Windows/web clients must not be locked out while their
 // attestation provider is being registered and verified.
 const requireAppCheck = defineBoolean("REQUIRE_APP_CHECK", {default: false});
-const realtimeDatabaseUrl = defineString("TABLESIDE_REALTIME_DATABASE_URL", {default: ""});
 const supportedTimeZones = Object.freeze(Intl.supportedValuesOf("timeZone"));
 const supportedTimeZoneSet = new Set(supportedTimeZones);
 const supportedCurrencyCodes = Object.freeze(Intl.supportedValuesOf("currency"));
@@ -2407,7 +2406,7 @@ async function submitRemoteHubCommandFor(caller, rawData) {
       "The venue hub is not enrolled for remote commands at this venue.",
     );
   }
-  const realtimeUrl = realtimeDatabaseUrl.value().trim();
+  const realtimeUrl = databaseURL.value().trim();
   if (realtimeUrl.length > 0) {
     try {
       const presence = await configuredRealtimeDatabase().database
@@ -2580,7 +2579,7 @@ async function heartbeatRemoteHubFor(caller, rawData) {
 }
 
 function configuredRealtimeDatabase() {
-  const url = realtimeDatabaseUrl.value().trim();
+  const url = databaseURL.value().trim();
   if (url.length === 0 || !/^https:\/\/[a-z0-9.-]+\/?$/u.test(url)) {
     throw new HttpsError(
       "failed-precondition",
@@ -2591,7 +2590,7 @@ function configuredRealtimeDatabase() {
 }
 
 async function syncRealtimeHubAuthority(tenantId, venueId, authority) {
-  const url = realtimeDatabaseUrl.value().trim();
+  const url = databaseURL.value().trim();
   if (url.length === 0) return;
   const configured = configuredRealtimeDatabase();
   await configured.database
@@ -2632,7 +2631,7 @@ async function claimRemoteHubCommandsFor(caller, rawData) {
   // Older deployments still use the Firestore presence document. Once RTDB
   // is configured, the persistent connection is the liveness authority and
   // this claim call is made only in response to a realtime wake signal.
-  if (realtimeDatabaseUrl.value().trim().length === 0) {
+  if (databaseURL.value().trim().length === 0) {
     await recordRemoteHubPresence(upload, null, {claimPoll: true});
   }
   const maximum = Math.min(Math.max(Number(upload.body.maximum ?? 10), 1), 25);
