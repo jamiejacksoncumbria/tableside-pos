@@ -142,6 +142,64 @@ void main() {
     expect(projection.balanceDueMinor, 0);
   });
 
+  test('same-epoch cloud baseline replays synced mutations idempotently', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}, hubEpoch: 3),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 2000,
+      }, hubEpoch: 3),
+      _event(3, 'order.itemQuantityChanged', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'quantity': 2,
+      }, hubEpoch: 3),
+      _event(4, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 1000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }, hubEpoch: 3),
+      _event(5, 'order.cloudBaseline', {
+        'orderId': 'order-a',
+        'sourceOfflineHubEpoch': 3,
+        'openedAtUtc': '2026-09-12T11:00:00.000Z',
+        'channel': 'dineIn',
+        'tableId': 'table-a',
+        'deliveryFeeMinor': 0,
+        'lines': [
+          {
+            'id': 'line-a',
+            'productId': 'product-a',
+            'name': 'Meal',
+            'quantity': 2,
+            'unitPriceMinor': 2000,
+            'sent': false,
+          },
+        ],
+        'payments': [
+          {
+            'id': 'payment-a',
+            'baseAmountMinor': 1000,
+            'tenderedAmountMinor': 1000,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+          },
+        ],
+      }, hubEpoch: 3),
+    ]);
+
+    expect(projection.lines.values.single.quantity, 2);
+    expect(projection.totalMinor, 4000);
+    expect(projection.paidMinor, 1000);
+    expect(projection.balanceDueMinor, 3000);
+  });
+
   test('interleaved global ledger sequences remain valid per order', () {
     final projection = projectOfflineOrder([
       _event(1, 'order.opened', {'orderId': 'order-a'}),

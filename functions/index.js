@@ -2791,10 +2791,11 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   const tenantRef = db.doc(`tenants/${upload.tenantId}`);
   const snapshotVersionRef = tenantRef.collection("offlineHubSnapshotVersions")
     .doc(upload.venueId);
-  // Schema 2 adds cloud-verified active-order baselines. Bumping generation
-  // transactionally makes every enrolled hub fetch it exactly once even when
-  // its menu/catalogue data has not otherwise changed.
-  const snapshotSchemaVersion = 2;
+  // Schema 3 includes same-epoch active-order baselines. They recover a hub
+  // whose encrypted local ledger was replaced while its epoch stayed active.
+  // Bumping generation makes every enrolled hub fetch the repair once even
+  // when its menu/catalogue data has not otherwise changed.
+  const snapshotSchemaVersion = 3;
   await db.runTransaction(async (transaction) => {
     const current = await transaction.get(snapshotVersionRef);
     if (!current.exists) {
@@ -2928,7 +2929,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   const openOrders = orders.docs.filter((document) => {
     const value = document.data();
     return ["open", "sent"].includes(value.status) &&
-      Number(value.offlineHubEpoch ?? 0) < upload.hubEpoch;
+      Number(value.offlineHubEpoch ?? 0) <= upload.hubEpoch;
   }).map((document) => {
     const value = document.data();
     const lines = Array.isArray(value.lines) ? value.lines : [];
@@ -3554,7 +3555,7 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
     ? next.payments.map((payment) => ({...payment})) : [];
   if (event.type === "order.cloudBaseline") {
     const sourceEpoch = Number(payload.sourceOfflineHubEpoch);
-    if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch >= event.hubEpoch ||
+    if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch > event.hubEpoch ||
         !["open", "sent"].includes(next.status) ||
         (next.tableId ?? null) !== (payload.tableId ?? null) ||
         (next.tabName ?? null) !== (payload.tabName ?? null) ||

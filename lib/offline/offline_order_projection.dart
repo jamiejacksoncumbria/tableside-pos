@@ -251,9 +251,9 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
   if (baseline != null) {
     final payload = baseline.payload;
     final sourceEpoch = (payload['sourceOfflineHubEpoch'] as num?)?.toInt();
-    if (sourceEpoch == null || sourceEpoch >= baseline.hubEpoch) {
+    if (sourceEpoch == null || sourceEpoch > baseline.hubEpoch) {
       throw const OfflineProjectionException(
-        'The cloud baseline does not belong to an earlier hub epoch.',
+        'The cloud baseline belongs to a future hub epoch.',
       );
     }
     opened = true;
@@ -454,6 +454,17 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         _requireOpened(opened);
         final lineId = _requiredString(event.payload, 'lineId');
         if (lines.containsKey(lineId)) {
+          final existing = lines[lineId]!;
+          // A same-epoch recovery baseline already contains cloud-projected
+          // lines. Replaying the original add is idempotent when its immutable
+          // sale identity matches; later quantity events still replay below.
+          final sameCloudLine = baseline != null &&
+              existing.productId ==
+                  _requiredString(event.payload, 'productId') &&
+              existing.name == _requiredString(event.payload, 'productName') &&
+              existing.unitPriceMinor ==
+                  _nonNegativeInt(event.payload, 'unitPriceMinor');
+          if (sameCloudLine) break;
           throw const OfflineProjectionException(
             'An order line ID was used more than once.',
           );
@@ -552,6 +563,12 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         _requireOpened(opened);
         final paymentId = _requiredString(event.payload, 'paymentId');
         if (!paymentIds.add(paymentId)) {
+          final existing = payments.where((item) => item.id == paymentId).first;
+          if (baseline != null &&
+              existing.baseAmountMinor ==
+                  _positiveInt(event.payload, 'baseAmountMinor')) {
+            break;
+          }
           throw const OfflineProjectionException(
             'A payment ID was used more than once.',
           );

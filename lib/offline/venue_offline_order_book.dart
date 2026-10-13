@@ -186,9 +186,11 @@ class VenueOfflineOrderBook {
     };
   }
 
-  /// Imports cloud-signed active orders from an earlier hub epoch exactly
-  /// once. These immutable baseline events let a replacement hub continue a
-  /// bill without inventing prices, lines or payments locally.
+  /// Imports cloud-signed active orders that are absent from the local ledger
+  /// exactly once. These immutable baseline events let a replacement or
+  /// repaired hub continue a bill without inventing prices, lines or payments
+  /// locally. A same-epoch baseline is valid because the signed snapshot can
+  /// outlive damaged or replaced local storage without changing hub ownership.
   Future<void> installCloudBaselines(Map<String, Object?> snapshot) async {
     final rawOrders = snapshot['openOrders'];
     if (rawOrders is! List || rawOrders.isEmpty) return;
@@ -210,7 +212,7 @@ class VenueOfflineOrderBook {
       if (orderId is! String ||
           orderId.isEmpty ||
           sourceEpoch == null ||
-          sourceEpoch >= hubEpoch ||
+          sourceEpoch > hubEpoch ||
           installed.contains(orderId)) {
         continue;
       }

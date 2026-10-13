@@ -2527,6 +2527,20 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     final canAdjustSale =
         staff?.roles.any((role) => role == 'owner' || role == 'manager') ??
         false;
+    final compactOutlinedButtonStyle = OutlinedButton.styleFrom(
+      visualDensity: VisualDensity.compact,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      minimumSize: const Size(0, 32),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      textStyle: Theme.of(context).textTheme.labelMedium,
+    );
+    final compactFilledButtonStyle = FilledButton.styleFrom(
+      visualDensity: VisualDensity.compact,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      minimumSize: const Size(0, 32),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      textStyle: Theme.of(context).textTheme.labelMedium,
+    );
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Padding(
@@ -2846,17 +2860,13 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                       ),
                     ),
             ),
-            // Totals and actions are a second flexible region. On a shallow
-            // tablet window they scroll instead of forcing the entire order
-            // card past its height; on larger displays they keep their normal
-            // intrinsic size. This remains safe even after payments add extra
-            // history rows to an already busy order.
-            Flexible(
-              flex: 2,
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
+            // Tablets and desktop tills pin totals/actions below the list, so
+            // staff never have to scroll past order items to reach payment or
+            // sending controls. Phones retain the safe scroll fallback.
+            _AdaptiveOrderFooter(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
                     if (order.channel == OrderChannel.delivery &&
                         order.deliveryFeeMinor > 0) ...[
                       const Divider(height: 20),
@@ -2926,7 +2936,15 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                           ),
                         ],
                       ),
-                      for (final payment in order.payments)
+                      if (order.payments.length > 2)
+                        Text(
+                          '+ ${order.payments.length - 2} earlier payment${order.payments.length == 3 ? '' : 's'}',
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                      for (final payment in order.payments
+                          .skip(order.payments.length > 2
+                              ? order.payments.length - 2
+                              : 0))
                         Text(
                           '${payment.recordedLocalDateTime?.trim().isNotEmpty == true ? formatVenueDateTimeSnapshot(payment.recordedLocalDateTime!) : formatAppDateTime(payment.recordedAt)} · ${payment.method} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
                           style: Theme.of(context).textTheme.labelSmall,
@@ -2937,9 +2955,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                       children: [
                         Expanded(
                           child: OutlinedButton.icon(
-                            style: OutlinedButton.styleFrom(
-                              visualDensity: VisualDensity.compact,
-                            ),
+                            style: compactOutlinedButtonStyle,
                             onPressed:
                                 order.isSplitOrder ||
                                     order.payments.isNotEmpty ||
@@ -2952,16 +2968,17 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                     order: order,
                                     currencyCode: widget.currencyCode,
                                   ),
-                            icon: const Icon(Icons.call_split_rounded),
-                            label: const Text('Split'),
+                            icon: const Icon(
+                              Icons.call_split_rounded,
+                              size: 17,
+                            ),
+                            label: const Text('Split bill'),
                           ),
                         ),
                         const SizedBox(width: 8),
                         Expanded(
                           child: OutlinedButton.icon(
-                            style: OutlinedButton.styleFrom(
-                              visualDensity: VisualDensity.compact,
-                            ),
+                            style: compactOutlinedButtonStyle,
                             onPressed: hasUnsentLines
                                 ? () => _showPendingOrderItems(
                                     context,
@@ -2969,7 +2986,10 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                     currencyCode: widget.currencyCode,
                                   )
                                 : null,
-                            icon: const Icon(Icons.pending_actions_rounded),
+                            icon: const Icon(
+                              Icons.pending_actions_rounded,
+                              size: 17,
+                            ),
                             label: Text(
                               'Pending (${order.lines.where((line) => !line.isSentToProduction).fold<int>(0, (total, line) => total + line.quantity)})',
                             ),
@@ -2982,9 +3002,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                       children: [
                         Expanded(
                           child: OutlinedButton.icon(
-                            style: OutlinedButton.styleFrom(
-                              visualDensity: VisualDensity.compact,
-                            ),
+                            style: compactOutlinedButtonStyle,
                             onPressed:
                                 isTraining ||
                                     order.lines.isEmpty ||
@@ -3022,16 +3040,17 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                       );
                                     }
                                   },
-                            icon: const Icon(Icons.receipt_long_outlined),
+                            icon: const Icon(
+                              Icons.receipt_long_outlined,
+                              size: 17,
+                            ),
                             label: const Text('Pre receipt'),
                           ),
                         ),
                         const SizedBox(width: 8),
                         Expanded(
                           child: FilledButton.icon(
-                            style: FilledButton.styleFrom(
-                              visualDensity: VisualDensity.compact,
-                            ),
+                            style: compactFilledButtonStyle,
                             onPressed:
                                 order.lines.isEmpty ||
                                     hasUnsentLines ||
@@ -3044,7 +3063,10 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                     order: order,
                                     currencyCode: widget.currencyCode,
                                   ),
-                            icon: const Icon(Icons.payments_outlined),
+                            icon: const Icon(
+                              Icons.payments_outlined,
+                              size: 17,
+                            ),
                             label: const Text('Pay'),
                           ),
                         ),
@@ -3054,9 +3076,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                     SizedBox(
                       width: double.infinity,
                       child: FilledButton.icon(
-                        style: FilledButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                        ),
+                        style: compactFilledButtonStyle,
                         onPressed: !hasUnsentLines
                             ? null
                             : () async {
@@ -3116,7 +3136,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                   );
                                 }
                               },
-                        icon: const Icon(Icons.print_rounded),
+                        icon: const Icon(Icons.print_rounded, size: 17),
                         label: Text(
                           order.status == OrderStatus.sent
                               ? 'Send additions'
@@ -3124,13 +3144,36 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                         ),
                       ),
                     ),
-                  ],
-                ),
+                ],
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Keeps the order controls permanently visible where the display has enough
+/// room, while retaining a scrollable safety fallback on compact phones.
+///
+/// The order-line list above this footer is already an [Expanded] [ListView],
+/// so tablet and desktop tills scroll only the items rather than moving the
+/// payment and production controls off screen.
+class _AdaptiveOrderFooter extends StatelessWidget {
+  const _AdaptiveOrderFooter({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context);
+    final pinActions = size.shortestSide >= 600 || size.width >= 1000;
+    if (pinActions) return child;
+
+    return Flexible(
+      flex: 2,
+      child: SingleChildScrollView(child: child),
     );
   }
 }
