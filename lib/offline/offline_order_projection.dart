@@ -411,10 +411,13 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           );
         }
         final amountMinor = _positiveInt(event.payload, 'baseAmountMinor');
-        final total = lines.values.fold<int>(
-          0,
-          (sum, line) => sum + line.totalMinor,
-        );
+        // Delivery charges are part of the bill. This replay validation must
+        // use the same total as [OfflineOrderProjection.totalMinor] and the
+        // pre-commit order-book check; otherwise a valid full delivery payment
+        // is incorrectly treated as an overpayment by exactly the fee amount.
+        final total =
+            lines.values.fold<int>(0, (sum, line) => sum + line.totalMinor) +
+            (channel == 'delivery' ? deliveryFeeMinor : 0);
         final alreadyPaid = payments.fold<int>(
           0,
           (sum, payment) => sum + payment.baseAmountMinor,
@@ -446,10 +449,9 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         break;
       case 'order.closed':
         _requireOpened(opened);
-        final total = lines.values.fold<int>(
-          0,
-          (sum, line) => sum + line.totalMinor,
-        );
+        final total =
+            lines.values.fold<int>(0, (sum, line) => sum + line.totalMinor) +
+            (channel == 'delivery' ? deliveryFeeMinor : 0);
         final paid = payments.fold<int>(
           0,
           (sum, payment) => sum + payment.baseAmountMinor,

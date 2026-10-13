@@ -61,6 +61,42 @@ void main() {
     expect(projection.payments.single.exchangeRateToBase, '1');
   });
 
+  test('delivery fee is included in payment and close validation', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {
+        'orderId': 'order-a',
+        'channel': 'delivery',
+        'customerId': 'customer-a',
+        'customerName': 'Delivery Customer',
+        'deliveryAddress': 'Kyrenia Centre',
+        'serviceAreaId': 'kyrenia',
+        'serviceAreaName': 'Kyrenia',
+        'deliveryFeeMinor': 250,
+      }),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 1000,
+      }),
+      _event(3, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 1250,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }),
+      _event(4, 'order.closed', {'orderId': 'order-a'}),
+    ]);
+
+    expect(projection.totalMinor, 1250);
+    expect(projection.paidMinor, 1250);
+    expect(projection.balanceDueMinor, 0);
+    expect(projection.isClosed, isTrue);
+  });
+
   test('interleaved global ledger sequences remain valid per order', () {
     final projection = projectOfflineOrder([
       _event(1, 'order.opened', {'orderId': 'order-a'}),
