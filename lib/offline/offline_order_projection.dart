@@ -231,6 +231,150 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
   var fulfilmentStatus = 'awaitingPreparation';
   String? assignedDriverId;
 
+  // A replacement hub starts a new immutable epoch, but open orders may have
+  // been created by the preceding hub. The cloud signs these baselines into
+  // the encrypted snapshot. Seed replay from that trusted state before
+  // applying new-epoch events, even when the baseline was appended later to
+  // repair an order that had already received a command.
+  final baselines = events
+      .where((event) => event.type == 'order.cloudBaseline')
+      .toList(growable: false);
+  if (baselines.length > 1) {
+    throw const OfflineProjectionException(
+      'An order has more than one cloud baseline.',
+    );
+  }
+  final baseline = baselines.firstOrNull;
+  DateTime openedAtUtc = first.createdAtUtc;
+  String? tableId = first.payload['tableId'] as String?;
+  String? tabName = first.payload['tabName'] as String?;
+  if (baseline != null) {
+    final payload = baseline.payload;
+    final sourceEpoch = (payload['sourceOfflineHubEpoch'] as num?)?.toInt();
+    if (sourceEpoch == null || sourceEpoch >= baseline.hubEpoch) {
+      throw const OfflineProjectionException(
+        'The cloud baseline does not belong to an earlier hub epoch.',
+      );
+    }
+    opened = true;
+    openedAtUtc = DateTime.tryParse(payload['openedAtUtc'] as String? ?? '')
+            ?.toUtc() ??
+        baseline.createdAtUtc;
+    tableId = payload['tableId'] as String?;
+    tabName = payload['tabName'] as String?;
+    channel = payload['channel'] as String? ?? 'dineIn';
+    if (!const ['dineIn', 'collection', 'delivery'].contains(channel)) {
+      throw const OfflineProjectionException(
+        'The cloud baseline channel is invalid.',
+      );
+    }
+    customerId = payload['customerId'] as String?;
+    customerName = payload['customerName'] as String?;
+    customerPhone = payload['customerPhone'] as String?;
+    deliveryAddress = payload['deliveryAddress'] as String?;
+    deliveryAddressLabel = payload['deliveryAddressLabel'] as String?;
+    deliveryLatitude = (payload['deliveryLatitude'] as num?)?.toDouble();
+    deliveryLongitude = (payload['deliveryLongitude'] as num?)?.toDouble();
+    serviceAreaId = payload['serviceAreaId'] as String?;
+    serviceAreaName = payload['serviceAreaName'] as String?;
+    deliveryFeeMinor = (payload['deliveryFeeMinor'] as num?)?.toInt() ?? 0;
+    scheduledForUtc = DateTime.tryParse(
+      payload['scheduledForUtc'] as String? ?? '',
+    )?.toUtc();
+    fulfilmentStatus = payload['fulfilmentStatus'] as String? ??
+        (channel == 'delivery' ? 'awaitingDriver' : 'awaitingPreparation');
+    assignedDriverId = payload['assignedDriverId'] as String?;
+    final rawLines = payload['lines'];
+    if (rawLines is! List) {
+      throw const OfflineProjectionException(
+        'The cloud baseline lines are invalid.',
+      );
+    }
+    for (final raw in rawLines) {
+      if (raw is! Map) {
+        throw const OfflineProjectionException(
+          'A cloud baseline line is invalid.',
+        );
+      }
+      final value = Map<String, Object?>.from(raw);
+      final lineId = _requiredString(value, 'id');
+      if (lines.containsKey(lineId)) {
+        throw const OfflineProjectionException(
+          'A cloud baseline line ID was used more than once.',
+        );
+      }
+      lines[lineId] = OfflineProjectedLine(
+        id: lineId,
+        productId: _requiredString(value, 'productId'),
+        name: _requiredString(value, 'name'),
+        quantity: _positiveInt(value, 'quantity'),
+        unitPriceMinor: _nonNegativeInt(value, 'unitPriceMinor'),
+        productionArea: value['productionArea'] as String? ?? 'kitchen',
+        details: (value['details'] as List?)
+                ?.whereType<String>()
+                .toList(growable: false) ??
+            const <String>[],
+        taxRateBasisPoints:
+            (value['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
+        taxRateName: value['taxRateName'] as String? ?? 'Zero Rate',
+        sent: value['sent'] == true,
+      );
+    }
+    final rawPayments = payload['payments'];
+    if (rawPayments is! List) {
+      throw const OfflineProjectionException(
+        'The cloud baseline payments are invalid.',
+      );
+    }
+    for (final raw in rawPayments) {
+      if (raw is! Map) {
+        throw const OfflineProjectionException(
+          'A cloud baseline payment is invalid.',
+        );
+      }
+      final value = Map<String, Object?>.from(raw);
+      final paymentId = _requiredString(value, 'id');
+      if (!paymentIds.add(paymentId)) {
+        throw const OfflineProjectionException(
+          'A cloud baseline payment ID was used more than once.',
+        );
+      }
+      payments.add(
+        OfflineProjectedPayment(
+          id: paymentId,
+          baseAmountMinor: _positiveInt(value, 'baseAmountMinor'),
+          tenderedAmountMinor:
+              (value['tenderedAmountMinor'] as num?)?.toInt() ??
+              _positiveInt(value, 'baseAmountMinor'),
+          method: _requiredString(value, 'method'),
+          currencyCode: _requiredString(value, 'currencyCode'),
+          exchangeRateToBase: value['exchangeRateToBase'] as String? ?? '1',
+          recordedAtUtc: DateTime.tryParse(
+                value['recordedAtUtc'] as String? ?? '',
+              )?.toUtc() ??
+              baseline.createdAtUtc,
+          terminalLabel: value['terminalLabel'] as String?,
+          cashChangeBaseMinor:
+              (value['cashChangeBaseMinor'] as num?)?.toInt() ?? 0,
+        ),
+      );
+    }
+    final total = lines.values.fold<int>(
+          0,
+          (sum, line) => sum + line.totalMinor,
+        ) +
+        (channel == 'delivery' ? deliveryFeeMinor : 0);
+    final paid = payments.fold<int>(
+      0,
+      (sum, payment) => sum + payment.baseAmountMinor,
+    );
+    if (paid > total) {
+      throw const OfflineProjectionException(
+        'The cloud baseline is overpaid.',
+      );
+    }
+  }
+
   for (final event in events) {
     if (event.tenantId != first.tenantId || event.venueId != first.venueId) {
       throw const OfflineProjectionException(
@@ -258,11 +402,13 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     }
 
     switch (event.type) {
+      case 'order.cloudBaseline':
+        // The signed baseline was applied before chronological replay.
+        break;
       case 'order.opened':
         if (opened) {
-          throw const OfflineProjectionException(
-            'The order was opened more than once.',
-          );
+          if (baseline != null) break;
+          throw const OfflineProjectionException('The order was opened more than once.');
         }
         opened = true;
         channel = event.payload['channel'] as String? ?? 'dineIn';
@@ -478,9 +624,9 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     tenantId: first.tenantId,
     venueId: first.venueId,
     orderId: orderId,
-    openedAtUtc: first.createdAtUtc,
-    tableId: first.payload['tableId'] as String?,
-    tabName: first.payload['tabName'] as String?,
+    openedAtUtc: openedAtUtc,
+    tableId: tableId,
+    tabName: tabName,
     hubEpoch: first.hubEpoch,
     lastSequence: lastSequence,
     lines: UnmodifiableMapView(lines),

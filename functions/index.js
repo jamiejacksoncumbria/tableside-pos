@@ -2791,19 +2791,28 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   const tenantRef = db.doc(`tenants/${upload.tenantId}`);
   const snapshotVersionRef = tenantRef.collection("offlineHubSnapshotVersions")
     .doc(upload.venueId);
-  let snapshotVersion = await snapshotVersionRef.get();
-  if (!snapshotVersion.exists) {
-    try {
-      await snapshotVersionRef.create({
-        generation: 1,
+  // Schema 2 adds cloud-verified active-order baselines. Bumping generation
+  // transactionally makes every enrolled hub fetch it exactly once even when
+  // its menu/catalogue data has not otherwise changed.
+  const snapshotSchemaVersion = 2;
+  await db.runTransaction(async (transaction) => {
+    const current = await transaction.get(snapshotVersionRef);
+    if (!current.exists) {
+      transaction.create(snapshotVersionRef, {
+        generation: 1, schemaVersion: snapshotSchemaVersion,
         updatedAt: FieldValue.serverTimestamp(),
       });
-    } catch (error) {
-      // Another request or a Firestore trigger may initialise it first.
-      if (error?.code !== 6 && error?.code !== "already-exists") throw error;
+      return;
     }
-    snapshotVersion = await snapshotVersionRef.get();
-  }
+    if (Number(current.data()?.schemaVersion ?? 1) < snapshotSchemaVersion) {
+      transaction.update(snapshotVersionRef, {
+        generation: Number(current.data()?.generation ?? 1) + 1,
+        schemaVersion: snapshotSchemaVersion,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+  });
+  const snapshotVersion = await snapshotVersionRef.get();
   const snapshotGeneration = Number(snapshotVersion.data()?.generation ?? 1);
   const knownSnapshotGeneration = Number(upload.body.knownSnapshotGeneration ?? 0);
   if (Number.isSafeInteger(knownSnapshotGeneration) &&
@@ -2814,7 +2823,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       snapshotDigest: knownSnapshotDigest ?? null,
     };
   }
-  const [tenant, venue, sections, products, modifierGroups, tables, members, pins, routes, syncState, courses, customers] =
+  const [tenant, venue, sections, products, modifierGroups, tables, members, pins, routes, syncState, courses, customers, orders] =
     await Promise.all([
       tenantRef.get(),
       tenantRef.collection("venues").doc(upload.venueId).get(),
@@ -2828,6 +2837,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       tenantRef.collection("offlineHubSyncState").doc(upload.venueId).get(),
       tenantRef.collection("courses").where("venueId", "==", upload.venueId).get(),
       tenantRef.collection("venueCustomers").where("venueId", "==", upload.venueId).get(),
+      tenantRef.collection("orders").where("venueId", "==", upload.venueId).get(),
     ]);
   const pinByUser = new Map(pins.docs.map((pin) => [pin.data().userId, pin.data()]));
   const memberUsers = await Promise.all(members.docs.map((member) =>
@@ -2909,6 +2919,77 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       })),
     };
   });
+  const isoDate = (value) => {
+    const date = value?.toDate instanceof Function ? value.toDate() :
+      value instanceof Date ? value :
+        typeof value === "string" || typeof value === "number" ? new Date(value) : null;
+    return date != null && Number.isFinite(date.getTime()) ? date.toISOString() : null;
+  };
+  const openOrders = orders.docs.filter((document) => {
+    const value = document.data();
+    return ["open", "sent"].includes(value.status) &&
+      Number(value.offlineHubEpoch ?? 0) < upload.hubEpoch;
+  }).map((document) => {
+    const value = document.data();
+    const lines = Array.isArray(value.lines) ? value.lines : [];
+    const payments = Array.isArray(value.payments) ? value.payments : [];
+    return {
+      orderId: document.id,
+      sourceOfflineHubEpoch: Number(value.offlineHubEpoch ?? 0),
+      openedAtUtc: isoDate(value.openedAt) ?? new Date().toISOString(),
+      tableId: typeof value.tableId === "string" ? value.tableId : null,
+      tabName: typeof value.tabName === "string" ? value.tabName : null,
+      channel: value.channel ?? "dineIn",
+      customerId: value.customerId ?? null,
+      customerName: value.customerName ?? null,
+      customerPhone: value.customerPhone ?? null,
+      deliveryAddress: value.deliveryAddress ?? null,
+      deliveryAddressLabel: value.deliveryAddressLabel ?? null,
+      deliveryLatitude: value.deliveryLatitude ?? null,
+      deliveryLongitude: value.deliveryLongitude ?? null,
+      serviceAreaId: value.serviceAreaId ?? null,
+      serviceAreaName: value.serviceAreaName ?? null,
+      deliveryFeeMinor: Number(value.deliveryFeeMinor ?? 0),
+      scheduledForUtc: isoDate(value.scheduledForUtc) ??
+        (typeof value.scheduledForUtc === "string" ? value.scheduledForUtc : null),
+      fulfilmentStatus: value.fulfilmentStatus ??
+        (value.channel === "delivery" ? "awaitingDriver" : "awaitingPreparation"),
+      assignedDriverId: value.assignedDriverId ?? null,
+      lines: lines.map((line) => ({
+        id: line.id,
+        productId: line.productId,
+        name: line.productName,
+        quantity: Number(line.quantity),
+        unitPriceMinor: Number(line.unitPriceMinor),
+        productionArea: line.productionArea ?? "kitchen",
+        details: [
+          ...(typeof line.variantName === "string" && line.variantName.trim() ?
+            [line.variantName.trim()] : []),
+          ...(Array.isArray(line.modifierSelections) ? line.modifierSelections
+            .map((modifier) => modifier?.optionName).filter((name) =>
+              typeof name === "string" && name.trim()).map((name) => name.trim()) : []),
+          ...(typeof line.itemNote === "string" && line.itemNote.trim() ?
+            [`NOTE: ${line.itemNote.trim()}`] : []),
+        ],
+        taxRateBasisPoints: Number(line.taxRateBasisPoints ?? 0),
+        taxRateName: line.taxRateName ?? "Zero Rate",
+        sent: line.isSentToProduction === true,
+      })),
+      payments: payments.map((payment) => ({
+        id: payment.id,
+        baseAmountMinor: Number(payment.baseAmountMinor),
+        tenderedAmountMinor: Number(
+          payment.tenderedAmountMinor ?? payment.baseAmountMinor,
+        ),
+        method: payment.method,
+        currencyCode: payment.tenderedCurrencyCode ?? payment.currencyCode,
+        exchangeRateToBase: payment.exchangeRateToBase ?? "1",
+        recordedAtUtc: isoDate(payment.recordedAt) ?? new Date().toISOString(),
+        terminalLabel: payment.terminalLabel ?? null,
+        cashChangeBaseMinor: Number(payment.cashChangeBaseMinor ?? 0),
+      })),
+    };
+  });
   const snapshot = {
     version: Date.now(),
     snapshotGeneration,
@@ -2946,6 +3027,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       ? venue.data().serviceAreas : [],
     fulfilmentDateOverrides: Array.isArray(venue.data()?.fulfilmentDateOverrides)
       ? venue.data().fulfilmentDateOverrides : [],
+    openOrders,
     sections: sections.docs.map((document) => ({
       id: document.id,
       name: document.data().name ?? "Menu section",
@@ -3415,6 +3497,16 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
   }
   if (event.type === "order.opened") {
     if (current != null) {
+      // A replacement hub can first create a local shell for a still-open
+      // order from the preceding epoch. Treat only that exact legacy identity
+      // as idempotent; all same-epoch or mismatched opens still fail closed.
+      const currentEpoch = Number(current.offlineHubEpoch ?? 0);
+      const sameIdentity = current.venueId === venueId &&
+        (current.tableId ?? null) === (payload.tableId ?? null) &&
+        (current.tabName ?? null) === (payload.tabName ?? null) &&
+        (current.channel ?? "dineIn") === (payload.channel ?? "dineIn") &&
+        ["open", "sent"].includes(current.status);
+      if (currentEpoch < event.hubEpoch && sameIdentity) return current;
       throw new HttpsError("already-exists", "The offline order already exists in cloud data.");
     }
     const tableId = typeof payload.tableId === "string" ? payload.tableId : null;
@@ -3460,6 +3552,29 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
   const lines = Array.isArray(next.lines) ? next.lines.map((line) => ({...line})) : [];
   const payments = Array.isArray(next.payments)
     ? next.payments.map((payment) => ({...payment})) : [];
+  if (event.type === "order.cloudBaseline") {
+    const sourceEpoch = Number(payload.sourceOfflineHubEpoch);
+    if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch >= event.hubEpoch ||
+        !["open", "sent"].includes(next.status) ||
+        (next.tableId ?? null) !== (payload.tableId ?? null) ||
+        (next.tabName ?? null) !== (payload.tabName ?? null) ||
+        (next.channel ?? "dineIn") !== (payload.channel ?? "dineIn")) {
+      throw new HttpsError("failed-precondition", "The cloud order baseline identity changed.");
+    }
+    const baselineLines = Array.isArray(payload.lines) ? payload.lines : [];
+    const baselinePayments = Array.isArray(payload.payments) ? payload.payments : [];
+    const lineMatches = baselineLines.every((baseline) => lines.some((line) =>
+      line.id === baseline.id && line.productId === baseline.productId &&
+      line.productName === baseline.name && Number(line.quantity) === Number(baseline.quantity) &&
+      Number(line.unitPriceMinor) === Number(baseline.unitPriceMinor)));
+    const paymentMatches = baselinePayments.every((baseline) => payments.some((payment) =>
+      payment.id === baseline.id &&
+      Number(payment.baseAmountMinor) === Number(baseline.baseAmountMinor)));
+    if (!lineMatches || !paymentMatches) {
+      throw new HttpsError("failed-precondition", "The cloud order baseline no longer matches.");
+    }
+    return next;
+  }
   if (event.type === "order.itemAdded") {
     if (lines.some((line) => line.id === payload.lineId)) {
       throw new HttpsError("already-exists", "The offline order line already exists.");
@@ -3531,7 +3646,9 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
   }
   if (event.type === "order.closed") {
     const total = lines.reduce((sum, line) =>
-      sum + Number(line.quantity) * Number(line.unitPriceMinor), 0);
+      sum + Number(line.quantity) * Number(line.unitPriceMinor), 0) +
+      ((next.channel ?? "dineIn") === "delivery" ?
+        Number(next.deliveryFeeMinor ?? 0) : 0);
     const paid = payments.reduce((sum, payment) =>
       sum + Number(payment.baseAmountMinor), 0);
     if (lines.length === 0 || total !== paid) {

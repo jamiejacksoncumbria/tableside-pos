@@ -3248,10 +3248,17 @@ Future<void> _showCheckoutSheet(
               appliedBaseMinor > 0 &&
               (method == PaymentMethod.cash ||
                   appliedBaseMinor <= remainingBaseMinor);
+          // A hub may have durably accepted the final payment before its cloud
+          // projection was interrupted. Once that payment is replayed, staff
+          // must be able to finalise the now-zero bill without charging it a
+          // second time.
+          final alreadyPaidInFull =
+              order.balanceDueMinor == 0 && paymentEntries.isEmpty;
           final canRecordPayment =
-              paymentEntries.isNotEmpty &&
-              remainingBaseMinor >= 0 &&
-              (!isTraining || remainingBaseMinor == 0);
+              alreadyPaidInFull ||
+              (paymentEntries.isNotEmpty &&
+                  remainingBaseMinor >= 0 &&
+                  (!isTraining || remainingBaseMinor == 0));
           final willCloseBill = canRecordPayment && remainingBaseMinor == 0;
           final isForeignCash = tenderedCurrencyCode != baseCurrencyCode;
           final hasAmountInput = tenderedAmountController.text
@@ -3945,6 +3952,8 @@ Future<void> _showCheckoutSheet(
                       label: Text(
                         saving
                             ? 'Recording…'
+                            : alreadyPaidInFull
+                            ? 'Finalise bill'
                             : willCloseBill
                             ? 'Close bill'
                             : 'Record partial payment',

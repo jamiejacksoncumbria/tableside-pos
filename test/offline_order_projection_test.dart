@@ -97,6 +97,51 @@ void main() {
     expect(projection.isClosed, isTrue);
   });
 
+  test('replacement hub repairs a legacy order before replaying payment', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {
+        'orderId': 'order-a',
+        'channel': 'delivery',
+        'customerId': 'customer-a',
+        'customerName': 'Jamie Jackson',
+        'deliveryAddress': 'Kyrenia Centre',
+      }, hubEpoch: 3),
+      _event(2, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 50000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }, hubEpoch: 3),
+      _event(3, 'order.cloudBaseline', {
+        'orderId': 'order-a',
+        'sourceOfflineHubEpoch': 2,
+        'openedAtUtc': '2026-09-12T11:00:00.000Z',
+        'channel': 'delivery',
+        'customerId': 'customer-a',
+        'customerName': 'Jamie Jackson',
+        'deliveryAddress': 'Kyrenia Centre',
+        'deliveryFeeMinor': 0,
+        'lines': [
+          {
+            'id': 'line-a',
+            'productId': 'product-a',
+            'name': 'Prawn Salad',
+            'quantity': 1,
+            'unitPriceMinor': 50000,
+            'sent': true,
+          },
+        ],
+        'payments': <Object?>[],
+      }, hubEpoch: 3),
+    ]);
+
+    expect(projection.lines.values.single.name, 'Prawn Salad');
+    expect(projection.totalMinor, 50000);
+    expect(projection.paidMinor, 50000);
+    expect(projection.balanceDueMinor, 0);
+  });
+
   test('interleaved global ledger sequences remain valid per order', () {
     final projection = projectOfflineOrder([
       _event(1, 'order.opened', {'orderId': 'order-a'}),

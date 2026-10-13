@@ -234,6 +234,7 @@ class VenueHubRuntime {
         catalogueProvider: () => catalogue,
         ledger: _ledger,
       );
+      await orderBook.installCloudBaselines(snapshot);
       await orderBook.rebuild();
       final printQueue = VenueHubPrintQueue(
         tenantId: scope.tenantId,
@@ -257,6 +258,8 @@ class VenueHubRuntime {
         await pins.installSnapshot(refreshed);
         catalogue = refreshedCatalogue;
         snapshot = Map<String, Object?>.from(refreshed);
+        await orderBook.installCloudBaselines(snapshot);
+        await orderBook.rebuild();
         printQueue.installSnapshot(snapshot);
         VenueHubOfflineView.instance.install(snapshot);
         await _ledger.saveSnapshot(

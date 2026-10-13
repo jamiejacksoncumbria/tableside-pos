@@ -67,8 +67,37 @@ class VenueOfflineOrderBook {
           return;
         }
         _validateProposed(existing, draft);
+        // Replay a synthetic copy before appending it. Once an event reaches
+        // the encrypted ledger it is a real financial fact, so no projection
+        // error is allowed to surface only after the durable commit.
+        _projectAffectedOrder(
+          [
+            ...existing,
+            OfflineEvent(
+              id: 'preflight-${existing.length + 1}',
+              tenantId: draft.tenantId,
+              venueId: draft.venueId,
+              deviceId: draft.deviceId,
+              staffId: draft.staffId,
+              managerApprovalStaffId: draft.managerApprovalStaffId,
+              type: draft.type,
+              payload: draft.payload,
+              createdAtUtc: DateTime.now().toUtc(),
+              deviceObservedAtUtc: DateTime.now().toUtc(),
+              timeAuthority: OfflineTimeAuthority.venueHub,
+              clockSkewMillis: 0,
+              businessTimestampUtc:
+                  draft.businessTimestamp?.toUtc() ?? DateTime.now().toUtc(),
+              sequence: existing.isEmpty ? 1 : existing.last.sequence + 1,
+              hubEpoch: hubEpoch,
+              previousHash: '',
+              eventHash: '',
+              syncState: OfflineEventSyncState.pending,
+            ),
+          ],
+          draft.payload['orderId'],
+        );
         final event = await _ledger.commit(draft, hubEpoch: hubEpoch);
-        _projectAffectedOrder([...existing, event], draft.payload['orderId']);
         completer.complete(event);
       } catch (error, stackTrace) {
         completer.completeError(error, stackTrace);
@@ -155,6 +184,49 @@ class VenueOfflineOrderBook {
       for (final entry in grouped.entries)
         entry.key: projectOfflineOrder(entry.value),
     };
+  }
+
+  /// Imports cloud-signed active orders from an earlier hub epoch exactly
+  /// once. These immutable baseline events let a replacement hub continue a
+  /// bill without inventing prices, lines or payments locally.
+  Future<void> installCloudBaselines(Map<String, Object?> snapshot) async {
+    final rawOrders = snapshot['openOrders'];
+    if (rawOrders is! List || rawOrders.isEmpty) return;
+    final existing = await _ledger.eventsForVenue(
+      tenantId: tenantId,
+      venueId: venueId,
+      hubEpoch: hubEpoch,
+    );
+    final installed = existing
+        .where((event) => event.type == 'order.cloudBaseline')
+        .map((event) => event.payload['orderId'])
+        .whereType<String>()
+        .toSet();
+    for (final raw in rawOrders) {
+      if (raw is! Map) continue;
+      final baseline = Map<String, Object?>.from(raw);
+      final orderId = baseline['orderId'];
+      final sourceEpoch = (baseline['sourceOfflineHubEpoch'] as num?)?.toInt();
+      if (orderId is! String ||
+          orderId.isEmpty ||
+          sourceEpoch == null ||
+          sourceEpoch >= hubEpoch ||
+          installed.contains(orderId)) {
+        continue;
+      }
+      await _ledger.commit(
+        OfflineEventDraft(
+          tenantId: tenantId,
+          venueId: venueId,
+          deviceId: 'hub-cloud-migration',
+          staffId: 'cloud-verified-baseline',
+          type: 'order.cloudBaseline',
+          payload: baseline,
+        ),
+        hubEpoch: hubEpoch,
+      );
+      installed.add(orderId);
+    }
   }
 
   Future<OfflineOrderProjection> order(String orderId) async {
