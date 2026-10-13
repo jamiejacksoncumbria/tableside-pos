@@ -64,23 +64,17 @@ class VenueHubRuntime {
   Future<void> Function()? _refreshAuthorityNow;
   StreamSubscription? _pendingSubscription;
   Timer? _authorityTimer;
-  Timer? _remoteCommandTimer;
-  Timer? _remoteHeartbeatTimer;
   VenueHubRuntimeStatus _status = const VenueHubRuntimeStatus(
     state: VenueHubRuntimeState.stopped,
     pendingEvents: 0,
   );
   VenueScope? _activeScope;
   VenueHubBootstrap? _activeBootstrap;
-  DateTime? _lastRemoteClaimAttemptAtUtc;
-  DateTime? _lastRemoteClaimSuccessAtUtc;
 
   VenueHubRuntimeStatus get status => _status;
   Stream<VenueHubRuntimeStatus> get statuses => _statuses.stream;
   VenueScope? get activeScope => _activeScope;
   VenueHubBootstrap? get activeBootstrap => _activeBootstrap;
-  DateTime? get lastRemoteClaimAttemptAtUtc => _lastRemoteClaimAttemptAtUtc;
-  DateTime? get lastRemoteClaimSuccessAtUtc => _lastRemoteClaimSuccessAtUtc;
 
   /// Waits for this process's hub listener to become usable.
   ///
@@ -434,10 +428,9 @@ class VenueHubRuntime {
           return VenueHubCloudUploadResult(acknowledgedEventIds: acknowledged);
         },
       );
-      // Realtime presence is introduced alongside the existing cloud poller.
-      // Until the RTDB instance, rules, and scoped-token endpoint are deployed
-      // everywhere, failure here is non-fatal and the signed polling fallback
-      // continues to preserve remote ordering.
+      // RTDB is the sole internet-presence and wake channel. A failure here is
+      // non-fatal for the local HTTPS hub: LAN terminals must remain usable
+      // during a venue internet outage, while remote commands fail closed.
       VenueHubRealtimePresence? activeRealtimePresence;
       try {
         final presence = _realtimePresence ??= VenueHubRealtimePresence(
@@ -452,19 +445,14 @@ class VenueHubRuntime {
         activeRealtimePresence = presence;
       } on Object catch (error, stackTrace) {
         AppLogger.error(
-          'Start venue hub realtime presence; signed polling remains active',
+          'Start venue hub realtime presence; remote commands are unavailable but LAN remains active',
           error,
           stackTrace,
         );
       }
       var remoteTickRunning = false;
       var remoteTickRequested = false;
-      var remoteHeartbeatRunning = false;
-      // Track the two cloud loops independently. A healthy heartbeat must not
-      // hide a broken claim poll (or vice versa); doing so previously reduced
-      // the only useful diagnostic to a generic one-line "offline" message.
       var remoteClaimAvailable = true;
-      var remoteHeartbeatAvailable = true;
       VenueHubStaffGrant? remoteGrant(Map<String, Object?> command) {
         final staffId = command['staffId'];
         final expectedPinVersion = command['pinVersion'];
@@ -509,11 +497,9 @@ class VenueHubRuntime {
           return;
         }
         remoteTickRunning = true;
-        _lastRemoteClaimAttemptAtUtc = DateTime.now().toUtc();
         try {
-          // Never let a half-open HTTP connection permanently hold the poll
-          // lock. The next timer cycle must be able to prove hub liveness and
-          // claim work after a router or Cloud Functions connection recovers.
+          // Bound each signal-triggered claim so a half-open HTTP connection
+          // cannot permanently block a later RTDB wake signal.
           final commands = await _repository
               .claimRemoteHubCommands(
                 scope: scope,
@@ -522,9 +508,8 @@ class VenueHubRuntime {
                 credential: credential,
               )
               .timeout(const Duration(seconds: 12));
-          _lastRemoteClaimSuccessAtUtc = DateTime.now().toUtc();
           if (!remoteClaimAvailable) {
-            AppLogger.info('Venue hub secure command polling restored.');
+            AppLogger.info('Venue hub secure command claiming restored.');
             remoteClaimAvailable = true;
           }
           for (final command in commands) {
@@ -636,7 +621,7 @@ class VenueHubRuntime {
         } catch (error, stackTrace) {
           if (remoteClaimAvailable) {
             AppLogger.error(
-              'Poll secure remote venue commands; LAN orders remain available',
+              'Claim signalled remote venue commands; LAN orders remain available',
               error,
               stackTrace,
             );
@@ -648,52 +633,6 @@ class VenueHubRuntime {
             remoteTickRequested = false;
             unawaited(remoteTick());
           }
-        }
-      }
-
-      // Heartbeats must not share the command-processing lock. A claimed
-      // command can legitimately take several seconds to validate, commit,
-      // print and acknowledge. Coupling the two made Firebase declare a live
-      // hub offline while it was busy, which incorrectly blocked POS devices
-      // using mobile data or another internet connection.
-      Future<void> remoteHeartbeat() async {
-        if (remoteHeartbeatRunning || _activeScope != scope) return;
-        // A successful signed command poll refreshes exactly the same server
-        // presence document. Avoid a second billed Function invocation while
-        // polling is healthy; this dedicated heartbeat is only the fallback
-        // when the polling path has not succeeded recently.
-        final lastClaimSuccess = _lastRemoteClaimSuccessAtUtc;
-        if (lastClaimSuccess != null &&
-            DateTime.now().toUtc().difference(lastClaimSuccess) <
-                const Duration(seconds: 25)) {
-          return;
-        }
-        remoteHeartbeatRunning = true;
-        try {
-          await _repository
-              .heartbeatRemoteHub(
-                scope: scope,
-                deviceId: deviceId,
-                hubEpoch: bootstrap.hubEpoch,
-                credential: credential,
-                pendingLocalEvents: (await _ledger.pending()).length,
-              )
-              .timeout(const Duration(seconds: 12));
-          if (!remoteHeartbeatAvailable) {
-            AppLogger.info('Venue hub internet heartbeat restored.');
-            remoteHeartbeatAvailable = true;
-          }
-        } catch (error, stackTrace) {
-          if (remoteHeartbeatAvailable) {
-            AppLogger.error(
-              'Publish venue hub internet heartbeat; same-network LAN orders remain available',
-              error,
-              stackTrace,
-            );
-            remoteHeartbeatAvailable = false;
-          }
-        } finally {
-          remoteHeartbeatRunning = false;
         }
       }
 
@@ -711,21 +650,9 @@ class VenueHubRuntime {
             );
           },
         );
-      } else {
-        // Safe rollout fallback for environments where RTDB has not yet been
-        // provisioned. Remove this after all deployments have migrated.
-        _remoteCommandTimer = Timer.periodic(
-          const Duration(seconds: 10),
-          (_) => unawaited(remoteTick()),
-        );
-        _remoteHeartbeatTimer = Timer.periodic(
-          const Duration(seconds: 30),
-          (_) => unawaited(remoteHeartbeat()),
-        );
-        await remoteHeartbeat();
+        // Recover commands queued just before the realtime listener connected.
+        unawaited(remoteTick());
       }
-      // Recover commands queued just before the realtime listener connected.
-      unawaited(remoteTick());
       _pendingSubscription = _ledger.watchPending().listen(
         (events) {
           _emit(
@@ -863,10 +790,6 @@ class VenueHubRuntime {
   Future<void> stop() async {
     _authorityTimer?.cancel();
     _authorityTimer = null;
-    _remoteCommandTimer?.cancel();
-    _remoteCommandTimer = null;
-    _remoteHeartbeatTimer?.cancel();
-    _remoteHeartbeatTimer = null;
     await _realtimeSignalSubscription?.cancel();
     _realtimeSignalSubscription = null;
     await _realtimePresence?.stop();
@@ -880,8 +803,6 @@ class VenueHubRuntime {
     _refreshAuthorityNow = null;
     _activeScope = null;
     _activeBootstrap = null;
-    _lastRemoteClaimAttemptAtUtc = null;
-    _lastRemoteClaimSuccessAtUtc = null;
     await _server.stop();
     await AndroidVenueHubService.stop();
     _emit(

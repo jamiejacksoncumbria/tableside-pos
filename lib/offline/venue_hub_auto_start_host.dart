@@ -30,8 +30,6 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
   static const _secrets = FlutterSecureStorage();
   bool _started = false;
   Timer? _retryTimer;
-  Timer? _watchdogTimer;
-  DateTime? _runtimeStartedAtUtc;
 
   @override
   void initState() {
@@ -44,9 +42,6 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.scope != widget.scope) {
       _retryTimer?.cancel();
-      _watchdogTimer?.cancel();
-      _watchdogTimer = null;
-      _runtimeStartedAtUtc = null;
       _started = false;
       unawaited(_start());
     }
@@ -199,12 +194,6 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
         endpointOverride: VenueHubRuntime.instance.status.endpoint,
       );
       AppLogger.info('Venue offline hub auto-started for this venue.');
-      _runtimeStartedAtUtc = DateTime.now().toUtc();
-      _watchdogTimer?.cancel();
-      _watchdogTimer = Timer.periodic(
-        const Duration(seconds: 15),
-        (_) => unawaited(_verifyHubWorker()),
-      );
     } catch (error, stackTrace) {
       AppLogger.error('Auto-start venue offline hub', error, stackTrace);
       // Startup can race Wi-Fi acquisition, Firebase token refresh, or a
@@ -222,52 +211,9 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
     }
   }
 
-  /// Restarts only the local runtime when its secure cloud-claim loop stops.
-  ///
-  /// The watchdog never accepts or mutates a command itself. A restarted
-  /// runtime must authenticate with the same enrolled Ed25519 credential and
-  /// current hub epoch before Firebase will return any queued work.
-  Future<void> _verifyHubWorker() async {
-    if (!mounted || !_started) return;
-    final runtime = VenueHubRuntime.instance;
-    if (runtime.activeScope != null && runtime.activeScope != widget.scope) {
-      return;
-    }
-    if (runtime.status.state == VenueHubRuntimeState.starting) return;
-    final now = DateTime.now().toUtc();
-    final lastAttempt = runtime.lastRemoteClaimAttemptAtUtc;
-    final runtimeAge = _runtimeStartedAtUtc == null
-        ? const Duration(days: 1)
-        : now.difference(_runtimeStartedAtUtc!);
-    final claimLoopHealthy =
-        runtime.activeScope == widget.scope &&
-        (runtime.status.state == VenueHubRuntimeState.ready ||
-            runtime.status.state == VenueHubRuntimeState.degraded) &&
-        ((lastAttempt != null &&
-                now.difference(lastAttempt) < const Duration(seconds: 30)) ||
-            (lastAttempt == null && runtimeAge < const Duration(seconds: 30)));
-    if (claimLoopHealthy) return;
-
-    AppLogger.error(
-      'Venue hub worker watchdog',
-      StateError(
-        'The secure command poller stopped. Restarting the authenticated hub runtime.',
-      ),
-      StackTrace.current,
-    );
-    _watchdogTimer?.cancel();
-    _watchdogTimer = null;
-    _runtimeStartedAtUtc = null;
-    _started = false;
-    await runtime.stop();
-    if (!mounted) return;
-    _retryTimer = Timer(const Duration(seconds: 2), () => unawaited(_start()));
-  }
-
   @override
   void dispose() {
     _retryTimer?.cancel();
-    _watchdogTimer?.cancel();
     super.dispose();
   }
 

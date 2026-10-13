@@ -673,35 +673,6 @@ class ProductionCommandRepository {
     });
   }
 
-  Future<void> heartbeatRemoteHub({
-    required VenueScope scope,
-    required String deviceId,
-    required int hubEpoch,
-    required VenueHubDeviceCredential credential,
-    required int pendingLocalEvents,
-  }) async {
-    final body = <String, Object?>{
-      'deviceId': deviceId,
-      'pendingLocalEvents': pendingLocalEvents,
-    };
-    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
-      credentialId: credential.credentialId,
-      tenantId: scope.tenantId,
-      venueId: scope.venueId,
-      deviceId: deviceId,
-      staffId: 'venue-hub',
-      method: 'POST',
-      path: '/v1/remote-heartbeat',
-      hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
-      body: body,
-    );
-    await _call('heartbeatRemoteHub', {
-      'envelope': envelope.toJson(),
-      'body': body,
-    });
-  }
-
   Future<Map<String, Object?>> issueRealtimeHubSession({
     required VenueScope scope,
     required String deviceId,
@@ -2123,7 +2094,6 @@ class ProductionCommandRepository {
     'getOfflineHubBootstrap',
     'getOfflineHubSnapshot',
     'ingestOfflineHubEvents',
-    'heartbeatRemoteHub',
     'issueRealtimeHubSession',
     'claimRemoteHubCommands',
     'completeRemoteHubCommand',

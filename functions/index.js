@@ -2320,17 +2320,6 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
 // acknowledgement paths below.
 const remoteHubCommandTtlMs = 2 * 60 * 1000;
 const remoteHubClaimLeaseMs = 15 * 1000;
-// Heartbeats arrive every five seconds on a dedicated hub loop. The lease
-// tolerates normal mobile/broadband latency without allowing a remote command
-// to be reported as saved by an unavailable hub. Commands still expire
-// independently unless the authoritative hub commits them.
-// Remote command polling is itself a signed, device-bound proof that the
-// authoritative hub is alive. Keep a comfortably larger lease than the
-// five-second poll cadence so a slow Cloud Functions cold start or a brief
-// broadband interruption cannot make healthy clients see a false OFFLINE
-// state. Commands still expire independently and are never reported as saved
-// until the hub durably commits them, so this tolerance cannot bypass the hub.
-const remoteHubHeartbeatTtlMs = 75 * 1000;
 const remoteHubEventTypes = new Set([
   "order.opened", "order.itemAdded", "order.itemQuantityChanged",
   "order.sent", "order.fulfilmentChanged", "payment.recorded",
@@ -2339,33 +2328,6 @@ const remoteHubEventTypes = new Set([
 
 function remoteHubQueue(tenantId, venueId) {
   return db.collection(`tenants/${tenantId}/venues/${venueId}/remoteHubCommands`);
-}
-
-function remoteHubStateRef(tenantId, venueId) {
-  return db.doc(`tenants/${tenantId}/venues/${venueId}/remoteHubState/status`);
-}
-
-async function recordRemoteHubPresence(
-  upload, pendingLocalEvents = null, {claimPoll = false} = {},
-) {
-  const expiresAt = new Date(Date.now() + remoteHubHeartbeatTtlMs);
-  const presence = {
-    hubDeviceId: upload.body.deviceId,
-    hubEpoch: upload.hubEpoch,
-    status: "online",
-    lastHeartbeatAt: FieldValue.serverTimestamp(),
-    heartbeatExpiresAt: expiresAt,
-  };
-  if (Number.isSafeInteger(pendingLocalEvents) && pendingLocalEvents >= 0) {
-    presence.pendingLocalEvents = pendingLocalEvents;
-  }
-  if (claimPoll) {
-    presence.lastClaimPollAt = FieldValue.serverTimestamp();
-    presence.lastClaimPollDeviceId = upload.body.deviceId;
-  }
-  await remoteHubStateRef(upload.tenantId, upload.venueId)
-    .set(presence, {merge: true});
-  return expiresAt;
 }
 
 async function submitRemoteHubCommandFor(caller, rawData) {
@@ -2406,30 +2368,28 @@ async function submitRemoteHubCommandFor(caller, rawData) {
       "The venue hub is not enrolled for remote commands at this venue.",
     );
   }
-  const realtimeUrl = databaseURL.value().trim();
-  if (realtimeUrl.length > 0) {
-    try {
-      const presence = await configuredRealtimeDatabase().database
-        .ref(`hubPresence/${tenantId}/${venueId}/${hub.deviceId}`).get();
-      const presenceValue = presence.val();
-      const lastReadyAt = Number(presenceValue?.lastReadyAt ?? 0);
-      if (presenceValue?.online !== true || presenceValue?.hubEpoch !== hubEpoch ||
-          !Number.isSafeInteger(lastReadyAt) || Date.now() - lastReadyAt > 75 * 1000) {
-        throw new HttpsError(
-          "unavailable",
-          "The venue hub is offline. Join the venue network or wait for it to reconnect.",
-        );
-      }
-    } catch (error) {
-      if (error instanceof HttpsError) throw error;
-      console.error("Could not read realtime venue hub presence", {
-        tenantId, venueId, error: String(error),
-      });
+  const realtime = configuredRealtimeDatabase();
+  try {
+    const presence = await realtime.database
+      .ref(`hubPresence/${tenantId}/${venueId}/${hub.deviceId}`).get();
+    const presenceValue = presence.val();
+    const lastReadyAt = Number(presenceValue?.lastReadyAt ?? 0);
+    if (presenceValue?.online !== true || presenceValue?.hubEpoch !== hubEpoch ||
+        !Number.isSafeInteger(lastReadyAt) || Date.now() - lastReadyAt > 75 * 1000) {
       throw new HttpsError(
         "unavailable",
-        "The venue hub presence service is unavailable. Nothing was accepted.",
+        "The venue hub is offline. Join the venue network or wait for it to reconnect.",
       );
     }
+  } catch (error) {
+    if (error instanceof HttpsError) throw error;
+    console.error("Could not read realtime venue hub presence", {
+      tenantId, venueId, error: String(error),
+    });
+    throw new HttpsError(
+      "unavailable",
+      "The venue hub presence service is unavailable. Nothing was accepted.",
+    );
   }
   if (!pin.exists || pin.data()?.locked === true) {
     throw new HttpsError("unauthenticated", "The staff PIN is unavailable or locked.");
@@ -2464,23 +2424,21 @@ async function submitRemoteHubCommandFor(caller, rawData) {
         ? data.businessTimestampUtc : null,
     });
   });
-  if (realtimeUrl.length > 0) {
-    try {
-      await configuredRealtimeDatabase().database
-        .ref(`hubSignals/${tenantId}/${venueId}`)
-        .set({commandId, hubEpoch, signaledAt: ServerValue.TIMESTAMP});
-    } catch (error) {
-      // The Firestore command is idempotent and remains safe to signal again
-      // when the client retries this same command ID. Never claim success if
-      // the authoritative hub was not actually woken.
-      console.error("Could not signal realtime venue hub command", {
-        tenantId, venueId, commandId, error: String(error),
-      });
-      throw new HttpsError(
-        "unavailable",
-        "The venue hub command channel is unavailable. Nothing was confirmed.",
-      );
-    }
+  try {
+    await realtime.database
+      .ref(`hubSignals/${tenantId}/${venueId}`)
+      .set({commandId, hubEpoch, signaledAt: ServerValue.TIMESTAMP});
+  } catch (error) {
+    // The Firestore command is idempotent and remains safe to signal again
+    // when the client retries this same command ID. Never claim success if
+    // the authoritative hub was not actually woken.
+    console.error("Could not signal realtime venue hub command", {
+      tenantId, venueId, commandId, error: String(error),
+    });
+    throw new HttpsError(
+      "unavailable",
+      "The venue hub command channel is unavailable. Nothing was confirmed.",
+    );
   }
   return {commandId, expiresAt: expiresAt.toISOString(), documentPath: commandRef.path};
 }
@@ -2496,10 +2454,9 @@ async function waitForRemoteHubCommandFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const commandId = requiredDocumentId(data, "commandId");
-  const [{membership}, initial, hubState] = await Promise.all([
+  const [{membership}, initial] = await Promise.all([
     requireTenantOperationalMember(caller, tenantId),
     remoteHubQueue(tenantId, venueId).doc(commandId).get(),
-    remoteHubStateRef(tenantId, venueId).get(),
   ]);
   const venueIds = Array.isArray(membership.venueIds) ? membership.venueIds : [];
   if (venueIds.length > 0 && !venueIds.includes(venueId)) {
@@ -2512,8 +2469,6 @@ async function waitForRemoteHubCommandFor(caller, rawData) {
   const commandRef = initial.ref;
   const responseFor = (snapshot) => {
     const value = snapshot.data() ?? {};
-    const lastClaimPollAt = hubState.data()?.lastClaimPollAt?.toDate?.();
-    const lastHeartbeatAt = hubState.data()?.lastHeartbeatAt?.toDate?.();
     return {
       commandId: snapshot.id,
       status: String(value.status ?? "pending"),
@@ -2523,10 +2478,6 @@ async function waitForRemoteHubCommandFor(caller, rawData) {
       result: value.status === "accepted" && value.result != null ? value.result : null,
       rejectionMessage: value.status === "rejected"
         ? String(value.rejectionMessage ?? "The venue hub rejected this command.") : null,
-      lastHubClaimPollAt: lastClaimPollAt?.toISOString?.() ?? null,
-      lastHubHeartbeatAt: lastHeartbeatAt?.toISOString?.() ?? null,
-      activeHubDeviceId: typeof hubState.data()?.hubDeviceId === "string"
-        ? hubState.data().hubDeviceId : null,
     };
   };
   if (["accepted", "rejected", "expired"].includes(initial.data().status)) {
@@ -2565,17 +2516,6 @@ async function waitForRemoteHubCommandFor(caller, rawData) {
       (error) => finish(() => reject(error)),
     );
   });
-}
-
-async function heartbeatRemoteHubFor(caller, rawData) {
-  const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/remote-heartbeat");
-  const pendingLocalEvents = Number(upload.body.pendingLocalEvents ?? 0);
-  const expiresAt = await recordRemoteHubPresence(
-    upload,
-    Number.isSafeInteger(pendingLocalEvents) && pendingLocalEvents >= 0
-      ? pendingLocalEvents : 0,
-  );
-  return {heartbeatExpiresAt: expiresAt.toISOString()};
 }
 
 function configuredRealtimeDatabase() {
@@ -2624,16 +2564,6 @@ async function issueRealtimeHubSessionFor(caller, rawData) {
 
 async function claimRemoteHubCommandsFor(caller, rawData) {
   const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/remote-claim");
-  // A successful signed poll proves exactly the same liveness properties as
-  // the dedicated heartbeat. Refreshing presence here closes a failure mode
-  // where command polling remained healthy but one stuck heartbeat request
-  // caused every remote POS to be rejected as if the hub were offline.
-  // Older deployments still use the Firestore presence document. Once RTDB
-  // is configured, the persistent connection is the liveness authority and
-  // this claim call is made only in response to a realtime wake signal.
-  if (databaseURL.value().trim().length === 0) {
-    await recordRemoteHubPresence(upload, null, {claimPoll: true});
-  }
   const maximum = Math.min(Math.max(Number(upload.body.maximum ?? 10), 1), 25);
   const candidates = await remoteHubQueue(upload.tenantId, upload.venueId)
     .where("status", "in", ["pending", "claimed"])
@@ -10763,7 +10693,7 @@ async function invokePosAction(action, caller, data) {
     "recoverOwnStaffPin",
     "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
     "getTrustedTime", "getOfflineHubBootstrap", "ingestOfflineHubEvents",
-    "getOfflineHubSnapshot", "heartbeatRemoteHub", "claimRemoteHubCommands",
+    "getOfflineHubSnapshot", "claimRemoteHubCommands",
     "issueRealtimeHubSession",
     "completeRemoteHubCommand",
   ]);
@@ -10805,8 +10735,6 @@ async function invokePosAction(action, caller, data) {
       return submitRemoteHubCommandFor(actingCaller, data);
     case "waitForRemoteHubCommand":
       return waitForRemoteHubCommandFor(actingCaller, data);
-    case "heartbeatRemoteHub":
-      return heartbeatRemoteHubFor(caller, data);
     case "issueRealtimeHubSession":
       return issueRealtimeHubSessionFor(caller, data);
     case "claimRemoteHubCommands":
