@@ -3166,6 +3166,9 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
     const orderState = new Map(orderSnapshots.map((snapshot) => [
       snapshot.id, snapshot.exists ? {...snapshot.data()} : null,
     ]));
+    const recoveryBaselines = new Map(events
+      .filter((event) => event.type === "order.cloudBaseline")
+      .map((event) => [event.payload.orderId, event]));
     const dirtyOrderIds = new Set();
     for (let index = 0; index < events.length; index += 1) {
       const event = events[index];
@@ -3230,9 +3233,91 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
           },
         );
       } else {
-        orderState.set(event.payload.orderId, applyOfflineEventToCloudOrder(
-          orderState.get(event.payload.orderId), event, upload.venueId,
-        ));
+        const orderId = event.payload.orderId;
+        const currentCloudOrder = orderState.get(orderId);
+        try {
+          orderState.set(orderId, applyOfflineEventToCloudOrder(
+            currentCloudOrder, event, upload.venueId,
+            recoveryBaselines.get(orderId),
+          ));
+        } catch (error) {
+          const recoveryBaseline = recoveryBaselines.get(orderId);
+          if (error instanceof HttpsError &&
+              error.message === "The offline bill is not fully paid." &&
+              event.type === "order.closed" &&
+              recoveryBaseline != null && currentCloudOrder != null) {
+            // A stale cloud snapshot can contain lines which the durable local
+            // order never accepted. Verify that snapshot identity against the
+            // live cloud order, then replay only the signed local chain through
+            // its close. Cloud table/tab/channel identity is preserved.
+            applyOfflineEventToCloudOrder(
+              currentCloudOrder, recoveryBaseline, upload.venueId,
+            );
+            const localCandidates = events.filter((candidate) =>
+              candidate.payload.orderId === orderId &&
+              candidate.sequence <= event.sequence &&
+              candidate.type !== "order.cloudBaseline");
+            if (!localCandidates.some((candidate) =>
+              candidate.type === "order.opened")) {
+              throw error;
+            }
+            // The local order.opened event can intentionally be a locationless
+            // recovery shell. Its later signed baseline has just proved the
+            // existing cloud identity, so retain that identity while rebuilding
+            // only the financial state from the immutable local chain.
+            let localClose = {
+              ...currentCloudOrder,
+              status: "open",
+              lines: [],
+              payments: [],
+            };
+            for (const candidate of localCandidates) {
+              if (candidate.type === "order.opened") continue;
+              localClose = applyOfflineEventToCloudOrder(
+                localClose, candidate, upload.venueId,
+              );
+            }
+            const recoveredLines = Array.isArray(localClose?.lines)
+              ? localClose.lines : [];
+            const recoveredPayments = Array.isArray(localClose?.payments)
+              ? localClose.payments : [];
+            const recoveredTotal = recoveredLines.reduce((sum, line) =>
+              sum + Number(line.quantity) * Number(line.unitPriceMinor), 0) +
+              ((currentCloudOrder.channel ?? "dineIn") === "delivery"
+                ? Number(currentCloudOrder.deliveryFeeMinor ?? 0) : 0);
+            const recoveredPaid = recoveredPayments.reduce((sum, payment) =>
+              sum + Number(payment.baseAmountMinor), 0);
+            if (localClose?.status === "closed" && recoveredLines.length > 0 &&
+                recoveredTotal === recoveredPaid) {
+              orderState.set(orderId, {
+                ...currentCloudOrder,
+                lines: recoveredLines,
+                payments: recoveredPayments,
+                status: "closed",
+                closedAt: new Date(event.createdAtUtc),
+                closedOffline: true,
+                receiptNumber: typeof event.payload.receiptNumber === "string"
+                  ? event.payload.receiptNumber : null,
+                // This exact signed baseline was validated against the live
+                // cloud order above. Retain its ID so its later event sequence
+                // is an idempotent acknowledgement after financial recovery.
+                offlineRecoveryBaselineEventId: recoveryBaseline.id,
+              });
+              dirtyOrderIds.add(orderId);
+              lastSequence = event.sequence;
+              lastEventHash = event.eventHash;
+              accepted.push(event.id);
+              continue;
+            }
+          }
+          if (error instanceof HttpsError) {
+            throw new HttpsError(
+              error.code,
+              `Offline event ${event.sequence} (${event.type}) was rejected: ${error.message}`,
+            );
+          }
+          throw error;
+        }
         dirtyOrderIds.add(event.payload.orderId);
       }
       lastSequence = event.sequence;
@@ -3332,11 +3417,15 @@ function verifiedClosedHubProjection(raw, upload, currencyCode) {
     throw new HttpsError("invalid-argument", "A reconciled hub order is invalid.");
   }
   const channel = value.channel ?? "dineIn";
-  const tableId = typeof value.tableId === "string" ? requiredDocumentId(value, "tableId") : null;
+  const rawTableId = typeof value.tableId === "string" ? value.tableId.trim() : "";
+  const tableId = rawTableId.length > 0
+    ? requiredDocumentId({tableId: rawTableId}, "tableId") : null;
   const tabName = value.tabName == null ? null : optionalText(value, "tabName", 160) || null;
-  if (!["dineIn", "collection", "delivery"].includes(channel) ||
-      (channel === "dineIn" && (tableId == null) === (tabName == null)) ||
-      (channel !== "dineIn" && (tableId != null || tabName != null))) {
+  // Historical orders can pre-date the one-location-only invariant and may
+  // contain both, or neither, of tableId/tabName. Reconciliation never trusts
+  // those values to choose a target: the transaction below requires an exact
+  // match with the existing venue-scoped cloud order before closing it.
+  if (!["dineIn", "collection", "delivery"].includes(channel)) {
     throw new HttpsError("invalid-argument", "A reconciled order location is invalid.");
   }
   if (!Array.isArray(value.lines) || value.lines.length < 1 || value.lines.length > 250 ||
@@ -3736,7 +3825,7 @@ function offlineBillFromProjectedOrder(
   };
 }
 
-function applyOfflineEventToCloudOrder(current, event, venueId) {
+function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline = null) {
   const payload = event.payload;
   const eventTime = new Date(event.createdAtUtc);
   if (!Number.isFinite(eventTime.getTime())) {
@@ -3744,16 +3833,28 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
   }
   if (event.type === "order.opened") {
     if (current != null) {
-      // A replacement hub can first create a local shell for a still-open
-      // order from the preceding epoch. Treat only that exact legacy identity
-      // as idempotent; all same-epoch or mismatched opens still fail closed.
+      // A replacement hub can create a local shell for an existing open order.
+      // The same epoch can also replay this event after cloud projection won
+      // the race but its acknowledgement never reached the hub. Treat only an
+      // exact open identity as idempotent; mismatched/future orders fail closed.
       const currentEpoch = Number(current.offlineHubEpoch ?? 0);
       const sameIdentity = current.venueId === venueId &&
         (current.tableId ?? null) === (payload.tableId ?? null) &&
         (current.tabName ?? null) === (payload.tabName ?? null) &&
         (current.channel ?? "dineIn") === (payload.channel ?? "dineIn") &&
         ["open", "sent"].includes(current.status);
-      if (currentEpoch < event.hubEpoch && sameIdentity) return current;
+      const baselinePayload = recoveryBaseline?.payload;
+      const baselineEpoch = Number(baselinePayload?.sourceOfflineHubEpoch);
+      const sameBaselineIdentity = recoveryBaseline?.hubEpoch === event.hubEpoch &&
+        recoveryBaseline?.sequence > event.sequence &&
+        Number.isSafeInteger(baselineEpoch) && baselineEpoch <= event.hubEpoch &&
+        current.venueId === venueId &&
+        (current.tableId ?? null) === (baselinePayload?.tableId ?? null) &&
+        (current.tabName ?? null) === (baselinePayload?.tabName ?? null) &&
+        (current.channel ?? "dineIn") === (baselinePayload?.channel ?? "dineIn") &&
+        ["open", "sent"].includes(current.status);
+      if (currentEpoch <= event.hubEpoch &&
+          (sameIdentity || sameBaselineIdentity)) return current;
       throw new HttpsError("already-exists", "The offline order already exists in cloud data.");
     }
     const tableId = typeof payload.tableId === "string" ? payload.tableId : null;
@@ -3801,6 +3902,7 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
   const payments = Array.isArray(next.payments)
     ? next.payments.map((payment) => ({...payment})) : [];
   if (event.type === "order.cloudBaseline") {
+    if (next.offlineRecoveryBaselineEventId === event.id) return next;
     const sourceEpoch = Number(payload.sourceOfflineHubEpoch);
     if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch > event.hubEpoch ||
         !["open", "sent", "closed"].includes(next.status) ||
@@ -3824,7 +3926,13 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
     return next;
   }
   if (event.type === "order.itemAdded") {
-    if (lines.some((line) => line.id === payload.lineId)) {
+    const existingLine = lines.find((line) => line.id === payload.lineId);
+    if (existingLine != null) {
+      if (existingLine.productId === payload.productId &&
+          existingLine.productName === payload.productName &&
+          Number(existingLine.unitPriceMinor) === Number(payload.unitPriceMinor)) {
+        return next;
+      }
       throw new HttpsError("already-exists", "The offline order line already exists.");
     }
     lines.push({
@@ -3836,7 +3944,8 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
   }
   if (event.type === "order.itemQuantityChanged") {
     const index = lines.findIndex((line) => line.id === payload.lineId &&
-      line.isSentToProduction !== true);
+      (line.isSentToProduction !== true ||
+        (recoveryBaseline != null && event.sequence < recoveryBaseline.sequence)));
     if (index < 0 || !Number.isInteger(payload.quantity) || payload.quantity < 0) {
       throw new HttpsError("failed-precondition", "The offline line cannot be changed.");
     }
@@ -3876,7 +3985,14 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
     return next;
   }
   if (event.type === "payment.recorded") {
-    if (payments.some((payment) => payment.id === payload.paymentId)) {
+    const existingPayment = payments.find((payment) => payment.id === payload.paymentId);
+    if (existingPayment != null) {
+      if (Number(existingPayment.baseAmountMinor) === Number(payload.baseAmountMinor) &&
+          existingPayment.method === payload.method &&
+          (existingPayment.tenderedCurrencyCode ?? existingPayment.currencyCode) ===
+            payload.currencyCode) {
+        return next;
+      }
       throw new HttpsError("already-exists", "The offline payment already exists.");
     }
     payments.push({
@@ -11363,6 +11479,15 @@ export const posApi = onRequest({cors: true}, async (request, response) => {
     response.status(200).json({data: result});
   } catch (error) {
     if (error instanceof HttpsError) {
+      // Log only the authenticated action and bounded server-authored error;
+      // never log request bodies, PIN sessions, tokens, or signed envelopes.
+      // This keeps operational hub conflicts diagnosable without exposing POS
+      // or customer data in Cloud Logging.
+      console.warn("Rejected POS command", {
+        action,
+        code: error.code,
+        message: diagnosticErrorMessage(error),
+      });
       response.status(httpStatusFor(error)).json({
         error: {code: error.code, message: error.message},
       });

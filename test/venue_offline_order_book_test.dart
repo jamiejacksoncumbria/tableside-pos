@@ -153,4 +153,83 @@ void main() {
       hasLength(1),
     );
   });
+
+  test('recovery baseline preserves a legacy order location after close', () async {
+    final database = sqlite3.openInMemory();
+    final store = NativeOfflineEventStore(
+      database: database,
+      crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
+    );
+    addTearDown(store.close);
+    final ledger = OfflineEventLedger.forTesting(store);
+    await ledger.initialize();
+
+    Future<void> append(String type, Map<String, Object?> payload) async {
+      await ledger.commit(
+        OfflineEventDraft(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'hub-a',
+          staffId: 'staff-a',
+          type: type,
+          payload: {'orderId': 'order-a', ...payload},
+        ),
+        hubEpoch: 3,
+      );
+    }
+
+    // The local recovery shell predates the authoritative location carried by
+    // the signed cloud baseline, which was appended after the local close.
+    await append('order.opened', {'channel': 'dineIn'});
+    await append('order.itemAdded', {
+      'lineId': 'line-a',
+      'productId': 'product-a',
+      'productName': 'Meal',
+      'quantity': 1,
+      'unitPriceMinor': 2000,
+    });
+    await append('payment.recorded', {
+      'paymentId': 'payment-a',
+      'baseAmountMinor': 2000,
+      'method': 'cash',
+      'currencyCode': 'TRY',
+    });
+    await append('order.closed', {'receiptNumber': 'R-1'});
+    await append('order.cloudBaseline', {
+      'sourceOfflineHubEpoch': 3,
+      'openedAtUtc': '2026-10-13T10:00:00.000Z',
+      'channel': 'dineIn',
+      'tableId': 'table-a',
+      'deliveryFeeMinor': 0,
+      'lines': [
+        {
+          'id': 'line-a',
+          'productId': 'product-a',
+          'name': 'Meal',
+          'quantity': 1,
+          'unitPriceMinor': 2000,
+          'sent': true,
+        },
+      ],
+      'payments': [
+        {
+          'id': 'payment-a',
+          'baseAmountMinor': 2000,
+          'tenderedAmountMinor': 2000,
+          'method': 'cash',
+          'currencyCode': 'TRY',
+        },
+      ],
+    });
+
+    final order = (await VenueOfflineOrderBook(
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+      hubEpoch: 3,
+      ledger: ledger,
+    ).rebuild())['order-a']!;
+    expect(order.isClosed, isTrue);
+    expect(order.balanceDueMinor, 0);
+    expect(order.tableId, 'table-a');
+  });
 }

@@ -451,17 +451,23 @@ class VenueOfflineOrderBook {
 /// Replacement hubs whose chain genuinely starts with a cloud baseline still
 /// use the full projection.
 OfflineOrderProjection _projectOrderEvents(List<OfflineEvent> events) {
+  try {
+    // Prefer the server-signed baseline because it carries the authoritative
+    // legacy location/customer identity for recovery shells. Projection now
+    // treats a baseline appended after closure as metadata, not a mutation.
+    return projectOfflineOrder(events);
+  } on OfflineProjectionException {
+    // A stale cloud baseline can contain extra lines that never belonged to
+    // the completed local bill. In that narrow case, the independently valid
+    // immutable local chain remains the stronger close/payment authority.
+  }
   final withoutBaselines = events
       .where((event) => event.type != 'order.cloudBaseline')
       .toList(growable: false);
-  if (withoutBaselines.isNotEmpty) {
-    try {
-      return projectOfflineOrder(withoutBaselines);
-    } on OfflineProjectionException {
-      // Fall through to the signed recovery baseline below.
-    }
+  if (withoutBaselines.isEmpty) {
+    return projectOfflineOrder(events);
   }
-  return projectOfflineOrder(events);
+  return projectOfflineOrder(withoutBaselines);
 }
 
 bool _isOrderEvent(OfflineEvent event) =>

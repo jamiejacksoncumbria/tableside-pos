@@ -432,6 +432,7 @@ class VenueHubRuntime {
         },
       );
       var reconcilingClosedOrders = false;
+      final closedOrderRetryAfter = <String, DateTime>{};
       Future<void> reconcileClosedCloudOrders() async {
         if (reconcilingClosedOrders || _activeScope != scope) return;
         final rawCloudOrders = snapshot['openOrders'];
@@ -449,30 +450,43 @@ class VenueHubRuntime {
           // same hub's durable projection has already closed it.
           await _sync!.flush();
           final localOrders = await orderBook.rebuild();
+          final now = DateTime.now().toUtc();
           final ghosts = localOrders.values
               .where(
                 (order) =>
-                    order.isClosed && cloudOpenIds.contains(order.orderId),
+                    order.isClosed &&
+                    cloudOpenIds.contains(order.orderId) &&
+                    !(closedOrderRetryAfter[order.orderId]?.isAfter(now) ??
+                        false),
               )
-              .map((order) => order.toJson())
               .toList(growable: false);
-          for (var offset = 0; offset < ghosts.length; offset += 25) {
-            final batch = ghosts
-                .skip(offset)
-                .take(25)
-                .toList(growable: false);
-            final repaired = await _repository
-                .reconcileOfflineHubClosedOrders(
-                  scope: scope,
-                  deviceId: deviceId,
-                  hubEpoch: bootstrap.hubEpoch,
-                  credential: credential,
-                  orders: batch,
-                );
-            if (repaired.isNotEmpty) {
+          for (final order in ghosts) {
+            try {
+              final repaired = await _repository
+                  .reconcileOfflineHubClosedOrders(
+                    scope: scope,
+                    deviceId: deviceId,
+                    hubEpoch: bootstrap.hubEpoch,
+                    credential: credential,
+                    orders: [order.toJson()],
+                  );
+              closedOrderRetryAfter.remove(order.orderId);
+              if (!repaired.contains(order.orderId)) continue;
               AppLogger.info(
-                'Reconciled ${repaired.length} locally closed order(s) that '
-                'were still advertised as open in cloud data.',
+                'Reconciled locally closed order ${order.orderId} that '
+                'was still advertised as open in cloud data.',
+              );
+            } catch (error, stackTrace) {
+              // One malformed historical order must not prevent independent
+              // valid orders from being repaired. Backoff also prevents a
+              // permanent data conflict from calling the API every refresh.
+              closedOrderRetryAfter[order.orderId] = now.add(
+                const Duration(minutes: 5),
+              );
+              AppLogger.error(
+                'Reconcile locally closed order ${order.orderId}',
+                error,
+                stackTrace,
               );
             }
           }

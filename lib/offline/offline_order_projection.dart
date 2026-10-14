@@ -399,6 +399,12 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         'An event belongs to a different order.',
       );
     }
+    if (event.type == 'order.cloudBaseline') {
+      // The signed baseline is applied before chronological replay. It can be
+      // appended after a local close during recovery, so encountering its
+      // sequence after closure is a no-op rather than a post-close mutation.
+      continue;
+    }
     if (closed) {
       throw const OfflineProjectionException(
         'A closed offline order cannot be changed.',
@@ -406,9 +412,6 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     }
 
     switch (event.type) {
-      case 'order.cloudBaseline':
-        // The signed baseline was applied before chronological replay.
-        break;
       case 'order.opened':
         if (opened) {
           if (baseline != null) break;
