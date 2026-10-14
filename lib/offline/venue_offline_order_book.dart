@@ -183,7 +183,7 @@ class VenueOfflineOrderBook {
     }
     return <String, OfflineOrderProjection>{
       for (final entry in grouped.entries)
-        entry.key: projectOfflineOrder(entry.value),
+        entry.key: _projectOrderEvents(entry.value),
     };
   }
 
@@ -195,6 +195,16 @@ class VenueOfflineOrderBook {
   Future<void> installCloudBaselines(Map<String, Object?> snapshot) async {
     final rawOrders = snapshot['openOrders'];
     if (rawOrders is! List) return;
+    final restored = await _ledger.restoreQuarantinedCloudBaselines(
+      tenantId: tenantId,
+      venueId: venueId,
+      hubEpoch: hubEpoch,
+    );
+    if (restored > 0) {
+      AppLogger.info(
+        'Restored $restored cloud baseline event(s) to preserve the offline upload sequence.',
+      );
+    }
     final existing = await _ledger.eventsForVenue(
       tenantId: tenantId,
       venueId: venueId,
@@ -210,9 +220,8 @@ class VenueOfflineOrderBook {
     // A cloud order can still be open while its valid local close is waiting
     // to sync. Never layer a recovery baseline over an order the append-only
     // local ledger can already reconstruct: doing so would duplicate its
-    // balance authority. Schema 3 briefly allowed that redundant event, so
-    // quarantine only that baseline during upgrade while preserving every
-    // sale, payment and close event.
+    // balance authority. The event remains in the durable upload chain, but
+    // local projection ignores it when the local event chain is complete.
     final reconstructable = <String>{};
     for (final entry in localByOrder.entries) {
       final withoutBaselines = entry.value
@@ -228,24 +237,11 @@ class VenueOfflineOrderBook {
       }
     }
 
-    final installed = <String>{};
-    for (final event in existing.where(
-      (event) => event.type == 'order.cloudBaseline',
-    )) {
-      final orderId = event.payload['orderId'];
-      if (orderId is! String || orderId.isEmpty) continue;
-      if (reconstructable.contains(orderId)) {
-        await _ledger.quarantine(
-          event.id,
-          'Redundant cloud baseline for a reconstructable local order.',
-        );
-        AppLogger.info(
-          'Quarantined redundant cloud order baseline: order=$orderId.',
-        );
-      } else {
-        installed.add(orderId);
-      }
-    }
+    final installed = existing
+        .where((event) => event.type == 'order.cloudBaseline')
+        .map((event) => event.payload['orderId'])
+        .whereType<String>()
+        .toSet();
     for (final raw in rawOrders) {
       if (raw is! Map) continue;
       final baseline = Map<String, Object?>.from(raw);
@@ -280,7 +276,7 @@ class VenueOfflineOrderBook {
       venueId: venueId,
       hubEpoch: hubEpoch,
     );
-    return projectOfflineOrder(
+    return _projectOrderEvents(
       events.where((event) => event.payload['orderId'] == orderId).toList(),
     );
   }
@@ -319,7 +315,7 @@ class VenueOfflineOrderBook {
           final existingName = opened.payload['tabName'];
           if (existingName is String &&
               existingName.trim().toLowerCase() == key &&
-              !projectOfflineOrder(events).isClosed) {
+              !_projectOrderEvents(events).isClosed) {
             throw const OfflineProjectionException(
               'A tab is already open with this name.',
             );
@@ -332,7 +328,7 @@ class VenueOfflineOrderBook {
     if (orderEvents.isEmpty) {
       throw const OfflineProjectionException('The order is not open.');
     }
-    final current = projectOfflineOrder(orderEvents);
+    final current = _projectOrderEvents(orderEvents);
     if (current.isClosed) {
       throw const OfflineProjectionException(
         'A closed offline order cannot be changed.',
@@ -441,12 +437,31 @@ class VenueOfflineOrderBook {
 
   void _projectAffectedOrder(List<OfflineEvent> events, Object? rawOrderId) {
     if (rawOrderId is! String) return;
-    projectOfflineOrder(
+    _projectOrderEvents(
       events
           .where((event) => event.payload['orderId'] == rawOrderId)
           .toList(growable: false),
     );
   }
+}
+
+/// Prefers the complete local event chain whenever it can stand on its own.
+/// A recovery baseline remains in the append-only outbox (preserving sequence
+/// continuity) but cannot overwrite a locally reconstructable close/payment.
+/// Replacement hubs whose chain genuinely starts with a cloud baseline still
+/// use the full projection.
+OfflineOrderProjection _projectOrderEvents(List<OfflineEvent> events) {
+  final withoutBaselines = events
+      .where((event) => event.type != 'order.cloudBaseline')
+      .toList(growable: false);
+  if (withoutBaselines.isNotEmpty) {
+    try {
+      return projectOfflineOrder(withoutBaselines);
+    } on OfflineProjectionException {
+      // Fall through to the signed recovery baseline below.
+    }
+  }
+  return projectOfflineOrder(events);
 }
 
 bool _isOrderEvent(OfflineEvent event) =>

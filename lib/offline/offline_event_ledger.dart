@@ -129,6 +129,19 @@ class OfflineEventLedger {
     return _store.quarantine(eventId, reason);
   }
 
+  Future<int> restoreQuarantinedCloudBaselines({
+    required String tenantId,
+    required String venueId,
+    required int hubEpoch,
+  }) {
+    _requireReady();
+    return _store.restoreQuarantinedCloudBaselines(
+      tenantId: tenantId,
+      venueId: venueId,
+      hubEpoch: hubEpoch,
+    );
+  }
+
   void _requireReady() {
     if (!_store.isSupported) {
       throw StateError(

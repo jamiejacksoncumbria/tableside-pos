@@ -640,6 +640,48 @@ class ProductionCommandRepository {
     return rawIds.whereType<String>().toSet();
   }
 
+  /// Publishes the hub's durable closed-order projections so a cloud document
+  /// that was left open by an interrupted earlier sync cannot resurrect a bill
+  /// on remote terminals. The active hub credential signs the complete body;
+  /// the server independently validates identity and a zero balance.
+  Future<Set<String>> reconcileOfflineHubClosedOrders({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+    required List<Map<String, Object?>> orders,
+  }) async {
+    if (orders.isEmpty || orders.length > 25) {
+      throw ArgumentError.value(
+        orders.length,
+        'orders',
+        'Reconcile between 1 and 25 closed orders.',
+      );
+    }
+    final body = <String, Object?>{'orders': orders};
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: '/v1/reconcile-closed-orders',
+      hubEpoch: hubEpoch,
+      sentAtUtc: DateTime.now().toUtc(),
+      body: body,
+    );
+    final response = await _call('reconcileOfflineHubClosedOrders', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+    final rawIds = response['reconciledOrderIds'];
+    if (rawIds is! List) {
+      throw StateError('The server returned an invalid order reconciliation.');
+    }
+    return rawIds.whereType<String>().toSet();
+  }
+
   Future<Map<String, Object?>> fetchOfflineHubSnapshot({
     required VenueScope scope,
     required String deviceId,
@@ -2094,6 +2136,7 @@ class ProductionCommandRepository {
     'getOfflineHubBootstrap',
     'getOfflineHubSnapshot',
     'ingestOfflineHubEvents',
+    'reconcileOfflineHubClosedOrders',
     'issueRealtimeHubSession',
     'claimRemoteHubCommands',
     'completeRemoteHubCommand',

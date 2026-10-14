@@ -91,6 +91,7 @@ class OfflineOrderProjection {
     required this.payments,
     required this.isClosed,
     this.receiptNumber,
+    this.closedAtUtc,
     this.channel = 'dineIn',
     this.customerId,
     this.customerName,
@@ -119,6 +120,7 @@ class OfflineOrderProjection {
   final List<OfflineProjectedPayment> payments;
   final bool isClosed;
   final String? receiptNumber;
+  final DateTime? closedAtUtc;
   final String channel;
   final String? customerId;
   final String? customerName;
@@ -152,6 +154,7 @@ class OfflineOrderProjection {
     'tabName': tabName,
     'isClosed': isClosed,
     'receiptNumber': receiptNumber,
+    'closedAtUtc': closedAtUtc?.toIso8601String(),
     'channel': channel,
     'customerId': customerId,
     'customerName': customerName,
@@ -216,6 +219,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
   var opened = false;
   var closed = false;
   String? receiptNumber;
+  DateTime? closedAtUtc;
   var channel = 'dineIn';
   String? customerId;
   String? customerName;
@@ -626,6 +630,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         }
         closed = true;
         receiptNumber = event.payload['receiptNumber'] as String?;
+        closedAtUtc = event.createdAtUtc;
         break;
       case 'receipt.requested':
         _requireOpened(opened);
@@ -650,6 +655,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     payments: List.unmodifiable(payments),
     isClosed: closed,
     receiptNumber: receiptNumber,
+    closedAtUtc: closedAtUtc,
     channel: channel,
     customerId: customerId,
     customerName: customerName,

@@ -3324,6 +3324,252 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
   return {acknowledgedEventIds, serverTimeMillis: Date.now()};
 }
 
+function verifiedClosedHubProjection(raw, upload, currencyCode) {
+  const value = requireObject(raw);
+  const orderId = requiredDocumentId(value, "orderId");
+  if (value.isClosed !== true || value.hubEpoch !== upload.hubEpoch ||
+      !Number.isSafeInteger(value.lastSequence) || value.lastSequence < 1) {
+    throw new HttpsError("invalid-argument", "A reconciled hub order is invalid.");
+  }
+  const channel = value.channel ?? "dineIn";
+  const tableId = typeof value.tableId === "string" ? requiredDocumentId(value, "tableId") : null;
+  const tabName = value.tabName == null ? null : optionalText(value, "tabName", 160) || null;
+  if (!["dineIn", "collection", "delivery"].includes(channel) ||
+      (channel === "dineIn" && (tableId == null) === (tabName == null)) ||
+      (channel !== "dineIn" && (tableId != null || tabName != null))) {
+    throw new HttpsError("invalid-argument", "A reconciled order location is invalid.");
+  }
+  if (!Array.isArray(value.lines) || value.lines.length < 1 || value.lines.length > 250 ||
+      !Array.isArray(value.payments) || value.payments.length > 100) {
+    throw new HttpsError("invalid-argument", "A reconciled order has invalid lines or payments.");
+  }
+  const lineIds = new Set();
+  const lines = value.lines.map((rawLine, index) => {
+    const line = requireObject(rawLine);
+    const id = requiredDocumentId(line, "id");
+    if (lineIds.has(id)) {
+      throw new HttpsError("invalid-argument", "A reconciled order line is duplicated.");
+    }
+    lineIds.add(id);
+    const quantity = Number(line.quantity);
+    const unitPriceMinor = Number(line.unitPriceMinor);
+    const taxRateBasisPoints = Number(line.taxRateBasisPoints ?? 0);
+    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 10000 ||
+        !Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0 ||
+        unitPriceMinor > 1000000000 || !Number.isSafeInteger(taxRateBasisPoints) ||
+        taxRateBasisPoints < 0 || taxRateBasisPoints > 100000) {
+      throw new HttpsError("invalid-argument", `Reconciled line ${index} is invalid.`);
+    }
+    const details = Array.isArray(line.details)
+      ? line.details.slice(0, 50).map((detail) => String(detail).trim().slice(0, 300))
+        .filter((detail) => detail.length > 0)
+      : [];
+    return {
+      id,
+      productId: requiredDocumentId(line, "productId"),
+      productName: requiredText(line, "name", 300),
+      quantity,
+      unitPriceMinor,
+      currencyCode,
+      productionArea: optionalText(line, "productionArea", 80) || "kitchen",
+      details,
+      taxRateBasisPoints,
+      taxRateName: optionalText(line, "taxRateName", 120) || "Zero Rate",
+      isSentToProduction: line.sent === true,
+    };
+  });
+  const paymentIds = new Set();
+  const payments = value.payments.map((rawPayment, index) => {
+    const payment = requireObject(rawPayment);
+    const id = requiredDocumentId(payment, "id");
+    const baseAmountMinor = Number(payment.baseAmountMinor);
+    const tenderedAmountMinor = Number(payment.tenderedAmountMinor ?? baseAmountMinor);
+    const recordedAt = new Date(payment.recordedAtUtc);
+    const tenderedCurrencyCode = requiredText(payment, "currencyCode", 3).toUpperCase();
+    const exchangeRateToBase = optionalText(payment, "exchangeRateToBase", 80) || "1";
+    const exchangeRate = Number(exchangeRateToBase);
+    if (paymentIds.has(id) || !Number.isSafeInteger(baseAmountMinor) ||
+        baseAmountMinor <= 0 || !Number.isSafeInteger(tenderedAmountMinor) ||
+        tenderedAmountMinor <= 0 || !Number.isFinite(recordedAt.getTime()) ||
+        recordedAt.getTime() < Date.UTC(2000, 0, 1) ||
+        recordedAt.getTime() > Date.now() + 5 * 60 * 1000 ||
+        !/^[A-Z]{3}$/.test(tenderedCurrencyCode) ||
+        !Number.isFinite(exchangeRate) || exchangeRate <= 0) {
+      throw new HttpsError("invalid-argument", `Reconciled payment ${index} is invalid.`);
+    }
+    paymentIds.add(id);
+    return {
+      id,
+      method: requiredText(payment, "method", 80),
+      baseAmountMinor,
+      tenderedAmountMinor,
+      tenderedCurrencyCode,
+      exchangeRateToBase,
+      terminalLabel: optionalText(payment, "terminalLabel", 160) || null,
+      cashChangeBaseMinor: Number(payment.cashChangeBaseMinor ?? 0),
+      recordedAt,
+      recordedAtMillis: recordedAt.getTime(),
+    };
+  });
+  const deliveryFeeMinor = channel === "delivery" ? Number(value.deliveryFeeMinor ?? 0) : 0;
+  if (!Number.isSafeInteger(deliveryFeeMinor) || deliveryFeeMinor < 0 ||
+      !payments.every((payment) => Number.isSafeInteger(payment.cashChangeBaseMinor) &&
+        payment.cashChangeBaseMinor >= 0)) {
+    throw new HttpsError("invalid-argument", "The reconciled payment totals are invalid.");
+  }
+  const totalMinor = lines.reduce((sum, line) =>
+    sum + line.quantity * line.unitPriceMinor, deliveryFeeMinor);
+  const paidMinor = payments.reduce((sum, payment) => sum + payment.baseAmountMinor, 0);
+  if (totalMinor !== paidMinor) {
+    throw new HttpsError("failed-precondition", "The reconciled order balance is not zero.");
+  }
+  const closedAt = new Date(value.closedAtUtc);
+  const earliestClose = Date.UTC(2000, 0, 1);
+  if (!Number.isFinite(closedAt.getTime()) || closedAt.getTime() < earliestClose ||
+      closedAt.getTime() > Date.now() + 5 * 60 * 1000) {
+    throw new HttpsError("invalid-argument", "The reconciled close time is invalid.");
+  }
+  return {
+    orderId, tableId, tabName, channel, lines, payments, deliveryFeeMinor,
+    totalMinor, paidMinor, closedAt,
+    receiptNumber: optionalText(value, "receiptNumber", 160) || null,
+    lastSequence: value.lastSequence,
+    customerId: typeof value.customerId === "string"
+      ? requiredDocumentId(value, "customerId") : null,
+    customerName: optionalText(value, "customerName", 300) || null,
+    customerPhone: optionalText(value, "customerPhone", 100) || null,
+    deliveryAddress: optionalText(value, "deliveryAddress", 800) || null,
+    deliveryAddressLabel: optionalText(value, "deliveryAddressLabel", 200) || null,
+    serviceAreaId: typeof value.serviceAreaId === "string"
+      ? requiredDocumentId(value, "serviceAreaId") : null,
+    serviceAreaName: optionalText(value, "serviceAreaName", 200) || null,
+  };
+}
+
+/// Repairs a cloud order that remained open after the active hub durably
+/// closed it. The request is signed by the current hub credential and carries
+/// a complete zero-balance projection; location identity must still match the
+/// cloud document. This never reopens an order or edits an already-closed bill.
+async function reconcileOfflineHubClosedOrdersFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(
+    caller, rawData, "/v1/reconcile-closed-orders",
+  );
+  const rawOrders = upload.body.orders;
+  if (!Array.isArray(rawOrders) || rawOrders.length < 1 || rawOrders.length > 25) {
+    throw new HttpsError("invalid-argument", "Reconcile between 1 and 25 closed orders.");
+  }
+  const tenantRef = db.doc(`tenants/${upload.tenantId}`);
+  const [tenant, venue] = await Promise.all([
+    tenantRef.get(), tenantRef.collection("venues").doc(upload.venueId).get(),
+  ]);
+  if (!tenant.exists || !venue.exists) {
+    throw new HttpsError("failed-precondition", "The venue is unavailable.");
+  }
+  const currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
+  const orders = rawOrders.map((order) =>
+    verifiedClosedHubProjection(order, upload, currencyCode));
+  if (new Set(orders.map((order) => order.orderId)).size !== orders.length) {
+    throw new HttpsError("invalid-argument", "A reconciled order is duplicated.");
+  }
+  const nonceId = createHash("sha256")
+    .update(`${upload.credentialId}\0${upload.nonce}`).digest("hex");
+  const nonceRef = tenantRef.collection("offlineHubUploadNonces").doc(nonceId);
+  const orderRefs = orders.map((order) => tenantRef.collection("orders").doc(order.orderId));
+  const billRefs = orders.map((order) => tenantRef.collection("bills").doc(`offline-${order.orderId}`));
+  const reconciledOrderIds = await db.runTransaction(async (transaction) => {
+    const reads = await Promise.all([
+      transaction.get(nonceRef),
+      transaction.get(tenantRef.collection("venues").doc(upload.venueId)),
+      ...orderRefs.map((ref) => transaction.get(ref)),
+      ...billRefs.map((ref) => transaction.get(ref)),
+    ]);
+    if (reads[0].exists) {
+      throw new HttpsError("already-exists", "This signed reconciliation was already used.");
+    }
+    const liveVenue = reads[1];
+    const hub = liveVenue.data()?.offlineHub;
+    if (!liveVenue.exists || hub?.enabled !== true || hub?.epoch !== upload.hubEpoch ||
+        hub?.deviceId !== upload.deviceId || hub?.credentialId !== upload.credentialId) {
+      throw new HttpsError("permission-denied", "This device is not the active venue hub.");
+    }
+    const orderSnapshots = reads.slice(2, 2 + orders.length);
+    const billSnapshots = reads.slice(2 + orders.length);
+    const result = [];
+    for (let index = 0; index < orders.length; index += 1) {
+      const local = orders[index];
+      const cloud = orderSnapshots[index];
+      if (!cloud.exists || cloud.data().venueId !== upload.venueId) continue;
+      const current = cloud.data();
+      if (current.status === "closed") {
+        result.push(local.orderId);
+        continue;
+      }
+      if (!["open", "sent"].includes(current.status) ||
+          (current.tableId ?? null) !== local.tableId ||
+          (current.tabName ?? null) !== local.tabName ||
+          (current.channel ?? "dineIn") !== local.channel ||
+          Number(current.offlineHubEpoch ?? 0) > upload.hubEpoch) {
+        throw new HttpsError("failed-precondition", "A cloud order identity changed.");
+      }
+      const projected = {
+        ...current,
+        lines: local.lines,
+        payments: local.payments,
+        deliveryFeeMinor: local.deliveryFeeMinor,
+        status: "closed",
+        receiptNumber: local.receiptNumber,
+        closedAt: local.closedAt,
+        closedOffline: true,
+        closureReconciledByHub: true,
+        offlineHubEpoch: upload.hubEpoch,
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+      transaction.set(orderRefs[index], projected, {merge: false});
+      if (local.tableId != null) {
+        transaction.set(tenantRef.collection("tables").doc(local.tableId), {
+          currentOrderId: null, hasOpenOrder: false,
+          updatedAt: FieldValue.serverTimestamp(),
+        }, {merge: true});
+      }
+      if (local.tabName != null) {
+        transaction.delete(openTabRegistryRef(
+          upload.tenantId, upload.venueId, local.tabName,
+        ));
+      }
+      if (!billSnapshots[index].exists) {
+        const rawCutoff = Number(liveVenue.data().businessDayCutoffMinutes ?? 240);
+        const cutoff = Number.isInteger(rawCutoff) && rawCutoff >= 0 && rawCutoff < 1440
+          ? rawCutoff : 240;
+        transaction.set(billRefs[index], offlineBillFromProjectedOrder(
+          projected, local.orderId, upload,
+          liveVenue.data().timeZone ?? "Europe/London", cutoff,
+        ), {merge: false});
+      }
+      const auditId = createHash("sha256")
+        .update(`${upload.hubEpoch}\0${local.orderId}\0${local.lastSequence}`)
+        .digest("hex");
+      transaction.set(tenantRef.collection("auditEvents").doc(`hub_close_${auditId}`), {
+        action: "offlineHubClosedOrderReconciled",
+        venueId: upload.venueId,
+        orderId: local.orderId,
+        deviceId: upload.deviceId,
+        hubEpoch: upload.hubEpoch,
+        localLastSequence: local.lastSequence,
+        totalMinor: local.totalMinor,
+        createdAt: FieldValue.serverTimestamp(),
+      }, {merge: false});
+      result.push(local.orderId);
+    }
+    transaction.create(nonceRef, {
+      credentialId: upload.credentialId,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return result;
+  });
+  return {reconciledOrderIds, serverTimeMillis: Date.now()};
+}
+
 async function applyOfflineStockForEvents(tenantRef, venueId, events) {
   for (const event of events.filter((item) => item.type === "order.sent")) {
     const order = await tenantRef.collection("orders").doc(event.payload.orderId).get();
@@ -3546,7 +3792,8 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
       openedAt: eventTime, openedOffline: true, createdByStaffId: event.staffId,
     };
   }
-  if (current == null || current.venueId !== venueId || current.status === "closed") {
+  if (current == null || current.venueId !== venueId ||
+      (current.status === "closed" && event.type !== "order.cloudBaseline")) {
     throw new HttpsError("failed-precondition", "The offline order is unavailable in cloud data.");
   }
   const next = {...current};
@@ -3556,7 +3803,7 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
   if (event.type === "order.cloudBaseline") {
     const sourceEpoch = Number(payload.sourceOfflineHubEpoch);
     if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch > event.hubEpoch ||
-        !["open", "sent"].includes(next.status) ||
+        !["open", "sent", "closed"].includes(next.status) ||
         (next.tableId ?? null) !== (payload.tableId ?? null) ||
         (next.tabName ?? null) !== (payload.tabName ?? null) ||
         (next.channel ?? "dineIn") !== (payload.channel ?? "dineIn")) {
@@ -10811,6 +11058,7 @@ async function invokePosAction(action, caller, data) {
     "recoverOwnStaffPin",
     "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
     "getTrustedTime", "getOfflineHubBootstrap", "ingestOfflineHubEvents",
+    "reconcileOfflineHubClosedOrders",
     "getOfflineHubSnapshot", "claimRemoteHubCommands",
     "issueRealtimeHubSession",
     "completeRemoteHubCommand",
@@ -10847,6 +11095,8 @@ async function invokePosAction(action, caller, data) {
       return getOfflineHubBootstrapFor(caller, data);
     case "ingestOfflineHubEvents":
       return ingestOfflineHubEventsFor(caller, data);
+    case "reconcileOfflineHubClosedOrders":
+      return reconcileOfflineHubClosedOrdersFor(caller, data);
     case "getOfflineHubSnapshot":
       return getOfflineHubSnapshotFor(caller, data);
     case "submitRemoteHubCommand":

@@ -431,6 +431,63 @@ class VenueHubRuntime {
           return VenueHubCloudUploadResult(acknowledgedEventIds: acknowledged);
         },
       );
+      var reconcilingClosedOrders = false;
+      Future<void> reconcileClosedCloudOrders() async {
+        if (reconcilingClosedOrders || _activeScope != scope) return;
+        final rawCloudOrders = snapshot['openOrders'];
+        if (rawCloudOrders is! List || rawCloudOrders.isEmpty) return;
+        final cloudOpenIds = rawCloudOrders
+            .whereType<Map>()
+            .map((order) => order['orderId'])
+            .whereType<String>()
+            .toSet();
+        if (cloudOpenIds.isEmpty) return;
+        reconcilingClosedOrders = true;
+        try {
+          // Upload ordinary immutable events first. Reconciliation is a
+          // narrow repair for a cloud document that still says open after the
+          // same hub's durable projection has already closed it.
+          await _sync!.flush();
+          final localOrders = await orderBook.rebuild();
+          final ghosts = localOrders.values
+              .where(
+                (order) =>
+                    order.isClosed && cloudOpenIds.contains(order.orderId),
+              )
+              .map((order) => order.toJson())
+              .toList(growable: false);
+          for (var offset = 0; offset < ghosts.length; offset += 25) {
+            final batch = ghosts
+                .skip(offset)
+                .take(25)
+                .toList(growable: false);
+            final repaired = await _repository
+                .reconcileOfflineHubClosedOrders(
+                  scope: scope,
+                  deviceId: deviceId,
+                  hubEpoch: bootstrap.hubEpoch,
+                  credential: credential,
+                  orders: batch,
+                );
+            if (repaired.isNotEmpty) {
+              AppLogger.info(
+                'Reconciled ${repaired.length} locally closed order(s) that '
+                'were still advertised as open in cloud data.',
+              );
+            }
+          }
+        } catch (error, stackTrace) {
+          // Never stop the LAN hub for a cloud repair failure. The signed,
+          // idempotent repair retries during the next authority refresh.
+          AppLogger.error(
+            'Reconcile locally closed orders with cloud terminals',
+            error,
+            stackTrace,
+          );
+        } finally {
+          reconcilingClosedOrders = false;
+        }
+      }
       // RTDB is the sole internet-presence and wake channel. A failure here is
       // non-fatal for the local HTTPS hub: LAN terminals must remain usable
       // during a venue internet outage, while remote commands fail closed.
@@ -689,7 +746,7 @@ class VenueHubRuntime {
           endpoint: endpoint,
         ),
       );
-      unawaited(_sync!.flush());
+      unawaited(reconcileClosedCloudOrders());
       var refreshingAuthority = false;
       Future<void> refreshAuthority() async {
         if (refreshingAuthority) return;
@@ -766,9 +823,11 @@ class VenueHubRuntime {
             AppLogger.info(
               'Venue hub snapshot is current; retained the encrypted local copy.',
             );
+            unawaited(reconcileClosedCloudOrders());
             return;
           }
           await installFreshSnapshot(refreshed);
+          unawaited(reconcileClosedCloudOrders());
         } catch (error, stackTrace) {
           // A timeout, malformed response, or snapshot refresh failure is not
           // evidence that cloud authority was revoked. Stopping here used to

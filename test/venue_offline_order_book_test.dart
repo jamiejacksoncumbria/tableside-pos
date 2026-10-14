@@ -6,7 +6,6 @@ import 'package:tableside_pos/offline/offline_event.dart';
 import 'package:tableside_pos/offline/offline_event_crypto.dart';
 import 'package:tableside_pos/offline/offline_event_ledger.dart';
 import 'package:tableside_pos/offline/offline_event_store_native.dart';
-import 'package:tableside_pos/offline/offline_order_projection.dart';
 import 'package:tableside_pos/offline/venue_offline_order_book.dart';
 
 void main() {
@@ -133,10 +132,9 @@ void main() {
       hubEpoch: hubEpoch,
       ledger: ledger,
     );
-    await expectLater(
-      orderBook.rebuild(),
-      throwsA(isA<OfflineProjectionException>()),
-    );
+    final beforeRefresh = await orderBook.rebuild();
+    expect(beforeRefresh[orderId]!.isClosed, isTrue);
+    expect(beforeRefresh[orderId]!.balanceDueMinor, 0);
 
     await orderBook.installCloudBaselines({
       'openOrders': [conflictingBaseline],
@@ -152,7 +150,7 @@ void main() {
     );
     expect(
       activeEvents.where((event) => event.type == 'order.cloudBaseline'),
-      isEmpty,
+      hasLength(1),
     );
   });
 }
