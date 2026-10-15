@@ -3363,13 +3363,27 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
     for (let index = 0; index < remoteCommandIds.length; index += 1) {
       const commandId = remoteCommandIds[index];
       const command = remoteCommandSnapshots[index];
-      if (!command.exists) {
-        throw new HttpsError("data-loss", "A committed remote command is missing from the queue.");
-      }
-      const commandData = command.data();
       const event = events.find((candidate) =>
         candidate.payload.remoteCommandId === commandId);
-      if (event == null || commandData.hubEpoch !== upload.hubEpoch ||
+      if (event == null) {
+        throw new HttpsError("data-loss", "A committed remote command has no signed hub event.");
+      }
+      if (!command.exists) {
+        // Remote command documents are intentionally short-lived. A hub can
+        // durably commit a command immediately, then remain unable to upload
+        // its signed event chain until after Firestore TTL removes the queue
+        // document. The active hub signature, epoch, nonce and hash chain are
+        // still authoritative for cloud convergence. Do not manufacture a
+        // late client acknowledgement; simply project the signed event.
+        console.warn("Remote command expired before signed event ingestion", {
+          hubEpoch: upload.hubEpoch,
+          eventType: event.type,
+          sequence: event.sequence,
+        });
+        continue;
+      }
+      const commandData = command.data();
+      if (commandData.hubEpoch !== upload.hubEpoch ||
           commandData.eventType !== event.type || commandData.staffId !== event.staffId) {
         throw new HttpsError("data-loss", "A committed remote command does not match its signed hub event.");
       }
