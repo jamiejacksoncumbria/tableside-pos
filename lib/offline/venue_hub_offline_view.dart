@@ -134,6 +134,18 @@ class VenueHubOfflineView {
             productionArea: area,
             trackStock: false,
             isSentToProduction: line['sent'] == true,
+            taxRateBasisPoints:
+                (line['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
+            taxRateName: line['taxRateName'] as String? ?? 'Zero Rate',
+            addedAt: DateTime.tryParse(
+              line['addedAtUtc'] as String? ?? '',
+            )?.toLocal(),
+            sentAt: DateTime.tryParse(
+              line['sentAtUtc'] as String? ?? '',
+            )?.toLocal(),
+            persistedProductionDetails: (line['details'] as List? ?? const [])
+                .whereType<String>()
+                .toList(growable: false),
           );
         })
         .toList(growable: false);

@@ -68,15 +68,13 @@ class TableManagementPage extends ConsumerWidget {
                   for (final table in tables)
                     _TableTile(
                       table: table,
-                      onEdit: scope == null
-                          ? null
-                          : () => _showTableDialog(
-                              context: context,
-                              ref: ref,
-                              scope: scope,
-                              existing: table,
-                            ),
-                      onDelete: scope == null || table.hasOpenOrder
+                      onEdit: () => _showTableDialog(
+                        context: context,
+                        ref: ref,
+                        scope: scope,
+                        existing: table,
+                      ),
+                      onDelete: table.hasOpenOrder
                           ? null
                           : () => _confirmDelete(
                               context: context,

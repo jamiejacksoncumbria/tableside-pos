@@ -65,6 +65,7 @@ class VenueHubRuntime {
   Future<void> Function()? _refreshAuthorityNow;
   StreamSubscription? _pendingSubscription;
   Timer? _authorityTimer;
+  Timer? _postCommitRetryTimer;
   VenueHubRuntimeStatus _status = const VenueHubRuntimeStatus(
     state: VenueHubRuntimeState.stopped,
     pendingEvents: 0,
@@ -262,6 +263,46 @@ class VenueHubRuntime {
       _printQueue = printQueue;
       _activeScope = scope;
       _activeBootstrap = bootstrap;
+      final pendingPostCommitEffects = <
+        String,
+        Future<void> Function()
+      >{};
+      var postCommitRetryRunning = false;
+
+      // A sale is accepted as soon as its immutable event is committed to the
+      // encrypted ledger. Printing and live-view publication happen after that
+      // durability boundary and must never turn an accepted payment/order into
+      // a rejection. Their operations are idempotent, so transient failures can
+      // be retried safely without duplicating a physical ticket.
+      Future<void> retryPostCommitEffects() async {
+        if (postCommitRetryRunning || pendingPostCommitEffects.isEmpty) return;
+        postCommitRetryRunning = true;
+        try {
+          for (final entry in pendingPostCommitEffects.entries.toList()) {
+            try {
+              await entry.value();
+              pendingPostCommitEffects.remove(entry.key);
+              AppLogger.info(
+                'Recovered post-commit effects for offline event ${entry.key}.',
+              );
+            } catch (error, stackTrace) {
+              AppLogger.error(
+                'Retry post-commit effects for offline event ${entry.key}',
+                error,
+                stackTrace,
+              );
+            }
+          }
+        } finally {
+          postCommitRetryRunning = false;
+        }
+      }
+
+      _postCommitRetryTimer?.cancel();
+      _postCommitRetryTimer = Timer.periodic(
+        const Duration(seconds: 3),
+        (_) => unawaited(retryPostCommitEffects()),
+      );
       Future<void> installFreshSnapshot(Map<String, Object?> refreshed) async {
         if (refreshed['hubEpoch'] != bootstrap.hubEpoch ||
             refreshed['version'] is! int) {
@@ -295,40 +336,86 @@ class VenueHubRuntime {
         authorizeStaff: sessions.authorize,
         validateEvent: catalogue.validateEvent,
         commitEvent: (draft, epoch) async {
+          OfflineOrderProjection? orderBeforeAdjustment;
+          OfflineProjectedLine? removedProductionLine;
+          if (draft.type == 'order.lineAdjusted' &&
+              draft.payload['operation'] == 'remove') {
+            final orderId = draft.payload['orderId'] as String;
+            orderBeforeAdjustment = await orderBook.order(orderId);
+            final lineId = draft.payload['lineId'] as String;
+            final line = orderBeforeAdjustment.lines[lineId];
+            if (line?.sent == true) removedProductionLine = line;
+          }
           final event = await orderBook.commit(draft, epoch);
-          if (event.type == 'order.sent') {
-            final orderId = event.payload['orderId'] as String;
-            final lineIds = (event.payload['lineIds'] as List)
-                .whereType<String>()
-                .toList();
-            await printQueue.enqueueProduction(
-              order: await orderBook.order(orderId),
-              lineIds: lineIds,
-              printRequired: event.payload['printRequired'] == true,
-              createdByName: staffDisplayName(event.staffId),
-            );
-          } else if (event.type == 'order.closed') {
-            final orderId = event.payload['orderId'] as String;
-            await printQueue.enqueueReceipt(
-              order: await orderBook.order(orderId),
-              printRequired: event.payload['printReceipt'] == true,
-            );
-          } else if (event.type == 'receipt.requested') {
-            final orderId = event.payload['orderId'] as String;
-            final isDeliveryNote = event.payload['isDeliveryNote'] == true;
-            await printQueue.enqueueReceipt(
-              order: await orderBook.order(orderId),
-              printRequired: true,
-              isPreReceipt: !isDeliveryNote,
-              isDeliveryNote: isDeliveryNote,
-              jobSuffix: event.id,
+          Future<void> applyPostCommitEffects() async {
+            if (event.type == 'order.sent') {
+              final orderId = event.payload['orderId'] as String;
+              final lineIds = (event.payload['lineIds'] as List)
+                  .whereType<String>()
+                  .toList();
+              await printQueue.enqueueProduction(
+                order: await orderBook.order(orderId),
+                lineIds: lineIds,
+                printRequired: event.payload['printRequired'] == true,
+                createdByName: staffDisplayName(event.staffId),
+              );
+            } else if (event.type == 'order.closed') {
+              final orderId = event.payload['orderId'] as String;
+              await printQueue.enqueueReceipt(
+                order: await orderBook.order(orderId),
+                printRequired: event.payload['printReceipt'] == true,
+              );
+            } else if (event.type == 'receipt.requested') {
+              final orderId = event.payload['orderId'] as String;
+              final isDeliveryNote = event.payload['isDeliveryNote'] == true;
+              final isPartPayment = event.payload['isPartPayment'] == true;
+              await printQueue.enqueueReceipt(
+                order: await orderBook.order(orderId),
+                printRequired: true,
+                isPreReceipt: !isDeliveryNote && !isPartPayment,
+                isPartPayment: isPartPayment,
+                isDeliveryNote: isDeliveryNote,
+                jobSuffix: event.id,
+              );
+            } else if (event.type == 'payment.batchRecorded' &&
+                event.payload['printReceipt'] == true) {
+              final orderId = event.payload['orderId'] as String;
+              final order = await orderBook.order(orderId);
+              final rawPayments = event.payload['payments'];
+              final hasNewPayment =
+                  rawPayments is List && rawPayments.isNotEmpty;
+              if (order.isClosed || hasNewPayment) {
+                await printQueue.enqueueReceipt(
+                  order: order,
+                  printRequired: true,
+                  isPartPayment: !order.isClosed,
+                  jobSuffix: event.id,
+                );
+              }
+            } else if (event.type == 'order.lineAdjusted' &&
+                removedProductionLine != null &&
+                orderBeforeAdjustment != null) {
+              await printQueue.enqueueCancellation(
+                order: orderBeforeAdjustment,
+                line: removedProductionLine,
+                reason: event.payload['reason'] as String,
+                createdByName: staffDisplayName(event.staffId),
+                eventId: event.id,
+              );
+            }
+            await publishOrders();
+          }
+
+          try {
+            await applyPostCommitEffects();
+          } catch (error, stackTrace) {
+            pendingPostCommitEffects[event.id] = applyPostCommitEffects;
+            AppLogger.error(
+              'Defer post-commit effects for accepted offline event ${event.id}',
+              error,
+              stackTrace,
             );
           }
-          // Commit updates the encrypted ledger, but consumers are listening
-          // to the in-memory projection. Emit the rebuilt projection before
-          // acknowledging the command so every hub screen observes the same
-          // accepted state as the submitting terminal.
-          await publishOrders();
           return event;
         },
       );
@@ -908,6 +995,8 @@ class VenueHubRuntime {
   }
 
   Future<void> stop() async {
+    _postCommitRetryTimer?.cancel();
+    _postCommitRetryTimer = null;
     _authorityTimer?.cancel();
     _authorityTimer = null;
     await _realtimeSignalSubscription?.cancel();

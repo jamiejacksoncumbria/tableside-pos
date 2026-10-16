@@ -26,6 +26,9 @@ List<ReceiptLineSummary> aggregateReceiptPayloadLines(Object? rawLines) {
     final baseName =
         raw['productName'] as String? ?? raw['name'] as String? ?? 'Item';
     final details = <String>[
+      if (raw['details'] is List)
+        for (final detail in (raw['details'] as List).whereType<String>())
+          if (detail.trim().isNotEmpty) detail.trim(),
       if ((raw['variantName'] as String?)?.trim().isNotEmpty == true)
         (raw['variantName'] as String).trim(),
       if (raw['modifierSelections'] is List)

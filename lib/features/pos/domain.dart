@@ -852,6 +852,7 @@ class OrderLine {
     this.courseName = 'Standard',
     this.courseSequence = 0,
     this.courseReleasePolicy = CourseReleasePolicy.immediate,
+    this.persistedProductionDetails = const <String>[],
   });
 
   final String id;
@@ -881,16 +882,19 @@ class OrderLine {
   final String courseName;
   final int courseSequence;
   final CourseReleasePolicy courseReleasePolicy;
+  final List<String> persistedProductionDetails;
 
   int get totalMinor => quantity * unitPriceMinor;
 
   /// Kitchen-safe detail lines, excluding any money. These are also used in
   /// the POS basket so a waiter can verify a guest's choices before sending.
-  List<String> get productionDetails => [
-    if (variantName?.trim().isNotEmpty == true) variantName!.trim(),
-    ...modifiers.map((modifier) => modifier.displayLabel),
-    if (itemNote.trim().isNotEmpty) 'NOTE: ${itemNote.trim()}',
-  ];
+  List<String> get productionDetails => persistedProductionDetails.isNotEmpty
+      ? persistedProductionDetails
+      : [
+          if (variantName?.trim().isNotEmpty == true) variantName!.trim(),
+          ...modifiers.map((modifier) => modifier.displayLabel),
+          if (itemNote.trim().isNotEmpty) 'NOTE: ${itemNote.trim()}',
+        ];
 
   String get receiptDescription =>
       [productName, ...productionDetails].join('\n');
@@ -923,6 +927,7 @@ class OrderLine {
     courseName: courseName,
     courseSequence: courseSequence,
     courseReleasePolicy: courseReleasePolicy,
+    persistedProductionDetails: persistedProductionDetails,
   );
 }
 

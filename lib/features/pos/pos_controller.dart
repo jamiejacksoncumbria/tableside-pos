@@ -295,8 +295,8 @@ class ActiveOrderController extends Notifier<PosOrder> {
     final now = DateTime.now();
     return PosOrder(
       id: trainingSession == null
-          ? 'order-1024'
-          : 'training-${DateTime.now().microsecondsSinceEpoch}',
+          ? 'order-${now.microsecondsSinceEpoch}'
+          : 'training-${now.microsecondsSinceEpoch}',
       tenantId: scope?.tenantId ?? demoTenant.id,
       venueId: scope?.venueId ?? demoVenue.id,
       tableId: tableId.isEmpty ? null : tableId,
@@ -1085,7 +1085,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
     } on Object catch (error, stackTrace) {
       _locallyClosingOrderId = null;
       final message = error.toString().toLowerCase();
-      if (message.contains('payment exceeds the outstanding balance')) {
+      if (message.contains('payment exceeds the outstanding balance') ||
+          message.contains('payment batch exceeds the outstanding balance') ||
+          message.contains('payment batch exceeds the bill balance')) {
         // A remote till can briefly hold an older Firestore projection after
         // the hub has already committed a payment. Never reduce or repeat the
         // payment automatically. Wait for the signed hub event to project,
@@ -1129,28 +1131,34 @@ class ActiveOrderController extends Notifier<PosOrder> {
       }
       rethrow;
     }
+    final completedPaymentRequestId = _pendingPaymentRequestId!;
     _pendingPaymentRequestId = null;
     _pendingPaymentFingerprint = null;
     _pendingDraftQuantities.clear();
     if (!result.orderClosed) {
       if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
-        final first = payments.first;
         state = state.copyWith(
           payments: <OrderPayment>[
             ...state.payments,
-            OrderPayment(
-              id:
-                  _pendingPaymentRequestId ??
-                  'offline-payment-${DateTime.now().microsecondsSinceEpoch}',
-              method: first.method.name,
-              tenderedAmountMinor: first.tenderedAmountMinor,
-              tenderedCurrencyCode: first.tenderedCurrencyCode,
-              baseAmountMinor: result.paidThisTimeMinor,
-              exchangeRateToBase: first.exchangeRateToBase,
-              recordedAt: DateTime.now(),
-              terminalLabel: first.terminalLabel,
-              cashChangeBaseMinor: first.cashChangeBaseMinor,
-            ),
+            for (var index = 0; index < payments.length; index++)
+              OrderPayment(
+                id: '$completedPaymentRequestId-$index',
+                method: payments[index].method.name,
+                tenderedAmountMinor: payments[index].tenderedAmountMinor,
+                tenderedCurrencyCode: payments[index].tenderedCurrencyCode,
+                baseAmountMinor:
+                    (payments[index].tenderedAmountMinor *
+                            (double.tryParse(
+                                  payments[index].exchangeRateToBase,
+                                ) ??
+                                1))
+                        .round() -
+                    payments[index].cashChangeBaseMinor,
+                exchangeRateToBase: payments[index].exchangeRateToBase,
+                recordedAt: DateTime.now(),
+                terminalLabel: payments[index].terminalLabel,
+                cashChangeBaseMinor: payments[index].cashChangeBaseMinor,
+              ),
           ],
         );
       } else {

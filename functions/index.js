@@ -2321,8 +2321,8 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
 const remoteHubCommandTtlMs = 2 * 60 * 1000;
 const remoteHubClaimLeaseMs = 15 * 1000;
 const remoteHubEventTypes = new Set([
-  "order.opened", "order.itemAdded", "order.itemQuantityChanged",
-  "order.sent", "order.fulfilmentChanged", "payment.recorded",
+  "order.opened", "order.itemAdded", "order.itemQuantityChanged", "order.lineAdjusted",
+  "order.sent", "order.fulfilmentChanged", "payment.recorded", "payment.batchRecorded",
   "order.closed", "receipt.requested",
 ]);
 
@@ -2975,6 +2975,8 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
         taxRateBasisPoints: Number(line.taxRateBasisPoints ?? 0),
         taxRateName: line.taxRateName ?? "Zero Rate",
         sent: line.isSentToProduction === true,
+        addedAtUtc: isoDate(line.addedAt),
+        sentAtUtc: isoDate(line.sentAt),
       })),
       payments: payments.map((payment) => ({
         id: payment.id,
@@ -3319,6 +3321,27 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
           throw error;
         }
         dirtyOrderIds.add(event.payload.orderId);
+        if (event.type === "order.lineAdjusted") {
+          transaction.create(
+            tenantRef.collection("auditEvents").doc(`offline_${event.id}`),
+            {
+              action: event.payload.operation === "remove"
+                ? "removeSaleItem" : "adjustSaleItemPrice",
+              venueId: upload.venueId,
+              orderId: event.payload.orderId,
+              lineId: event.payload.lineId,
+              operation: event.payload.operation,
+              valueMinor: event.payload.valueMinor ?? null,
+              reason: event.payload.reason,
+              staffId: event.staffId,
+              deviceId: event.deviceId,
+              hubEpoch: upload.hubEpoch,
+              sourceEventId: event.id,
+              occurredAt: new Date(event.createdAtUtc),
+              createdAt: FieldValue.serverTimestamp(),
+            },
+          );
+        }
       }
       lastSequence = event.sequence;
       lastEventHash = event.eventHash;
@@ -3980,6 +4003,44 @@ function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline
     next.lines = lines;
     return next;
   }
+  if (event.type === "order.lineAdjusted") {
+    const index = lines.findIndex((line) => line.id === payload.lineId);
+    const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
+    const operation = payload.operation;
+    if (index < 0 || reason.length === 0 ||
+        !["remove", "setUnitPrice", "discountUnitAmount"].includes(operation)) {
+      throw new HttpsError("failed-precondition", "The offline sale adjustment is invalid.");
+    }
+    if (operation === "remove") {
+      lines.splice(index, 1);
+    } else {
+      const valueMinor = Number(payload.valueMinor);
+      const nextPrice = operation === "setUnitPrice"
+        ? valueMinor : Number(lines[index].unitPriceMinor) - valueMinor;
+      if (!Number.isSafeInteger(valueMinor) || valueMinor < 0 ||
+          !Number.isSafeInteger(nextPrice) || nextPrice < 0) {
+        throw new HttpsError("failed-precondition", "The offline sale price is invalid.");
+      }
+      lines[index].unitPriceMinor = nextPrice;
+      lines[index].priceAdjustment = {
+        operation, valueMinor, reason, actor: event.staffId,
+        adjustedAt: eventTime.toISOString(),
+      };
+    }
+    const adjustedTotal = lines.reduce((sum, line) =>
+      sum + Number(line.quantity) * Number(line.unitPriceMinor), 0) +
+      ((next.channel ?? "dineIn") === "delivery" ? Number(next.deliveryFeeMinor ?? 0) : 0);
+    const alreadyPaid = payments.reduce((sum, payment) =>
+      sum + Number(payment.baseAmountMinor), 0);
+    if (lines.length === 0 || adjustedTotal < alreadyPaid) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This adjustment would invalidate payments already recorded.",
+      );
+    }
+    next.lines = lines;
+    return next;
+  }
   if (event.type === "order.sent") {
     const ids = new Set(payload.lineIds);
     if (ids.size < 1 || [...ids].some((id) => !lines.some((line) => line.id === id))) {
@@ -4032,6 +4093,65 @@ function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline
       recordedAt: eventTime, recordedAtMillis: eventTime.getTime(),
     });
     next.payments = payments;
+    return next;
+  }
+  if (event.type === "payment.batchRecorded") {
+    if (typeof payload.batchId !== "string" || payload.batchId.length === 0 ||
+        !Array.isArray(payload.payments)) {
+      throw new HttpsError("invalid-argument", "The offline payment batch is invalid.");
+    }
+    const total = lines.reduce((sum, line) =>
+      sum + Number(line.quantity) * Number(line.unitPriceMinor), 0) +
+      ((next.channel ?? "dineIn") === "delivery" ?
+        Number(next.deliveryFeeMinor ?? 0) : 0);
+    let paid = payments.reduce((sum, payment) =>
+      sum + Number(payment.baseAmountMinor), 0);
+    for (const value of payload.payments) {
+      if (value == null || typeof value !== "object" || Array.isArray(value) ||
+          typeof value.paymentId !== "string" || value.paymentId.length === 0 ||
+          typeof value.method !== "string" || value.method.length === 0 ||
+          typeof value.currencyCode !== "string" || value.currencyCode.length === 0 ||
+          !Number.isSafeInteger(value.baseAmountMinor) || value.baseAmountMinor <= 0) {
+        throw new HttpsError("invalid-argument", "An offline payment is invalid.");
+      }
+      const existingPayment = payments.find((payment) => payment.id === value.paymentId);
+      if (existingPayment != null) {
+        if (Number(existingPayment.baseAmountMinor) === value.baseAmountMinor &&
+            existingPayment.method === value.method &&
+            (existingPayment.tenderedCurrencyCode ?? existingPayment.currencyCode) ===
+              value.currencyCode) {
+          continue;
+        }
+        throw new HttpsError("already-exists", "The offline payment already exists.");
+      }
+      if (paid + value.baseAmountMinor > total) {
+        throw new HttpsError("failed-precondition", "The payment batch exceeds the bill balance.");
+      }
+      payments.push({
+        id: value.paymentId,
+        method: value.method,
+        tenderedAmountMinor: value.tenderedAmountMinor ?? value.baseAmountMinor,
+        tenderedCurrencyCode: value.currencyCode,
+        baseAmountMinor: value.baseAmountMinor,
+        exchangeRateToBase: value.exchangeRateToBase ?? "1",
+        terminalLabel: value.terminalLabel ?? null,
+        cashChangeBaseMinor: value.cashChangeBaseMinor ?? 0,
+        recordedAt: eventTime,
+        recordedAtMillis: eventTime.getTime(),
+      });
+      paid += value.baseAmountMinor;
+    }
+    next.payments = payments;
+    if (payload.closeIfSettled === true) {
+      if (lines.length === 0 || paid !== total) {
+        throw new HttpsError("failed-precondition", "The offline bill is not fully paid.");
+      }
+      next.status = "closed";
+      next.closedAt = eventTime;
+      next.closedOffline = true;
+      next.receiptNumber = typeof payload.receiptNumber === "string"
+        ? payload.receiptNumber : null;
+    }
     return next;
   }
   if (event.type === "order.closed") {

@@ -37,6 +37,7 @@ class QueuedNativePrintWorker {
   VenueScope? _heartbeatScope;
   bool _cloudHeartbeatOffline = false;
   String? _lastReadinessDiagnostic;
+  final Set<String> _printedAwaitingCompletion = <String>{};
 
   String? get _requiredTransport {
     // `Platform` from dart:io throws at runtime in a browser. Web is a POS
@@ -201,6 +202,7 @@ class QueuedNativePrintWorker {
       venueId: scope.venueId,
       deviceId: deviceId,
       deviceCredential: deviceCredential!,
+      printedAwaitingCompletion: _printedAwaitingCompletion,
     );
     try {
       return await worker.processNext();

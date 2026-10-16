@@ -134,10 +134,14 @@ class VenueOfflineOrderBook {
       }
       return switch (draft.type) {
         'order.opened' || 'order.closed' => true,
-        'order.itemAdded' || 'order.itemQuantityChanged' =>
+        'order.itemAdded' ||
+        'order.itemQuantityChanged' ||
+        'order.lineAdjusted' =>
           event.payload['lineId'] == draft.payload['lineId'],
         'payment.recorded' =>
           event.payload['paymentId'] == draft.payload['paymentId'],
+        'payment.batchRecorded' =>
+          event.payload['batchId'] == draft.payload['batchId'],
         'order.sent' =>
           _canonicalJson(event.payload['lineIds']) ==
               _canonicalJson(draft.payload['lineIds']),
@@ -354,6 +358,28 @@ class VenueOfflineOrderBook {
           );
         }
         break;
+      case 'order.lineAdjusted':
+        final lineId = draft.payload['lineId'];
+        final line = current.lines[lineId];
+        final operation = draft.payload['operation'];
+        final reason = draft.payload['reason'];
+        final valueMinor = draft.payload['valueMinor'];
+        if (lineId is! String ||
+            line == null ||
+            reason is! String ||
+            reason.trim().isEmpty ||
+            !const {
+              'remove',
+              'setUnitPrice',
+              'discountUnitAmount',
+            }.contains(operation) ||
+            (operation != 'remove' &&
+                (valueMinor is! int || valueMinor < 0))) {
+          throw const OfflineProjectionException(
+            'The manager sale adjustment is invalid.',
+          );
+        }
+        break;
       case 'order.sent':
         final lineIds = draft.payload['lineIds'];
         if (lineIds is! List ||
@@ -402,6 +428,37 @@ class VenueOfflineOrderBook {
           throw const OfflineProjectionException(
             'The payment exceeds the outstanding balance.',
           );
+        }
+        break;
+      case 'payment.batchRecorded':
+        final rawPayments = draft.payload['payments'];
+        if (draft.payload['batchId'] is! String ||
+            (draft.payload['batchId'] as String).isEmpty ||
+            rawPayments is! List ||
+            rawPayments.any((value) => value is! Map)) {
+          throw const OfflineProjectionException(
+            'The payment batch is invalid.',
+          );
+        }
+        final amount = rawPayments.whereType<Map>().fold<int>(
+          0,
+          (sum, value) =>
+              sum + ((value['baseAmountMinor'] as num?)?.toInt() ?? -1),
+        );
+        if (amount < 0 || amount > current.balanceDueMinor) {
+          throw const OfflineProjectionException(
+            'The payment batch exceeds the outstanding balance.',
+          );
+        }
+        if (draft.payload['closeIfSettled'] == true &&
+            amount != current.balanceDueMinor) {
+          throw const OfflineProjectionException(
+            'The order cannot close with an outstanding balance.',
+          );
+        }
+        if (draft.payload['printReceipt'] == true &&
+            (rawPayments.isNotEmpty || current.balanceDueMinor == 0)) {
+          catalogueProvider?.call().validateReceiptRoute(printRequired: true);
         }
         break;
       case 'order.closed':
@@ -473,6 +530,7 @@ OfflineOrderProjection _projectOrderEvents(List<OfflineEvent> events) {
 bool _isOrderEvent(OfflineEvent event) =>
     event.type.startsWith('order.') ||
     event.type == 'payment.recorded' ||
+    event.type == 'payment.batchRecorded' ||
     event.type == 'receipt.requested';
 
 String _canonicalJson(Object? value) => jsonEncode(_canonicalValue(value));

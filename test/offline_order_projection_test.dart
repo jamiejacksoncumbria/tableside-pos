@@ -61,6 +61,151 @@ void main() {
     expect(projection.payments.single.exchangeRateToBase, '1');
   });
 
+  test('payment batch records split tender and closes atomically', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 2000,
+      }),
+      _event(3, 'payment.batchRecorded', {
+        'orderId': 'order-a',
+        'batchId': 'checkout-a',
+        'payments': [
+          {
+            'paymentId': 'checkout-a-0',
+            'baseAmountMinor': 750,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+          },
+          {
+            'paymentId': 'checkout-a-1',
+            'baseAmountMinor': 1250,
+            'method': 'cardTerminal',
+            'currencyCode': 'TRY',
+          },
+        ],
+        'closeIfSettled': true,
+        'receiptNumber': 'OFF-2-checkout-a',
+      }),
+    ]);
+
+    expect(projection.payments, hasLength(2));
+    expect(projection.paidMinor, 2000);
+    expect(projection.balanceDueMinor, 0);
+    expect(projection.isClosed, isTrue);
+    expect(projection.receiptNumber, 'OFF-2-checkout-a');
+  });
+
+  test('payment batch is rejected in full when split tender overpays', () {
+    final events = [
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 2000,
+      }),
+      _event(3, 'payment.batchRecorded', {
+        'orderId': 'order-a',
+        'batchId': 'checkout-a',
+        'payments': [
+          {
+            'paymentId': 'checkout-a-0',
+            'baseAmountMinor': 1000,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+          },
+          {
+            'paymentId': 'checkout-a-1',
+            'baseAmountMinor': 1500,
+            'method': 'cardTerminal',
+            'currencyCode': 'TRY',
+          },
+        ],
+        'closeIfSettled': true,
+      }),
+    ];
+
+    expect(
+      () => projectOfflineOrder(events),
+      throwsA(isA<OfflineProjectionException>()),
+    );
+  });
+
+  test('manager adjustment changes the authoritative hub balance', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {
+        'orderId': 'order-a',
+        'tableId': 'table-a',
+      }),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 2,
+        'unitPriceMinor': 1500,
+      }),
+      _event(3, 'order.lineAdjusted', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'operation': 'discountUnitAmount',
+        'valueMinor': 250,
+        'reason': 'Manager goodwill',
+      }),
+    ]);
+
+    expect(projection.lines.values.single.unitPriceMinor, 1250);
+    expect(projection.totalMinor, 2500);
+    expect(projection.balanceDueMinor, 2500);
+  });
+
+  test('manager adjustment cannot reduce a bill below recorded payments', () {
+    final events = [
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 1500,
+      }),
+      _event(3, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 1000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }),
+      _event(4, 'order.lineAdjusted', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'operation': 'setUnitPrice',
+        'valueMinor': 500,
+        'reason': 'Invalid reduction',
+      }),
+    ];
+
+    expect(
+      () => projectOfflineOrder(events),
+      throwsA(
+        isA<OfflineProjectionException>().having(
+          (error) => error.message,
+          'message',
+          contains('payments already recorded'),
+        ),
+      ),
+    );
+  });
+
   test('delivery fee is included in payment and close validation', () {
     final projection = projectOfflineOrder([
       _event(1, 'order.opened', {

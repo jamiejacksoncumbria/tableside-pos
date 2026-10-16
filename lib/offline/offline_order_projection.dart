@@ -23,6 +23,8 @@ class OfflineProjectedLine {
     required this.taxRateBasisPoints,
     required this.taxRateName,
     required this.sent,
+    this.addedAtUtc,
+    this.sentAtUtc,
   });
 
   final String id;
@@ -35,21 +37,30 @@ class OfflineProjectedLine {
   final int taxRateBasisPoints;
   final String taxRateName;
   final bool sent;
+  final DateTime? addedAtUtc;
+  final DateTime? sentAtUtc;
 
   int get totalMinor => quantity * unitPriceMinor;
 
-  OfflineProjectedLine copyWith({int? quantity, bool? sent}) =>
+  OfflineProjectedLine copyWith({
+    int? quantity,
+    int? unitPriceMinor,
+    bool? sent,
+    DateTime? sentAtUtc,
+  }) =>
       OfflineProjectedLine(
         id: id,
         productId: productId,
         name: name,
         quantity: quantity ?? this.quantity,
-        unitPriceMinor: unitPriceMinor,
+        unitPriceMinor: unitPriceMinor ?? this.unitPriceMinor,
         productionArea: productionArea,
         details: details,
         taxRateBasisPoints: taxRateBasisPoints,
         taxRateName: taxRateName,
         sent: sent ?? this.sent,
+        addedAtUtc: addedAtUtc,
+        sentAtUtc: sentAtUtc ?? this.sentAtUtc,
       );
 }
 
@@ -182,6 +193,8 @@ class OfflineOrderProjection {
             'taxRateBasisPoints': line.taxRateBasisPoints,
             'taxRateName': line.taxRateName,
             'sent': line.sent,
+            'addedAtUtc': line.addedAtUtc?.toIso8601String(),
+            'sentAtUtc': line.sentAtUtc?.toIso8601String(),
           },
         )
         .toList(growable: false),
@@ -322,6 +335,12 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
             (value['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
         taxRateName: value['taxRateName'] as String? ?? 'Zero Rate',
         sent: value['sent'] == true,
+        addedAtUtc: DateTime.tryParse(
+          value['addedAtUtc'] as String? ?? '',
+        )?.toUtc(),
+        sentAtUtc: DateTime.tryParse(
+          value['sentAtUtc'] as String? ?? '',
+        )?.toUtc(),
       );
     }
     final rawPayments = payload['payments'];
@@ -491,6 +510,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
               (event.payload['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
           taxRateName: event.payload['taxRateName'] as String? ?? 'Zero Rate',
           sent: false,
+          addedAtUtc: event.createdAtUtc,
         );
         break;
       case 'order.itemQuantityChanged':
@@ -509,6 +529,53 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           lines[lineId] = existing.copyWith(quantity: quantity);
         }
         break;
+      case 'order.lineAdjusted':
+        _requireOpened(opened);
+        final lineId = _requiredString(event.payload, 'lineId');
+        final existing = lines[lineId];
+        if (existing == null) {
+          throw const OfflineProjectionException(
+            'Only an existing sale line can be adjusted.',
+          );
+        }
+        final operation = _requiredString(event.payload, 'operation');
+        final reason = _requiredString(event.payload, 'reason').trim();
+        if (reason.isEmpty) {
+          throw const OfflineProjectionException(
+            'A manager adjustment needs a reason.',
+          );
+        }
+        if (operation == 'remove') {
+          lines.remove(lineId);
+        } else {
+          final valueMinor = _nonNegativeInt(event.payload, 'valueMinor');
+          final nextPrice = operation == 'setUnitPrice'
+              ? valueMinor
+              : operation == 'discountUnitAmount'
+              ? existing.unitPriceMinor - valueMinor
+              : -1;
+          if (nextPrice < 0) {
+            throw const OfflineProjectionException(
+              'The manager price adjustment is invalid.',
+            );
+          }
+          lines[lineId] = existing.copyWith(unitPriceMinor: nextPrice);
+        }
+        final adjustedTotal = lines.values.fold<int>(
+              0,
+              (sum, line) => sum + line.totalMinor,
+            ) +
+            (channel == 'delivery' ? deliveryFeeMinor : 0);
+        final alreadyPaid = payments.fold<int>(
+          0,
+          (sum, payment) => sum + payment.baseAmountMinor,
+        );
+        if (lines.isEmpty || adjustedTotal < alreadyPaid) {
+          throw const OfflineProjectionException(
+            'This adjustment would invalidate payments already recorded.',
+          );
+        }
+        break;
       case 'order.sent':
         _requireOpened(opened);
         final rawLineIds = event.payload['lineIds'];
@@ -523,7 +590,10 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
               'A send event refers to an unknown line.',
             );
           }
-          lines[value] = lines[value]!.copyWith(sent: true);
+          lines[value] = lines[value]!.copyWith(
+            sent: true,
+            sentAtUtc: event.createdAtUtc,
+          );
         }
         break;
       case 'order.fulfilmentChanged':
@@ -616,6 +686,70 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
                 (event.payload['cashChangeBaseMinor'] as num?)?.toInt() ?? 0,
           ),
         );
+        break;
+      case 'payment.batchRecorded':
+        _requireOpened(opened);
+        _requiredString(event.payload, 'batchId');
+        final rawPayments = event.payload['payments'];
+        if (rawPayments is! List || rawPayments.any((value) => value is! Map)) {
+          throw const OfflineProjectionException(
+            'The payment batch is invalid.',
+          );
+        }
+        final total =
+            lines.values.fold<int>(0, (sum, line) => sum + line.totalMinor) +
+            (channel == 'delivery' ? deliveryFeeMinor : 0);
+        var paid = payments.fold<int>(
+          0,
+          (sum, payment) => sum + payment.baseAmountMinor,
+        );
+        for (final rawPayment in rawPayments.whereType<Map>()) {
+          final payment = Map<String, Object?>.from(rawPayment);
+          final paymentId = _requiredString(payment, 'paymentId');
+          final amountMinor = _positiveInt(payment, 'baseAmountMinor');
+          if (!paymentIds.add(paymentId)) {
+            final existing = payments
+                .where((item) => item.id == paymentId)
+                .first;
+            if (existing.baseAmountMinor == amountMinor) continue;
+            throw const OfflineProjectionException(
+              'A payment ID was used more than once.',
+            );
+          }
+          if (paid + amountMinor > total) {
+            throw const OfflineProjectionException(
+              'The payment batch exceeds the outstanding balance.',
+            );
+          }
+          payments.add(
+            OfflineProjectedPayment(
+              id: paymentId,
+              baseAmountMinor: amountMinor,
+              tenderedAmountMinor:
+                  (payment['tenderedAmountMinor'] as num?)?.toInt() ??
+                  amountMinor,
+              method: _requiredString(payment, 'method'),
+              currencyCode: _requiredString(payment, 'currencyCode'),
+              exchangeRateToBase:
+                  payment['exchangeRateToBase'] as String? ?? '1',
+              recordedAtUtc: event.createdAtUtc,
+              terminalLabel: payment['terminalLabel'] as String?,
+              cashChangeBaseMinor:
+                  (payment['cashChangeBaseMinor'] as num?)?.toInt() ?? 0,
+            ),
+          );
+          paid += amountMinor;
+        }
+        if (event.payload['closeIfSettled'] == true) {
+          if (lines.isEmpty || paid != total) {
+            throw const OfflineProjectionException(
+              'An order may close only when its balance is exactly zero.',
+            );
+          }
+          closed = true;
+          receiptNumber = event.payload['receiptNumber'] as String?;
+          closedAtUtc = event.createdAtUtc;
+        }
         break;
       case 'order.closed':
         _requireOpened(opened);

@@ -8,6 +8,32 @@ import 'package:tableside_pos/offline/venue_hub_command_processor.dart';
 import 'package:tableside_pos/offline/venue_hub_protocol.dart';
 
 void main() {
+  test('manager sale adjustments require manager permission', () {
+    final processor = VenueHubCommandProcessor(
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+      hubEpoch: 2,
+      credentials: const {},
+      authorizeStaff: (_, _, _) async => null,
+      commitEvent: (draft, epoch) async => _event(draft, epoch),
+    );
+
+    expect(processor.permissionForEvent('order.lineAdjusted'), 'manager');
+  });
+
+  test('atomic payment batches require payment permission', () {
+    final processor = VenueHubCommandProcessor(
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+      hubEpoch: 2,
+      credentials: const {},
+      authorizeStaff: (_, _, _) async => null,
+      commitEvent: (draft, epoch) async => _event(draft, epoch),
+    );
+
+    expect(processor.permissionForEvent('payment.batchRecorded'), 'payment');
+  });
+
   test('requires both device signature and active staff permission', () async {
     final algorithm = Ed25519();
     final keyPair = await algorithm.newKeyPairFromSeed(List<int>.filled(32, 4));

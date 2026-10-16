@@ -238,10 +238,75 @@ class VenueHubPrintQueue {
     await _persist();
   });
 
+  /// Queues a clearly marked cancellation ticket when a manager removes an
+  /// item which has already reached production. The sale adjustment remains
+  /// authoritative even if a venue has no active route, matching the online
+  /// server behaviour, but the missing route is logged rather than silently
+  /// inventing a successful print.
+  Future<void> enqueueCancellation({
+    required OfflineOrderProjection order,
+    required OfflineProjectedLine line,
+    required String reason,
+    required String createdByName,
+    required String eventId,
+  }) => _run(() async {
+    final route = _routes()[line.productionArea];
+    if (route == null || route.primaryDeviceId.isEmpty) {
+      AppLogger.info(
+        'Hub cancellation ticket not queued: no active ${line.productionArea} route for order ${order.orderId}.',
+      );
+      return;
+    }
+    final id =
+        'offline-$hubEpoch-${order.orderId}-${line.productionArea}-cancel-$eventId';
+    _jobs.putIfAbsent(
+      id,
+      () => VenueHubLocalPrintJob(
+        id: id,
+        targetDeviceId: route.primaryDeviceId,
+        fallbackDeviceId: route.fallbackDeviceId,
+        orderId: order.orderId,
+        productionArea: line.productionArea,
+        createdAtUtc: TrustedClock.instance.nowUtc(),
+        attempts: 0,
+        status: 'queued',
+        payload: <String, Object?>{
+          'type': 'production',
+          'ticketId': id,
+          'restaurantName':
+              snapshot['venueName'] ?? snapshot['tenantName'] ?? '',
+          'reference': 'CANCEL ${order.orderId.split('-').last}',
+          'productionArea': line.productionArea,
+          'tableLabel': _tableLabel(order.tableId),
+          'tabName': order.tabName,
+          'channel': order.channel,
+          'customerName': order.customerName,
+          'deliveryAddress': order.deliveryAddress,
+          'scheduledForMillis':
+              order.scheduledForUtc?.toLocal().millisecondsSinceEpoch,
+          'createdByName': createdByName,
+          'isAddition': true,
+          'lines': <Map<String, Object?>>[
+            <String, Object?>{
+              'name': 'CANCEL ${line.name}',
+              'quantity': line.quantity,
+              'details': <String>['Reason: $reason'],
+            },
+          ],
+        },
+      ),
+    );
+    AppLogger.info(
+      'Hub cancellation queued: job=$id, device=${route.primaryDeviceId}.',
+    );
+    await _persist();
+  });
+
   Future<void> enqueueReceipt({
     required OfflineOrderProjection order,
     required bool printRequired,
     bool isPreReceipt = false,
+    bool isPartPayment = false,
     bool isDeliveryNote = false,
     String? jobSuffix,
   }) => _run(() async {
@@ -288,6 +353,7 @@ class VenueHubPrintQueue {
         payload: <String, Object?>{
           'type': 'receipt',
           'isPreReceipt': isPreReceipt,
+          'isPartPayment': isPartPayment,
           'isDeliveryNote': isDeliveryNote,
           'receiptNumber':
               order.receiptNumber ?? 'OFF-$hubEpoch-${order.lastSequence}',
@@ -317,9 +383,15 @@ class VenueHubPrintQueue {
           'lines': order.lines.values
               .map(
                 (line) => <String, Object?>{
+                  'productId': line.productId,
                   'name': line.name,
                   'quantity': line.quantity,
+                  'unitPriceMinor': line.unitPriceMinor,
                   'lineTotalMinor': line.totalMinor,
+                  'details': line.details,
+                  'taxRateBasisPoints': line.taxRateBasisPoints,
+                  'taxRateName': line.taxRateName,
+                  'addedAtMillis': line.addedAtUtc?.millisecondsSinceEpoch,
                 },
               )
               .toList(growable: false),
@@ -333,7 +405,8 @@ class VenueHubPrintQueue {
                   'exchangeRateToBase': payment.exchangeRateToBase,
                   'terminalLabel': payment.terminalLabel,
                   'cashChangeBaseMinor': payment.cashChangeBaseMinor,
-                  'recordedAt': payment.recordedAtUtc.toIso8601String(),
+                  'recordedAtMillis':
+                      payment.recordedAtUtc.millisecondsSinceEpoch,
                 },
               )
               .toList(growable: false),
@@ -356,7 +429,10 @@ class VenueHubPrintQueue {
                 const <String>[],
             'receiptFooter': snapshot['receiptFooter'] ?? '',
           },
-          if (isPreReceipt) 'balanceDueMinor': order.balanceDueMinor,
+          if (isPreReceipt || isPartPayment) ...<String, Object?>{
+            'paidTotalMinor': order.paidMinor,
+            'balanceDueMinor': order.balanceDueMinor,
+          },
         },
       ),
     );

@@ -90,6 +90,24 @@ void main() {
     expect(lines.last.name, contains('Cooking: Well done'));
   });
 
+  test('preserves canonical hub production details on a paid receipt', () {
+    final lines = aggregateReceiptPayloadLines([
+      {
+        'productId': 'curry',
+        'name': 'Chicken curry',
+        'quantity': 1,
+        'unitPriceMinor': 18000,
+        'lineTotalMinor': 18000,
+        'details': ['Hot', 'Rice: Pilau', 'NOTE: no coriander'],
+      },
+    ]);
+
+    expect(lines, hasLength(1));
+    expect(lines.single.name, contains('Chicken curry'));
+    expect(lines.single.name, contains('Rice: Pilau'));
+    expect(lines.single.name, contains('NOTE: no coriander'));
+  });
+
   test('keeps the same product on different dates as separate lines', () {
     final firstDay = DateTime(2026, 9, 10, 22).millisecondsSinceEpoch;
     final secondDay = DateTime(2026, 9, 11, 1).millisecondsSinceEpoch;

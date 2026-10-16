@@ -1315,13 +1315,22 @@ class ProductionCommandRepository {
     required String operation,
     required String reason,
     int? valueMinor,
-  }) {
+  }) async {
     if (VenueHubClientRegistry.instance.requiresHub(scope)) {
-      throw StateError(
-        'Item discounts and removals are unavailable while venue-hub routing is active.',
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'order.lineAdjusted',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'lineId': lineId,
+          'operation': operation,
+          'reason': reason.trim(),
+          if (valueMinor != null) 'valueMinor': valueMinor,
+        },
       );
+      return;
     }
-    return _call('adjustOrderLine', {
+    await _call('adjustOrderLine', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'orderId': order.id,
@@ -1569,43 +1578,43 @@ class ProductionCommandRepository {
         assignedDriverName: order.assignedDriverName,
       );
       var paidThisTime = 0;
+      final hubPayments = <Map<String, Object?>>[];
       for (var index = 0; index < payments.length; index++) {
         final payment = payments[index];
         final baseAmount = _baseAmountMinor(payment);
         paidThisTime += baseAmount;
-        await _sendHubEvent(
-          scope: scope,
-          eventType: 'payment.recorded',
-          payload: <String, Object?>{
-            'orderId': order.id,
-            'paymentId': '$requestId-$index',
-            'method': payment.method.name,
-            'baseAmountMinor': baseAmount,
-            'tenderedAmountMinor': payment.tenderedAmountMinor,
-            'currencyCode': payment.tenderedCurrencyCode,
-            'exchangeRateToBase': payment.exchangeRateToBase,
-            if (payment.terminalLabel != null)
-              'terminalLabel': payment.terminalLabel,
-            'cashChangeBaseMinor': payment.cashChangeBaseMinor,
-          },
-        );
+        hubPayments.add(<String, Object?>{
+          'paymentId': '$requestId-$index',
+          'method': payment.method.name,
+          'baseAmountMinor': baseAmount,
+          'tenderedAmountMinor': payment.tenderedAmountMinor,
+          'currencyCode': payment.tenderedCurrencyCode,
+          'exchangeRateToBase': payment.exchangeRateToBase,
+          if (payment.terminalLabel != null)
+            'terminalLabel': payment.terminalLabel,
+          'cashChangeBaseMinor': payment.cashChangeBaseMinor,
+        });
       }
       final paidTotal = order.paidMinor + paidThisTime;
       final balance = (order.totalMinor - paidTotal).clamp(0, order.totalMinor);
       final closed = balance == 0;
       final receiptNumber =
           'OFF-${hub.hubEpochFor(scope)}-${requestId.split('-').last}';
-      if (closed) {
-        await _sendHubEvent(
-          scope: scope,
-          eventType: 'order.closed',
-          payload: <String, Object?>{
-            'orderId': order.id,
-            'printReceipt': printReceipt,
-            'receiptNumber': receiptNumber,
-          },
-        );
-      }
+      // All tenders and the close decision are one idempotent ledger fact.
+      // Previously a network break between payment.recorded and order.closed
+      // could accept money while reporting that checkout failed.
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'payment.batchRecorded',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'batchId': requestId,
+          'payments': hubPayments,
+          'closeIfSettled': closed,
+          'printReceipt': printReceipt,
+          'receiptNumber': receiptNumber,
+        },
+      );
       return BillCloseResult(
         billId: 'offline-${order.id}',
         totalMinor: order.totalMinor,
@@ -1615,8 +1624,8 @@ class ProductionCommandRepository {
         currencyCode: baseCurrencyCode.trim().toUpperCase(),
         receiptNumber: receiptNumber,
         alreadyClosed: false,
-        receiptPrintRequested: printReceipt && closed,
-        receiptPrintQueued: printReceipt && closed,
+        receiptPrintRequested: printReceipt,
+        receiptPrintQueued: printReceipt && (closed || payments.isNotEmpty),
         orderClosed: closed,
         paidThisTimeMinor: paidThisTime,
         paidTotalMinor: paidTotal,
@@ -1816,7 +1825,7 @@ class ProductionCommandRepository {
   }) async {
     if (VenueHubClientRegistry.instance.requiresHub(scope)) {
       throw StateError(
-        'Bill splitting is not yet available through the venue hub. Reconnect and deactivate hub routing before splitting.',
+        'Bill splitting is temporarily unavailable while secure venue-hub routing is active. The order was not changed.',
       );
     }
     final response = await _call('splitOrder', {

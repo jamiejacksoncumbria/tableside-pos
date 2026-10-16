@@ -21,7 +21,9 @@ class NativePrintWorker {
     required this.venueId,
     required this.deviceId,
     required this.deviceCredential,
-  });
+    Set<String>? printedAwaitingCompletion,
+  }) : printedAwaitingCompletion =
+           printedAwaitingCompletion ?? <String>{};
 
   final PrintJobRepository queue;
   final NativeReceiptPrinter printer;
@@ -29,6 +31,7 @@ class NativePrintWorker {
   final String venueId;
   final String deviceId;
   final String deviceCredential;
+  final Set<String> printedAwaitingCompletion;
 
   /// Call this from a native foreground/background service on a short timer,
   /// and also when the Firestore queue stream reports new work.
@@ -46,27 +49,53 @@ class NativePrintWorker {
       'area=${job.productionArea ?? 'unknown'}, attempt=${job.attempts}.',
     );
 
-    try {
-      await printer.printTicket(
-        payload: job.payload,
-        idempotencyKey: job.idempotencyKey,
+    if (!printedAwaitingCompletion.contains(job.idempotencyKey)) {
+      try {
+        await printer.printTicket(
+          payload: job.payload,
+          idempotencyKey: job.idempotencyKey,
+        );
+        // Keep an in-process delivery checkpoint until the queue authority
+        // confirms completion. If the HTTP response is interrupted after the
+        // physical printer accepted the ticket, the resumed claim must only
+        // retry its acknowledgement, never print a second kitchen ticket.
+        printedAwaitingCompletion.add(job.idempotencyKey);
+      } on Object catch (error, stackTrace) {
+        AppLogger.error('Print ticket ${job.idempotencyKey}', error, stackTrace);
+        await queue.complete(
+          job: job,
+          deviceCredential: deviceCredential,
+          printed: false,
+          failureReason: error.toString(),
+        );
+        return PrintWorkerResult.failed;
+      }
+    } else {
+      AppLogger.info(
+        'Printer job ${job.id} was already delivered; retrying completion acknowledgement only.',
       );
+    }
+
+    try {
       await queue.complete(
         job: job,
         deviceCredential: deviceCredential,
         printed: true,
       );
+      printedAwaitingCompletion.remove(job.idempotencyKey);
       AppLogger.info('Printer job completed: job=${job.id}, printed=true.');
       return PrintWorkerResult.printed;
     } on Object catch (error, stackTrace) {
-      AppLogger.error('Print ticket ${job.idempotencyKey}', error, stackTrace);
-      await queue.complete(
-        job: job,
-        deviceCredential: deviceCredential,
-        printed: false,
-        failureReason: error.toString(),
+      AppLogger.error(
+        'Confirm printed ticket ${job.idempotencyKey}',
+        error,
+        stackTrace,
       );
-      return PrintWorkerResult.failed;
+      // The paper has already left the printer. Never report it as a physical
+      // failure or route a fallback copy merely because the completion
+      // acknowledgement was interrupted. The owner worker retains the local
+      // checkpoint and resumes this exact claim on its next pass.
+      rethrow;
     }
   }
 }
