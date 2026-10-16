@@ -127,6 +127,28 @@ class VenueOfflineOrderBook {
         return previous;
       }
     }
+    if (draft.type == 'order.opened') {
+      final baselineMatches = existing
+          .where(
+            (event) =>
+                event.type == 'order.cloudBaseline' &&
+                event.payload['orderId'] == draft.payload['orderId'],
+          )
+          .toList(growable: false);
+      if (baselineMatches.isNotEmpty) {
+        final baseline = baselineMatches.last;
+        if (!_sameOpenedOrderIdentity(baseline.payload, draft.payload)) {
+          throw const OfflineProjectionException(
+            'The restored order identity does not match this table or tab.',
+          );
+        }
+        // A replacement hub can know an open order only through its signed
+        // cloud baseline. `ensureOrderOpened` is an idempotent assertion, not
+        // a request to create a second order. Return that durable baseline as
+        // the acknowledgement and do not append a duplicate opening event.
+        return baseline;
+      }
+    }
     bool hasSameIdentity(OfflineEvent event) {
       if (event.type != draft.type ||
           event.payload['orderId'] != draft.payload['orderId']) {
@@ -500,6 +522,30 @@ class VenueOfflineOrderBook {
           .toList(growable: false),
     );
   }
+}
+
+bool _sameOpenedOrderIdentity(
+  Map<String, Object?> authoritative,
+  Map<String, Object?> proposed,
+) {
+  if (authoritative['orderId'] != proposed['orderId'] ||
+      (authoritative['channel'] ?? 'dineIn') !=
+          (proposed['channel'] ?? 'dineIn')) {
+    return false;
+  }
+  final proposedTable = proposed['tableId'];
+  if (proposedTable is String &&
+      proposedTable.isNotEmpty &&
+      authoritative['tableId'] != proposedTable) {
+    return false;
+  }
+  final proposedTab = proposed['tabName'];
+  if (proposedTab is String &&
+      proposedTab.isNotEmpty &&
+      authoritative['tabName'] != proposedTab) {
+    return false;
+  }
+  return true;
 }
 
 /// Prefers the complete local event chain whenever it can stand on its own.

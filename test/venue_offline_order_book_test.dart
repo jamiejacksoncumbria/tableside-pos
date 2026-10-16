@@ -6,6 +6,7 @@ import 'package:tableside_pos/offline/offline_event.dart';
 import 'package:tableside_pos/offline/offline_event_crypto.dart';
 import 'package:tableside_pos/offline/offline_event_ledger.dart';
 import 'package:tableside_pos/offline/offline_event_store_native.dart';
+import 'package:tableside_pos/offline/offline_order_projection.dart';
 import 'package:tableside_pos/offline/venue_offline_order_book.dart';
 
 void main() {
@@ -43,6 +44,125 @@ void main() {
       'channel': 'dineIn',
     });
     expect(tableTwo, isNot(tableOne));
+  });
+
+  test('order ensure accepts a matching signed recovery baseline', () async {
+    final database = sqlite3.openInMemory();
+    final store = NativeOfflineEventStore(
+      database: database,
+      crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
+    );
+    addTearDown(store.close);
+    final ledger = OfflineEventLedger.forTesting(store);
+    await ledger.initialize();
+    final baseline = await ledger.commit(
+      OfflineEventDraft(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'hub-cloud-migration',
+        staffId: 'cloud-verified-baseline',
+        type: 'order.cloudBaseline',
+        payload: <String, Object?>{
+          'orderId': 'order-a',
+          'sourceOfflineHubEpoch': 3,
+          'openedAtUtc': '2026-10-13T10:00:00.000Z',
+          'channel': 'dineIn',
+          'tableId': 'table-a',
+          'deliveryFeeMinor': 0,
+          'lines': <Object?>[],
+          'payments': <Object?>[],
+        },
+      ),
+      hubEpoch: 3,
+    );
+    final orderBook = VenueOfflineOrderBook(
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+      hubEpoch: 3,
+      ledger: ledger,
+    );
+
+    final acknowledged = await orderBook.commit(
+      OfflineEventDraft(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'terminal-a',
+        staffId: 'staff-a',
+        type: 'order.opened',
+        payload: <String, Object?>{
+          'orderId': 'order-a',
+          'channel': 'dineIn',
+          'tableId': 'table-a',
+        },
+      ),
+      3,
+    );
+
+    expect(acknowledged.id, baseline.id);
+    expect(
+      await ledger.eventsForVenue(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        hubEpoch: 3,
+      ),
+      hasLength(1),
+    );
+  });
+
+  test('order ensure rejects a conflicting recovery location', () async {
+    final database = sqlite3.openInMemory();
+    final store = NativeOfflineEventStore(
+      database: database,
+      crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
+    );
+    addTearDown(store.close);
+    final ledger = OfflineEventLedger.forTesting(store);
+    await ledger.initialize();
+    await ledger.commit(
+      OfflineEventDraft(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'hub-cloud-migration',
+        staffId: 'cloud-verified-baseline',
+        type: 'order.cloudBaseline',
+        payload: <String, Object?>{
+          'orderId': 'order-a',
+          'sourceOfflineHubEpoch': 3,
+          'openedAtUtc': '2026-10-13T10:00:00.000Z',
+          'channel': 'dineIn',
+          'tableId': 'table-a',
+          'deliveryFeeMinor': 0,
+          'lines': <Object?>[],
+          'payments': <Object?>[],
+        },
+      ),
+      hubEpoch: 3,
+    );
+    final orderBook = VenueOfflineOrderBook(
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+      hubEpoch: 3,
+      ledger: ledger,
+    );
+
+    expect(
+      () => orderBook.commit(
+        OfflineEventDraft(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'terminal-a',
+          staffId: 'staff-a',
+          type: 'order.opened',
+          payload: <String, Object?>{
+            'orderId': 'order-a',
+            'channel': 'dineIn',
+            'tableId': 'table-b',
+          },
+        ),
+        3,
+      ),
+      throwsA(isA<OfflineProjectionException>()),
+    );
   });
 
   test('redundant baseline cannot poison an already closed local order', () async {
