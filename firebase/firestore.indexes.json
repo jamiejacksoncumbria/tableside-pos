@@ -58,6 +58,14 @@
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "createdAt", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "notificationEvents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "venueId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [

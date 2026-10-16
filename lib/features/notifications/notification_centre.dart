@@ -234,24 +234,28 @@ class OperationalNotificationHost extends ConsumerStatefulWidget {
 class _OperationalNotificationHostState
     extends ConsumerState<OperationalNotificationHost> {
   String? _scopeKey;
-  bool _seeded = false;
-  final Set<String> _seen = <String>{};
+  final OperationalNotificationBootstrap _bootstrap =
+      OperationalNotificationBootstrap();
 
   @override
   Widget build(BuildContext context) {
     final scope = ref.watch(activeVenueScopeProvider);
     final staff = ref.watch(activeStaffPinSessionProvider);
-    final key = scope == null ? null : '${scope.tenantId}/${scope.venueId}';
+    final key = scope == null || staff == null
+        ? null
+        : '${scope.tenantId}/${scope.venueId}/${staff.userId}';
     if (_scopeKey != key) {
       _scopeKey = key;
-      _seeded = false;
-      _seen.clear();
+      _bootstrap.reset();
     }
     if (scope == null || staff == null) return const SizedBox.shrink();
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: FirebaseFirestore.instance
           .collection('tenants/${scope.tenantId}/notificationEvents')
           .where('venueId', isEqualTo: scope.venueId)
+          // Without an explicit creation order Firestore limits by document
+          // ID, so a busy venue can eventually stop receiving newer events.
+          .orderBy('createdAt', descending: true)
           .limit(100)
           .snapshots(includeMetadataChanges: true),
       builder: (context, snapshot) {
@@ -263,20 +267,15 @@ class _OperationalNotificationHostState
           );
         }
         final documents = snapshot.data?.docs ?? const [];
-        if (!_seeded) {
-          // Do not seed from an empty/stale local cache. Wait for the server
-          // snapshot, then mark every existing record as historic. Otherwise
-          // the later server response looks like a burst of new alerts each
-          // time a staff member logs in.
-          if (snapshot.data?.metadata.isFromCache == true) {
-            return const SizedBox.shrink();
-          }
-          _seen.addAll(documents.map((document) => document.id));
-          _seeded = true;
-          return const SizedBox.shrink();
-        }
+        final newDocumentIds = _bootstrap
+            .acceptSnapshot(
+              hasData: snapshot.hasData,
+              isFromCache: snapshot.data?.metadata.isFromCache == true,
+              documentIds: documents.map((document) => document.id),
+            )
+            .toSet();
         for (final document in documents) {
-          if (!_seen.add(document.id)) continue;
+          if (!newDocumentIds.contains(document.id)) continue;
           final data = document.data();
           final users = (data['recipientUserIds'] as List? ?? const [])
               .whereType<String>();
@@ -306,6 +305,45 @@ class _OperationalNotificationHostState
         return const SizedBox.shrink();
       },
     );
+  }
+}
+
+/// Tracks the authoritative starting point of the operational notification
+/// stream. A [StreamBuilder] first builds with no data; treating that waiting
+/// frame as an empty server result causes every historical Firestore document
+/// to be replayed as a new notification a moment later.
+///
+/// This small state machine is kept separate from the widget so the startup
+/// race remains covered by a deterministic unit test.
+class OperationalNotificationBootstrap {
+  bool _seeded = false;
+  final Set<String> _seen = <String>{};
+
+  void reset() {
+    _seeded = false;
+    _seen.clear();
+  }
+
+  Iterable<String> acceptSnapshot({
+    required bool hasData,
+    required bool isFromCache,
+    required Iterable<String> documentIds,
+  }) {
+    // Wait for an actual authoritative Firestore result. In particular,
+    // `hasData == false` is the normal first StreamBuilder frame and must not
+    // initialise the cursor with an empty set.
+    if (!_seeded) {
+      if (!hasData || isFromCache) return const <String>[];
+      _seen.addAll(documentIds);
+      _seeded = true;
+      return const <String>[];
+    }
+
+    final added = <String>[];
+    for (final id in documentIds) {
+      if (_seen.add(id)) added.add(id);
+    }
+    return added;
   }
 }
 
