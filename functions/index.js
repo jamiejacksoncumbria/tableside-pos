@@ -2174,6 +2174,139 @@ async function manageFulfilmentFor(caller, rawData) {
     return {documentId: reference.id, saved: true};
   }
 
+  if (operation === "cancelLegacyOrder") {
+    if (!canManage || documentId == null) {
+      throw new HttpsError(
+        "permission-denied",
+        "Only a manager or owner can cancel a legacy order.",
+      );
+    }
+    const reason = requiredText(values, "reason", 500).trim();
+    if (reason.length < 5) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Enter a clear cancellation reason of at least five characters.",
+      );
+    }
+    await requireFreshManagerPin(
+      caller, tenantId, venueId, values.managerPin, "cancelLegacyOrder",
+    );
+    const orderRef = tenantRef.collection("orders").doc(documentId);
+    const ticketSnapshot = await tenantRef.collection("productionTickets")
+      .where("orderId", "==", documentId).get();
+    const auditRef = tenantRef.collection("auditEvents").doc();
+    const notificationRef = tenantRef.collection("notificationEvents").doc();
+    await db.runTransaction(async (transaction) => {
+      const order = await transaction.get(orderRef);
+      if (!order.exists || order.data().venueId !== venueId) {
+        throw new HttpsError("not-found", "That legacy order was not found.");
+      }
+      const orderData = order.data();
+      if (!["collection", "delivery"].includes(orderData.channel)) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Only a legacy collection or delivery can be cleaned up here.",
+        );
+      }
+      if (["closed", "cancelled"].includes(orderData.status) ||
+          orderData.fulfilmentStatus === "cancelled") {
+        throw new HttpsError("already-exists", "That order is already closed or cancelled.");
+      }
+      const payments = Array.isArray(orderData.payments) ? orderData.payments : [];
+      const paidMinor = payments.reduce((sum, payment) =>
+        sum + Number(payment?.baseAmountMinor ?? 0), 0);
+      if (paidMinor !== 0) {
+        throw new HttpsError(
+          "failed-precondition",
+          "A paid order cannot be removed as legacy data. Use Refunds & corrections.",
+        );
+      }
+      const activeHub = venue.data().offlineHub;
+      const activeHubEpoch = Number(activeHub?.epoch ?? 0);
+      const orderHubEpoch = Number(orderData.offlineHubEpoch ?? 0);
+      // Cleanup is intentionally available only while a hub is active and the
+      // order belongs to an older generation. Pre-hub orders have no epoch and
+      // therefore normalise to generation zero; current/future generations
+      // can never use this administrative cleanup route.
+      if (activeHub?.enabled !== true || activeHubEpoch <= 0 ||
+          orderHubEpoch >= activeHubEpoch) {
+        throw new HttpsError(
+          "failed-precondition",
+          "This is a current EPOS 3 order and must be cancelled through the venue hub.",
+        );
+      }
+
+      let table = null;
+      let tableRef = null;
+      if (typeof orderData.tableId === "string" && orderData.tableId.length > 0) {
+        tableRef = tenantRef.collection("tables").doc(orderData.tableId);
+        table = await transaction.get(tableRef);
+      }
+      let tab = null;
+      let tabRef = null;
+      if (typeof orderData.tabName === "string" && orderData.tabName.trim().length > 0) {
+        tabRef = openTabRegistryRef(tenantId, venueId, orderData.tabName);
+        tab = await transaction.get(tabRef);
+      }
+
+      transaction.update(orderRef, {
+        status: "cancelled",
+        fulfilmentStatus: "cancelled",
+        cancelledAt: FieldValue.serverTimestamp(),
+        cancelledReason: reason,
+        cancelledByActor: actor,
+        legacyCleanup: true,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      if (tableRef != null && table?.exists === true &&
+          table.data().currentOrderId === documentId) {
+        transaction.set(tableRef, {
+          currentOrderId: FieldValue.delete(),
+          hasOpenOrder: false,
+          updatedAt: FieldValue.serverTimestamp(),
+        }, {merge: true});
+      }
+      if (tabRef != null && tab?.exists === true &&
+          tab.data().orderId === documentId) {
+        transaction.delete(tabRef);
+      }
+      for (const ticket of ticketSnapshot.docs) {
+        if (ticket.data().venueId !== venueId) continue;
+        transaction.update(ticket.ref, {
+          status: "cancelled",
+          fulfilmentStatus: "cancelled",
+          cancelledAt: FieldValue.serverTimestamp(),
+          cancellationReason: reason,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+      transaction.create(auditRef, {
+        action: "cancelLegacyOrder",
+        venueId,
+        orderId: documentId,
+        previousStatus: orderData.status ?? null,
+        previousFulfilmentStatus: orderData.fulfilmentStatus ?? null,
+        previousOfflineHubEpoch: orderHubEpoch,
+        activeHubEpoch,
+        reason,
+        actor,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+      transaction.create(notificationRef, {
+        venueId,
+        type: "order.legacyCancelled",
+        orderId: documentId,
+        recipientRoles: ["manager", "owner"],
+        title: "Legacy order cancelled",
+        body: `${orderData.customerName ?? documentId}: ${reason}`,
+        status: "pending",
+        createdAt: FieldValue.serverTimestamp(),
+        createdByActor: actor,
+      });
+    });
+    return {documentId, cancelled: true};
+  }
+
   if (operation === "updateOrderFulfilment") {
     if (documentId == null) throw new HttpsError("invalid-argument", "An order is required.");
     const status = requiredText(values, "status", 40);
@@ -5015,17 +5148,19 @@ async function actingCallerFromStaffSession(hostCaller, data) {
   return {...hostCaller, uid: actingUserId, hostUid: hostCaller.uid};
 }
 
-// Sensitive financial corrections must not rely only on the existing
-// 30-minute staff session. The acting manager re-enters their own PIN for
-// every refund; failures use the same three-attempt lock as normal sign-in.
-async function requireFreshManagerPin(caller, tenantId, venueId, rawPin) {
+// Sensitive operations must not rely only on the existing 30-minute staff
+// session. The acting manager re-enters their own PIN for each operation;
+// failures use the same three-attempt lock as normal sign-in.
+async function requireFreshManagerPin(
+  caller, tenantId, venueId, rawPin, action = "sensitiveManagerAction",
+) {
   const pin = typeof rawPin === "string" ? rawPin.trim() : "";
   if (!/^\d{6}$/.test(pin)) {
     throw new HttpsError("invalid-argument", "Enter the manager's six-digit PIN.");
   }
   const {roles} = await requireTenantOperationalMember(caller, tenantId);
   if (!roles.some((role) => role === "owner" || role === "manager")) {
-    throw new HttpsError("permission-denied", "A manager or owner must approve this refund.");
+    throw new HttpsError("permission-denied", "A manager or owner must approve this action.");
   }
   const pinRef = db.doc(
     `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`,
@@ -5066,7 +5201,7 @@ async function requireFreshManagerPin(caller, tenantId, venueId, rawPin) {
       userId: caller.uid,
       hostUserId: caller.hostUid ?? caller.uid,
       failedAttempts: result.failedAttempts,
-      action: "refundBill",
+      action,
       requiresManagerAttention: result.failedAttempts >= 3,
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -8382,7 +8517,9 @@ async function createRefundFor(caller, rawData) {
   const reason = requiredText(data, "reason", 500);
   const printReceipt = data.printReceipt !== false;
   const cardRefundConfirmed = data.cardRefundConfirmed === true;
-  await requireFreshManagerPin(caller, tenantId, venueId, data.managerPin);
+  await requireFreshManagerPin(
+    caller, tenantId, venueId, data.managerPin, "createRefund",
+  );
 
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
@@ -8753,7 +8890,9 @@ async function startTrainingModeFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const targetDeviceId = optionalText(data, "targetDeviceId", 1500) || null;
-  await requireFreshManagerPin(caller, tenantId, venueId, data.managerPin);
+  await requireFreshManagerPin(
+    caller, tenantId, venueId, data.managerPin, "startTrainingMode",
+  );
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
   const deviceRef = targetDeviceId == null
@@ -8940,7 +9079,9 @@ async function clearTrainingDataFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  await requireFreshManagerPin(caller, tenantId, venueId, data.managerPin);
+  await requireFreshManagerPin(
+    caller, tenantId, venueId, data.managerPin, "clearTrainingData",
+  );
   // Reserve one write in the batch for the audit event (Firestore permits a
   // maximum of 500 writes per batch).
   const snapshot = await db.collection(`tenants/${tenantId}/trainingOrders`)
