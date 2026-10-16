@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' show ClientException;
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
@@ -204,6 +205,16 @@ class QueuedNativePrintWorker {
     try {
       return await worker.processNext();
     } on Object catch (error, stackTrace) {
+      if (error is ClientException || error is SocketException) {
+        // A cloud claim can be committed immediately before its HTTP response
+        // is interrupted. The server lets this same enrolled device resume
+        // that claim on the next pass, so this is a temporary transport pause,
+        // not evidence that a physical printer or ticket failed.
+        AppLogger.info(
+          'Printer cloud queue temporarily unavailable; the claim will resume automatically. ($error)',
+        );
+        return PrintWorkerResult.noWork;
+      }
       AppLogger.error('Process queued native print job', error, stackTrace);
       return PrintWorkerResult.failed;
     }

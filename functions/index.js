@@ -3742,6 +3742,18 @@ async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
     const order = await tenantRef.collection("orders").doc(event.payload.orderId).get();
     if (!order.exists || order.data().venueId !== venueId) continue;
     const orderData = order.data();
+    let tableLabel = typeof orderData.tableLabel === "string" &&
+      orderData.tableLabel.trim().length > 0 ? orderData.tableLabel.trim() : null;
+    if (tableLabel == null && typeof orderData.tableId === "string" &&
+        orderData.tableId.length > 0) {
+      const table = await tenantRef.collection("tables").doc(orderData.tableId).get();
+      const candidate = table.exists ? table.data().label : null;
+      // Preserve the ID as a last-resort diagnostic, but normally materialise
+      // the human table number/name so Windows KDS and reprints never display
+      // an opaque Firestore document identifier.
+      tableLabel = typeof candidate === "string" && candidate.trim().length > 0
+        ? candidate.trim() : orderData.tableId;
+    }
     const channel = ["delivery", "collection"].includes(orderData.channel)
       ? orderData.channel : "dineIn";
     const scheduledForMillis = Date.parse(orderData.scheduledForUtc ?? "");
@@ -3768,7 +3780,7 @@ async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
       await ticketRef.create({
         venueId, orderId: event.payload.orderId,
         reference: String(event.payload.orderId).split("-").at(-1),
-        tableLabel: orderData.tableLabel ?? orderData.tableId ?? null,
+        tableLabel,
         tabName: orderData.tabName ?? null,
         channel,
         customerName: orderData.customerName ?? null,
@@ -4070,6 +4082,37 @@ async function getTrustedTimeFor(caller, rawData) {
 async function claimDevicePrintJobFor(caller, rawData) {
   const device = await authenticatedPrinterDevice(caller, rawData);
   const jobs = db.collection(`tenants/${device.tenantId}/printJobs`);
+  // Resume a claim already owned by this device before claiming another job.
+  // This covers the ambiguous network case where Firestore committed the
+  // transaction but the HTTPS response was closed before reaching the app.
+  const ownedClaims = await jobs
+    .where("venueId", "==", device.venueId)
+    .where("targetDeviceId", "==", device.deviceId)
+    .where("status", "==", "claimed")
+    .limit(10)
+    .get();
+  const owned = ownedClaims.docs
+    .filter((document) => document.data().claimedByDeviceId === device.deviceId)
+    .sort((left, right) => {
+      const leftTime = left.data().claimedAt?.toMillis?.() ?? 0;
+      const rightTime = right.data().claimedAt?.toMillis?.() ?? 0;
+      return leftTime - rightTime;
+    })[0];
+  if (owned != null) {
+    const value = owned.data();
+    return {job: {
+      id: owned.id,
+      venueId: value.venueId,
+      targetDeviceId: value.targetDeviceId,
+      orderId: value.orderId,
+      ticketId: value.ticketId ?? null,
+      productionArea: value.productionArea ?? null,
+      idempotencyKey: value.idempotencyKey,
+      createdAt: value.createdAt?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
+      attempts: Number.isInteger(value.attempts) ? value.attempts : 1,
+      payload: value.payload ?? {},
+    }};
+  }
   const candidates = await jobs
     .where("venueId", "==", device.venueId)
     .where("targetDeviceId", "==", device.deviceId)

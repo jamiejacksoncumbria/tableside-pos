@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tableside_pos/features/fulfilment/fulfilment_domain.dart';
+import 'package:tableside_pos/features/pos/domain.dart';
 import 'package:tableside_pos/offline/venue_hub_offline_view.dart';
 
 void main() {
@@ -112,6 +113,43 @@ void main() {
     await settingsExpectation;
     expect(view.customers.single.displayName, 'Test Customer');
     expect(view.fulfilmentSettings.serviceAreas.single.name, 'Kyrenia');
+    view.clear();
+  });
+
+  test('hub order stream publishes accepted and closed projections', () async {
+    final view = VenueHubOfflineView.instance..clear();
+    final expectation = expectLater(
+      view.orderStream.take(3),
+      emitsInOrder([
+        isEmpty,
+        predicate<List<PosOrder>>(
+          (orders) =>
+              orders.single.tableId == 'table-7' &&
+              orders.single.status == OrderStatus.open,
+          'open table projection',
+        ),
+        predicate<List<PosOrder>>(
+          (orders) => orders.single.status == OrderStatus.closed,
+          'closed table projection',
+        ),
+      ]),
+    );
+
+    Map<String, Object?> order({required bool closed}) => {
+      'orderId': 'order-1',
+      'tenantId': 'tenant-1',
+      'venueId': 'venue-1',
+      'tableId': 'table-7',
+      'openedAtUtc': '2026-10-16T12:00:00.000Z',
+      'isClosed': closed,
+      'lines': <Object?>[],
+      'payments': <Object?>[],
+    };
+
+    await Future<void>.delayed(Duration.zero);
+    view.installOrders([order(closed: false)]);
+    view.installOrders([order(closed: true)]);
+    await expectation;
     view.clear();
   });
 }

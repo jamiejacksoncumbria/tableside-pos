@@ -6,6 +6,7 @@ import '../core/trusted_clock.dart';
 import '../data/production_command_repository.dart';
 import 'offline_event.dart';
 import 'offline_event_ledger.dart';
+import 'offline_order_projection.dart';
 import 'venue_hub_bootstrap.dart';
 import 'venue_hub_cloud_sync.dart';
 import 'venue_hub_command_processor.dart';
@@ -235,7 +236,21 @@ class VenueHubRuntime {
         ledger: _ledger,
       );
       await orderBook.installCloudBaselines(snapshot);
-      await orderBook.rebuild();
+      Future<Map<String, OfflineOrderProjection>> publishOrders() async {
+        final orders = await orderBook.rebuild();
+        // The order book is the durable authority, while the offline view is
+        // the live source consumed by the hub's POS widgets. Publishing every
+        // rebuild keeps table balances, named tabs and closed-order state in
+        // sync immediately without waiting for a cloud snapshot refresh.
+        VenueHubOfflineView.instance.installOrders(
+          orders.values
+              .map((order) => order.toJson())
+              .toList(growable: false),
+        );
+        return orders;
+      }
+
+      await publishOrders();
       final printQueue = VenueHubPrintQueue(
         tenantId: scope.tenantId,
         venueId: scope.venueId,
@@ -259,7 +274,7 @@ class VenueHubRuntime {
         catalogue = refreshedCatalogue;
         snapshot = Map<String, Object?>.from(refreshed);
         await orderBook.installCloudBaselines(snapshot);
-        await orderBook.rebuild();
+        await publishOrders();
         printQueue.installSnapshot(snapshot);
         VenueHubOfflineView.instance.install(snapshot);
         await _ledger.saveSnapshot(
@@ -309,6 +324,11 @@ class VenueHubRuntime {
               jobSuffix: event.id,
             );
           }
+          // Commit updates the encrypted ledger, but consumers are listening
+          // to the in-memory projection. Emit the rebuilt projection before
+          // acknowledging the command so every hub screen observes the same
+          // accepted state as the submitting terminal.
+          await publishOrders();
           return event;
         },
       );
@@ -412,7 +432,7 @@ class VenueHubRuntime {
             await refresh();
           },
           readPrintJobs: () async => printQueue.visibleJobs,
-          readOrders: () async => (await orderBook.rebuild()).values
+          readOrders: () async => (await publishOrders()).values
               .map((order) => order.toJson())
               .toList(growable: false),
           allowedOrigins: allowedOrigins,
@@ -449,7 +469,7 @@ class VenueHubRuntime {
           // narrow repair for a cloud document that still says open after the
           // same hub's durable projection has already closed it.
           await _sync!.flush();
-          final localOrders = await orderBook.rebuild();
+          final localOrders = await publishOrders();
           final now = DateTime.now().toUtc();
           final ghosts = localOrders.values
               .where(
