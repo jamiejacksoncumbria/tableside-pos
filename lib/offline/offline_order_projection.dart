@@ -47,21 +47,20 @@ class OfflineProjectedLine {
     int? unitPriceMinor,
     bool? sent,
     DateTime? sentAtUtc,
-  }) =>
-      OfflineProjectedLine(
-        id: id,
-        productId: productId,
-        name: name,
-        quantity: quantity ?? this.quantity,
-        unitPriceMinor: unitPriceMinor ?? this.unitPriceMinor,
-        productionArea: productionArea,
-        details: details,
-        taxRateBasisPoints: taxRateBasisPoints,
-        taxRateName: taxRateName,
-        sent: sent ?? this.sent,
-        addedAtUtc: addedAtUtc,
-        sentAtUtc: sentAtUtc ?? this.sentAtUtc,
-      );
+  }) => OfflineProjectedLine(
+    id: id,
+    productId: productId,
+    name: name,
+    quantity: quantity ?? this.quantity,
+    unitPriceMinor: unitPriceMinor ?? this.unitPriceMinor,
+    productionArea: productionArea,
+    details: details,
+    taxRateBasisPoints: taxRateBasisPoints,
+    taxRateName: taxRateName,
+    sent: sent ?? this.sent,
+    addedAtUtc: addedAtUtc,
+    sentAtUtc: sentAtUtc ?? this.sentAtUtc,
+  );
 }
 
 class OfflineProjectedPayment {
@@ -274,8 +273,8 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
       );
     }
     opened = true;
-    openedAtUtc = DateTime.tryParse(payload['openedAtUtc'] as String? ?? '')
-            ?.toUtc() ??
+    openedAtUtc =
+        DateTime.tryParse(payload['openedAtUtc'] as String? ?? '')?.toUtc() ??
         baseline.createdAtUtc;
     tableId = payload['tableId'] as String?;
     tabName = payload['tabName'] as String?;
@@ -298,7 +297,8 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     scheduledForUtc = DateTime.tryParse(
       payload['scheduledForUtc'] as String? ?? '',
     )?.toUtc();
-    fulfilmentStatus = payload['fulfilmentStatus'] as String? ??
+    fulfilmentStatus =
+        payload['fulfilmentStatus'] as String? ??
         (channel == 'delivery' ? 'awaitingDriver' : 'awaitingPreparation');
     assignedDriverId = payload['assignedDriverId'] as String?;
     final rawLines = payload['lines'];
@@ -327,12 +327,12 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         quantity: _positiveInt(value, 'quantity'),
         unitPriceMinor: _nonNegativeInt(value, 'unitPriceMinor'),
         productionArea: value['productionArea'] as String? ?? 'kitchen',
-        details: (value['details'] as List?)
-                ?.whereType<String>()
-                .toList(growable: false) ??
+        details:
+            (value['details'] as List?)?.whereType<String>().toList(
+              growable: false,
+            ) ??
             const <String>[],
-        taxRateBasisPoints:
-            (value['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
+        taxRateBasisPoints: (value['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
         taxRateName: value['taxRateName'] as String? ?? 'Zero Rate',
         sent: value['sent'] == true,
         addedAtUtc: DateTime.tryParse(
@@ -372,7 +372,8 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           method: _requiredString(value, 'method'),
           currencyCode: _requiredString(value, 'currencyCode'),
           exchangeRateToBase: value['exchangeRateToBase'] as String? ?? '1',
-          recordedAtUtc: DateTime.tryParse(
+          recordedAtUtc:
+              DateTime.tryParse(
                 value['recordedAtUtc'] as String? ?? '',
               )?.toUtc() ??
               baseline.createdAtUtc,
@@ -382,19 +383,15 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         ),
       );
     }
-    final total = lines.values.fold<int>(
-          0,
-          (sum, line) => sum + line.totalMinor,
-        ) +
+    final total =
+        lines.values.fold<int>(0, (sum, line) => sum + line.totalMinor) +
         (channel == 'delivery' ? deliveryFeeMinor : 0);
     final paid = payments.fold<int>(
       0,
       (sum, payment) => sum + payment.baseAmountMinor,
     );
     if (paid > total) {
-      throw const OfflineProjectionException(
-        'The cloud baseline is overpaid.',
-      );
+      throw const OfflineProjectionException('The cloud baseline is overpaid.');
     }
   }
 
@@ -434,7 +431,9 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
       case 'order.opened':
         if (opened) {
           if (baseline != null) break;
-          throw const OfflineProjectionException('The order was opened more than once.');
+          throw const OfflineProjectionException(
+            'The order was opened more than once.',
+          );
         }
         opened = true;
         channel = event.payload['channel'] as String? ?? 'dineIn';
@@ -484,7 +483,8 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           // A same-epoch recovery baseline already contains cloud-projected
           // lines. Replaying the original add is idempotent when its immutable
           // sale identity matches; later quantity events still replay below.
-          final sameCloudLine = baseline != null &&
+          final sameCloudLine =
+              baseline != null &&
               existing.productId ==
                   _requiredString(event.payload, 'productId') &&
               existing.name == _requiredString(event.payload, 'productName') &&
@@ -561,16 +561,14 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           }
           lines[lineId] = existing.copyWith(unitPriceMinor: nextPrice);
         }
-        final adjustedTotal = lines.values.fold<int>(
-              0,
-              (sum, line) => sum + line.totalMinor,
-            ) +
+        final adjustedTotal =
+            lines.values.fold<int>(0, (sum, line) => sum + line.totalMinor) +
             (channel == 'delivery' ? deliveryFeeMinor : 0);
         final alreadyPaid = payments.fold<int>(
           0,
           (sum, payment) => sum + payment.baseAmountMinor,
         );
-        if (lines.isEmpty || adjustedTotal < alreadyPaid) {
+        if (adjustedTotal < alreadyPaid) {
           throw const OfflineProjectionException(
             'This adjustment would invalidate payments already recorded.',
           );

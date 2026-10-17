@@ -71,33 +71,30 @@ class VenueOfflineOrderBook {
         // Replay a synthetic copy before appending it. Once an event reaches
         // the encrypted ledger it is a real financial fact, so no projection
         // error is allowed to surface only after the durable commit.
-        _projectAffectedOrder(
-          [
-            ...existing,
-            OfflineEvent(
-              id: 'preflight-${existing.length + 1}',
-              tenantId: draft.tenantId,
-              venueId: draft.venueId,
-              deviceId: draft.deviceId,
-              staffId: draft.staffId,
-              managerApprovalStaffId: draft.managerApprovalStaffId,
-              type: draft.type,
-              payload: draft.payload,
-              createdAtUtc: DateTime.now().toUtc(),
-              deviceObservedAtUtc: DateTime.now().toUtc(),
-              timeAuthority: OfflineTimeAuthority.venueHub,
-              clockSkewMillis: 0,
-              businessTimestampUtc:
-                  draft.businessTimestamp?.toUtc() ?? DateTime.now().toUtc(),
-              sequence: existing.isEmpty ? 1 : existing.last.sequence + 1,
-              hubEpoch: hubEpoch,
-              previousHash: '',
-              eventHash: '',
-              syncState: OfflineEventSyncState.pending,
-            ),
-          ],
-          draft.payload['orderId'],
-        );
+        _projectAffectedOrder([
+          ...existing,
+          OfflineEvent(
+            id: 'preflight-${existing.length + 1}',
+            tenantId: draft.tenantId,
+            venueId: draft.venueId,
+            deviceId: draft.deviceId,
+            staffId: draft.staffId,
+            managerApprovalStaffId: draft.managerApprovalStaffId,
+            type: draft.type,
+            payload: draft.payload,
+            createdAtUtc: DateTime.now().toUtc(),
+            deviceObservedAtUtc: DateTime.now().toUtc(),
+            timeAuthority: OfflineTimeAuthority.venueHub,
+            clockSkewMillis: 0,
+            businessTimestampUtc:
+                draft.businessTimestamp?.toUtc() ?? DateTime.now().toUtc(),
+            sequence: existing.isEmpty ? 1 : existing.last.sequence + 1,
+            hubEpoch: hubEpoch,
+            previousHash: '',
+            eventHash: '',
+            syncState: OfflineEventSyncState.pending,
+          ),
+        ], draft.payload['orderId']);
         final event = await _ledger.commit(draft, hubEpoch: hubEpoch);
         completer.complete(event);
       } catch (error, stackTrace) {
@@ -148,6 +145,26 @@ class VenueOfflineOrderBook {
         // the acknowledgement and do not append a duplicate opening event.
         return baseline;
       }
+      final openedMatches = existing
+          .where(
+            (event) =>
+                event.type == 'order.opened' &&
+                event.payload['orderId'] == draft.payload['orderId'],
+          )
+          .toList(growable: false);
+      if (openedMatches.isNotEmpty) {
+        final opened = openedMatches.last;
+        if (!_sameOpenedOrderIdentity(opened.payload, draft.payload)) {
+          throw const OfflineProjectionException(
+            'The open order identity changed between devices.',
+          );
+        }
+        // ensureOrderOpened is an assertion that may be repeated before Send,
+        // payment or fulfilment changes. Optional details can be absent from a
+        // later client payload, so compare the protected location identity
+        // rather than treating the assertion as a reused mutation key.
+        return opened;
+      }
     }
     bool hasSameIdentity(OfflineEvent event) {
       if (event.type != draft.type ||
@@ -155,7 +172,7 @@ class VenueOfflineOrderBook {
         return false;
       }
       return switch (draft.type) {
-        'order.opened' || 'order.closed' => true,
+        'order.closed' => true,
         'order.itemAdded' ||
         'order.itemQuantityChanged' ||
         'order.lineAdjusted' =>
@@ -395,8 +412,7 @@ class VenueOfflineOrderBook {
               'setUnitPrice',
               'discountUnitAmount',
             }.contains(operation) ||
-            (operation != 'remove' &&
-                (valueMinor is! int || valueMinor < 0))) {
+            (operation != 'remove' && (valueMinor is! int || valueMinor < 0))) {
           throw const OfflineProjectionException(
             'The manager sale adjustment is invalid.',
           );

@@ -141,10 +141,7 @@ void main() {
 
   test('manager adjustment changes the authoritative hub balance', () {
     final projection = projectOfflineOrder([
-      _event(1, 'order.opened', {
-        'orderId': 'order-a',
-        'tableId': 'table-a',
-      }),
+      _event(1, 'order.opened', {'orderId': 'order-a', 'tableId': 'table-a'}),
       _event(2, 'order.itemAdded', {
         'orderId': 'order-a',
         'lineId': 'line-a',
@@ -165,6 +162,30 @@ void main() {
     expect(projection.lines.values.single.unitPriceMinor, 1250);
     expect(projection.totalMinor, 2500);
     expect(projection.balanceDueMinor, 2500);
+  });
+
+  test('manager can remove the final item from an unpaid order', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Mistake',
+        'quantity': 1,
+        'unitPriceMinor': 1500,
+      }),
+      _event(3, 'order.lineAdjusted', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'operation': 'remove',
+        'reason': 'Added by mistake',
+      }),
+    ]);
+
+    expect(projection.lines, isEmpty);
+    expect(projection.totalMinor, 0);
+    expect(projection.balanceDueMinor, 0);
   });
 
   test('manager adjustment cannot reduce a bill below recorded payments', () {

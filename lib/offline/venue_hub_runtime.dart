@@ -244,9 +244,7 @@ class VenueHubRuntime {
         // rebuild keeps table balances, named tabs and closed-order state in
         // sync immediately without waiting for a cloud snapshot refresh.
         VenueHubOfflineView.instance.installOrders(
-          orders.values
-              .map((order) => order.toJson())
-              .toList(growable: false),
+          orders.values.map((order) => order.toJson()).toList(growable: false),
         );
         return orders;
       }
@@ -263,10 +261,7 @@ class VenueHubRuntime {
       _printQueue = printQueue;
       _activeScope = scope;
       _activeBootstrap = bootstrap;
-      final pendingPostCommitEffects = <
-        String,
-        Future<void> Function()
-      >{};
+      final pendingPostCommitEffects = <String, Future<void> Function()>{};
       var postCommitRetryRunning = false;
 
       // A sale is accepted as soon as its immutable event is committed to the
@@ -609,6 +604,7 @@ class VenueHubRuntime {
           reconcilingClosedOrders = false;
         }
       }
+
       // RTDB is the sole internet-presence and wake channel. A failure here is
       // non-fatal for the local HTTPS hub: LAN terminals must remain usable
       // during a venue internet outage, while remote commands fail closed.
@@ -758,14 +754,34 @@ class VenueHubRuntime {
               continue;
             }
 
-            // From this point onward the operation is irrevocably committed
-            // in the encrypted ledger. A network failure must never send it
-            // down the rejection path. Start the durable event uploader first;
-            // cloud ingestion can independently acknowledge this command if
-            // the immediate completion request is lost.
+            // Do not acknowledge success directly from the hub. Cloud event
+            // ingestion projects the order and marks the remote command
+            // accepted in one Firestore transaction. This ordering guarantees
+            // that a terminal cannot be told "finished" while its live cloud
+            // order still contains the old collection/delivery state.
+            //
+            // A failed upload leaves the immutable event in the encrypted
+            // outbox. The command remains claimed and its waiter keeps showing
+            // "Waiting for venue hub" until a later retry projects it. This is
+            // deliberately fail-closed and does not weaken hub authority.
             final committedAcknowledgement = acknowledgement;
-            unawaited(_sync!.flush());
+            final projected = await _waitForCloudProjection(
+              scope: scope,
+              hubEpoch: bootstrap.hubEpoch,
+              eventId: committedAcknowledgement.eventId,
+            );
+            if (!projected) {
+              AppLogger.info(
+                'Remote hub command $commandId remains durably committed but '
+                'unacknowledged until cloud projection succeeds.',
+              );
+              continue;
+            }
             try {
+              // For a new event, ingestion has already acknowledged this
+              // command transactionally. For an idempotent order-open retry,
+              // the reused event may belong to an older command; completing it
+              // here is safe because that event is now confirmed cloud-synced.
               await _repository
                   .completeRemoteHubCommand(
                     scope: scope,
@@ -785,16 +801,12 @@ class VenueHubRuntime {
                     },
                   )
                   .timeout(const Duration(seconds: 12));
-              AppLogger.info(
-                'Remote hub command $commandId: cloud acknowledgement delivered.',
-              );
             } catch (error, stackTrace) {
-              // The local commit remains authoritative and retryable. The
-              // encrypted outbox upload above will project the same immutable
-              // event and mark its remote command accepted transactionally.
+              // A new event was already accepted by ingestion. An interrupted
+              // response is therefore ambiguous, never a business rejection;
+              // the remote waiter can safely observe the stored command state.
               AppLogger.error(
-                'Deliver acknowledgement for committed remote command '
-                '$commandId; durable outbox will retry',
+                'Confirm projected remote command $commandId',
                 error,
                 stackTrace,
               );
@@ -992,6 +1004,41 @@ class VenueHubRuntime {
       );
       rethrow;
     }
+  }
+
+  /// Waits until the immutable event has been accepted by cloud ingestion.
+  /// This is the ordering barrier between the hub's durable local commit and
+  /// the success response shown by a remote terminal.
+  Future<bool> _waitForCloudProjection({
+    required VenueScope scope,
+    required int hubEpoch,
+    required String eventId,
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      await _sync?.flush();
+      final events = await _ledger.eventsForVenue(
+        tenantId: scope.tenantId,
+        venueId: scope.venueId,
+        hubEpoch: hubEpoch,
+      );
+      OfflineEvent? target;
+      for (final event in events) {
+        if (event.id == eventId) {
+          target = event;
+          break;
+        }
+      }
+      if (target?.syncState == OfflineEventSyncState.synced) return true;
+      if (target?.syncState == OfflineEventSyncState.quarantined) {
+        throw StateError(
+          'The committed hub event was permanently rejected during cloud projection.',
+        );
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+    return false;
   }
 
   Future<void> stop() async {

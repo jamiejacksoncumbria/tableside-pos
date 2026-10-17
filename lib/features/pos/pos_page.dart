@@ -407,6 +407,11 @@ class _TablesPanel extends ConsumerWidget {
                                   );
                                 }
                               },
+                              onDeselect: selectedTableId == table.id
+                                  ? () => ref
+                                        .read(activeOrderProvider.notifier)
+                                        .clearCurrentSelection()
+                                  : null,
                             ),
                         ],
                       ),
@@ -468,6 +473,13 @@ class _TablesPanel extends ConsumerWidget {
                                         );
                                       }
                                     },
+                                    onDeselect: tab.orderId == activeOrder.id
+                                        ? () => ref
+                                              .read(
+                                                activeOrderProvider.notifier,
+                                              )
+                                              .clearCurrentSelection()
+                                        : null,
                                   ),
                                 ),
                             ],
@@ -531,6 +543,13 @@ class _TablesPanel extends ConsumerWidget {
                                         );
                                       }
                                     },
+                                    onDeselect: order.id == activeOrder.id
+                                        ? () => ref
+                                              .read(
+                                                activeOrderProvider.notifier,
+                                              )
+                                              .clearCurrentSelection()
+                                        : null,
                                   ),
                                 ),
                             ],
@@ -558,6 +577,7 @@ class _TableButton extends ConsumerWidget {
     required this.isTraining,
     this.trainingOrder,
     required this.onTap,
+    this.onDeselect,
   });
 
   final DiningTable table;
@@ -568,6 +588,7 @@ class _TableButton extends ConsumerWidget {
   final bool isTraining;
   final PosOrder? trainingOrder;
   final VoidCallback onTap;
+  final VoidCallback? onDeselect;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -612,54 +633,72 @@ class _TableButton extends ConsumerWidget {
             borderRadius: BorderRadius.circular(14),
             border: selected ? Border.all(color: Colors.white, width: 2) : null,
           ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+          child: Stack(
             children: [
-              Text(
-                table.label,
-                style: TextStyle(
-                  fontWeight: FontWeight.w800,
-                  color: foreground,
-                ),
-              ),
-              const SizedBox(height: 3),
-              if (isOpen) ...[
-                Text(
-                  'OPEN',
-                  style: TextStyle(
-                    fontSize: compact ? 9 : 10,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: .6,
-                    color: foreground.withValues(alpha: .84),
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text(
-                      amountDueMinor == null
-                          ? 'Loading...'
-                          : formatMoney(
-                              amountDueMinor,
-                              currencyCode: currencyCode,
-                            ),
-                      maxLines: 1,
+              Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      table.label,
                       style: TextStyle(
-                        fontSize: compact ? 11 : 13,
                         fontWeight: FontWeight.w800,
                         color: foreground,
                       ),
                     ),
-                  ),
+                    const SizedBox(height: 3),
+                    if (isOpen) ...[
+                      Text(
+                        'OPEN',
+                        style: TextStyle(
+                          fontSize: compact ? 9 : 10,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: .6,
+                          color: foreground.withValues(alpha: .84),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            amountDueMinor == null
+                                ? 'Loading...'
+                                : formatMoney(
+                                    amountDueMinor,
+                                    currencyCode: currencyCode,
+                                  ),
+                            maxLines: 1,
+                            style: TextStyle(
+                              fontSize: compact ? 11 : 13,
+                              fontWeight: FontWeight.w800,
+                              color: foreground,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ] else
+                      Text(
+                        '${table.seats} seats',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: foreground.withValues(alpha: .8),
+                        ),
+                      ),
+                  ],
                 ),
-              ] else
-                Text(
-                  '${table.seats} seats',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: foreground.withValues(alpha: .8),
+              ),
+              if (onDeselect != null)
+                Positioned(
+                  top: 0,
+                  right: 0,
+                  child: IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Deselect table',
+                    onPressed: onDeselect,
+                    icon: const Icon(Icons.close_rounded, size: 17),
+                    color: Colors.white,
                   ),
                 ),
             ],
@@ -677,6 +716,7 @@ class _NamedTabButton extends ConsumerWidget {
     required this.currencyCode,
     required this.selected,
     required this.onTap,
+    this.onDeselect,
   });
 
   final OpenNamedTab tab;
@@ -684,6 +724,7 @@ class _NamedTabButton extends ConsumerWidget {
   final String currencyCode;
   final bool selected;
   final VoidCallback onTap;
+  final VoidCallback? onDeselect;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -752,8 +793,14 @@ class _NamedTabButton extends ConsumerWidget {
                   ],
                 ),
               ),
-              if (selected)
-                const Icon(Icons.check_circle_rounded, color: Colors.white),
+              if (onDeselect != null)
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Deselect named tab',
+                  onPressed: onDeselect,
+                  icon: const Icon(Icons.close_rounded, size: 18),
+                  color: Colors.white,
+                ),
             ],
           ),
         ),
@@ -769,6 +816,7 @@ class _FulfilmentOrderButton extends ConsumerWidget {
     required this.currencyCode,
     required this.selected,
     required this.onTap,
+    this.onDeselect,
   });
 
   final PosOrder order;
@@ -776,6 +824,7 @@ class _FulfilmentOrderButton extends ConsumerWidget {
   final String currencyCode;
   final bool selected;
   final VoidCallback onTap;
+  final VoidCallback? onDeselect;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -822,6 +871,14 @@ class _FulfilmentOrderButton extends ConsumerWidget {
                     ),
                   ),
                 ),
+                if (onDeselect != null)
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Deselect order',
+                    onPressed: onDeselect,
+                    icon: const Icon(Icons.close_rounded, size: 18),
+                    color: Colors.white,
+                  ),
               ],
             ),
             const SizedBox(height: 3),
@@ -2867,283 +2924,275 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                    if (order.channel == OrderChannel.delivery &&
-                        order.deliveryFeeMinor > 0) ...[
-                      const Divider(height: 20),
-                      Row(
-                        children: [
-                          Text(
-                            order.serviceAreaName?.trim().isNotEmpty == true
-                                ? 'Delivery · ${order.serviceAreaName}'
-                                : 'Delivery fee',
-                          ),
-                          const Spacer(),
-                          Text(
-                            formatMoney(
-                              order.deliveryFeeMinor,
-                              currencyCode: widget.currencyCode,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                    const Divider(height: 16),
+                  if (order.channel == OrderChannel.delivery &&
+                      order.deliveryFeeMinor > 0) ...[
+                    const Divider(height: 20),
                     Row(
                       children: [
                         Text(
-                          'Total',
+                          order.serviceAreaName?.trim().isNotEmpty == true
+                              ? 'Delivery · ${order.serviceAreaName}'
+                              : 'Delivery fee',
+                        ),
+                        const Spacer(),
+                        Text(
+                          formatMoney(
+                            order.deliveryFeeMinor,
+                            currencyCode: widget.currencyCode,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                  const Divider(height: 16),
+                  Row(
+                    children: [
+                      Text(
+                        'Total',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const Spacer(),
+                      Text(
+                        formatMoney(
+                          order.totalMinor,
+                          currencyCode: widget.currencyCode,
+                        ),
+                        style: Theme.of(context).textTheme.headlineSmall
+                            ?.copyWith(fontWeight: FontWeight.w800),
+                      ),
+                    ],
+                  ),
+                  if (order.paidMinor > 0) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        const Text('Payments received'),
+                        const Spacer(),
+                        Text(
+                          formatMoney(
+                            order.paidMinor,
+                            currencyCode: widget.currencyCode,
+                          ),
+                        ),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        Text(
+                          'Balance due',
                           style: Theme.of(context).textTheme.titleMedium,
                         ),
                         const Spacer(),
                         Text(
                           formatMoney(
-                            order.totalMinor,
+                            order.balanceDueMinor,
                             currencyCode: widget.currencyCode,
                           ),
-                          style: Theme.of(context).textTheme.headlineSmall
+                          style: Theme.of(context).textTheme.titleMedium
                               ?.copyWith(fontWeight: FontWeight.w800),
                         ),
                       ],
                     ),
-                    if (order.paidMinor > 0) ...[
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          const Text('Payments received'),
-                          const Spacer(),
-                          Text(
-                            formatMoney(
-                              order.paidMinor,
-                              currencyCode: widget.currencyCode,
-                            ),
-                          ),
-                        ],
+                    if (order.payments.length > 2)
+                      Text(
+                        '+ ${order.payments.length - 2} earlier payment${order.payments.length == 3 ? '' : 's'}',
+                        style: Theme.of(context).textTheme.labelSmall,
                       ),
-                      Row(
-                        children: [
-                          Text(
-                            'Balance due',
-                            style: Theme.of(context).textTheme.titleMedium,
-                          ),
-                          const Spacer(),
-                          Text(
-                            formatMoney(
-                              order.balanceDueMinor,
-                              currencyCode: widget.currencyCode,
-                            ),
-                            style: Theme.of(context).textTheme.titleMedium
-                                ?.copyWith(fontWeight: FontWeight.w800),
-                          ),
-                        ],
+                    for (final payment in order.payments.skip(
+                      order.payments.length > 2 ? order.payments.length - 2 : 0,
+                    ))
+                      Text(
+                        '${payment.recordedLocalDateTime?.trim().isNotEmpty == true ? formatVenueDateTimeSnapshot(payment.recordedLocalDateTime!) : formatAppDateTime(payment.recordedAt)} · ${payment.method} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
+                        style: Theme.of(context).textTheme.labelSmall,
                       ),
-                      if (order.payments.length > 2)
-                        Text(
-                          '+ ${order.payments.length - 2} earlier payment${order.payments.length == 3 ? '' : 's'}',
-                          style: Theme.of(context).textTheme.labelSmall,
+                  ],
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: compactOutlinedButtonStyle,
+                          onPressed:
+                              order.isSplitOrder ||
+                                  order.payments.isNotEmpty ||
+                                  order.lines.isEmpty ||
+                                  hasUnsentLines
+                              ? null
+                              : () => _showSplitBillSheet(
+                                  context,
+                                  ref: ref,
+                                  order: order,
+                                  currencyCode: widget.currencyCode,
+                                ),
+                          icon: const Icon(Icons.call_split_rounded, size: 17),
+                          label: const Text('Split bill'),
                         ),
-                      for (final payment in order.payments
-                          .skip(order.payments.length > 2
-                              ? order.payments.length - 2
-                              : 0))
-                        Text(
-                          '${payment.recordedLocalDateTime?.trim().isNotEmpty == true ? formatVenueDateTimeSnapshot(payment.recordedLocalDateTime!) : formatAppDateTime(payment.recordedAt)} · ${payment.method} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
-                          style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: compactOutlinedButtonStyle,
+                          onPressed: hasUnsentLines
+                              ? () => _showPendingOrderItems(
+                                  context,
+                                  order: order,
+                                  currencyCode: widget.currencyCode,
+                                )
+                              : null,
+                          icon: const Icon(
+                            Icons.pending_actions_rounded,
+                            size: 17,
+                          ),
+                          label: Text(
+                            'Pending (${order.lines.where((line) => !line.isSentToProduction).fold<int>(0, (total, line) => total + line.quantity)})',
+                          ),
                         ),
+                      ),
                     ],
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            style: compactOutlinedButtonStyle,
-                            onPressed:
-                                order.isSplitOrder ||
-                                    order.payments.isNotEmpty ||
-                                    order.lines.isEmpty ||
-                                    hasUnsentLines
-                                ? null
-                                : () => _showSplitBillSheet(
-                                    context,
-                                    ref: ref,
-                                    order: order,
-                                    currencyCode: widget.currencyCode,
-                                  ),
-                            icon: const Icon(
-                              Icons.call_split_rounded,
-                              size: 17,
-                            ),
-                            label: const Text('Split bill'),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: compactOutlinedButtonStyle,
+                          onPressed:
+                              isTraining ||
+                                  order.lines.isEmpty ||
+                                  hasUnsentLines
+                              ? null
+                              : () async {
+                                  try {
+                                    final queued = await ref
+                                        .read(activeOrderProvider.notifier)
+                                        .printPreReceipt();
+                                    if (!context.mounted) return;
+                                    showAppNotification(
+                                      context,
+                                      ref: ref,
+                                      title: queued
+                                          ? 'Pre receipt queued'
+                                          : 'Pre receipt not queued',
+                                      message: queued
+                                          ? 'The unpaid bill has been sent to the receipt printer.'
+                                          : 'No receipt printer accepted the pre receipt.',
+                                    );
+                                  } on Object catch (error, stackTrace) {
+                                    AppLogger.error(
+                                      'Print pre receipt',
+                                      error,
+                                      stackTrace,
+                                    );
+                                    if (!context.mounted) return;
+                                    showAppNotification(
+                                      context,
+                                      ref: ref,
+                                      title: 'Pre receipt was not printed',
+                                      message: '$error',
+                                      level: AppNotificationLevel.error,
+                                    );
+                                  }
+                                },
+                          icon: const Icon(
+                            Icons.receipt_long_outlined,
+                            size: 17,
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            style: compactOutlinedButtonStyle,
-                            onPressed: hasUnsentLines
-                                ? () => _showPendingOrderItems(
-                                    context,
-                                    order: order,
-                                    currencyCode: widget.currencyCode,
-                                  )
-                                : null,
-                            icon: const Icon(
-                              Icons.pending_actions_rounded,
-                              size: 17,
-                            ),
-                            label: Text(
-                              'Pending (${order.lines.where((line) => !line.isSentToProduction).fold<int>(0, (total, line) => total + line.quantity)})',
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            style: compactOutlinedButtonStyle,
-                            onPressed:
-                                isTraining ||
-                                    order.lines.isEmpty ||
-                                    hasUnsentLines
-                                ? null
-                                : () async {
-                                    try {
-                                      final queued = await ref
-                                          .read(activeOrderProvider.notifier)
-                                          .printPreReceipt();
-                                      if (!context.mounted) return;
-                                      showAppNotification(
-                                        context,
-                                        ref: ref,
-                                        title: queued
-                                            ? 'Pre receipt queued'
-                                            : 'Pre receipt not queued',
-                                        message: queued
-                                            ? 'The unpaid bill has been sent to the receipt printer.'
-                                            : 'No receipt printer accepted the pre receipt.',
-                                      );
-                                    } on Object catch (error, stackTrace) {
-                                      AppLogger.error(
-                                        'Print pre receipt',
-                                        error,
-                                        stackTrace,
-                                      );
-                                      if (!context.mounted) return;
-                                      showAppNotification(
-                                        context,
-                                        ref: ref,
-                                        title: 'Pre receipt was not printed',
-                                        message: '$error',
-                                        level: AppNotificationLevel.error,
-                                      );
-                                    }
-                                  },
-                            icon: const Icon(
-                              Icons.receipt_long_outlined,
-                              size: 17,
-                            ),
-                            label: const Text('Pre receipt'),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: FilledButton.icon(
-                            style: compactFilledButtonStyle,
-                            onPressed:
-                                order.lines.isEmpty ||
-                                    hasUnsentLines ||
-                                    (!order.isSplitOrder &&
-                                        openSplitOrders.isNotEmpty)
-                                ? null
-                                : () => _showCheckoutSheet(
-                                    context,
-                                    ref: ref,
-                                    order: order,
-                                    currencyCode: widget.currencyCode,
-                                  ),
-                            icon: const Icon(
-                              Icons.payments_outlined,
-                              size: 17,
-                            ),
-                            label: const Text('Pay'),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    SizedBox(
-                      width: double.infinity,
-                      child: FilledButton.icon(
-                        style: compactFilledButtonStyle,
-                        onPressed: !hasUnsentLines
-                            ? null
-                            : () async {
-                                final printRequired =
-                                    await _confirmProductionPrint(context);
-                                if (printRequired == null || !context.mounted) {
-                                  return;
-                                }
-                                try {
-                                  final printResult = await ref
-                                      .read(activeOrderProvider.notifier)
-                                      .sendToProduction(
-                                        printRequired: printRequired,
-                                      );
-                                  if (!context.mounted) return;
-                                  final message = isTraining
-                                      ? (printRequired &&
-                                                trainingSession
-                                                        .targetDeviceId !=
-                                                    null
-                                            ? 'Training order saved and a clearly marked training ticket was queued.'
-                                            : 'Training order saved without printing. No live order or stock was changed.')
-                                      : !printRequired
-                                      ? 'New items sent to the Order Flow Board without printing.'
-                                      : printResult.ticketsPrinted > 0
-                                      ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
-                                      : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.';
-                                  showAppNotification(
-                                    context,
-                                    ref: ref,
-                                    title: isTraining
-                                        ? 'Training order sent'
-                                        : 'Order sent',
-                                    message: message,
-                                    level: AppNotificationLevel.success,
-                                  );
-                                  ref
-                                      .read(activeOrderProvider.notifier)
-                                      .clearSelectionAfterSend();
-                                  ref
-                                      .read(posCompactTabProvider.notifier)
-                                      .select(0);
-                                } on Object catch (error, stackTrace) {
-                                  AppLogger.error(
-                                    'Send order to production',
-                                    error,
-                                    stackTrace,
-                                  );
-                                  if (!context.mounted) return;
-                                  showAppNotification(
-                                    context,
-                                    ref: ref,
-                                    title: 'Order needs attention',
-                                    message:
-                                        'The order or its local ticket could not be completed. It remains open for a safe retry.',
-                                    level: AppNotificationLevel.error,
-                                  );
-                                }
-                              },
-                        icon: const Icon(Icons.print_rounded, size: 17),
-                        label: Text(
-                          order.status == OrderStatus.sent
-                              ? 'Send additions'
-                              : 'Send order',
+                          label: const Text('Pre receipt'),
                         ),
                       ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: FilledButton.icon(
+                          style: compactFilledButtonStyle,
+                          onPressed:
+                              order.lines.isEmpty ||
+                                  hasUnsentLines ||
+                                  (!order.isSplitOrder &&
+                                      openSplitOrders.isNotEmpty)
+                              ? null
+                              : () => _showCheckoutSheet(
+                                  context,
+                                  ref: ref,
+                                  order: order,
+                                  currencyCode: widget.currencyCode,
+                                ),
+                          icon: const Icon(Icons.payments_outlined, size: 17),
+                          label: const Text('Pay'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      style: compactFilledButtonStyle,
+                      onPressed: !hasUnsentLines
+                          ? null
+                          : () async {
+                              final printRequired =
+                                  await _confirmProductionPrint(context);
+                              if (printRequired == null || !context.mounted) {
+                                return;
+                              }
+                              try {
+                                final printResult = await ref
+                                    .read(activeOrderProvider.notifier)
+                                    .sendToProduction(
+                                      printRequired: printRequired,
+                                    );
+                                if (!context.mounted) return;
+                                final message = isTraining
+                                    ? (printRequired &&
+                                              trainingSession.targetDeviceId !=
+                                                  null
+                                          ? 'Training order saved and a clearly marked training ticket was queued.'
+                                          : 'Training order saved without printing. No live order or stock was changed.')
+                                    : !printRequired
+                                    ? 'New items sent to the Order Flow Board without printing.'
+                                    : printResult.ticketsPrinted > 0
+                                    ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
+                                    : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.';
+                                showAppNotification(
+                                  context,
+                                  ref: ref,
+                                  title: isTraining
+                                      ? 'Training order sent'
+                                      : 'Order sent',
+                                  message: message,
+                                  level: AppNotificationLevel.success,
+                                );
+                                ref
+                                    .read(activeOrderProvider.notifier)
+                                    .clearSelectionAfterSend();
+                                ref
+                                    .read(posCompactTabProvider.notifier)
+                                    .select(0);
+                              } on Object catch (error, stackTrace) {
+                                AppLogger.error(
+                                  'Send order to production',
+                                  error,
+                                  stackTrace,
+                                );
+                                if (!context.mounted) return;
+                                showAppNotification(
+                                  context,
+                                  ref: ref,
+                                  title: 'Order needs attention',
+                                  message:
+                                      'The order or its local ticket could not be completed. It remains open for a safe retry.',
+                                  level: AppNotificationLevel.error,
+                                );
+                              }
+                            },
+                      icon: const Icon(Icons.print_rounded, size: 17),
+                      label: Text(
+                        order.status == OrderStatus.sent
+                            ? 'Send additions'
+                            : 'Send order',
+                      ),
                     ),
+                  ),
                 ],
               ),
             ),
@@ -3171,10 +3220,7 @@ class _AdaptiveOrderFooter extends StatelessWidget {
     final pinActions = size.shortestSide >= 600 || size.width >= 1000;
     if (pinActions) return child;
 
-    return Flexible(
-      flex: 2,
-      child: SingleChildScrollView(child: child),
-    );
+    return Flexible(flex: 2, child: SingleChildScrollView(child: child));
   }
 }
 

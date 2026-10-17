@@ -431,6 +431,31 @@ class ActiveOrderController extends Notifier<PosOrder> {
     if (remoteOrder == null) {
       _pendingDraftQuantities.clear();
       AppLogger.info('Live active order is no longer open.');
+      final selectedOrderId = ref.read(activePersistedOrderIdProvider);
+      if (selectedOrderId != state.id || _locallyClosingOrderId == state.id) {
+        return;
+      }
+      final scope = ref.read(activeVenueScopeProvider);
+      if (scope == null) return;
+      final location = state.customerName?.trim().isNotEmpty == true
+          ? state.customerName!.trim()
+          : state.tabName?.trim().isNotEmpty == true
+          ? state.tabName!.trim()
+          : _tableLabelFor(state);
+      final closedOrderId = state.id;
+      _resetOrder(scope);
+      ref
+          .read(appNotificationsProvider.notifier)
+          .add(
+            title: 'Order finished on another device',
+            message: location.trim().isEmpty
+                ? 'The finished order was removed from this terminal.'
+                : '$location was finished and removed from this terminal.',
+            level: AppNotificationLevel.information,
+          );
+      AppLogger.info(
+        'Missing live order $closedOrderId was cleared from this terminal.',
+      );
       return;
     }
     if (remoteOrder.id != state.id) return;
@@ -982,6 +1007,18 @@ class ActiveOrderController extends Notifier<PosOrder> {
       status: OrderStatus.open,
       lines: const [],
     );
+  }
+
+  /// Leaves the selected table, tab, collection or delivery without changing
+  /// its durable hub order. Draft lines are persisted before this is offered,
+  /// so the order can safely be reopened on any POS device.
+  void clearCurrentSelection() {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) return;
+    if (ref.read(trainingModeProvider) != null && state.lines.isNotEmpty) {
+      ref.read(trainingOpenOrdersProvider.notifier).save(state);
+    }
+    _resetOrder(scope);
   }
 
   /// Records verified payment allocations after the server atomically creates

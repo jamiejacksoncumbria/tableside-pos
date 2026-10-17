@@ -4165,7 +4165,7 @@ function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline
       ((next.channel ?? "dineIn") === "delivery" ? Number(next.deliveryFeeMinor ?? 0) : 0);
     const alreadyPaid = payments.reduce((sum, payment) =>
       sum + Number(payment.baseAmountMinor), 0);
-    if (lines.length === 0 || adjustedTotal < alreadyPaid) {
+    if (adjustedTotal < alreadyPaid) {
       throw new HttpsError(
         "failed-precondition",
         "This adjustment would invalidate payments already recorded.",

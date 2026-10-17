@@ -327,26 +327,48 @@ class VenueOfflineCatalogue {
     for (final raw in selections) {
       final selection = _map(raw, 'modifier selection');
       final groupId = _requiredText(selection, 'groupId');
-      final optionId = _requiredText(selection, 'optionId');
       if (!product.modifierGroupIds.contains(groupId)) {
         throw const VenueOfflineCatalogueException(
           'A selected modifier is not available for this product.',
         );
       }
       final group = modifierGroups[groupId]!;
-      final option = group.options[optionId];
-      if (!group.available || option == null || !option.available) {
+      // Production clients submit the same grouped schema as the online API
+      // (`optionIds`). Older locally enrolled clients submitted one flattened
+      // `optionId` per record. Accept both shapes, then canonicalise them to
+      // the same trusted option snapshots below.
+      final rawOptionIds = selection['optionIds'];
+      final optionIds = rawOptionIds is List
+          ? rawOptionIds
+                .map(
+                  (value) => value is String && value.trim().isNotEmpty
+                      ? value.trim()
+                      : throw const VenueOfflineCatalogueException(
+                          'A selected modifier is invalid.',
+                        ),
+                )
+                .toList(growable: false)
+          : <String>[_requiredText(selection, 'optionId')];
+      if (optionIds.isEmpty) {
         throw const VenueOfflineCatalogueException(
-          'A selected modifier is not available.',
+          'A selected modifier is invalid.',
         );
       }
       final list = selectedByGroup.putIfAbsent(groupId, () => []);
-      if (list.any((item) => item.id == optionId)) {
-        throw const VenueOfflineCatalogueException(
-          'A modifier option was selected more than once.',
-        );
+      for (final optionId in optionIds) {
+        final option = group.options[optionId];
+        if (!group.available || option == null || !option.available) {
+          throw const VenueOfflineCatalogueException(
+            'A selected modifier is not available.',
+          );
+        }
+        if (list.any((item) => item.id == optionId)) {
+          throw const VenueOfflineCatalogueException(
+            'A modifier option was selected more than once.',
+          );
+        }
+        list.add(option);
       }
-      list.add(option);
     }
     final canonicalSelections = <Map<String, Object?>>[];
     for (final groupId in product.modifierGroupIds) {

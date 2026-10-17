@@ -67,6 +67,31 @@ void main() {
     expect(payload['itemNote'], '');
   });
 
+  test(
+    'grouped online modifier selections are canonicalised by the hub',
+    () async {
+      final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
+      final payload = await catalogue.validateEvent('order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'steak',
+        'quantity': 1,
+        'variantId': 'large',
+        'modifierSelections': [
+          {
+            'groupId': 'cooking',
+            'optionIds': ['medium'],
+          },
+        ],
+      }, grant);
+
+      final selections = payload['modifierSelections'] as List<Object?>;
+      expect(selections, hasLength(1));
+      expect((selections.single as Map<String, Object?>)['optionId'], 'medium');
+      expect(payload['unitPriceMinor'], 2800);
+    },
+  );
+
   test('delivery-only exclusion requires an explicit staff override', () async {
     final snapshot = _snapshot();
     final product =
