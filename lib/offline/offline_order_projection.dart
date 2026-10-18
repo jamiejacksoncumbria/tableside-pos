@@ -767,6 +767,21 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         receiptNumber = event.payload['receiptNumber'] as String?;
         closedAtUtc = event.createdAtUtc;
         break;
+      case 'order.cancelled':
+        _requireOpened(opened);
+        final reason = event.payload['reason'];
+        if (lines.isNotEmpty ||
+            payments.isNotEmpty ||
+            reason is! String ||
+            reason.trim().length < 3) {
+          throw const OfflineProjectionException(
+            'Only an empty, unpaid order can be cancelled.',
+          );
+        }
+        closed = true;
+        receiptNumber = null;
+        closedAtUtc = event.createdAtUtc;
+        break;
       case 'receipt.requested':
         _requireOpened(opened);
         break;

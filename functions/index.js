@@ -2456,7 +2456,7 @@ const remoteHubClaimLeaseMs = 15 * 1000;
 const remoteHubEventTypes = new Set([
   "order.opened", "order.itemAdded", "order.itemQuantityChanged", "order.lineAdjusted",
   "order.sent", "order.fulfilmentChanged", "payment.recorded", "payment.batchRecorded",
-  "order.closed", "receipt.requested",
+  "order.closed", "order.cancelled", "receipt.requested",
 ]);
 
 function remoteHubQueue(tenantId, venueId) {
@@ -3474,6 +3474,22 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
               createdAt: FieldValue.serverTimestamp(),
             },
           );
+        } else if (event.type === "order.cancelled") {
+          transaction.create(
+            tenantRef.collection("auditEvents").doc(`offline_${event.id}`),
+            {
+              action: "cancelEmptyOrder",
+              venueId: upload.venueId,
+              orderId: event.payload.orderId,
+              reason: event.payload.reason,
+              staffId: event.staffId,
+              deviceId: event.deviceId,
+              hubEpoch: upload.hubEpoch,
+              sourceEventId: event.id,
+              occurredAt: new Date(event.createdAtUtc),
+              createdAt: FieldValue.serverTimestamp(),
+            },
+          );
         }
       }
       lastSequence = event.sequence;
@@ -3509,7 +3525,7 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
           createdAt: projected.openedAt,
         }, {merge: true});
       }
-      if (projected.status === "closed") {
+      if (projected.status === "closed" && projected.cancelled !== true) {
         transaction.set(tenantRef.collection("bills").doc(`offline-${orderId}`),
           offlineBillFromProjectedOrder(
             projected, orderId, upload, venueTimeZone, businessDayCutoffMinutes,
@@ -4302,6 +4318,24 @@ function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline
     next.closedOffline = true;
     next.receiptNumber = typeof payload.receiptNumber === "string"
       ? payload.receiptNumber : null;
+    return next;
+  }
+  if (event.type === "order.cancelled") {
+    const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
+    if (lines.length !== 0 || payments.length !== 0 || reason.length < 3) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Only an empty, unpaid order can be cancelled.",
+      );
+    }
+    next.status = "closed";
+    next.cancelled = true;
+    next.cancelledAt = eventTime;
+    next.cancellationReason = reason;
+    next.cancelledByStaffId = event.staffId;
+    next.closedAt = eventTime;
+    next.closedOffline = true;
+    next.receiptNumber = null;
     return next;
   }
   if (event.type === "receipt.requested") return next;
@@ -7853,6 +7887,94 @@ async function refreshStaffPinSessionFor(caller, rawData) {
   }, {merge: true});
   await batch.commit();
   return {expiresAt: expiresAt.toISOString()};
+}
+
+// Cancels a mistaken order only after all items have been removed. Keeping
+// this separate from checkout prevents zero-value bills, receipts and sales
+// reports while still releasing the table/tab in one audited transaction.
+async function cancelEmptyOrderFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const orderId = requiredText(data, "orderId", 180);
+  const reason = requiredText(data, "reason", 240).trim();
+  requiredDocumentId(data, "requestId");
+  if (reason.length < 3) {
+    throw new HttpsError("invalid-argument", "Enter a reason for closing the empty order.");
+  }
+  await requireTenantOperationalMember(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const orderRef = tenantRef.collection("orders").doc(orderId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const auditRef = tenantRef.collection("auditEvents").doc();
+
+  return db.runTransaction(async (transaction) => {
+    const [venue, order] = await Promise.all([
+      transaction.get(venueRef),
+      transaction.get(orderRef),
+    ]);
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (!order.exists || order.data().venueId !== venueId) {
+      throw new HttpsError("failed-precondition", "The order is not open at this venue.");
+    }
+    const orderData = order.data();
+    if (orderData.status === "closed" && orderData.cancelled === true) {
+      return {cancelled: true, alreadyCancelled: true};
+    }
+    if (orderData.status === "closed") {
+      throw new HttpsError("failed-precondition", "The order has already been completed.");
+    }
+    const lines = Array.isArray(orderData.lines) ? orderData.lines : [];
+    const payments = Array.isArray(orderData.payments) ? orderData.payments : [];
+    if (lines.length !== 0 || payments.length !== 0) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Only an empty, unpaid order can be cancelled.",
+      );
+    }
+    const tableRef = typeof orderData.tableId === "string" && orderData.tableId.length > 0
+      ? tenantRef.collection("tables").doc(orderData.tableId) : null;
+    const tabRef = typeof orderData.tabName === "string" && orderData.tabName.trim().length > 0
+      ? openTabRegistryRef(tenantId, venueId, orderData.tabName) : null;
+    const [table, tab] = await Promise.all([
+      tableRef == null ? Promise.resolve(null) : transaction.get(tableRef),
+      tabRef == null ? Promise.resolve(null) : transaction.get(tabRef),
+    ]);
+
+    transaction.update(orderRef, {
+      status: "closed",
+      fulfilmentStatus: orderData.channel === "dineIn"
+        ? orderData.fulfilmentStatus ?? null : "cancelled",
+      cancelled: true,
+      cancelledAt: FieldValue.serverTimestamp(),
+      cancellationReason: reason,
+      cancelledByStaffId: caller.uid,
+      closedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    if (tableRef != null && table?.exists && table.data().currentOrderId === orderId) {
+      transaction.set(tableRef, {
+        currentOrderId: null,
+        hasOpenOrder: false,
+        updatedAt: FieldValue.serverTimestamp(),
+      }, {merge: true});
+    }
+    if (tabRef != null && tab?.exists && tab.data().orderId === orderId) {
+      transaction.delete(tabRef);
+    }
+    transaction.create(auditRef, {
+      action: "cancelEmptyOrder",
+      venueId,
+      orderId,
+      reason,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {cancelled: true, alreadyCancelled: false};
+  });
 }
 
 async function closeOrderFor(caller, rawData) {
@@ -11587,6 +11709,8 @@ async function invokePosAction(action, caller, data) {
       return sendOrderToProductionFor(actingCaller, data);
     case "closeOrder":
       return closeOrderFor(actingCaller, data);
+    case "cancelEmptyOrder":
+      return cancelEmptyOrderFor(actingCaller, data);
     case "createRefund":
       return createRefundFor(actingCaller, data);
     case "startTrainingMode":

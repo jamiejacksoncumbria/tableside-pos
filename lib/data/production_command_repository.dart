@@ -1666,6 +1666,62 @@ class ProductionCommandRepository {
     );
   }
 
+  /// Closes a durable order which has had every item removed. This is a
+  /// cancellation, not a zero-value sale: it never creates a bill or print
+  /// job, and both the hub and cloud re-check that no payment exists.
+  Future<void> cancelEmptyOrder({
+    required VenueScope scope,
+    required PosOrder order,
+    required String reason,
+  }) async {
+    final normalizedReason = reason.trim();
+    if (order.lines.isNotEmpty || order.payments.isNotEmpty) {
+      throw StateError('Only an empty, unpaid order can be cancelled.');
+    }
+    if (normalizedReason.length < 3) {
+      throw StateError('Enter a short reason for closing the empty order.');
+    }
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      await _ensureHubOrderOpened(
+        scope: scope,
+        orderId: order.id,
+        tableId: order.tableId,
+        tabName: order.tabName,
+        channel: order.channel,
+        customerId: order.customerId,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        deliveryAddress: order.deliveryAddress,
+        deliveryAddressLabel: order.deliveryAddressLabel,
+        deliveryLatitude: order.deliveryLatitude,
+        deliveryLongitude: order.deliveryLongitude,
+        serviceAreaId: order.serviceAreaId,
+        serviceAreaName: order.serviceAreaName,
+        deliveryFeeMinor: order.deliveryFeeMinor,
+        scheduledFor: order.scheduledFor,
+        assignedDriverId: order.assignedDriverId,
+        assignedDriverName: order.assignedDriverName,
+      );
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'order.cancelled',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'reason': normalizedReason,
+        },
+      );
+      return;
+    }
+    await _call('cancelEmptyOrder', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'orderId': order.id,
+      'reason': normalizedReason,
+      'requestId': 'cancel-${DateTime.now().microsecondsSinceEpoch}',
+    });
+  }
+
   int _baseAmountMinor(BillPaymentInput payment) {
     final rate = double.tryParse(payment.exchangeRateToBase);
     if (rate == null || !rate.isFinite || rate <= 0) {

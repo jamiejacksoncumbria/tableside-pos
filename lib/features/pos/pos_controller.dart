@@ -1021,6 +1021,32 @@ class ActiveOrderController extends Notifier<PosOrder> {
     _resetOrder(scope);
   }
 
+  /// Cancels a persisted basket after every item has been removed. The
+  /// authoritative hub/cloud operation completes before local selection is
+  /// cleared, so a failed cancellation remains visible for a safe retry.
+  Future<void> cancelEmptyOrder({required String reason}) async {
+    if (_isSavingDraft) {
+      throw StateError('The basket is still saving. Please wait a moment.');
+    }
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) throw StateError('Select a venue first.');
+    if (state.lines.isNotEmpty || state.payments.isNotEmpty) {
+      throw StateError('Only an empty, unpaid order can be cancelled.');
+    }
+    if (ref.read(activePersistedOrderIdProvider) != state.id) {
+      throw StateError('This empty basket has not created a live order.');
+    }
+    if (ref.read(trainingModeProvider) != null) {
+      ref.read(trainingOpenOrdersProvider.notifier).remove(state.id);
+      _resetOrder(scope);
+      return;
+    }
+    await ref
+        .read(productionCommandRepositoryProvider)
+        .cancelEmptyOrder(scope: scope, order: state, reason: reason);
+    _resetOrder(scope);
+  }
+
   /// Records verified payment allocations after the server atomically creates
   /// an immutable bill. Closing a split returns to its still-open parent,
   /// whereas closing a main bill releases its table or named-tab reservation.

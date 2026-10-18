@@ -2280,6 +2280,72 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     });
   }
 
+  Future<void> _closeEmptyOrder() async {
+    final reason = TextEditingController(text: 'All items removed');
+    final confirmed = await showAppDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Close empty order?'),
+        content: TextField(
+          controller: reason,
+          autofocus: true,
+          maxLength: 240,
+          decoration: const InputDecoration(
+            labelText: 'Reason',
+            helperText: 'Required and saved in the audit trail.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep open'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Close order'),
+          ),
+        ],
+      ),
+    );
+    final cancellationReason = reason.text.trim();
+    reason.dispose();
+    if (confirmed != true || !mounted) return;
+    if (cancellationReason.length < 3) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Order remains open',
+        message: 'Enter a short reason for closing the empty order.',
+        level: AppNotificationLevel.warning,
+      );
+      return;
+    }
+    try {
+      await ref
+          .read(activeOrderProvider.notifier)
+          .cancelEmptyOrder(reason: cancellationReason);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Empty order closed',
+        message: 'The table or tab is available again.',
+        level: AppNotificationLevel.success,
+      );
+      ref.read(posCompactTabProvider.notifier).select(0);
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Close empty order', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Order remains open',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    }
+  }
+
   Future<void> _adjustLine(OrderLine line, String operation) async {
     final reason = TextEditingController();
     final value = TextEditingController(
@@ -2532,6 +2598,11 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     final order = ref.watch(activeOrderProvider);
     final trainingSession = ref.watch(trainingModeProvider);
     final isTraining = trainingSession != null;
+    final persistedOrderId = ref.watch(activePersistedOrderIdProvider);
+    final canCloseEmptyOrder =
+        order.lines.isEmpty &&
+        order.payments.isEmpty &&
+        persistedOrderId == order.id;
     final currentLineIds = order.lines.map((line) => line.id).toSet();
     _selectedLineIds.removeWhere((id) => !currentLineIds.contains(id));
     final splitOrdersValue = order.isSplitOrder || isTraining
@@ -3123,6 +3194,18 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                     ],
                   ),
                   const SizedBox(height: 4),
+                  if (canCloseEmptyOrder) ...[
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        style: compactOutlinedButtonStyle,
+                        onPressed: _closeEmptyOrder,
+                        icon: const Icon(Icons.cancel_outlined, size: 17),
+                        label: const Text('Close empty order'),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                  ],
                   SizedBox(
                     width: double.infinity,
                     child: FilledButton.icon(

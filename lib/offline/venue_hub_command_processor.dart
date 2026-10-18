@@ -91,6 +91,10 @@ class VenueHubCommandProcessor {
     'payment.recorded': 'payment',
     'payment.batchRecorded': 'payment',
     'order.closed': 'payment',
+    // An empty order contains no financial transaction. Staff with normal
+    // order permission may cancel it, while the projection still rejects any
+    // order containing items or payments.
+    'order.cancelled': 'order',
     'receipt.requested': 'order',
   };
 
@@ -155,12 +159,11 @@ class VenueHubCommandProcessor {
     return _validateAndCommit(
       eventType: eventType,
       body: <String, Object?>{
-        'payload': <String, Object?>{
-          ...payload,
-          'remoteCommandId': commandId,
-        },
+        'payload': <String, Object?>{...payload, 'remoteCommandId': commandId},
         if (businessTimestampUtc != null)
-          'businessTimestampUtc': businessTimestampUtc.toUtc().toIso8601String(),
+          'businessTimestampUtc': businessTimestampUtc
+              .toUtc()
+              .toIso8601String(),
       },
       grant: grant,
       deviceId: deviceId,

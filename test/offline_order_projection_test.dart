@@ -188,6 +188,56 @@ void main() {
     expect(projection.balanceDueMinor, 0);
   });
 
+  test('empty unpaid order can be cancelled without creating a sale', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a', 'tableId': 'table-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Mistake',
+        'quantity': 1,
+        'unitPriceMinor': 1500,
+      }),
+      _event(3, 'order.lineAdjusted', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'operation': 'remove',
+        'reason': 'Added by mistake',
+      }),
+      _event(4, 'order.cancelled', {
+        'orderId': 'order-a',
+        'reason': 'All items removed',
+      }),
+    ]);
+
+    expect(projection.lines, isEmpty);
+    expect(projection.payments, isEmpty);
+    expect(projection.isClosed, isTrue);
+    expect(projection.receiptNumber, isNull);
+  });
+
+  test('order cancellation rejects an order which still has an item', () {
+    expect(
+      () => projectOfflineOrder([
+        _event(1, 'order.opened', {'orderId': 'order-a'}),
+        _event(2, 'order.itemAdded', {
+          'orderId': 'order-a',
+          'lineId': 'line-a',
+          'productId': 'product-a',
+          'productName': 'Meal',
+          'quantity': 1,
+          'unitPriceMinor': 1500,
+        }),
+        _event(3, 'order.cancelled', {
+          'orderId': 'order-a',
+          'reason': 'Invalid cancellation',
+        }),
+      ]),
+      throwsA(isA<OfflineProjectionException>()),
+    );
+  });
+
   test('manager adjustment cannot reduce a bill below recorded payments', () {
     final events = [
       _event(1, 'order.opened', {'orderId': 'order-a'}),

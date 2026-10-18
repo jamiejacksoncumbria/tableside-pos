@@ -172,7 +172,7 @@ class VenueOfflineOrderBook {
         return false;
       }
       return switch (draft.type) {
-        'order.closed' => true,
+        'order.closed' || 'order.cancelled' => true,
         'order.itemAdded' ||
         'order.itemQuantityChanged' ||
         'order.lineAdjusted' =>
@@ -508,6 +508,17 @@ class VenueOfflineOrderBook {
         catalogueProvider?.call().validateReceiptRoute(
           printRequired: draft.payload['printReceipt'] == true,
         );
+        break;
+      case 'order.cancelled':
+        final reason = draft.payload['reason'];
+        if (current.lines.isNotEmpty ||
+            current.payments.isNotEmpty ||
+            reason is! String ||
+            reason.trim().length < 3) {
+          throw const OfflineProjectionException(
+            'Only an empty, unpaid order can be cancelled.',
+          );
+        }
         break;
       case 'receipt.requested':
         if (current.lines.isEmpty) {
