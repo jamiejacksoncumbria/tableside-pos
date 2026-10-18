@@ -5,8 +5,18 @@
     "hubAuthorities": {
       "$tenantId": {
         "$venueId": {
-          ".read": false,
+          ".read": "auth != null && auth.token.tablesideHub === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId && auth.token.deviceId === data.child('deviceId').val() && auth.token.hubEpoch === data.child('hubEpoch').val()",
           ".write": false
+        }
+      }
+    },
+    "printerAuthorities": {
+      "$tenantId": {
+        "$venueId": {
+          "$deviceId": {
+            ".read": false,
+            ".write": false
+          }
         }
       }
     },
@@ -14,7 +24,7 @@
       "$tenantId": {
         "$venueId": {
           "$deviceId": {
-            ".read": "auth != null && auth.token.tablesideHub === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId",
+            ".read": "auth != null && (auth.token.tablesideHub === true || auth.token.tablesidePos === true) && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId",
             ".write": "auth != null && auth.token.tablesideHub === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId && auth.token.deviceId === $deviceId && root.child('hubAuthorities').child($tenantId).child($venueId).child('enabled').val() === true && root.child('hubAuthorities').child($tenantId).child($venueId).child('deviceId').val() === $deviceId && root.child('hubAuthorities').child($tenantId).child($venueId).child('hubEpoch').val() === auth.token.hubEpoch",
             ".validate": "newData.hasChildren(['online', 'hubEpoch']) && newData.child('online').isBoolean() && newData.child('hubEpoch').isNumber() && newData.child('hubEpoch').val() === auth.token.hubEpoch"
           }
@@ -26,6 +36,37 @@
         "$venueId": {
           ".read": "auth != null && auth.token.tablesideHub === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId && root.child('hubAuthorities').child($tenantId).child($venueId).child('enabled').val() === true && root.child('hubAuthorities').child($tenantId).child($venueId).child('deviceId').val() === auth.token.deviceId && root.child('hubAuthorities').child($tenantId).child($venueId).child('hubEpoch').val() === auth.token.hubEpoch",
           ".write": false
+        }
+      }
+    },
+    "remoteCommandStatus": {
+      "$tenantId": {
+        "$venueId": {
+          "$commandId": {
+            ".read": "auth != null && auth.token.tablesidePos === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId && data.child('hostUid').val() === auth.token.hostUid && data.child('staffId').val() === auth.token.staffId",
+            ".write": false
+          }
+        }
+      }
+    },
+    "printerPresence": {
+      "$tenantId": {
+        "$venueId": {
+          ".read": "auth != null && auth.token.tablesidePos === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId",
+          "$deviceId": {
+            ".write": "auth != null && auth.token.tablesidePrinter === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId && auth.token.deviceId === $deviceId && root.child('printerAuthorities').child($tenantId).child($venueId).child($deviceId).child('active').val() === true",
+            ".validate": "newData.hasChild('online') && newData.child('online').isBoolean()"
+          }
+        }
+      }
+    },
+    "printerSignals": {
+      "$tenantId": {
+        "$venueId": {
+          "$deviceId": {
+            ".read": "auth != null && auth.token.tablesidePrinter === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId && auth.token.deviceId === $deviceId",
+            ".write": false
+          }
         }
       }
     }

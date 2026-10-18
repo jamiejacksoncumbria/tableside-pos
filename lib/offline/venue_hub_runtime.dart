@@ -61,6 +61,8 @@ class VenueHubRuntime {
   VenueHubPrintQueue? _printQueue;
   VenueHubRealtimePresence? _realtimePresence;
   StreamSubscription<void>? _realtimeSignalSubscription;
+  StreamSubscription<bool>? _realtimeAuthoritySubscription;
+  Timer? _realtimeReconnectTimer;
   Future<void> Function(Map<String, Object?> snapshot)? _installFreshSnapshot;
   Future<void> Function()? _refreshAuthorityNow;
   StreamSubscription? _pendingSubscription;
@@ -845,6 +847,54 @@ class VenueHubRuntime {
               );
             },
           );
+      await _realtimeAuthoritySubscription?.cancel();
+      _realtimeAuthoritySubscription = activeRealtimePresence.authority.listen((
+        active,
+      ) {
+        if (active || _activeScope != scope) return;
+        AppLogger.info(
+          'Venue hub realtime authority was revoked; stopping immediately.',
+        );
+        unawaited(stop());
+      });
+      var reconnectingRealtime = false;
+      var realtimeRetryDelay = const Duration(seconds: 5);
+      var nextRealtimeRetryAt = DateTime.now();
+      _realtimeReconnectTimer?.cancel();
+      _realtimeReconnectTimer = Timer.periodic(const Duration(seconds: 5), (
+        _,
+      ) async {
+        if (_activeScope != scope ||
+            activeRealtimePresence.started ||
+            reconnectingRealtime ||
+            DateTime.now().isBefore(nextRealtimeRetryAt)) {
+          return;
+        }
+        reconnectingRealtime = true;
+        try {
+          await activeRealtimePresence.start(
+            scope: scope,
+            deviceId: deviceId,
+            hubEpoch: bootstrap.hubEpoch,
+            credential: credential,
+          );
+          realtimeRetryDelay = const Duration(seconds: 5);
+          AppLogger.info('Venue hub realtime channel restored.');
+          unawaited(remoteTick());
+        } catch (error, stackTrace) {
+          AppLogger.error(
+            'Retry venue hub realtime channel; LAN remains available',
+            error,
+            stackTrace,
+          );
+          nextRealtimeRetryAt = DateTime.now().add(realtimeRetryDelay);
+          realtimeRetryDelay = Duration(
+            seconds: (realtimeRetryDelay.inSeconds * 2).clamp(5, 60),
+          );
+        } finally {
+          reconnectingRealtime = false;
+        }
+      });
       if (activeRealtimePresence.connected.value) {
         // Recover commands queued just before the realtime listener connected.
         unawaited(remoteTick());
@@ -988,7 +1038,7 @@ class VenueHubRuntime {
       refreshAuthorityCallback = refreshAuthority;
 
       _authorityTimer = Timer.periodic(
-        const Duration(seconds: 30),
+        const Duration(minutes: 5),
         (_) => unawaited(refreshAuthority()),
       );
       await AndroidVenueHubService.start();
@@ -1046,8 +1096,12 @@ class VenueHubRuntime {
     _postCommitRetryTimer = null;
     _authorityTimer?.cancel();
     _authorityTimer = null;
+    _realtimeReconnectTimer?.cancel();
+    _realtimeReconnectTimer = null;
     await _realtimeSignalSubscription?.cancel();
     _realtimeSignalSubscription = null;
+    await _realtimeAuthoritySubscription?.cancel();
+    _realtimeAuthoritySubscription = null;
     await _realtimePresence?.stop();
     await _pendingSubscription?.cancel();
     _pendingSubscription = null;

@@ -83,10 +83,9 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     });
     _retryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       unawaited(worker.maintainHeartbeat(scope));
-      // The Firestore/encrypted-queue stream wakes normal jobs immediately.
-      // This slower scan is only a safety net for a platform stream
-      // interruption, avoiding a billed empty claim every ten seconds.
-      unawaited(_processAvailable(scope));
+      // Queue streams and the RTDB printer signal wake real jobs. Do not issue
+      // an empty Cloud Function claim on a timer: fifty venues would otherwise
+      // create thousands of unnecessary invocations every day.
     });
     unawaited(worker.maintainHeartbeat(scope));
     unawaited(_processAvailable(scope));

@@ -27,7 +27,7 @@ class RemoteHubWaitState {
 }
 
 class VenueHubRemoteCommandClient {
-  VenueHubRemoteCommandClient({this.timeout = const Duration(seconds: 90)});
+  VenueHubRemoteCommandClient({this.timeout = const Duration(seconds: 45)});
 
   final Duration timeout;
 

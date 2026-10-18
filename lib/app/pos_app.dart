@@ -231,6 +231,23 @@ class _HubOfflineDialogHostState extends State<_HubOfflineDialogHost> {
   @override
   void didUpdateWidget(covariant _HubOfflineDialogHost oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.issue != null && widget.issue == null) {
+      // Recovery must remove the blocking explanation immediately. Waiting
+      // for staff to dismiss a now-stale offline dialog made a restored hub
+      // still look unavailable.
+      if (_dialogOpen) _rootNavigatorKey.currentState?.pop();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final messengerContext = _rootNavigatorKey.currentContext;
+        if (!mounted || messengerContext == null) return;
+        ScaffoldMessenger.maybeOf(messengerContext)?.showSnackBar(
+          const SnackBar(
+            content: Text('Venue hub is back online and ready.'),
+            backgroundColor: Color(0xff2e7d32),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      });
+    }
     if (oldWidget.issue != widget.issue) _scheduleIfNeeded();
   }
 

@@ -21,6 +21,7 @@ import '../../offline/venue_hub_client_cache.dart';
 import '../../offline/venue_hub_client.dart';
 import '../../offline/venue_hub_device_credential.dart';
 import '../../offline/venue_hub_runtime.dart';
+import '../../offline/venue_hub_realtime_client.dart';
 
 final activeStaffPinSessionProvider =
     NotifierProvider<ActiveStaffPinSessionController, StaffPinVerification?>(
@@ -358,6 +359,23 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         ref
             .read(activeStaffPinSessionProvider.notifier)
             .unlock(session, widget.scope);
+        if (bootstrap.enabled) {
+          unawaited(
+            VenueHubRealtimeClient.instance
+                .ensureConfigured(
+                  scope: widget.scope,
+                  hubEpoch: bootstrap.hubEpoch,
+                  repository: _repository,
+                )
+                .catchError((Object error, StackTrace stackTrace) {
+                  AppLogger.error(
+                    'Start realtime POS channel after PIN unlock',
+                    error,
+                    stackTrace,
+                  );
+                }),
+          );
+        }
         _scheduleExpiryCheck();
         return;
       }
@@ -501,6 +519,23 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       ref
           .read(activeStaffPinSessionProvider.notifier)
           .unlock(session, widget.scope);
+      if (bootstrap.enabled) {
+        unawaited(
+          VenueHubRealtimeClient.instance
+              .ensureConfigured(
+                scope: widget.scope,
+                hubEpoch: bootstrap.hubEpoch,
+                repository: _repository,
+              )
+              .catchError((Object error, StackTrace stackTrace) {
+                AppLogger.error(
+                  'Start realtime POS channel after PIN unlock',
+                  error,
+                  stackTrace,
+                );
+              }),
+        );
+      }
       if (bootstrap.enabled && hubLogin == null && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(

@@ -10,7 +10,7 @@ import {getDatabase, ServerValue} from "firebase-admin/database";
 import {getStorage} from "firebase-admin/storage";
 import {FieldValue, getFirestore} from "firebase-admin/firestore";
 import {
-  onDocumentCreated, onDocumentUpdated, onDocumentWritten,
+  onDocumentCreated, onDocumentDeleted, onDocumentUpdated, onDocumentWritten,
 } from "firebase-functions/v2/firestore";
 import {HttpsError, onRequest} from "firebase-functions/v2/https";
 import {onSchedule} from "firebase-functions/v2/scheduler";
@@ -1603,6 +1603,12 @@ async function manageVenueConfigurationFor(caller, rawData) {
       });
     }
     await batch.commit();
+    await syncRealtimePrinterAuthority(tenantId, venueId, deviceId, true);
+    if (priorNamedDevice) {
+      await syncRealtimePrinterAuthority(
+        tenantId, venueId, priorNamedDevice.id, false,
+      );
+    }
     result = {saved: true, deviceCredential};
   } else if (resource === "printerDeviceRemoval") {
     const deviceId = requiredDocumentId(values, "deviceId");
@@ -1663,6 +1669,7 @@ async function manageVenueConfigurationFor(caller, rawData) {
       createdAt: FieldValue.serverTimestamp(),
     });
     await batch.commit();
+    await syncRealtimePrinterAuthority(tenantId, venueId, deviceId, false);
     result = {saved: true, removed: true};
   } else if (resource === "printerRoute") {
     const productionArea = requiredText(values, "productionArea", 32);
@@ -1947,6 +1954,27 @@ async function heartbeatPrinterDeviceFor(caller, rawData) {
   const device = await authenticatedPrinterDevice(caller, rawData);
   await device.deviceRef.update({lastHeartbeatAt: FieldValue.serverTimestamp()});
   return {online: true};
+}
+
+async function issueRealtimePrinterSessionFor(caller, rawData) {
+  const device = await authenticatedPrinterDevice(caller, rawData);
+  const configured = configuredRealtimeDatabase();
+  // Backfill authority for printers enrolled before the RTDB migration.
+  // Removal flips this server-owned record immediately, invalidating an
+  // already-issued realtime identity at the rules layer.
+  await syncRealtimePrinterAuthority(
+    device.tenantId, device.venueId, device.deviceId, true,
+  );
+  const scopedUid = `printer_${createHash("sha256")
+    .update(`${device.tenantId}:${device.venueId}:${device.deviceId}`)
+    .digest("hex").slice(0, 48)}`;
+  const customToken = await auth.createCustomToken(scopedUid, {
+    tablesidePrinter: true,
+    tenantId: device.tenantId,
+    venueId: device.venueId,
+    deviceId: device.deviceId,
+  });
+  return {customToken, databaseUrl: configured.url};
 }
 
 function normalisedPhone(value) {
@@ -2508,7 +2536,7 @@ async function submitRemoteHubCommandFor(caller, rawData) {
     const presenceValue = presence.val();
     const lastReadyAt = Number(presenceValue?.lastReadyAt ?? 0);
     if (presenceValue?.online !== true || presenceValue?.hubEpoch !== hubEpoch ||
-        !Number.isSafeInteger(lastReadyAt) || Date.now() - lastReadyAt > 75 * 1000) {
+        !Number.isSafeInteger(lastReadyAt) || Date.now() - lastReadyAt > 20 * 1000) {
       throw new HttpsError(
         "unavailable",
         "The venue hub is offline. Join the venue network or wait for it to reconnect.",
@@ -2558,6 +2586,17 @@ async function submitRemoteHubCommandFor(caller, rawData) {
     });
   });
   try {
+    await realtime.database
+      .ref(`remoteCommandStatus/${tenantId}/${venueId}/${commandId}`)
+      .transaction((current) => current ?? ({
+        commandId,
+        hostUid: caller.hostUid,
+        staffId: caller.uid,
+        status: "pending",
+        stage: "queued",
+        hubEpoch,
+        updatedAt: ServerValue.TIMESTAMP,
+      }));
     await realtime.database
       .ref(`hubSignals/${tenantId}/${venueId}`)
       .set({commandId, hubEpoch, signaledAt: ServerValue.TIMESTAMP});
@@ -2671,6 +2710,70 @@ async function syncRealtimeHubAuthority(tenantId, venueId, authority) {
     .set(authority);
 }
 
+async function syncRealtimePrinterAuthority(
+  tenantId, venueId, deviceId, active,
+) {
+  const url = databaseURL.value().trim();
+  if (url.length === 0) return;
+  await configuredRealtimeDatabase().database
+    .ref(`printerAuthorities/${tenantId}/${venueId}/${deviceId}`)
+    .set({active: active === true});
+}
+
+async function publishRealtimeCommandStatus(
+  tenantId, venueId, commandId, value,
+) {
+  const url = databaseURL.value().trim();
+  if (url.length === 0) return;
+  try {
+    await configuredRealtimeDatabase().database
+      .ref(`remoteCommandStatus/${tenantId}/${venueId}/${commandId}`)
+      .update({...value, updatedAt: ServerValue.TIMESTAMP});
+  } catch (error) {
+    // Firestore remains durable. The client uses one protected HTTPS fallback
+    // if acknowledgement metadata cannot reach the realtime channel.
+    console.error("Could not publish realtime command acknowledgement", {
+      tenantId, venueId, commandId, error: String(error),
+    });
+  }
+}
+
+async function issueRealtimePosSessionFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const {membership} = await requireTenantOperationalMember(caller, tenantId);
+  const venueIds = Array.isArray(membership.venueIds) ? membership.venueIds : [];
+  if (venueIds.length > 0 && !venueIds.includes(venueId)) {
+    throw new HttpsError("permission-denied", "This staff member is not assigned to this venue.");
+  }
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  const hub = venue.data()?.offlineHub;
+  if (!venue.exists || venue.data()?.status === "deleting" ||
+      hub?.enabled !== true || !Number.isSafeInteger(hub.epoch) ||
+      typeof hub.deviceId !== "string" || hub.deviceId.length === 0) {
+    throw new HttpsError("failed-precondition", "The venue hub is not active.");
+  }
+  const configured = configuredRealtimeDatabase();
+  const scopedUid = `pos_${createHash("sha256")
+    .update(`${tenantId}:${venueId}:${caller.hostUid}:${caller.uid}`)
+    .digest("hex").slice(0, 48)}`;
+  const customToken = await auth.createCustomToken(scopedUid, {
+    tablesidePos: true,
+    tenantId,
+    venueId,
+    hostUid: caller.hostUid,
+    staffId: caller.uid,
+    hubEpoch: hub.epoch,
+  });
+  return {
+    customToken,
+    databaseUrl: configured.url,
+    hubEpoch: hub.epoch,
+    hubDeviceId: hub.deviceId,
+  };
+}
+
 async function issueRealtimeHubSessionFor(caller, rawData) {
   const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/realtime-session");
   const configured = configuredRealtimeDatabase();
@@ -2781,6 +2884,18 @@ async function completeRemoteHubCommandFor(caller, rawData) {
       rejectionMessage: accepted ? null : String(upload.body.rejectionMessage ?? "The venue hub rejected this command.").slice(0, 500),
       claimTokenHash: FieldValue.delete(), claimExpiresAt: FieldValue.delete(),
     });
+  });
+  const command = await commandRef.get();
+  const value = command.data() ?? {};
+  await publishRealtimeCommandStatus(upload.tenantId, upload.venueId, commandId, {
+    commandId,
+    hostUid: value.hostUid ?? null,
+    staffId: value.staffId ?? null,
+    status: accepted ? "accepted" : "rejected",
+    stage: accepted ? "hubCommitted" : "hubRejected",
+    result: accepted ? result : null,
+    rejectionMessage: accepted ? null :
+      String(upload.body.rejectionMessage ?? "The venue hub rejected this command.").slice(0, 500),
   });
   return {commandId, accepted};
 }
@@ -3594,6 +3709,26 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
   await applyOfflineStockForEvents(tenantRef, upload.venueId, events);
   await materializeOfflineProductionTickets(tenantRef, upload.venueId, events);
   await materializeOfflineFulfilmentChanges(tenantRef, upload.venueId, events);
+  // Mirror only acknowledgement metadata to RTDB after the Firestore
+  // projection transaction commits. Remote POS clients can then finish on a
+  // persistent socket without repeatedly invoking a long-poll Function.
+  for (const commandId of remoteCommandIds) {
+    const command = await remoteHubQueue(upload.tenantId, upload.venueId)
+      .doc(commandId).get();
+    const value = command.data();
+    if (!command.exists || value?.status !== "accepted") continue;
+    await publishRealtimeCommandStatus(
+      upload.tenantId, upload.venueId, commandId,
+      {
+        commandId,
+        hostUid: value.hostUid,
+        staffId: value.staffId,
+        status: "accepted",
+        stage: "cloudProjected",
+        result: value.result ?? null,
+      },
+    );
+  }
   return {acknowledgedEventIds, serverTimeMillis: Date.now()};
 }
 
@@ -9919,6 +10054,42 @@ async function cancelPrintJobFor(caller, rawData) {
 // this server-side trigger create a separate, idempotent fallback job.  That
 // prevents the same ticket printing at both locations while a printer is just
 // temporarily slow to connect.
+export const signalQueuedPrinter = onDocumentWritten(
+  "tenants/{tenantId}/printJobs/{jobId}",
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (after?.status !== "queued" ||
+        (before?.status === "queued" &&
+         before?.targetDeviceId === after.targetDeviceId)) return;
+    const venueId = typeof after.venueId === "string" ? after.venueId : "";
+    const deviceId = typeof after.targetDeviceId === "string"
+      ? after.targetDeviceId : "";
+    if (!venueId || !deviceId) return;
+    const url = databaseURL.value().trim();
+    if (url.length === 0) return;
+    await configuredRealtimeDatabase().database
+      .ref(`printerSignals/${event.params.tenantId}/${venueId}/${deviceId}`)
+      .set({
+        jobId: event.params.jobId,
+        signaledAt: ServerValue.TIMESTAMP,
+      });
+  },
+);
+
+// Firestore TTL eventually deletes remote commands. Remove the parallel RTDB
+// acknowledgement at the same time so the fast channel stays bounded.
+export const cleanupRealtimeRemoteCommand = onDocumentDeleted(
+  "tenants/{tenantId}/venues/{venueId}/remoteHubCommands/{commandId}",
+  async (event) => {
+    const url = databaseURL.value().trim();
+    if (url.length === 0) return;
+    await configuredRealtimeDatabase().database.ref(
+      `remoteCommandStatus/${event.params.tenantId}/${event.params.venueId}/${event.params.commandId}`,
+    ).remove();
+  },
+);
+
 export const enqueueFallbackPrintJob = onDocumentUpdated(
   "tenants/{tenantId}/printJobs/{jobId}",
   async (event) => {
@@ -11615,6 +11786,7 @@ async function invokePosAction(action, caller, data) {
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
     "recoverOwnStaffPin",
     "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
+    "issueRealtimePrinterSession",
     "getTrustedTime", "getOfflineHubBootstrap", "ingestOfflineHubEvents",
     "reconcileOfflineHubClosedOrders",
     "getOfflineHubSnapshot", "claimRemoteHubCommands",
@@ -11643,6 +11815,8 @@ async function invokePosAction(action, caller, data) {
       return refreshStaffPinSessionFor(actingCaller, data);
     case "heartbeatPrinterDevice":
       return heartbeatPrinterDeviceFor(caller, data);
+    case "issueRealtimePrinterSession":
+      return issueRealtimePrinterSessionFor(caller, data);
     case "claimDevicePrintJob":
       return claimDevicePrintJobFor(caller, data);
     case "completeDevicePrintJob":
@@ -11663,6 +11837,8 @@ async function invokePosAction(action, caller, data) {
       return waitForRemoteHubCommandFor(actingCaller, data);
     case "issueRealtimeHubSession":
       return issueRealtimeHubSessionFor(caller, data);
+    case "issueRealtimePosSession":
+      return issueRealtimePosSessionFor(actingCaller, data);
     case "claimRemoteHubCommands":
       return claimRemoteHubCommandsFor(caller, data);
     case "completeRemoteHubCommand":

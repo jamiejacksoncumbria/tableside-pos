@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -18,6 +19,7 @@ import '../offline/venue_hub_protocol.dart';
 import '../offline/venue_hub_client_registry.dart';
 import '../offline/venue_hub_client.dart';
 import '../offline/venue_hub_remote_command_client.dart';
+import '../offline/venue_hub_realtime_client.dart';
 import '../offline/venue_hub_runtime.dart';
 
 class ProductionDispatchResult {
@@ -739,6 +741,26 @@ class ProductionCommandRepository {
       'body': body,
     });
   }
+
+  /// Opens one short-lived, staff-scoped RTDB session for presence and command
+  /// acknowledgements. Order data still travels only through the POS API.
+  Future<Map<String, Object?>> issueRealtimePosSession({
+    required VenueScope scope,
+  }) => _call('issueRealtimePosSession', {
+    'tenantId': scope.tenantId,
+    'venueId': scope.venueId,
+  });
+
+  Future<Map<String, Object?>> issueRealtimePrinterSession({
+    required VenueScope scope,
+    required String deviceId,
+    required String deviceCredential,
+  }) => _call('issueRealtimePrinterSession', {
+    'tenantId': scope.tenantId,
+    'venueId': scope.venueId,
+    'deviceId': deviceId,
+    'deviceCredential': deviceCredential,
+  });
 
   Future<List<Map<String, Object?>>> claimRemoteHubCommands({
     required VenueScope scope,
@@ -2066,6 +2088,17 @@ class ProductionCommandRepository {
     if (epoch == null || epoch < 1) {
       throw StateError('The venue hub generation is unavailable.');
     }
+    final realtime = VenueHubRealtimeClient.instance;
+    await realtime.ensureConfigured(
+      scope: scope,
+      hubEpoch: epoch,
+      repository: this,
+    );
+    if (!realtime.hubOnline) {
+      throw StateError(
+        'The venue hub is offline. Join the venue network or wait for it to reconnect.',
+      );
+    }
     return _remoteHub.send(
       scope: scope,
       hubEpoch: epoch,
@@ -2073,7 +2106,20 @@ class ProductionCommandRepository {
       payload: payload,
       businessTimestampUtc: businessTimestampUtc,
       submit: (request) => _call('submitRemoteHubCommand', request),
-      waitForStatus: (request) => _call('waitForRemoteHubCommand', request),
+      waitForStatus: (request) async {
+        try {
+          return await realtime.waitForCommand(
+            scope,
+            request['commandId'] as String,
+            timeout: const Duration(seconds: 12),
+          );
+        } on TimeoutException {
+          // RTDB is the normal low-latency path. A single protected long poll
+          // preserves a durable acknowledgement if its metadata publish was
+          // interrupted after Firestore already committed the result.
+          return _call('waitForRemoteHubCommand', request);
+        }
+      },
     );
   }
 
@@ -2203,6 +2249,8 @@ class ProductionCommandRepository {
     'ingestOfflineHubEvents',
     'reconcileOfflineHubClosedOrders',
     'issueRealtimeHubSession',
+    'issueRealtimePosSession',
+    'issueRealtimePrinterSession',
     'claimRemoteHubCommands',
     'completeRemoteHubCommand',
     'heartbeatPrinterDevice',

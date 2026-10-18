@@ -11,6 +11,7 @@ import '../../data/print_job_repository.dart';
 import '../../data/printer_device_repository.dart';
 import 'local_printer_device_identity.dart';
 import 'native_print_worker.dart';
+import 'printer_realtime_presence.dart';
 import 'queued_bluetooth_receipt_printer.dart';
 import 'queued_windows_receipt_printer.dart';
 import '../../offline/venue_hub_client_registry.dart';
@@ -32,10 +33,7 @@ class QueuedNativePrintWorker {
   final PrintJobRepository _queue;
   final PrinterDeviceRepository _devices;
   final LocalPrinterDeviceIdentity _identity;
-  DateTime? _lastHeartbeatAt;
-  DateTime? _heartbeatRetryAfter;
-  VenueScope? _heartbeatScope;
-  bool _cloudHeartbeatOffline = false;
+  final PrinterRealtimePresence _realtime = PrinterRealtimePresence();
   String? _lastReadinessDiagnostic;
   final Set<String> _printedAwaitingCompletion = <String>{};
 
@@ -53,20 +51,34 @@ class QueuedNativePrintWorker {
 
   /// Signals that a venue has queued work. The host listens to this stream and
   /// claims jobs immediately; it does not wait for a periodic scan.
-  Stream<int> watchQueuedJobCount(VenueScope scope) => _queue
-      .watchQueuedJobCount(tenantId: scope.tenantId, venueId: scope.venueId);
+  Stream<int> watchQueuedJobCount(VenueScope scope) {
+    final queue = _queue.watchQueuedJobCount(
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+    );
+    return Stream<int>.multi((controller) {
+      var latest = 0;
+      final queueSubscription = queue.listen((queuedCount) {
+        latest = queuedCount;
+        controller.add(queuedCount);
+      }, onError: controller.addError);
+      final signalSubscription = _realtime.signals.listen((_) {
+        // A realtime signal wakes the worker even before the Firestore/local
+        // queue snapshot arrives. Atomic claim still decides whether work
+        // exists, so duplicate signals are harmless.
+        controller.add(latest == 0 ? 1 : latest);
+      }, onError: controller.addError);
+      controller.onCancel = () async {
+        await queueSubscription.cancel();
+        await signalSubscription.cancel();
+      };
+    });
+  }
 
   /// Keeps a registered foreground printer visible to the venue-wide delivery
   /// monitor even while it has no jobs. An unregistered till performs no
   /// heartbeat write, so this is safe to call on the shared app shell timer.
   Future<void> maintainHeartbeat(VenueScope scope) async {
-    final now = DateTime.now();
-    if (_heartbeatRetryAfter?.isAfter(now) == true) return;
-    if (_heartbeatScope == scope &&
-        _lastHeartbeatAt != null &&
-        now.difference(_lastHeartbeatAt!) < const Duration(seconds: 60)) {
-      return;
-    }
     try {
       final user = FirebaseAuth.instance.currentUser;
       final requiredTransport = _requiredTransport;
@@ -81,6 +93,7 @@ class QueuedNativePrintWorker {
         }
       }
       if (deviceCredential == null || deviceCredential.isEmpty) return;
+      if (_realtime.isConfigured(scope, deviceId)) return;
       final device = await _devices.getDevice(
         tenantId: scope.tenantId,
         deviceId: deviceId,
@@ -91,34 +104,15 @@ class QueuedNativePrintWorker {
           !device.transports.contains(requiredTransport)) {
         return;
       }
-      // Hub-local tickets are claimed without Firebase, but the cloud device
-      // heartbeat still feeds every till's delivery monitor. Suppressing this
-      // heartbeat in hub mode made a healthy local printer appear offline and
-      // obscured the real state of queued tickets.
-      await _devices.heartbeat(
+      await _realtime.start(
         scope: scope,
         deviceId: deviceId,
         deviceCredential: deviceCredential,
       );
-      _lastHeartbeatAt = now;
-      _heartbeatScope = scope;
-      _heartbeatRetryAfter = null;
-      if (_cloudHeartbeatOffline) {
-        AppLogger.info('Printer device cloud heartbeat restored.');
-        _cloudHeartbeatOffline = false;
-      }
     } on Object catch (error) {
-      // Internet loss is an expected operating mode for a venue hub. Back off
-      // cloud-only presence updates while the encrypted LAN queue continues;
-      // otherwise a ten-second timer floods the diagnostics with identical
-      // socket stacks and can contend with local printing.
-      _heartbeatRetryAfter = now.add(const Duration(minutes: 2));
-      if (!_cloudHeartbeatOffline) {
-        AppLogger.info(
-          'Printer cloud heartbeat is offline; local hub printing remains active. ($error)',
-        );
-        _cloudHeartbeatOffline = true;
-      }
+      AppLogger.info(
+        'Printer realtime presence is offline; local hub printing remains active. ($error)',
+      );
     }
   }
 
@@ -180,18 +174,8 @@ class QueuedNativePrintWorker {
       _lastReadinessDiagnostic = readyDiagnostic;
     }
 
-    final now = DateTime.now();
-    if (!hubMode &&
-        (_heartbeatScope != scope ||
-            _lastHeartbeatAt == null ||
-            now.difference(_lastHeartbeatAt!) >= const Duration(seconds: 60))) {
-      await _devices.heartbeat(
-        scope: scope,
-        deviceId: deviceId,
-        deviceCredential: deviceCredential!,
-      );
-      _lastHeartbeatAt = now;
-      _heartbeatScope = scope;
+    if (!hubMode && !_realtime.isConfigured(scope, deviceId)) {
+      await maintainHeartbeat(scope);
     }
     final worker = NativePrintWorker(
       queue: _queue,

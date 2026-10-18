@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../core/tenant_scope.dart';
 import 'production_command_repository.dart';
+import '../offline/venue_hub_realtime_client.dart';
 
 class PrinterDevice {
   const PrinterDevice({
@@ -84,7 +85,7 @@ class PrinterDeviceRepository {
     required String tenantId,
     required String venueId,
   }) {
-    return _firestore
+    final devices = _firestore
         .collection('tenants/$tenantId/devices')
         .where('venueId', isEqualTo: venueId)
         .snapshots()
@@ -92,6 +93,45 @@ class PrinterDeviceRepository {
           (snapshot) =>
               snapshot.docs.map(_fromDocument).toList(growable: false),
         );
+    return Stream<List<PrinterDevice>>.multi((controller) {
+      var currentDevices = const <PrinterDevice>[];
+      var currentPresence = const <String, DateTime>{};
+      void emit() {
+        controller.add(
+          currentDevices
+              .map(
+                (device) => PrinterDevice(
+                  id: device.id,
+                  venueId: device.venueId,
+                  name: device.name,
+                  platform: device.platform,
+                  productionAreas: device.productionAreas,
+                  transports: device.transports,
+                  active: device.active,
+                  lastHeartbeatAt:
+                      currentPresence[device.id] ?? device.lastHeartbeatAt,
+                ),
+              )
+              .toList(growable: false),
+        );
+      }
+
+      final deviceSubscription = devices.listen((value) {
+        currentDevices = value;
+        emit();
+      }, onError: controller.addError);
+      final presenceSubscription = VenueHubRealtimeClient
+          .instance
+          .printerPresence
+          .listen((value) {
+            currentPresence = value;
+            emit();
+          }, onError: controller.addError);
+      controller.onCancel = () async {
+        await deviceSubscription.cancel();
+        await presenceSubscription.cancel();
+      };
+    });
   }
 
   PrinterDevice _fromDocument(DocumentSnapshot<Map<String, dynamic>> document) {
