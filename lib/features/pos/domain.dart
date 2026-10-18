@@ -793,6 +793,7 @@ class DiningTable {
     required this.id,
     required this.label,
     required this.seats,
+    this.sortOrder,
     this.hasOpenOrder = false,
     this.currentOrderId,
   });
@@ -800,11 +801,56 @@ class DiningTable {
   final String id;
   final String label;
   final int seats;
+
+  /// Optional manager-defined position. Older table documents do not contain
+  /// this value and are ordered naturally by their visible label instead.
+  final int? sortOrder;
   final bool hasOpenOrder;
 
   /// The server-owned open order for this table, if one exists.  The POS uses
   /// this identifier to stream the live total directly on the table tile.
   final String? currentOrderId;
+}
+
+/// Sorts table labels as staff read them rather than as raw strings.
+///
+/// This keeps `Table 2` before `Table 10` and produces the same deterministic
+/// order from Firestore and an offline-hub snapshot. A configured sort order
+/// wins when present; the ID is the final stable tie-breaker.
+int compareDiningTables(DiningTable left, DiningTable right) {
+  final leftOrder = left.sortOrder;
+  final rightOrder = right.sortOrder;
+  if (leftOrder != null || rightOrder != null) {
+    final byConfiguredOrder = (leftOrder ?? 0x7fffffff).compareTo(
+      rightOrder ?? 0x7fffffff,
+    );
+    if (byConfiguredOrder != 0) return byConfiguredOrder;
+  }
+  final byLabel = _compareNaturalText(left.label, right.label);
+  if (byLabel != 0) return byLabel;
+  return left.id.compareTo(right.id);
+}
+
+int _compareNaturalText(String left, String right) {
+  final chunks = RegExp(r'\d+|\D+');
+  final leftChunks = chunks.allMatches(left.trim().toLowerCase()).toList();
+  final rightChunks = chunks.allMatches(right.trim().toLowerCase()).toList();
+  final sharedLength = leftChunks.length < rightChunks.length
+      ? leftChunks.length
+      : rightChunks.length;
+  for (var index = 0; index < sharedLength; index++) {
+    final leftChunk = leftChunks[index].group(0)!;
+    final rightChunk = rightChunks[index].group(0)!;
+    final leftNumber = int.tryParse(leftChunk);
+    final rightNumber = int.tryParse(rightChunk);
+    final comparison = leftNumber != null && rightNumber != null
+        ? leftNumber.compareTo(rightNumber)
+        : leftChunk.compareTo(rightChunk);
+    if (comparison != 0) return comparison;
+  }
+  final byChunkCount = leftChunks.length.compareTo(rightChunks.length);
+  if (byChunkCount != 0) return byChunkCount;
+  return left.toLowerCase().compareTo(right.toLowerCase());
 }
 
 /// A venue-local customer-name tab. Its server-created registry is what makes

@@ -503,6 +503,7 @@ class FirestorePosRepository {
                   id: document.id,
                   label: data['label'] as String? ?? 'Table',
                   seats: data['seats'] as int? ?? 0,
+                  sortOrder: (data['sortOrder'] as num?)?.toInt(),
                   hasOpenOrder: currentOrderId?.trim().isNotEmpty == true,
                   currentOrderId: currentOrderId?.trim().isNotEmpty == true
                       ? currentOrderId

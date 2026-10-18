@@ -264,6 +264,7 @@ class VenueHubOfflineView {
             id: item['id'] as String,
             label: item['label'] as String,
             seats: (item['seats'] as num?)?.toInt() ?? 0,
+            sortOrder: (item['sortOrder'] as num?)?.toInt(),
           );
         })
         .toList(growable: false);

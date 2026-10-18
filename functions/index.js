@@ -3199,6 +3199,8 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
     tables: tables.docs.map((table) => ({
       id: table.id, label: table.data().label ?? table.id,
       seats: Number(table.data().seats ?? 0), active: table.data().active !== false,
+      sortOrder: Number.isSafeInteger(table.data().sortOrder)
+        ? table.data().sortOrder : null,
     })),
     printerRoutes: routes.docs.map((route) => ({
       productionArea: route.data().productionArea ?? "kitchen",

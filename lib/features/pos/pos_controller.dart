@@ -44,8 +44,10 @@ final allMenuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
 });
 
 final diningTablesProvider = StreamProvider<List<DiningTable>>((ref) {
+  List<DiningTable> ordered(List<DiningTable> tables) =>
+      List<DiningTable>.of(tables)..sort(compareDiningTables);
   final scope = ref.watch(activeVenueScopeProvider);
-  if (scope == null) return Stream.value(demoTables);
+  if (scope == null) return Stream.value(ordered(demoTables));
   if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     final view = VenueHubOfflineView.instance;
     return view.orderStream.map((orders) {
@@ -61,14 +63,19 @@ final diningTablesProvider = StreamProvider<List<DiningTable>>((ref) {
               id: table.id,
               label: table.label,
               seats: table.seats,
+              sortOrder: table.sortOrder,
               hasOpenOrder: order != null,
               currentOrderId: order?.id,
             );
           })
-          .toList(growable: false);
+          .toList(growable: false)
+        ..sort(compareDiningTables);
     });
   }
-  return ref.watch(firestorePosRepositoryProvider).watchTables(scope);
+  return ref
+      .watch(firestorePosRepositoryProvider)
+      .watchTables(scope)
+      .map(ordered);
 });
 
 final openNamedTabsProvider = StreamProvider<List<OpenNamedTab>>((ref) {
