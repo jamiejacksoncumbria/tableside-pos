@@ -807,11 +807,15 @@ class FirestorePosRepository {
       tenantId: scope.tenantId,
       venueId: scope.venueId,
       tableId: data['tableId'] as String?,
-      tabName:
-          data['tabName'] as String? ??
-          (data['channel'] == 'dineIn'
-              ? null
-              : data['customerName'] as String?),
+      // A collection/delivery customer is not a named tab. The previous
+      // display fallback copied customerName into tabName, then checkout sent
+      // that invented tab identity back to the hub. The hub correctly rejected
+      // it because the immutable opening event has no tab for fulfilment
+      // orders. Keep display data in customerName and preserve tabName only for
+      // genuine dine-in named tabs.
+      tabName: data['channel'] == 'collection' || data['channel'] == 'delivery'
+          ? null
+          : data['tabName'] as String?,
       businessDate: DateTime(date.year, date.month, date.day),
       openedAt: date,
       status: status,
