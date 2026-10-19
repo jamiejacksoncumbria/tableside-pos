@@ -155,7 +155,6 @@ class PrintJobRepository {
     required String tenantId,
     required String venueId,
     Duration retention = const Duration(days: 5),
-    int limit = 250,
   }) {
     final cutoff = DateTime.now().subtract(retention);
     final cloud = _jobs(tenantId)
@@ -166,7 +165,6 @@ class PrintJobRepository {
           isGreaterThanOrEqualTo: Timestamp.fromDate(cutoff),
         )
         .orderBy('completedAt', descending: true)
-        .limit(limit)
         .snapshots()
         .map(
           (snapshot) => snapshot.docs
@@ -181,7 +179,6 @@ class PrintJobRepository {
                 scope,
                 statuses: const <String>{'printed'},
                 sinceUtc: cutoff,
-                limit: limit,
               )
             : null);
     if (local == null) return cloud;
@@ -200,7 +197,7 @@ class PrintJobRepository {
               left.completedAt ?? left.createdAt,
             ),
           );
-        controller.add(values.take(limit).toList(growable: false));
+        controller.add(values);
       }
 
       final cloudSubscription = cloud.listen((jobs) {
