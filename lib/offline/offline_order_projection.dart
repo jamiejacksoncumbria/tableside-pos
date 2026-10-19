@@ -116,6 +116,9 @@ class OfflineOrderProjection {
     this.scheduledForUtc,
     this.fulfilmentStatus = 'awaitingPreparation',
     this.assignedDriverId,
+    this.splitFromOrderId,
+    this.splitSequence = 0,
+    this.openSplitOrderIds = const <String>[],
   });
 
   final String tenantId;
@@ -145,6 +148,9 @@ class OfflineOrderProjection {
   final DateTime? scheduledForUtc;
   final String fulfilmentStatus;
   final String? assignedDriverId;
+  final String? splitFromOrderId;
+  final int splitSequence;
+  final List<String> openSplitOrderIds;
 
   int get totalMinor =>
       lines.values.fold(0, (sum, line) => sum + line.totalMinor) +
@@ -179,6 +185,9 @@ class OfflineOrderProjection {
     'scheduledForUtc': scheduledForUtc?.toIso8601String(),
     'fulfilmentStatus': fulfilmentStatus,
     'assignedDriverId': assignedDriverId,
+    'splitFromOrderId': splitFromOrderId,
+    'splitSequence': splitSequence,
+    'openSplitOrderIds': openSplitOrderIds,
     'lines': lines.values
         .map(
           (line) => <String, Object?>{
@@ -213,6 +222,40 @@ class OfflineOrderProjection {
         )
         .toList(growable: false),
   };
+
+  OfflineOrderProjection withOpenSplitOrderIds(List<String> value) =>
+      OfflineOrderProjection._(
+        tenantId: tenantId,
+        venueId: venueId,
+        orderId: orderId,
+        openedAtUtc: openedAtUtc,
+        tableId: tableId,
+        tabName: tabName,
+        hubEpoch: hubEpoch,
+        lastSequence: lastSequence,
+        lines: lines,
+        payments: payments,
+        isClosed: isClosed,
+        receiptNumber: receiptNumber,
+        closedAtUtc: closedAtUtc,
+        channel: channel,
+        customerId: customerId,
+        customerName: customerName,
+        customerPhone: customerPhone,
+        deliveryAddress: deliveryAddress,
+        deliveryAddressLabel: deliveryAddressLabel,
+        deliveryLatitude: deliveryLatitude,
+        deliveryLongitude: deliveryLongitude,
+        serviceAreaId: serviceAreaId,
+        serviceAreaName: serviceAreaName,
+        deliveryFeeMinor: deliveryFeeMinor,
+        scheduledForUtc: scheduledForUtc,
+        fulfilmentStatus: fulfilmentStatus,
+        assignedDriverId: assignedDriverId,
+        splitFromOrderId: splitFromOrderId,
+        splitSequence: splitSequence,
+        openSplitOrderIds: List.unmodifiable(value),
+      );
 }
 
 /// Rebuilds an order solely from its immutable venue-hub events. Validation is
@@ -246,6 +289,9 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
   DateTime? scheduledForUtc;
   var fulfilmentStatus = 'awaitingPreparation';
   String? assignedDriverId;
+  String? splitFromOrderId;
+  var splitSequence = 0;
+  final openSplitOrderIds = <String>[];
 
   // A replacement hub starts a new immutable epoch, but open orders may have
   // been created by the preceding hub. The cloud signs these baselines into
@@ -301,6 +347,12 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         payload['fulfilmentStatus'] as String? ??
         (channel == 'delivery' ? 'awaitingDriver' : 'awaitingPreparation');
     assignedDriverId = payload['assignedDriverId'] as String?;
+    splitFromOrderId = payload['splitFromOrderId'] as String?;
+    splitSequence = (payload['splitSequence'] as num?)?.toInt() ?? 0;
+    openSplitOrderIds.addAll(
+      (payload['openSplitOrderIds'] as List?)?.whereType<String>() ??
+          const <String>[],
+    );
     final rawLines = payload['lines'];
     if (rawLines is! List) {
       throw const OfflineProjectionException(
@@ -611,6 +663,66 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           );
         }
         break;
+      case 'order.splitCreated':
+        _requireOpened(opened);
+        if (splitFromOrderId != null || payments.isNotEmpty) {
+          throw const OfflineProjectionException(
+            'Only an unpaid main bill can be split.',
+          );
+        }
+        final splitOrderId = _requiredString(event.payload, 'splitOrderId');
+        final rawAllocations = event.payload['splitLines'];
+        if (rawAllocations is! List || rawAllocations.isEmpty) {
+          throw const OfflineProjectionException(
+            'The split bill selection is invalid.',
+          );
+        }
+        var selectedQuantity = 0;
+        final selectedLineIds = <String>{};
+        for (final raw in rawAllocations) {
+          if (raw is! Map) {
+            throw const OfflineProjectionException(
+              'A split bill item is invalid.',
+            );
+          }
+          final allocation = Map<String, Object?>.from(raw);
+          final lineId = _requiredString(allocation, 'lineId');
+          final quantity = _positiveInt(allocation, 'quantity');
+          final line = lines[lineId];
+          if (line == null ||
+              !line.sent ||
+              quantity > line.quantity ||
+              !selectedLineIds.add(lineId)) {
+            throw const OfflineProjectionException(
+              'A selected split item is no longer available.',
+            );
+          }
+          selectedQuantity += quantity;
+        }
+        final sourceQuantity = lines.values.fold<int>(
+          0,
+          (sum, line) => sum + line.quantity,
+        );
+        if (selectedQuantity >= sourceQuantity ||
+            openSplitOrderIds.contains(splitOrderId)) {
+          throw const OfflineProjectionException(
+            'The split must leave at least one item on the main bill.',
+          );
+        }
+        for (final raw in rawAllocations.whereType<Map>()) {
+          final lineId = raw['lineId']! as String;
+          final quantity = (raw['quantity']! as num).toInt();
+          final line = lines[lineId]!;
+          final remaining = line.quantity - quantity;
+          if (remaining == 0) {
+            lines.remove(lineId);
+          } else {
+            lines[lineId] = line.copyWith(quantity: remaining);
+          }
+        }
+        splitSequence++;
+        openSplitOrderIds.add(splitOrderId);
+        break;
       case 'order.fulfilmentChanged':
         _requireOpened(opened);
         final status = _requiredString(event.payload, 'status');
@@ -837,6 +949,9 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     scheduledForUtc: scheduledForUtc,
     fulfilmentStatus: fulfilmentStatus,
     assignedDriverId: assignedDriverId,
+    splitFromOrderId: splitFromOrderId,
+    splitSequence: splitSequence,
+    openSplitOrderIds: List.unmodifiable(openSplitOrderIds),
   );
 }
 

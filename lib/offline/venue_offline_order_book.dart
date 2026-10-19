@@ -184,6 +184,8 @@ class VenueOfflineOrderBook {
           event.payload['paymentId'] == draft.payload['paymentId'],
         'payment.batchRecorded' =>
           event.payload['batchId'] == draft.payload['batchId'],
+        'order.splitCreated' =>
+          event.payload['splitOrderId'] == draft.payload['splitOrderId'],
         'order.sent' =>
           _canonicalJson(event.payload['lineIds']) ==
               _canonicalJson(draft.payload['lineIds']),
@@ -216,8 +218,8 @@ class VenueOfflineOrderBook {
       venueId: venueId,
       hubEpoch: hubEpoch,
     );
-    final orderEvents = events.where(_isOrderEvent);
-    final grouped = <String, List<OfflineEvent>>{};
+    final orderEvents = events.where(_isOrderEvent).toList(growable: false);
+    final orderIds = <String>{};
     for (final event in orderEvents) {
       final orderId = event.payload['orderId'];
       if (orderId is! String || orderId.isEmpty) {
@@ -225,12 +227,34 @@ class VenueOfflineOrderBook {
           'An offline event does not identify an order.',
         );
       }
-      grouped.putIfAbsent(orderId, () => []).add(event);
+      orderIds.add(orderId);
+      if (event.type == 'order.splitCreated') {
+        final splitOrderId = event.payload['splitOrderId'];
+        if (splitOrderId is! String || splitOrderId.isEmpty) {
+          throw const OfflineProjectionException(
+            'A split event does not identify its child bill.',
+          );
+        }
+        orderIds.add(splitOrderId);
+      }
     }
-    return <String, OfflineOrderProjection>{
-      for (final entry in grouped.entries)
-        entry.key: _projectOrderEvents(entry.value),
-    };
+    final result = <String, OfflineOrderProjection>{};
+    for (final orderId in orderIds) {
+      result[orderId] = _projectOrderEvents(
+        _eventsForOrder(orderEvents, orderId),
+      );
+    }
+    // A settled child is no longer an obstacle to closing its main bill. The
+    // immutable split event remains unchanged; this is derived state only.
+    for (final entry in result.entries.toList(growable: false)) {
+      final openChildren = entry.value.openSplitOrderIds
+          .where((id) => result[id]?.isClosed == false)
+          .toList(growable: false);
+      if (openChildren.length != entry.value.openSplitOrderIds.length) {
+        result[entry.key] = entry.value.withOpenSplitOrderIds(openChildren);
+      }
+    }
+    return result;
   }
 
   /// Imports cloud-signed active orders that are absent from the local ledger
@@ -261,6 +285,13 @@ class VenueOfflineOrderBook {
       final orderId = event.payload['orderId'];
       if (orderId is! String || orderId.isEmpty) continue;
       localByOrder.putIfAbsent(orderId, () => []).add(event);
+      if (event.type == 'order.splitCreated' &&
+          event.payload['splitOrderId'] is String) {
+        localByOrder.putIfAbsent(
+          event.payload['splitOrderId']! as String,
+          () => <OfflineEvent>[event],
+        );
+      }
     }
 
     // A cloud order can still be open while its valid local close is waiting
@@ -269,6 +300,12 @@ class VenueOfflineOrderBook {
     // balance authority. The event remains in the durable upload chain, but
     // local projection ignores it when the local event chain is complete.
     final reconstructable = <String>{};
+    reconstructable.addAll(
+      existing
+          .where((event) => event.type == 'order.splitCreated')
+          .map((event) => event.payload['splitOrderId'])
+          .whereType<String>(),
+    );
     for (final entry in localByOrder.entries) {
       final withoutBaselines = entry.value
           .where((event) => event.type != 'order.cloudBaseline')
@@ -317,14 +354,12 @@ class VenueOfflineOrderBook {
   }
 
   Future<OfflineOrderProjection> order(String orderId) async {
-    final events = await _ledger.eventsForVenue(
-      tenantId: tenantId,
-      venueId: venueId,
-      hubEpoch: hubEpoch,
-    );
-    return _projectOrderEvents(
-      events.where((event) => event.payload['orderId'] == orderId).toList(),
-    );
+    final orders = await rebuild();
+    final result = orders[orderId];
+    if (result == null) {
+      throw const OfflineProjectionException('The order is not open.');
+    }
+    return result;
   }
 
   void _validateProposed(List<OfflineEvent> existing, OfflineEventDraft draft) {
@@ -334,9 +369,7 @@ class VenueOfflineOrderBook {
         'The offline command does not identify an order.',
       );
     }
-    final orderEvents = existing
-        .where((event) => event.payload['orderId'] == orderId)
-        .toList(growable: false);
+    final orderEvents = _eventsForOrder(existing, orderId);
     if (draft.type == 'order.opened') {
       if (orderEvents.isNotEmpty) {
         throw const OfflineProjectionException('The order already exists.');
@@ -469,6 +502,60 @@ class VenueOfflineOrderBook {
           printRequired: draft.payload['printRequired'] == true,
         );
         break;
+      case 'order.splitCreated':
+        final splitOrderId = draft.payload['splitOrderId'];
+        final rawAllocations = draft.payload['splitLines'];
+        if (current.splitFromOrderId != null ||
+            current.payments.isNotEmpty ||
+            splitOrderId is! String ||
+            splitOrderId.isEmpty ||
+            splitOrderId.length > 180 ||
+            rawAllocations is! List ||
+            rawAllocations.isEmpty ||
+            rawAllocations.length > 100 ||
+            existing.any(
+              (event) =>
+                  event.payload['orderId'] == splitOrderId ||
+                  event.payload['splitOrderId'] == splitOrderId,
+            )) {
+          throw const OfflineProjectionException(
+            'Only an unpaid main bill can be split.',
+          );
+        }
+        var selectedQuantity = 0;
+        final selectedLineIds = <String>{};
+        for (final raw in rawAllocations) {
+          if (raw is! Map) {
+            throw const OfflineProjectionException(
+              'A split bill item is invalid.',
+            );
+          }
+          final lineId = raw['lineId'];
+          final quantity = (raw['quantity'] as num?)?.toInt();
+          final line = current.lines[lineId];
+          if (lineId is! String ||
+              quantity == null ||
+              quantity <= 0 ||
+              line == null ||
+              !line.sent ||
+              quantity > line.quantity ||
+              !selectedLineIds.add(lineId)) {
+            throw const OfflineProjectionException(
+              'A selected split item is no longer available.',
+            );
+          }
+          selectedQuantity += quantity;
+        }
+        final sourceQuantity = current.lines.values.fold<int>(
+          0,
+          (sum, line) => sum + line.quantity,
+        );
+        if (selectedQuantity >= sourceQuantity) {
+          throw const OfflineProjectionException(
+            'The split must leave at least one item on the main bill.',
+          );
+        }
+        break;
       case 'order.fulfilmentChanged':
         final status = draft.payload['status'];
         if (status is! String ||
@@ -571,12 +658,124 @@ class VenueOfflineOrderBook {
 
   void _projectAffectedOrder(List<OfflineEvent> events, Object? rawOrderId) {
     if (rawOrderId is! String) return;
-    _projectOrderEvents(
-      events
-          .where((event) => event.payload['orderId'] == rawOrderId)
-          .toList(growable: false),
-    );
+    _projectOrderEvents(_eventsForOrder(events, rawOrderId));
+    final latest = events.last;
+    if (latest.type == 'order.splitCreated') {
+      final splitOrderId = latest.payload['splitOrderId'];
+      if (splitOrderId is String) {
+        _projectOrderEvents(_eventsForOrder(events, splitOrderId));
+      }
+    }
   }
+}
+
+/// Builds the child bill deterministically from the single atomic split event.
+/// No second ledger write is needed, so a crash cannot leave the parent reduced
+/// without its payable child (or create the child without reducing the parent).
+List<OfflineEvent> _eventsForOrder(
+  Iterable<OfflineEvent> allEvents,
+  String orderId,
+) {
+  final events = allEvents.where(_isOrderEvent).toList(growable: false);
+  final direct = events
+      .where((event) => event.payload['orderId'] == orderId)
+      .toList(growable: true);
+  final splitEvent = events.cast<OfflineEvent?>().firstWhere(
+    (event) =>
+        event?.type == 'order.splitCreated' &&
+        event?.payload['splitOrderId'] == orderId,
+    orElse: () => null,
+  );
+  if (splitEvent == null) return direct;
+  final sourceOrderId = splitEvent.payload['orderId']! as String;
+  final sourceEvents = events
+      .where(
+        (event) =>
+            event.payload['orderId'] == sourceOrderId &&
+            event.sequence < splitEvent.sequence,
+      )
+      .toList(growable: false);
+  final source = _projectOrderEvents(sourceEvents);
+  final allocations = <String, int>{
+    for (final raw in (splitEvent.payload['splitLines'] as List).whereType<Map>())
+      raw['lineId']! as String: (raw['quantity']! as num).toInt(),
+  };
+  var index = 0;
+  final childLines = <Map<String, Object?>>[];
+  for (final line in source.lines.values) {
+    final quantity = allocations[line.id] ?? 0;
+    if (quantity <= 0) continue;
+    final suffix = orderId.length > 18
+        ? orderId.substring(orderId.length - 18)
+        : orderId;
+    final sourceSuffix = line.id.length > 18
+        ? line.id.substring(line.id.length - 18)
+        : line.id;
+    childLines.add(<String, Object?>{
+      'id': 'split-$suffix-${index++}-$sourceSuffix',
+      'productId': line.productId,
+      'name': line.name,
+      'quantity': quantity,
+      'unitPriceMinor': line.unitPriceMinor,
+      'productionArea': line.productionArea,
+      'details': line.details,
+      'taxRateBasisPoints': line.taxRateBasisPoints,
+      'taxRateName': line.taxRateName,
+      'sent': true,
+      'addedAtUtc': line.addedAtUtc?.toIso8601String(),
+      'sentAtUtc': line.sentAtUtc?.toIso8601String(),
+    });
+  }
+  final baseline = OfflineEvent(
+    id: 'derived-split-${splitEvent.id}',
+    tenantId: splitEvent.tenantId,
+    venueId: splitEvent.venueId,
+    deviceId: splitEvent.deviceId,
+    staffId: splitEvent.staffId,
+    managerApprovalStaffId: splitEvent.managerApprovalStaffId,
+    type: 'order.cloudBaseline',
+    payload: <String, Object?>{
+      'orderId': orderId,
+      'sourceOfflineHubEpoch': splitEvent.hubEpoch,
+      'openedAtUtc': splitEvent.createdAtUtc.toIso8601String(),
+      'tableId': source.tableId,
+      'tabName': source.tabName,
+      'channel': source.channel,
+      'customerId': source.customerId,
+      'customerName': source.customerName,
+      'customerPhone': source.customerPhone,
+      'deliveryAddress': source.deliveryAddress,
+      'deliveryAddressLabel': source.deliveryAddressLabel,
+      'deliveryLatitude': source.deliveryLatitude,
+      'deliveryLongitude': source.deliveryLongitude,
+      'serviceAreaId': source.serviceAreaId,
+      'serviceAreaName': source.serviceAreaName,
+      // The venue delivery charge belongs to the main order only.
+      'deliveryFeeMinor': 0,
+      'scheduledForUtc': source.scheduledForUtc?.toIso8601String(),
+      'fulfilmentStatus': source.fulfilmentStatus,
+      'assignedDriverId': source.assignedDriverId,
+      'splitFromOrderId': sourceOrderId,
+      'splitSequence': source.splitSequence + 1,
+      'openSplitOrderIds': const <String>[],
+      'lines': childLines,
+      'payments': const <Object?>[],
+    },
+    createdAtUtc: splitEvent.createdAtUtc,
+    deviceObservedAtUtc: splitEvent.deviceObservedAtUtc,
+    timeAuthority: splitEvent.timeAuthority,
+    clockSkewMillis: splitEvent.clockSkewMillis,
+    businessTimestampUtc: splitEvent.businessTimestampUtc,
+    sequence: splitEvent.sequence,
+    hubEpoch: splitEvent.hubEpoch,
+    previousHash: splitEvent.previousHash,
+    eventHash: splitEvent.eventHash,
+    syncState: splitEvent.syncState,
+    cloudAcknowledgedAtUtc: splitEvent.cloudAcknowledgedAtUtc,
+    quarantineReason: splitEvent.quarantineReason,
+  );
+  return <OfflineEvent>[baseline, ...direct]
+    ..sort((left, right) => left.sequence.compareTo(right.sequence));
 }
 
 bool _sameOpenedOrderIdentity(

@@ -1682,6 +1682,8 @@ class ProductionCommandRepository {
           'closeIfSettled': closed,
           'printReceipt': printReceipt,
           'receiptNumber': receiptNumber,
+          if (order.splitFromOrderId != null)
+            'splitFromOrderId': order.splitFromOrderId,
         },
       );
       return BillCloseResult(
@@ -1948,9 +1950,56 @@ class ProductionCommandRepository {
     required String splitOrderId,
     required Map<String, int> lineQuantities,
   }) async {
+    final selected = lineQuantities.entries
+        .where((entry) => entry.value > 0)
+        .toList(growable: false);
     if (VenueHubClientRegistry.instance.requiresHub(scope)) {
-      throw StateError(
-        'Bill splitting is temporarily unavailable while secure venue-hub routing is active. The order was not changed.',
+      await _ensureHubOrderOpened(
+        scope: scope,
+        orderId: order.id,
+        tableId: order.tableId,
+        tabName: order.tabName,
+        channel: order.channel,
+        customerId: order.customerId,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        deliveryAddress: order.deliveryAddress,
+        deliveryAddressLabel: order.deliveryAddressLabel,
+        deliveryLatitude: order.deliveryLatitude,
+        deliveryLongitude: order.deliveryLongitude,
+        serviceAreaId: order.serviceAreaId,
+        serviceAreaName: order.serviceAreaName,
+        deliveryFeeMinor: order.deliveryFeeMinor,
+        scheduledFor: order.scheduledFor,
+        assignedDriverId: order.assignedDriverId,
+        assignedDriverName: order.assignedDriverName,
+      );
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'order.splitCreated',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'splitOrderId': splitOrderId,
+          'splitLines': selected
+              .map(
+                (entry) => <String, Object?>{
+                  'lineId': entry.key,
+                  'quantity': entry.value,
+                },
+              )
+              .toList(growable: false),
+        },
+      );
+      var splitTotalMinor = 0;
+      for (final line in order.lines) {
+        splitTotalMinor +=
+            line.unitPriceMinor * (lineQuantities[line.id] ?? 0);
+      }
+      return OrderSplitResult(
+        splitOrderId: splitOrderId,
+        splitTotalMinor: splitTotalMinor,
+        remainingTotalMinor: order.totalMinor - splitTotalMinor,
+        alreadySplit: false,
       );
     }
     final response = await _call('splitOrder', {
@@ -1958,8 +2007,7 @@ class ProductionCommandRepository {
       'venueId': scope.venueId,
       'orderId': order.id,
       'splitOrderId': splitOrderId,
-      'splitLines': lineQuantities.entries
-          .where((entry) => entry.value > 0)
+      'splitLines': selected
           .map(
             (entry) => <String, Object?>{
               'lineId': entry.key,

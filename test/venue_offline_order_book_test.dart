@@ -165,191 +165,297 @@ void main() {
     );
   });
 
-  test('redundant baseline cannot poison an already closed local order', () async {
-    final database = sqlite3.openInMemory();
-    final store = NativeOfflineEventStore(
-      database: database,
-      crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
-    );
-    addTearDown(store.close);
-    final ledger = OfflineEventLedger.forTesting(store);
-    await ledger.initialize();
+  test(
+    'redundant baseline cannot poison an already closed local order',
+    () async {
+      final database = sqlite3.openInMemory();
+      final store = NativeOfflineEventStore(
+        database: database,
+        crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
+      );
+      addTearDown(store.close);
+      final ledger = OfflineEventLedger.forTesting(store);
+      await ledger.initialize();
 
-    const tenantId = 'tenant-a';
-    const venueId = 'venue-a';
-    const orderId = 'order-a';
-    const hubEpoch = 3;
-    Future<void> append(String type, Map<String, Object?> payload) async {
-      await ledger.commit(
-        OfflineEventDraft(
-          tenantId: tenantId,
-          venueId: venueId,
-          deviceId: 'hub-a',
-          staffId: 'staff-a',
-          type: type,
-          payload: {'orderId': orderId, ...payload},
-        ),
+      const tenantId = 'tenant-a';
+      const venueId = 'venue-a';
+      const orderId = 'order-a';
+      const hubEpoch = 3;
+      Future<void> append(String type, Map<String, Object?> payload) async {
+        await ledger.commit(
+          OfflineEventDraft(
+            tenantId: tenantId,
+            venueId: venueId,
+            deviceId: 'hub-a',
+            staffId: 'staff-a',
+            type: type,
+            payload: {'orderId': orderId, ...payload},
+          ),
+          hubEpoch: hubEpoch,
+        );
+      }
+
+      await append('order.opened', {'channel': 'dineIn', 'tableId': 'table-a'});
+      await append('order.itemAdded', {
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 2000,
+      });
+      await append('payment.recorded', {
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 2000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      });
+      await append('order.closed', {'receiptNumber': 'R-1'});
+
+      final conflictingBaseline = <String, Object?>{
+        'orderId': orderId,
+        'sourceOfflineHubEpoch': hubEpoch,
+        'openedAtUtc': '2026-10-13T10:00:00.000Z',
+        'channel': 'dineIn',
+        'tableId': 'table-a',
+        'deliveryFeeMinor': 0,
+        'lines': [
+          {
+            'id': 'line-a',
+            'productId': 'product-a',
+            'name': 'Meal',
+            'quantity': 1,
+            'unitPriceMinor': 2000,
+            'sent': true,
+          },
+          {
+            'id': 'cloud-only-line',
+            'productId': 'product-b',
+            'name': 'Cloud-only item',
+            'quantity': 1,
+            'unitPriceMinor': 500,
+            'sent': true,
+          },
+        ],
+        'payments': [
+          {
+            'id': 'payment-a',
+            'baseAmountMinor': 2000,
+            'tenderedAmountMinor': 2000,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+          },
+        ],
+      };
+      await append('order.cloudBaseline', conflictingBaseline);
+
+      final orderBook = VenueOfflineOrderBook(
+        tenantId: tenantId,
+        venueId: venueId,
+        hubEpoch: hubEpoch,
+        ledger: ledger,
+      );
+      final beforeRefresh = await orderBook.rebuild();
+      expect(beforeRefresh[orderId]!.isClosed, isTrue);
+      expect(beforeRefresh[orderId]!.balanceDueMinor, 0);
+
+      await orderBook.installCloudBaselines({
+        'openOrders': [conflictingBaseline],
+      });
+
+      final rebuilt = await orderBook.rebuild();
+      expect(rebuilt[orderId]!.isClosed, isTrue);
+      expect(rebuilt[orderId]!.balanceDueMinor, 0);
+      final activeEvents = await ledger.eventsForVenue(
+        tenantId: tenantId,
+        venueId: venueId,
         hubEpoch: hubEpoch,
       );
-    }
-
-    await append('order.opened', {'channel': 'dineIn', 'tableId': 'table-a'});
-    await append('order.itemAdded', {
-      'lineId': 'line-a',
-      'productId': 'product-a',
-      'productName': 'Meal',
-      'quantity': 1,
-      'unitPriceMinor': 2000,
-    });
-    await append('payment.recorded', {
-      'paymentId': 'payment-a',
-      'baseAmountMinor': 2000,
-      'method': 'cash',
-      'currencyCode': 'TRY',
-    });
-    await append('order.closed', {'receiptNumber': 'R-1'});
-
-    final conflictingBaseline = <String, Object?>{
-      'orderId': orderId,
-      'sourceOfflineHubEpoch': hubEpoch,
-      'openedAtUtc': '2026-10-13T10:00:00.000Z',
-      'channel': 'dineIn',
-      'tableId': 'table-a',
-      'deliveryFeeMinor': 0,
-      'lines': [
-        {
-          'id': 'line-a',
-          'productId': 'product-a',
-          'name': 'Meal',
-          'quantity': 1,
-          'unitPriceMinor': 2000,
-          'sent': true,
-        },
-        {
-          'id': 'cloud-only-line',
-          'productId': 'product-b',
-          'name': 'Cloud-only item',
-          'quantity': 1,
-          'unitPriceMinor': 500,
-          'sent': true,
-        },
-      ],
-      'payments': [
-        {
-          'id': 'payment-a',
-          'baseAmountMinor': 2000,
-          'tenderedAmountMinor': 2000,
-          'method': 'cash',
-          'currencyCode': 'TRY',
-        },
-      ],
-    };
-    await append('order.cloudBaseline', conflictingBaseline);
-
-    final orderBook = VenueOfflineOrderBook(
-      tenantId: tenantId,
-      venueId: venueId,
-      hubEpoch: hubEpoch,
-      ledger: ledger,
-    );
-    final beforeRefresh = await orderBook.rebuild();
-    expect(beforeRefresh[orderId]!.isClosed, isTrue);
-    expect(beforeRefresh[orderId]!.balanceDueMinor, 0);
-
-    await orderBook.installCloudBaselines({
-      'openOrders': [conflictingBaseline],
-    });
-
-    final rebuilt = await orderBook.rebuild();
-    expect(rebuilt[orderId]!.isClosed, isTrue);
-    expect(rebuilt[orderId]!.balanceDueMinor, 0);
-    final activeEvents = await ledger.eventsForVenue(
-      tenantId: tenantId,
-      venueId: venueId,
-      hubEpoch: hubEpoch,
-    );
-    expect(
-      activeEvents.where((event) => event.type == 'order.cloudBaseline'),
-      hasLength(1),
-    );
-  });
-
-  test('recovery baseline preserves a legacy order location after close', () async {
-    final database = sqlite3.openInMemory();
-    final store = NativeOfflineEventStore(
-      database: database,
-      crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
-    );
-    addTearDown(store.close);
-    final ledger = OfflineEventLedger.forTesting(store);
-    await ledger.initialize();
-
-    Future<void> append(String type, Map<String, Object?> payload) async {
-      await ledger.commit(
-        OfflineEventDraft(
-          tenantId: 'tenant-a',
-          venueId: 'venue-a',
-          deviceId: 'hub-a',
-          staffId: 'staff-a',
-          type: type,
-          payload: {'orderId': 'order-a', ...payload},
-        ),
-        hubEpoch: 3,
+      expect(
+        activeEvents.where((event) => event.type == 'order.cloudBaseline'),
+        hasLength(1),
       );
-    }
+    },
+  );
 
-    // The local recovery shell predates the authoritative location carried by
-    // the signed cloud baseline, which was appended after the local close.
-    await append('order.opened', {'channel': 'dineIn'});
-    await append('order.itemAdded', {
-      'lineId': 'line-a',
-      'productId': 'product-a',
-      'productName': 'Meal',
-      'quantity': 1,
-      'unitPriceMinor': 2000,
-    });
-    await append('payment.recorded', {
-      'paymentId': 'payment-a',
-      'baseAmountMinor': 2000,
-      'method': 'cash',
-      'currencyCode': 'TRY',
-    });
-    await append('order.closed', {'receiptNumber': 'R-1'});
-    await append('order.cloudBaseline', {
-      'sourceOfflineHubEpoch': 3,
-      'openedAtUtc': '2026-10-13T10:00:00.000Z',
-      'channel': 'dineIn',
-      'tableId': 'table-a',
-      'deliveryFeeMinor': 0,
-      'lines': [
-        {
-          'id': 'line-a',
-          'productId': 'product-a',
-          'name': 'Meal',
-          'quantity': 1,
-          'unitPriceMinor': 2000,
-          'sent': true,
-        },
-      ],
-      'payments': [
-        {
-          'id': 'payment-a',
-          'baseAmountMinor': 2000,
-          'tenderedAmountMinor': 2000,
-          'method': 'cash',
-          'currencyCode': 'TRY',
-        },
-      ],
-    });
+  test(
+    'recovery baseline preserves a legacy order location after close',
+    () async {
+      final database = sqlite3.openInMemory();
+      final store = NativeOfflineEventStore(
+        database: database,
+        crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
+      );
+      addTearDown(store.close);
+      final ledger = OfflineEventLedger.forTesting(store);
+      await ledger.initialize();
 
-    final order = (await VenueOfflineOrderBook(
-      tenantId: 'tenant-a',
-      venueId: 'venue-a',
-      hubEpoch: 3,
-      ledger: ledger,
-    ).rebuild())['order-a']!;
-    expect(order.isClosed, isTrue);
-    expect(order.balanceDueMinor, 0);
-    expect(order.tableId, 'table-a');
-  });
+      Future<void> append(String type, Map<String, Object?> payload) async {
+        await ledger.commit(
+          OfflineEventDraft(
+            tenantId: 'tenant-a',
+            venueId: 'venue-a',
+            deviceId: 'hub-a',
+            staffId: 'staff-a',
+            type: type,
+            payload: {'orderId': 'order-a', ...payload},
+          ),
+          hubEpoch: 3,
+        );
+      }
+
+      // The local recovery shell predates the authoritative location carried by
+      // the signed cloud baseline, which was appended after the local close.
+      await append('order.opened', {'channel': 'dineIn'});
+      await append('order.itemAdded', {
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 2000,
+      });
+      await append('payment.recorded', {
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 2000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      });
+      await append('order.closed', {'receiptNumber': 'R-1'});
+      await append('order.cloudBaseline', {
+        'sourceOfflineHubEpoch': 3,
+        'openedAtUtc': '2026-10-13T10:00:00.000Z',
+        'channel': 'dineIn',
+        'tableId': 'table-a',
+        'deliveryFeeMinor': 0,
+        'lines': [
+          {
+            'id': 'line-a',
+            'productId': 'product-a',
+            'name': 'Meal',
+            'quantity': 1,
+            'unitPriceMinor': 2000,
+            'sent': true,
+          },
+        ],
+        'payments': [
+          {
+            'id': 'payment-a',
+            'baseAmountMinor': 2000,
+            'tenderedAmountMinor': 2000,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+          },
+        ],
+      });
+
+      final order = (await VenueOfflineOrderBook(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        hubEpoch: 3,
+        ledger: ledger,
+      ).rebuild())['order-a']!;
+      expect(order.isClosed, isTrue);
+      expect(order.balanceDueMinor, 0);
+      expect(order.tableId, 'table-a');
+    },
+  );
+
+  test(
+    'split event atomically creates a payable child and reduces parent',
+    () async {
+      final database = sqlite3.openInMemory();
+      final store = NativeOfflineEventStore(
+        database: database,
+        crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
+      );
+      addTearDown(store.close);
+      final ledger = OfflineEventLedger.forTesting(store);
+      await ledger.initialize();
+      final orderBook = VenueOfflineOrderBook(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        hubEpoch: 3,
+        ledger: ledger,
+      );
+
+      Future<void> commit(String type, Map<String, Object?> payload) async {
+        await orderBook.commit(
+          OfflineEventDraft(
+            tenantId: 'tenant-a',
+            venueId: 'venue-a',
+            deviceId: 'terminal-a',
+            staffId: 'staff-a',
+            type: type,
+            payload: payload,
+          ),
+          3,
+        );
+      }
+
+      await commit('order.opened', {
+        'orderId': 'order-a',
+        'channel': 'dineIn',
+        'tableId': 'table-a',
+      });
+      await commit('order.itemsAdded', {
+        'orderId': 'order-a',
+        'items': [
+          {
+            'lineId': 'line-a',
+            'productId': 'product-a',
+            'productName': 'Curry',
+            'quantity': 2,
+            'unitPriceMinor': 1500,
+          },
+          {
+            'lineId': 'line-b',
+            'productId': 'product-b',
+            'productName': 'Rice',
+            'quantity': 1,
+            'unitPriceMinor': 500,
+          },
+        ],
+      });
+      await commit('order.sent', {
+        'orderId': 'order-a',
+        'lineIds': ['line-a', 'line-b'],
+      });
+      await commit('order.splitCreated', {
+        'orderId': 'order-a',
+        'splitOrderId': 'split-a',
+        'splitLines': [
+          {'lineId': 'line-a', 'quantity': 1},
+        ],
+      });
+
+      var orders = await orderBook.rebuild();
+      expect(orders.keys, containsAll(['order-a', 'split-a']));
+      expect(orders['order-a']!.totalMinor, 2000);
+      expect(orders['order-a']!.openSplitOrderIds, ['split-a']);
+      expect(orders['split-a']!.totalMinor, 1500);
+      expect(orders['split-a']!.splitFromOrderId, 'order-a');
+      expect(orders['split-a']!.lines.values.single.sent, isTrue);
+
+      await commit('payment.batchRecorded', {
+        'orderId': 'split-a',
+        'splitFromOrderId': 'order-a',
+        'batchId': 'payment-split-a',
+        'payments': [
+          {
+            'paymentId': 'payment-split-a-0',
+            'baseAmountMinor': 1500,
+            'tenderedAmountMinor': 1500,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+            'exchangeRateToBase': '1',
+          },
+        ],
+        'closeIfSettled': true,
+        'receiptNumber': 'OFF-SPLIT-A',
+      });
+
+      orders = await orderBook.rebuild();
+      expect(orders['split-a']!.isClosed, isTrue);
+      expect(orders['order-a']!.openSplitOrderIds, isEmpty);
+    },
+  );
 }

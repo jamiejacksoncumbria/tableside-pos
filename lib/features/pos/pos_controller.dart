@@ -110,6 +110,17 @@ final openSplitOrdersProvider = StreamProvider.autoDispose
       if (scope == null || sourceOrderId.trim().isEmpty) {
         return Stream.value(const <PosOrder>[]);
       }
+      if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+        return VenueHubOfflineView.instance.orderStream.map(
+          (orders) => orders
+              .where(
+                (order) =>
+                    order.status != OrderStatus.closed &&
+                    order.splitFromOrderId == sourceOrderId,
+              )
+              .toList(growable: false),
+        );
+      }
       return ref
           .watch(firestorePosRepositoryProvider)
           .watchOpenSplitOrders(scope: scope, sourceOrderId: sourceOrderId);
@@ -1351,9 +1362,14 @@ class ActiveOrderController extends Notifier<PosOrder> {
       return result;
     }
     if (order.isSplitOrder && order.splitFromOrderId != null) {
-      final parentOrder = await ref
-          .read(firestorePosRepositoryProvider)
-          .fetchOrder(scope: scope, orderId: order.splitFromOrderId!);
+      final parentOrder =
+          (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope))
+          ? VenueHubOfflineView.instance.currentOrders
+                .where((item) => item.id == order.splitFromOrderId)
+                .firstOrNull
+          : await ref
+                .read(firestorePosRepositoryProvider)
+                .fetchOrder(scope: scope, orderId: order.splitFromOrderId!);
       if (parentOrder != null) {
         state = parentOrder;
         _selectPersistedOrder(parentOrder.id);

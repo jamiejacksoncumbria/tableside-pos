@@ -2483,7 +2483,7 @@ const remoteHubCommandTtlMs = 2 * 60 * 1000;
 const remoteHubClaimLeaseMs = 15 * 1000;
 const remoteHubEventTypes = new Set([
   "order.opened", "order.itemAdded", "order.itemsAdded", "order.itemQuantityChanged", "order.lineAdjusted",
-  "order.sent", "order.fulfilmentChanged", "payment.recorded", "payment.batchRecorded",
+  "order.sent", "order.splitCreated", "order.fulfilmentChanged", "payment.recorded", "payment.batchRecorded",
   "order.closed", "order.cancelled", "receipt.requested",
 ]);
 
@@ -3250,6 +3250,10 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       fulfilmentStatus: value.fulfilmentStatus ??
         (value.channel === "delivery" ? "awaitingDriver" : "awaitingPreparation"),
       assignedDriverId: value.assignedDriverId ?? null,
+      splitFromOrderId: value.splitFromOrderId ?? null,
+      splitSequence: Number(value.splitSequence ?? 0),
+      openSplitOrderIds: Array.isArray(value.openSplitOrderIds)
+        ? value.openSplitOrderIds : [],
       lines: lines.map((line) => ({
         id: line.id,
         productId: line.productId,
@@ -3441,7 +3445,15 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
     "security.pinAttempt", "security.printQueueManaged",
   ]);
   const orderEvents = events.filter((event) => !securityEventTypes.has(event.type));
-  const orderIds = [...new Set(orderEvents.map((event) => event.payload.orderId))];
+  // Split creation mutates the parent and creates a payable child atomically.
+  // Settling that child also removes it from the parent's outstanding split
+  // list, so every affected document must be read before the transaction.
+  const orderIds = [...new Set(orderEvents.flatMap((event) => [
+    event.payload.orderId,
+    event.type === "order.splitCreated" ? event.payload.splitOrderId : null,
+    typeof event.payload.splitFromOrderId === "string"
+      ? event.payload.splitFromOrderId : null,
+  ]).filter((id) => id != null))];
   if (orderIds.some((id) => typeof id !== "string" || id.length < 1 || id.length > 180)) {
     throw new HttpsError("invalid-argument", "An offline event order ID is invalid.");
   }
@@ -3550,10 +3562,39 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
         const orderId = event.payload.orderId;
         const currentCloudOrder = orderState.get(orderId);
         try {
-          orderState.set(orderId, applyOfflineEventToCloudOrder(
-            currentCloudOrder, event, upload.venueId,
-            recoveryBaselines.get(orderId),
-          ));
+          if (event.type === "order.splitCreated") {
+            const splitOrderId = event.payload.splitOrderId;
+            const split = applyOfflineSplitEvent(
+              currentCloudOrder, event, upload.venueId,
+              orderState.get(splitOrderId),
+            );
+            orderState.set(orderId, split.parent);
+            orderState.set(splitOrderId, split.child);
+            dirtyOrderIds.add(splitOrderId);
+          } else {
+            const projected = applyOfflineEventToCloudOrder(
+              currentCloudOrder, event, upload.venueId,
+              recoveryBaselines.get(orderId),
+            );
+            orderState.set(orderId, projected);
+            if (projected.status === "closed" &&
+                typeof event.payload.splitFromOrderId === "string") {
+              const parentId = event.payload.splitFromOrderId;
+              const parent = orderState.get(parentId);
+              if (parent == null || parent.venueId !== upload.venueId) {
+                throw new HttpsError(
+                  "failed-precondition", "The split bill parent is unavailable.",
+                );
+              }
+              orderState.set(parentId, {
+                ...parent,
+                openSplitOrderIds: (Array.isArray(parent.openSplitOrderIds)
+                  ? parent.openSplitOrderIds : [])
+                  .filter((id) => id !== orderId),
+              });
+              dirtyOrderIds.add(parentId);
+            }
+          }
         } catch (error) {
           const recoveryBaseline = recoveryBaselines.get(orderId);
           if (error instanceof HttpsError &&
@@ -3633,7 +3674,24 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
           throw error;
         }
         dirtyOrderIds.add(event.payload.orderId);
-        if (event.type === "order.lineAdjusted") {
+        if (event.type === "order.splitCreated") {
+          transaction.create(
+            tenantRef.collection("auditEvents").doc(`offline_${event.id}`),
+            {
+              action: "splitOrder",
+              venueId: upload.venueId,
+              orderId: event.payload.orderId,
+              splitOrderId: event.payload.splitOrderId,
+              splitLines: event.payload.splitLines,
+              staffId: event.staffId,
+              deviceId: event.deviceId,
+              hubEpoch: upload.hubEpoch,
+              sourceEventId: event.id,
+              occurredAt: new Date(event.createdAtUtc),
+              createdAt: FieldValue.serverTimestamp(),
+            },
+          );
+        } else if (event.type === "order.lineAdjusted") {
           transaction.create(
             tenantRef.collection("auditEvents").doc(`offline_${event.id}`),
             {
@@ -3686,14 +3744,16 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
         updatedAt: FieldValue.serverTimestamp(),
         offlineHubEpoch: upload.hubEpoch,
       }, {merge: false});
-      if (typeof projected.tableId === "string") {
+      if (typeof projected.tableId === "string" &&
+          typeof projected.splitFromOrderId !== "string") {
         transaction.set(tenantRef.collection("tables").doc(projected.tableId), {
           currentOrderId: projected.status === "closed" ? null : orderId,
           hasOpenOrder: projected.status !== "closed",
           updatedAt: FieldValue.serverTimestamp(),
         }, {merge: true});
       }
-      if (typeof projected.tabName === "string") {
+      if (typeof projected.tabName === "string" &&
+          typeof projected.splitFromOrderId !== "string") {
         const tabRef = openTabRegistryRef(
           upload.tenantId, upload.venueId, projected.tabName,
         );
@@ -4220,6 +4280,86 @@ function offlineBillFromProjectedOrder(
     closedAt, source: "venueHub", offlineHubEpoch: upload.hubEpoch,
     createdAt: FieldValue.serverTimestamp(),
   };
+}
+
+function applyOfflineSplitEvent(current, event, venueId, existingChild) {
+  const payload = event.payload;
+  const splitOrderId = typeof payload.splitOrderId === "string"
+    ? payload.splitOrderId : "";
+  const allocations = Array.isArray(payload.splitLines) ? payload.splitLines : [];
+  if (current == null || current.venueId !== venueId ||
+      !["open", "sent"].includes(current.status) ||
+      typeof current.splitFromOrderId === "string" ||
+      (Array.isArray(current.payments) && current.payments.length > 0) ||
+      splitOrderId.length < 1 || splitOrderId.length > 180 ||
+      allocations.length < 1 || allocations.length > 100) {
+    throw new HttpsError("failed-precondition", "Only an unpaid main bill can be split.");
+  }
+  if (existingChild != null) {
+    if (existingChild.splitFromOrderId === payload.orderId) {
+      return {parent: current, child: existingChild, alreadySplit: true};
+    }
+    throw new HttpsError("already-exists", "The split bill identity is already in use.");
+  }
+  const sourceLines = Array.isArray(current.lines)
+    ? current.lines.map((line) => ({...line})) : [];
+  const selectedIds = new Set();
+  const childLines = [];
+  let selectedQuantity = 0;
+  for (let index = 0; index < allocations.length; index += 1) {
+    const allocation = allocations[index];
+    const lineId = typeof allocation?.lineId === "string" ? allocation.lineId : "";
+    const quantity = Number(allocation?.quantity);
+    const sourceIndex = sourceLines.findIndex((line) => line.id === lineId);
+    const line = sourceLines[sourceIndex];
+    if (line == null || line.isSentToProduction !== true ||
+        !Number.isSafeInteger(quantity) || quantity < 1 ||
+        quantity > Number(line.quantity) || selectedIds.has(lineId)) {
+      throw new HttpsError("failed-precondition", "A selected split item is no longer available.");
+    }
+    selectedIds.add(lineId);
+    selectedQuantity += quantity;
+    const suffix = splitOrderId.slice(-18);
+    const sourceSuffix = lineId.slice(-18);
+    childLines.push({
+      ...line,
+      id: `split-${suffix}-${index}-${sourceSuffix}`,
+      quantity,
+      isSentToProduction: true,
+    });
+    const remaining = Number(line.quantity) - quantity;
+    if (remaining === 0) sourceLines.splice(sourceIndex, 1);
+    else sourceLines[sourceIndex].quantity = remaining;
+  }
+  const originalQuantity = (Array.isArray(current.lines) ? current.lines : [])
+    .reduce((sum, line) => sum + Number(line.quantity), 0);
+  if (selectedQuantity >= originalQuantity || sourceLines.length === 0) {
+    throw new HttpsError(
+      "failed-precondition", "The split must leave at least one item on the main bill.",
+    );
+  }
+  const splitSequence = Number(current.splitSequence ?? 0) + 1;
+  const openSplitOrderIds = Array.isArray(current.openSplitOrderIds)
+    ? [...current.openSplitOrderIds] : [];
+  if (!openSplitOrderIds.includes(splitOrderId)) openSplitOrderIds.push(splitOrderId);
+  const parent = {...current, lines: sourceLines, splitSequence, openSplitOrderIds};
+  const child = {
+    ...current,
+    status: "sent",
+    lines: childLines,
+    payments: [],
+    deliveryFeeMinor: 0,
+    openedAt: new Date(event.createdAtUtc),
+    openedOffline: true,
+    createdByStaffId: event.staffId,
+    splitFromOrderId: payload.orderId,
+    splitSequence,
+    openSplitOrderIds: [],
+    // A split child is not a second table/tab owner and must never replace the
+    // main bill in the location registry during cloud projection.
+    isSplitPaymentOrder: true,
+  };
+  return {parent, child, alreadySplit: false};
 }
 
 function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline = null) {

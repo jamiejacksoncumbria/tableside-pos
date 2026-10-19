@@ -190,6 +190,13 @@ class VenueHubOfflineView {
           ? OrderStatus.sent
           : OrderStatus.open,
       lines: lines,
+      splitFromOrderId: value['splitFromOrderId'] as String?,
+      splitSequence: (value['splitSequence'] as num?)?.toInt(),
+      openSplitOrderIds:
+          (value['openSplitOrderIds'] as List?)?.whereType<String>().toList(
+            growable: false,
+          ) ??
+          const <String>[],
       payments: payments,
       channel: switch (value['channel']) {
         'collection' => OrderChannel.collection,
