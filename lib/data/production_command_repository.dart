@@ -691,6 +691,7 @@ class ProductionCommandRepository {
     required VenueHubDeviceCredential credential,
     String? knownSnapshotDigest,
     int? knownSnapshotGeneration,
+    Map<String, int>? knownSnapshotSections,
   }) async {
     final body = <String, Object?>{
       'snapshotVersion': 1,
@@ -698,6 +699,8 @@ class ProductionCommandRepository {
         'knownSnapshotDigest': knownSnapshotDigest,
       if (knownSnapshotGeneration != null)
         'knownSnapshotGeneration': knownSnapshotGeneration,
+      if (knownSnapshotSections?.isNotEmpty == true)
+        'knownSnapshotSections': knownSnapshotSections,
     };
     final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
       credentialId: credential.credentialId,

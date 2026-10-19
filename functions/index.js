@@ -3043,12 +3043,21 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   // whose encrypted local ledger was replaced while its epoch stayed active.
   // Bumping generation makes every enrolled hub fetch the repair once even
   // when its menu/catalogue data has not otherwise changed.
-  const snapshotSchemaVersion = 3;
+  // Schema 4 adds independently versioned snapshot sections. A catalogue
+  // edit no longer forces the hub to redownload customers, staff, printers,
+  // tables and open orders.
+  const snapshotSchemaVersion = 4;
   await db.runTransaction(async (transaction) => {
     const current = await transaction.get(snapshotVersionRef);
     if (!current.exists) {
       transaction.create(snapshotVersionRef, {
         generation: 1, schemaVersion: snapshotSchemaVersion,
+        venueGeneration: 0,
+        catalogueGeneration: 0,
+        operationsGeneration: 0,
+        staffGeneration: 0,
+        printingGeneration: 0,
+        customersGeneration: 0,
         updatedAt: FieldValue.serverTimestamp(),
       });
       return;
@@ -3063,38 +3072,75 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   });
   const snapshotVersion = await snapshotVersionRef.get();
   const snapshotGeneration = Number(snapshotVersion.data()?.generation ?? 1);
+  const snapshotSections = {
+    venue: Number(snapshotVersion.data()?.venueGeneration ?? 0),
+    catalogue: Number(snapshotVersion.data()?.catalogueGeneration ?? 0),
+    operations: Number(snapshotVersion.data()?.operationsGeneration ?? 0),
+    staff: Number(snapshotVersion.data()?.staffGeneration ?? 0),
+    printing: Number(snapshotVersion.data()?.printingGeneration ?? 0),
+    customers: Number(snapshotVersion.data()?.customersGeneration ?? 0),
+  };
+  const rawKnownSections = upload.body.knownSnapshotSections;
+  const knownSnapshotSections = rawKnownSections != null &&
+      typeof rawKnownSections === "object" && !Array.isArray(rawKnownSections)
+    ? rawKnownSections : null;
+  if (rawKnownSections != null && knownSnapshotSections == null) {
+    throw new HttpsError("invalid-argument", "The known snapshot sections are invalid.");
+  }
+  if (knownSnapshotSections != null && Object.entries(knownSnapshotSections)
+    .some(([key, value]) => !Object.hasOwn(snapshotSections, key) ||
+      !Number.isSafeInteger(Number(value)) || Number(value) < 0)) {
+    throw new HttpsError("invalid-argument", "A known snapshot section version is invalid.");
+  }
+  const changed = (section) => knownSnapshotSections == null ||
+    Number(knownSnapshotSections[section] ?? 0) !== snapshotSections[section];
   const knownSnapshotGeneration = Number(upload.body.knownSnapshotGeneration ?? 0);
   if (Number.isSafeInteger(knownSnapshotGeneration) &&
       knownSnapshotGeneration > 0 && knownSnapshotGeneration === snapshotGeneration) {
     return {
       unchanged: true,
       snapshotGeneration,
+      snapshotSections,
       snapshotDigest: knownSnapshotDigest ?? null,
     };
   }
+  const venueChanged = changed("venue");
+  const catalogueChanged = changed("catalogue");
+  const operationsChanged = changed("operations");
+  const staffChanged = changed("staff");
+  const printingChanged = changed("printing");
+  const customersChanged = changed("customers");
+  const partial = knownSnapshotSections != null;
   const [tenant, venue, sections, products, modifierGroups, tables, members, pins, routes, syncState, courses, customers, orders] =
     await Promise.all([
-      tenantRef.get(),
-      tenantRef.collection("venues").doc(upload.venueId).get(),
-      tenantRef.collection("menuSections").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("products").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("modifierGroups").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("tables").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("members").where("active", "!=", false).get(),
-      tenantRef.collection("staffPins").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("printerRoutes").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("offlineHubSyncState").doc(upload.venueId).get(),
-      tenantRef.collection("courses").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("venueCustomers").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("orders").where("venueId", "==", upload.venueId).get(),
+      venueChanged ? tenantRef.get() : null,
+      venueChanged ? tenantRef.collection("venues").doc(upload.venueId).get() : null,
+      catalogueChanged ? tenantRef.collection("menuSections").where("venueId", "==", upload.venueId).get() : null,
+      catalogueChanged ? tenantRef.collection("products").where("venueId", "==", upload.venueId).get() : null,
+      catalogueChanged ? tenantRef.collection("modifierGroups").where("venueId", "==", upload.venueId).get() : null,
+      operationsChanged ? tenantRef.collection("tables").where("venueId", "==", upload.venueId).get() : null,
+      staffChanged ? tenantRef.collection("members").where("active", "!=", false).get() : null,
+      staffChanged ? tenantRef.collection("staffPins").where("venueId", "==", upload.venueId).get() : null,
+      printingChanged ? tenantRef.collection("printerRoutes").where("venueId", "==", upload.venueId).get() : null,
+      operationsChanged ? tenantRef.collection("offlineHubSyncState").doc(upload.venueId).get() : null,
+      catalogueChanged ? tenantRef.collection("courses").where("venueId", "==", upload.venueId).get() : null,
+      customersChanged ? tenantRef.collection("venueCustomers").where("venueId", "==", upload.venueId).get() : null,
+      // The hub needs only orders that can still change. Reading the complete
+      // financial history here made every catalogue/settings refresh grow
+      // slower over the lifetime of a venue even though closed orders were
+      // discarded immediately below.
+      operationsChanged ? tenantRef.collection("orders")
+        .where("venueId", "==", upload.venueId)
+        .where("status", "in", ["open", "sent"])
+        .get() : null,
     ]);
-  const pinByUser = new Map(pins.docs.map((pin) => [pin.data().userId, pin.data()]));
-  const memberUsers = await Promise.all(members.docs.map((member) =>
+  const pinByUser = new Map((pins?.docs ?? []).map((pin) => [pin.data().userId, pin.data()]));
+  const memberUsers = await Promise.all((members?.docs ?? []).map((member) =>
     auth.getUser(member.id).catch(() => null)));
   const memberNameById = new Map(memberUsers.filter(Boolean).map((user) => [
     user.uid, user.displayName || user.email || user.uid,
   ]));
-  const staff = members.docs.map((member) => {
+  const staff = (members?.docs ?? []).map((member) => {
     const roles = Array.isArray(member.data().roles) ? member.data().roles : [];
     const pin = pinByUser.get(member.id);
     if (pin == null || pin.locked === true || !offlinePinVerifierReady(pin)) return null;
@@ -3113,7 +3159,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       offlinePinHash: pin.offlinePinHash,
     };
   }).filter(Boolean);
-  const productValues = products.docs.map((document) => {
+  const productValues = (products?.docs ?? []).map((document) => {
     const item = document.data();
     return {
       id: document.id,
@@ -3153,7 +3199,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       courseReleasePolicy: item.courseReleasePolicy ?? "immediate",
     };
   });
-  const groupValues = modifierGroups.docs.map((document) => {
+  const groupValues = (modifierGroups?.docs ?? []).map((document) => {
     const group = document.data();
     return {
       id: document.id, name: group.name,
@@ -3174,7 +3220,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
         typeof value === "string" || typeof value === "number" ? new Date(value) : null;
     return date != null && Number.isFinite(date.getTime()) ? date.toISOString() : null;
   };
-  const openOrders = orders.docs.filter((document) => {
+  const openOrders = (orders?.docs ?? []).filter((document) => {
     const value = document.data();
     return ["open", "sent"].includes(value.status) &&
       Number(value.offlineHubEpoch ?? 0) <= upload.hubEpoch;
@@ -3241,89 +3287,105 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       })),
     };
   });
+  const tenantData = tenant?.data() ?? {};
+  const venueData = venue?.data() ?? {};
   const snapshot = {
     version: Date.now(),
     snapshotGeneration,
+    snapshotSections,
     generatedAtUtc: new Date().toISOString(),
     hubEpoch: upload.hubEpoch,
-    cloudLastSequence: syncState.exists && syncState.data().hubEpoch === upload.hubEpoch
-      ? Number(syncState.data().lastSequence ?? 0) : 0,
-    currencyCode: String(
-      venue.data()?.currencyCode ?? tenant.data()?.currencyCode ?? "GBP",
-    ).toUpperCase(),
-    tenantName: tenant.data()?.displayName ?? tenant.data()?.legalName ?? "",
-    venueName: venue.data()?.name ?? tenant.data()?.displayName ?? "",
-    venueCountry: venue.data()?.country ?? "Kuzey Kıbrıs Türk Cumhuriyeti",
-    deliveryLocations: venue.data()?.deliveryLocations ?? {},
-    venueTimeZone: venue.data()?.timeZone ?? "Europe/London",
-    venueUtcOffsetMinutes: timeZoneOffsetMinutes(
-      venue.data()?.timeZone ?? "Europe/London",
-    ),
-    businessDayCutoffMinutes: Number(venue.data()?.businessDayCutoffMinutes ?? 240),
-    tenantAddress: tenant.data()?.address ?? "",
-    tenantPhoneNumbers: Array.isArray(tenant.data()?.phoneNumbers)
-      ? tenant.data().phoneNumbers : [],
-    venueAddress: venue.data()?.address ?? "",
-    venuePhoneNumbers: Array.isArray(venue.data()?.phoneNumbers)
-      ? venue.data().phoneNumbers : [],
-    receiptFooter: venue.data()?.receiptFooter ?? tenant.data()?.receiptFooter ?? "",
-    collectionEnabled: venue.data()?.collectionEnabled === true,
-    deliveryEnabled: venue.data()?.deliveryEnabled === true,
-    courseControlEnabled: venue.data()?.courseControlEnabled === true,
-    collectionWindows: Array.isArray(venue.data()?.collectionWindows)
-      ? venue.data().collectionWindows : [],
-    deliveryWindows: Array.isArray(venue.data()?.deliveryWindows)
-      ? venue.data().deliveryWindows : [],
-    serviceAreas: Array.isArray(venue.data()?.serviceAreas)
-      ? venue.data().serviceAreas : [],
-    fulfilmentDateOverrides: Array.isArray(venue.data()?.fulfilmentDateOverrides)
-      ? venue.data().fulfilmentDateOverrides : [],
-    openOrders,
-    sections: sections.docs.map((document) => ({
+    ...(operationsChanged ? {
+      cloudLastSequence: syncState?.exists && syncState.data().hubEpoch === upload.hubEpoch
+        ? Number(syncState.data().lastSequence ?? 0) : 0,
+      openOrders,
+      tables: (tables?.docs ?? []).map((table) => ({
+        id: table.id, label: table.data().label ?? table.id,
+        seats: Number(table.data().seats ?? 0), active: table.data().active !== false,
+        sortOrder: Number.isSafeInteger(table.data().sortOrder)
+          ? table.data().sortOrder : null,
+      })),
+    } : {}),
+    ...(venueChanged ? {
+      currencyCode: String(
+        venueData.currencyCode ?? tenantData.currencyCode ?? "GBP",
+      ).toUpperCase(),
+      tenantName: tenantData.displayName ?? tenantData.legalName ?? "",
+      venueName: venueData.name ?? tenantData.displayName ?? "",
+      venueCountry: venueData.country ?? "Kuzey Kıbrıs Türk Cumhuriyeti",
+      deliveryLocations: venueData.deliveryLocations ?? {},
+      venueTimeZone: venueData.timeZone ?? "Europe/London",
+      venueUtcOffsetMinutes: timeZoneOffsetMinutes(
+        venueData.timeZone ?? "Europe/London",
+      ),
+      businessDayCutoffMinutes: Number(venueData.businessDayCutoffMinutes ?? 240),
+      tenantAddress: tenantData.address ?? "",
+      tenantPhoneNumbers: Array.isArray(tenantData.phoneNumbers)
+        ? tenantData.phoneNumbers : [],
+      venueAddress: venueData.address ?? "",
+      venuePhoneNumbers: Array.isArray(venueData.phoneNumbers)
+        ? venueData.phoneNumbers : [],
+      receiptFooter: venueData.receiptFooter ?? tenantData.receiptFooter ?? "",
+      collectionEnabled: venueData.collectionEnabled === true,
+      deliveryEnabled: venueData.deliveryEnabled === true,
+      courseControlEnabled: venueData.courseControlEnabled === true,
+      collectionWindows: Array.isArray(venueData.collectionWindows)
+        ? venueData.collectionWindows : [],
+      deliveryWindows: Array.isArray(venueData.deliveryWindows)
+        ? venueData.deliveryWindows : [],
+      serviceAreas: Array.isArray(venueData.serviceAreas)
+        ? venueData.serviceAreas : [],
+      fulfilmentDateOverrides: Array.isArray(venueData.fulfilmentDateOverrides)
+        ? venueData.fulfilmentDateOverrides : [],
+    } : {}),
+    ...(catalogueChanged ? {
+      sections: (sections?.docs ?? []).map((document) => ({
       id: document.id,
       name: document.data().name ?? "Menu section",
       icon: document.data().icon ?? "🍽️",
       parentSectionId: document.data().parentSectionId ?? null,
       sortOrder: Number(document.data().sortOrder ?? 0),
-    })),
-    products: productValues,
-    modifierGroups: groupValues,
-    courses: courses.docs.filter((course) => course.data().active !== false).map((course) => ({
-      id: course.id,
-      name: course.data().name,
-      sequence: Number(course.data().sequence ?? 0),
-      releasePolicy: course.data().releasePolicy ?? "immediate",
-      amberMinutes: Number(course.data().amberMinutes ?? 15),
-      redMinutes: Number(course.data().redMinutes ?? 25),
-      productionAreas: Array.isArray(course.data().productionAreas)
-        ? course.data().productionAreas : [],
-    })),
-    venueCustomers: customers.docs.map((customer) => ({
-      id: customer.id,
-      displayName: customer.data().displayName ?? "Customer",
-      phoneNumbers: Array.isArray(customer.data().phoneNumbers)
-        ? customer.data().phoneNumbers : [],
-      email: customer.data().email ?? null,
-      addresses: Array.isArray(customer.data().addresses)
-        ? customer.data().addresses : [],
-      claimStatus: customer.data().claimStatus ?? "unclaimed",
-      globalCustomerId: customer.data().globalCustomerId ?? null,
-      createdAtUtc: customer.data().createdAt?.toDate instanceof Function
-        ? customer.data().createdAt.toDate().toISOString() : null,
-    })),
-    tables: tables.docs.map((table) => ({
-      id: table.id, label: table.data().label ?? table.id,
-      seats: Number(table.data().seats ?? 0), active: table.data().active !== false,
-      sortOrder: Number.isSafeInteger(table.data().sortOrder)
-        ? table.data().sortOrder : null,
-    })),
-    printerRoutes: routes.docs.map((route) => ({
-      productionArea: route.data().productionArea ?? "kitchen",
-      primaryDeviceId: route.data().primaryDeviceId ?? null,
-      fallbackDeviceId: route.data().fallbackDeviceId ?? null,
-    })).filter((route) => typeof route.primaryDeviceId === "string"),
-    staff,
+      })),
+      products: productValues,
+      modifierGroups: groupValues,
+      courses: (courses?.docs ?? []).filter((course) => course.data().active !== false).map((course) => ({
+        id: course.id,
+        name: course.data().name,
+        sequence: Number(course.data().sequence ?? 0),
+        releasePolicy: course.data().releasePolicy ?? "immediate",
+        amberMinutes: Number(course.data().amberMinutes ?? 15),
+        redMinutes: Number(course.data().redMinutes ?? 25),
+        productionAreas: Array.isArray(course.data().productionAreas)
+          ? course.data().productionAreas : [],
+      })),
+    } : {}),
+    ...(customersChanged ? {
+      venueCustomers: (customers?.docs ?? []).map((customer) => ({
+        id: customer.id,
+        displayName: customer.data().displayName ?? "Customer",
+        phoneNumbers: Array.isArray(customer.data().phoneNumbers)
+          ? customer.data().phoneNumbers : [],
+        email: customer.data().email ?? null,
+        addresses: Array.isArray(customer.data().addresses)
+          ? customer.data().addresses : [],
+        claimStatus: customer.data().claimStatus ?? "unclaimed",
+        globalCustomerId: customer.data().globalCustomerId ?? null,
+        createdAtUtc: customer.data().createdAt?.toDate instanceof Function
+          ? customer.data().createdAt.toDate().toISOString() : null,
+      })),
+    } : {}),
+    ...(printingChanged ? {
+      printerRoutes: (routes?.docs ?? []).map((route) => ({
+        productionArea: route.data().productionArea ?? "kitchen",
+        primaryDeviceId: route.data().primaryDeviceId ?? null,
+        fallbackDeviceId: route.data().fallbackDeviceId ?? null,
+      })).filter((route) => typeof route.primaryDeviceId === "string"),
+    } : {}),
+    ...(staffChanged ? {staff} : {}),
   };
+  if (partial) {
+    return {...snapshot, partial: true, unchanged: false, snapshotDigest: null};
+  }
   const digestValue = {...snapshot};
   delete digestValue.version;
   delete digestValue.generatedAtUtc;
@@ -3332,7 +3394,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
     .update(JSON.stringify(canonicalJsonValue(digestValue)))
     .digest("base64url");
   if (knownSnapshotDigest === snapshotDigest) {
-    return {unchanged: true, snapshotGeneration, snapshotDigest};
+    return {unchanged: true, snapshotGeneration, snapshotSections, snapshotDigest};
   }
   return {...snapshot, unchanged: false, snapshotDigest};
 }
@@ -11941,7 +12003,7 @@ const offlineHubSnapshotCollections = new Set([
   "offlineHubSyncState",
 ]);
 
-async function bumpOfflineHubSnapshotVersions(tenantId, venueIds) {
+async function bumpOfflineHubSnapshotVersions(tenantId, venueIds, section) {
   const values = [...new Set(venueIds.filter((value) =>
     typeof value === "string" && value.length > 0))];
   for (let offset = 0; offset < values.length; offset += 400) {
@@ -11951,6 +12013,7 @@ async function bumpOfflineHubSnapshotVersions(tenantId, venueIds) {
         db.doc(`tenants/${tenantId}/offlineHubSnapshotVersions/${venueId}`),
         {
           generation: FieldValue.increment(1),
+          [`${section}Generation`]: FieldValue.increment(1),
           updatedAt: FieldValue.serverTimestamp(),
         },
         {merge: true},
@@ -11971,8 +12034,23 @@ export const markOfflineHubSnapshotChanged = onDocumentWritten(
     const tenantId = event.params.tenantId;
     const before = event.data?.before.data();
     const after = event.data?.after.data();
+    const section = {
+      venues: "venue",
+      menuSections: "catalogue",
+      products: "catalogue",
+      modifierGroups: "catalogue",
+      courses: "catalogue",
+      tables: "operations",
+      offlineHubSyncState: "operations",
+      members: "staff",
+      staffPins: "staff",
+      printerRoutes: "printing",
+      venueCustomers: "customers",
+    }[collectionId];
     if (collectionId === "venues") {
-      await bumpOfflineHubSnapshotVersions(tenantId, [event.params.documentId]);
+      await bumpOfflineHubSnapshotVersions(
+        tenantId, [event.params.documentId], section,
+      );
       return;
     }
     if (collectionId === "members") {
@@ -11982,13 +12060,14 @@ export const markOfflineHubSnapshotChanged = onDocumentWritten(
       await bumpOfflineHubSnapshotVersions(
         tenantId,
         venues.docs.map((document) => document.id),
+        section,
       );
       return;
     }
     await bumpOfflineHubSnapshotVersions(tenantId, [
       before?.venueId,
       after?.venueId,
-    ]);
+    ], section);
   },
 );
 
@@ -12000,6 +12079,7 @@ export const markTenantOfflineHubSnapshotsChanged = onDocumentUpdated(
     await bumpOfflineHubSnapshotVersions(
       event.params.tenantId,
       venues.docs.map((document) => document.id),
+      "venue",
     );
   },
 );

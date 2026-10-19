@@ -41,7 +41,10 @@ class PrintJobRepository {
     final local =
         VenueHubRuntime.instance.localPrintJobs(scope) ??
         (VenueHubClientRegistry.instance.hasUsableSession(scope)
-            ? VenueHubClientRegistry.instance.watchPrintJobs(scope)
+            ? VenueHubClientRegistry.instance.watchPrintJobs(
+                scope,
+                statuses: const <String>{'queued'},
+              )
             : null);
     if (local == null) return cloud;
 
@@ -86,6 +89,7 @@ class PrintJobRepository {
   }) {
     final cloud = _jobs(tenantId)
         .where('venueId', isEqualTo: venueId)
+        .where('status', whereIn: const <String>['queued', 'claimed', 'failed'])
         .snapshots()
         .map(
           (snapshot) => snapshot.docs
@@ -96,7 +100,10 @@ class PrintJobRepository {
     final local =
         VenueHubRuntime.instance.localPrintJobs(scope) ??
         (VenueHubClientRegistry.instance.hasUsableSession(scope)
-            ? VenueHubClientRegistry.instance.watchPrintJobs(scope)
+            ? VenueHubClientRegistry.instance.watchPrintJobs(
+                scope,
+                statuses: const <String>{'queued', 'claimed', 'failed'},
+              )
             : null);
     if (local == null) return cloud;
 
@@ -122,6 +129,93 @@ class PrintJobRepository {
       }, onError: controller.addError);
       final localSubscription = local.listen((jobs) {
         localJobs = jobs
+            .where(
+              (data) => const <String>{
+                'queued',
+                'claimed',
+                'failed',
+              }.contains(data['status']),
+            )
+            .map((data) => _fromLocalSnapshot(tenantId, venueId, data))
+            .toList(growable: false);
+        emit();
+      }, onError: controller.addError);
+      controller.onCancel = () async {
+        await cloudSubscription.cancel();
+        await localSubscription.cancel();
+      };
+    });
+  }
+
+  /// Streams only the bounded reprint window. Printed history must never be
+  /// part of the always-on delivery monitor: a busy venue can create hundreds
+  /// of tickets per day, while the operational worker needs only unresolved
+  /// jobs. The audit record remains in Firestore after it leaves this query.
+  Stream<List<PrintJob>> watchRecentlyPrintedJobs({
+    required String tenantId,
+    required String venueId,
+    Duration retention = const Duration(days: 5),
+    int limit = 250,
+  }) {
+    final cutoff = DateTime.now().subtract(retention);
+    final cloud = _jobs(tenantId)
+        .where('venueId', isEqualTo: venueId)
+        .where('status', isEqualTo: 'printed')
+        .where(
+          'completedAt',
+          isGreaterThanOrEqualTo: Timestamp.fromDate(cutoff),
+        )
+        .orderBy('completedAt', descending: true)
+        .limit(limit)
+        .snapshots()
+        .map(
+          (snapshot) => snapshot.docs
+              .map((document) => _fromDocument(tenantId, document))
+              .toList(growable: false),
+        );
+    final scope = VenueScope(tenantId: tenantId, venueId: venueId);
+    final local =
+        VenueHubRuntime.instance.localPrintJobs(scope) ??
+        (VenueHubClientRegistry.instance.hasUsableSession(scope)
+            ? VenueHubClientRegistry.instance.watchPrintJobs(
+                scope,
+                statuses: const <String>{'printed'},
+                sinceUtc: cutoff,
+                limit: limit,
+              )
+            : null);
+    if (local == null) return cloud;
+
+    return Stream<List<PrintJob>>.multi((controller) {
+      var cloudJobs = const <PrintJob>[];
+      var localJobs = const <PrintJob>[];
+      void emit() {
+        final byId = <String, PrintJob>{
+          for (final job in cloudJobs) job.id: job,
+          for (final job in localJobs) job.id: job,
+        };
+        final values = byId.values.toList(growable: false)
+          ..sort(
+            (left, right) => (right.completedAt ?? right.createdAt).compareTo(
+              left.completedAt ?? left.createdAt,
+            ),
+          );
+        controller.add(values.take(limit).toList(growable: false));
+      }
+
+      final cloudSubscription = cloud.listen((jobs) {
+        cloudJobs = jobs;
+        emit();
+      }, onError: controller.addError);
+      final localSubscription = local.listen((jobs) {
+        localJobs = jobs
+            .where((data) {
+              if (data['status'] != 'printed') return false;
+              final created = DateTime.tryParse(
+                data['createdAtUtc'] as String? ?? '',
+              );
+              return created != null && !created.isBefore(cutoff);
+            })
             .map((data) => _fromLocalSnapshot(tenantId, venueId, data))
             .toList(growable: false);
         emit();

@@ -78,11 +78,20 @@ class VenueHubClientRegistry {
   /// claiming remains device-authenticated and manager recovery remains
   /// separately PIN-authorised; this stream merely makes delivery failures
   /// visible on every signed-in venue device.
-  Stream<List<Map<String, Object?>>> watchPrintJobs(VenueScope scope) async* {
+  Stream<List<Map<String, Object?>>> watchPrintJobs(
+    VenueScope scope, {
+    Set<String>? statuses,
+    DateTime? sinceUtc,
+    int? limit,
+  }) async* {
     while (hasUsableSession(scope)) {
       final client = clientFor(scope);
       if (client == null) return;
-      yield await client.fetchPrintJobs();
+      yield await client.fetchPrintJobs(
+        statuses: statuses,
+        sinceUtc: sinceUtc,
+        limit: limit,
+      );
       await Future<void>.delayed(const Duration(seconds: 3));
     }
   }

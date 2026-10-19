@@ -36,7 +36,8 @@ final fulfilmentOrdersProvider = StreamProvider<List<PosOrder>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <PosOrder>[]);
   final session = ref.watch(activeStaffPinSessionProvider);
-  final driverOnly = session != null &&
+  final driverOnly =
+      session != null &&
       session.roles.contains('driver') &&
       !session.roles.any((role) => role == 'owner' || role == 'manager');
   if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
@@ -46,11 +47,68 @@ final fulfilmentOrdersProvider = StreamProvider<List<PosOrder>>((ref) {
           .toList(growable: false),
     );
   }
-  return ref.watch(fulfilmentRepositoryProvider).watchFulfilmentOrders(
-    scope,
-    assignedDriverId: driverOnly ? session.userId : null,
-  );
+  return ref
+      .watch(fulfilmentRepositoryProvider)
+      .watchFulfilmentOrders(
+        scope,
+        assignedDriverId: driverOnly ? session.userId : null,
+      );
 });
+
+/// Value object used by Riverpod to keep a date-bounded fulfilment listener.
+/// The operational POS uses [fulfilmentOrdersProvider]; only the management
+/// history screen opens this wider query, and only for its selected dates.
+@immutable
+class FulfilmentHistoryQuery {
+  const FulfilmentHistoryQuery({
+    required this.scope,
+    required this.startMillis,
+    required this.endExclusiveMillis,
+    this.assignedDriverId,
+  });
+
+  final VenueScope scope;
+  final int startMillis;
+  final int endExclusiveMillis;
+  final String? assignedDriverId;
+
+  @override
+  bool operator ==(Object other) =>
+      other is FulfilmentHistoryQuery &&
+      other.scope == scope &&
+      other.startMillis == startMillis &&
+      other.endExclusiveMillis == endExclusiveMillis &&
+      other.assignedDriverId == assignedDriverId;
+
+  @override
+  int get hashCode =>
+      Object.hash(scope, startMillis, endExclusiveMillis, assignedDriverId);
+}
+
+final fulfilmentOrderHistoryProvider = StreamProvider.autoDispose
+    .family<List<PosOrder>, FulfilmentHistoryQuery>((ref, request) {
+      final scope = request.scope;
+      if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+        return VenueHubOfflineView.instance.orderStream.map(
+          (orders) => orders
+              .where((order) {
+                if (order.channel == OrderChannel.dineIn) return false;
+                if (request.assignedDriverId != null &&
+                    order.assignedDriverId != request.assignedDriverId) {
+                  return false;
+                }
+                final time = (order.scheduledFor ?? order.openedAt)
+                    .millisecondsSinceEpoch;
+                return time >= request.startMillis &&
+                    time < request.endExclusiveMillis;
+              })
+              .toList(growable: false),
+        );
+      }
+      return ref
+          .watch(fulfilmentRepositoryProvider)
+          .watchFulfilmentOrderHistory(request);
+    });
 
 final fulfilmentStaffProvider = StreamProvider<List<FulfilmentStaffMember>>((
   ref,
@@ -174,25 +232,101 @@ class FulfilmentRepository {
   }) {
     Query<Map<String, dynamic>> query = _firestore
         .collection('tenants/${scope.tenantId}/orders')
-        .where('venueId', isEqualTo: scope.venueId);
+        .where('venueId', isEqualTo: scope.venueId)
+        .where('status', whereIn: const <String>['open', 'sent']);
     if (assignedDriverId != null) {
       query = query.where('assignedDriverId', isEqualTo: assignedDriverId);
     }
-    return query
-      .snapshots()
-      .map((snapshot) {
-        final orders = snapshot.docs
-            .map(_fulfilmentOrder)
-            .whereType<PosOrder>()
-            .where((order) => order.channel != OrderChannel.dineIn)
-            .toList();
-        orders.sort((left, right) {
-          final leftTime = left.scheduledFor ?? left.openedAt;
-          final rightTime = right.scheduledFor ?? right.openedAt;
-          return leftTime.compareTo(rightTime);
-        });
-        return orders;
+    return query.snapshots().map((snapshot) {
+      final orders = snapshot.docs
+          .map(_fulfilmentOrder)
+          .whereType<PosOrder>()
+          .where((order) => order.channel != OrderChannel.dineIn)
+          .toList();
+      orders.sort((left, right) {
+        final leftTime = left.scheduledFor ?? left.openedAt;
+        final rightTime = right.scheduledFor ?? right.openedAt;
+        return leftTime.compareTo(rightTime);
       });
+      return orders;
+    });
+  }
+
+  /// Loads only the selected delivery/collection interval. New EPOS 3 orders
+  /// always carry scheduledForMillis; the bounded openedAt fallback is merged
+  /// for older ASAP records created before that field was introduced.
+  Stream<List<PosOrder>> watchFulfilmentOrderHistory(
+    FulfilmentHistoryQuery request,
+  ) {
+    final collection = _firestore.collection(
+      'tenants/${request.scope.tenantId}/orders',
+    );
+    final scheduled = collection
+        .where('venueId', isEqualTo: request.scope.venueId)
+        .where('channel', whereIn: const <String>['collection', 'delivery'])
+        .where(
+          'scheduledForMillis',
+          isGreaterThanOrEqualTo: request.startMillis,
+        )
+        .where('scheduledForMillis', isLessThan: request.endExclusiveMillis)
+        .snapshots();
+    final opened = collection
+        .where('venueId', isEqualTo: request.scope.venueId)
+        .where('channel', whereIn: const <String>['collection', 'delivery'])
+        .where('scheduledForMillis', isNull: true)
+        .where(
+          'openedAt',
+          isGreaterThanOrEqualTo: Timestamp.fromMillisecondsSinceEpoch(
+            request.startMillis,
+          ),
+        )
+        .where(
+          'openedAt',
+          isLessThan: Timestamp.fromMillisecondsSinceEpoch(
+            request.endExclusiveMillis,
+          ),
+        )
+        .snapshots();
+
+    return Stream<List<PosOrder>>.multi((controller) {
+      var scheduledDocs = const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+      var openedDocs = const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+      void emit() {
+        final documents = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{
+          for (final document in scheduledDocs) document.id: document,
+          for (final document in openedDocs) document.id: document,
+        };
+        final orders =
+            documents.values
+                .map(_fulfilmentOrder)
+                .whereType<PosOrder>()
+                .where(
+                  (order) =>
+                      request.assignedDriverId == null ||
+                      order.assignedDriverId == request.assignedDriverId,
+                )
+                .toList(growable: false)
+              ..sort((left, right) {
+                final leftTime = left.scheduledFor ?? left.openedAt;
+                final rightTime = right.scheduledFor ?? right.openedAt;
+                return leftTime.compareTo(rightTime);
+              });
+        controller.add(orders);
+      }
+
+      final scheduledSubscription = scheduled.listen((snapshot) {
+        scheduledDocs = snapshot.docs;
+        emit();
+      }, onError: controller.addError);
+      final openedSubscription = opened.listen((snapshot) {
+        openedDocs = snapshot.docs;
+        emit();
+      }, onError: controller.addError);
+      controller.onCancel = () async {
+        await scheduledSubscription.cancel();
+        await openedSubscription.cancel();
+      };
+    });
   }
 
   Stream<List<FulfilmentStaffMember>> watchStaff(VenueScope scope) => _firestore

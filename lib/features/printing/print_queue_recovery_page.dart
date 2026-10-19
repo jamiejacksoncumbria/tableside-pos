@@ -19,6 +19,15 @@ final venuePrintJobsProvider = StreamProvider.autoDispose
       ).watchVenueJobs(tenantId: scope.tenantId, venueId: scope.venueId),
     );
 
+final recentlyPrintedVenueJobsProvider = StreamProvider.autoDispose
+    .family<List<PrintJob>, VenueScope>(
+      (ref, scope) => PrintJobRepository(FirebaseFirestore.instance)
+          .watchRecentlyPrintedJobs(
+            tenantId: scope.tenantId,
+            venueId: scope.venueId,
+          ),
+    );
+
 /// The venue's live print-recovery desk. Jobs are never physically deleted:
 /// managers can clear unprinted work with a reason, leaving an audit record
 /// while safely stopping any linked fallback copy.
@@ -594,8 +603,7 @@ class _PrintedTicketHistoryPageState
     if (scope == null) {
       return const Scaffold(body: Center(child: Text('Choose a venue first.')));
     }
-    final jobs = ref.watch(venuePrintJobsProvider(scope));
-    final cutoff = DateTime.now().subtract(const Duration(days: 5));
+    final jobs = ref.watch(recentlyPrintedVenueJobsProvider(scope));
     return Scaffold(
       appBar: AppBar(title: const Text('Printed ticket history')),
       body: jobs.when(
@@ -605,16 +613,8 @@ class _PrintedTicketHistoryPageState
           return _QueueError(error: error);
         },
         data: (allJobs) {
-          final printed =
-              allJobs
-                  .where((job) {
-                    final printedAt = job.completedAt;
-                    return job.status == PrintJobStatus.printed &&
-                        printedAt != null &&
-                        !printedAt.isBefore(cutoff);
-                  })
-                  .toList(growable: false)
-                ..sort((a, b) => b.completedAt!.compareTo(a.completedAt!));
+          final printed = allJobs.toList(growable: false)
+            ..sort((a, b) => b.completedAt!.compareTo(a.completedAt!));
           if (printed.isEmpty) {
             return const Center(
               child: Text(

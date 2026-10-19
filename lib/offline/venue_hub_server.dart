@@ -27,7 +27,12 @@ typedef VenueHubPrintJobManager =
     );
 typedef VenueHubClientSnapshotReader = Future<Map<String, Object?>> Function();
 typedef VenueHubSnapshotRefresher = Future<void> Function();
-typedef VenueHubPrintJobReader = Future<List<Map<String, Object?>>> Function();
+typedef VenueHubPrintJobReader =
+    Future<List<Map<String, Object?>>> Function(
+      Set<String>? statuses,
+      DateTime? sinceUtc,
+      int? limit,
+    );
 typedef VenueHubOrderProjectionReader =
     Future<List<Map<String, Object?>>> Function();
 

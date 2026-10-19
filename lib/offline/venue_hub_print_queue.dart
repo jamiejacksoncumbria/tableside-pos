@@ -282,8 +282,9 @@ class VenueHubPrintQueue {
           'channel': order.channel,
           'customerName': order.customerName,
           'deliveryAddress': order.deliveryAddress,
-          'scheduledForMillis':
-              order.scheduledForUtc?.toLocal().millisecondsSinceEpoch,
+          'scheduledForMillis': order.scheduledForUtc
+              ?.toLocal()
+              .millisecondsSinceEpoch,
           'createdByName': createdByName,
           'isAddition': true,
           'lines': <Map<String, Object?>>[
@@ -606,7 +607,8 @@ class VenueHubPrintQueue {
     final before = _jobs.length;
     _jobs.removeWhere(
       (_, job) =>
-          job.status == 'printed' && job.createdAtUtc.isBefore(oldestRetained),
+          {'printed', 'cancelled'}.contains(job.status) &&
+          job.createdAtUtc.isBefore(oldestRetained),
     );
     return _jobs.length != before;
   }

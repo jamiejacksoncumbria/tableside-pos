@@ -515,7 +515,25 @@ class VenueHubRuntime {
             }
             await refresh();
           },
-          readPrintJobs: () async => printQueue.visibleJobs,
+          readPrintJobs: (statuses, sinceUtc, limit) async {
+            final filtered = printQueue.visibleJobs.where((job) {
+              if (statuses != null && !statuses.contains(job['status'])) {
+                return false;
+              }
+              if (sinceUtc != null) {
+                final createdAt = DateTime.tryParse(
+                  job['createdAtUtc'] as String? ?? '',
+                );
+                if (createdAt == null || createdAt.isBefore(sinceUtc)) {
+                  return false;
+                }
+              }
+              return true;
+            });
+            return (limit == null ? filtered : filtered.take(limit)).toList(
+              growable: false,
+            );
+          },
           readOrders: () async => (await publishOrders()).values
               .map((order) => order.toJson())
               .toList(growable: false),
@@ -980,6 +998,10 @@ class VenueHubRuntime {
               credential: credential,
               knownSnapshotDigest: snapshot['snapshotDigest'] as String?,
               knownSnapshotGeneration: snapshot['snapshotGeneration'] as int?,
+              knownSnapshotSections: (snapshot['snapshotSections'] as Map?)
+                  ?.map(
+                    (key, value) => MapEntry('$key', (value as num).toInt()),
+                  ),
             );
           } catch (error, stackTrace) {
             AppLogger.error(
@@ -1008,6 +1030,14 @@ class VenueHubRuntime {
             );
             unawaited(reconcileClosedCloudOrders());
             return;
+          }
+          if (refreshed['partial'] == true) {
+            final merged = Map<String, Object?>.from(snapshot);
+            for (final entry in refreshed.entries) {
+              if (entry.key == 'partial' || entry.key == 'unchanged') continue;
+              merged[entry.key] = entry.value;
+            }
+            refreshed = merged;
           }
           await installFreshSnapshot(refreshed);
           unawaited(reconcileClosedCloudOrders());

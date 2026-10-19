@@ -233,8 +233,17 @@ class NativeVenueHubServer implements VenueHubServer {
           trustedNowUtc: TrustedClock.instance.nowUtc(),
           requiredPermission: 'order',
         );
+        final statuses = (body['statuses'] as List? ?? const <Object?>[])
+            .whereType<String>()
+            .toSet();
+        final sinceUtc = DateTime.tryParse(body['sinceUtc'] as String? ?? '');
+        final requestedLimit = (body['limit'] as num?)?.toInt();
         _json(response, HttpStatus.ok, {
-          'jobs': await _configuration!.readPrintJobs(),
+          'jobs': await _configuration!.readPrintJobs(
+            statuses.isEmpty ? null : statuses,
+            sinceUtc,
+            requestedLimit == null ? null : requestedLimit.clamp(1, 500),
+          ),
         });
         return;
       }

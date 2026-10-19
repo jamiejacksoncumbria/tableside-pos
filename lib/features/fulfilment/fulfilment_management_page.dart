@@ -93,7 +93,20 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
 
   @override
   Widget build(BuildContext context) {
-    final orders = ref.watch(fulfilmentOrdersProvider);
+    final start = DateUtils.dateOnly(_dateRange.start);
+    final endExclusive = DateUtils.dateOnly(
+      _dateRange.end,
+    ).add(const Duration(days: 1));
+    final orders = ref.watch(
+      fulfilmentOrderHistoryProvider(
+        FulfilmentHistoryQuery(
+          scope: scope,
+          startMillis: start.millisecondsSinceEpoch,
+          endExclusiveMillis: endExclusive.millisecondsSinceEpoch,
+          assignedDriverId: widget.assignedDriverId,
+        ),
+      ),
+    );
     final session = ref.watch(activeStaffPinSessionProvider);
     final canManageOrders =
         session?.roles.any((role) => role == 'owner' || role == 'manager') ??
@@ -112,44 +125,45 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
         return Center(child: Text('Live orders could not be loaded: $error'));
       },
       data: (allItems) {
-        final items = allItems
-            .where((order) {
-              if (widget.assignedDriverId != null &&
-                  order.assignedDriverId != widget.assignedDriverId) {
-                return false;
-              }
-              final value = order.scheduledFor ?? order.openedAt;
-              final date = DateUtils.dateOnly(value.toLocal());
-              if (date.isBefore(_dateRange.start) ||
-                  date.isAfter(_dateRange.end)) {
-                return false;
-              }
-              if (_statusFilter != null &&
-                  order.fulfilmentStatus != _statusFilter) {
-                return false;
-              }
-              final query = _searchQuery.trim().toLowerCase();
-              if (query.isEmpty) return true;
-              return <String?>[
-                order.customerName,
-                order.customerPhone,
-                order.deliveryAddress,
-                order.deliveryAddressLabel,
-                order.serviceAreaName,
-                order.assignedDriverName,
-                order.id,
-                order.channel.label,
-                _statusLabel(order.fulfilmentStatus),
-              ].whereType<String>().any(
-                (value) => value.toLowerCase().contains(query),
-              );
-            })
-            .toList(growable: false)
-          ..sort((left, right) {
-            final leftTime = left.scheduledFor ?? left.openedAt;
-            final rightTime = right.scheduledFor ?? right.openedAt;
-            return leftTime.compareTo(rightTime);
-          });
+        final items =
+            allItems
+                .where((order) {
+                  if (widget.assignedDriverId != null &&
+                      order.assignedDriverId != widget.assignedDriverId) {
+                    return false;
+                  }
+                  final value = order.scheduledFor ?? order.openedAt;
+                  final date = DateUtils.dateOnly(value.toLocal());
+                  if (date.isBefore(_dateRange.start) ||
+                      date.isAfter(_dateRange.end)) {
+                    return false;
+                  }
+                  if (_statusFilter != null &&
+                      order.fulfilmentStatus != _statusFilter) {
+                    return false;
+                  }
+                  final query = _searchQuery.trim().toLowerCase();
+                  if (query.isEmpty) return true;
+                  return <String?>[
+                    order.customerName,
+                    order.customerPhone,
+                    order.deliveryAddress,
+                    order.deliveryAddressLabel,
+                    order.serviceAreaName,
+                    order.assignedDriverName,
+                    order.id,
+                    order.channel.label,
+                    _statusLabel(order.fulfilmentStatus),
+                  ].whereType<String>().any(
+                    (value) => value.toLowerCase().contains(query),
+                  );
+                })
+                .toList(growable: false)
+              ..sort((left, right) {
+                final leftTime = left.scheduledFor ?? left.openedAt;
+                final rightTime = right.scheduledFor ?? right.openedAt;
+                return leftTime.compareTo(rightTime);
+              });
         return Column(
           children: [
             Padding(
@@ -169,9 +183,8 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
                       ),
                       const SizedBox(width: 8),
                       FilledButton.tonalIcon(
-                        onPressed: () => setState(
-                          () => _showFilters = !_showFilters,
-                        ),
+                        onPressed: () =>
+                            setState(() => _showFilters = !_showFilters),
                         icon: Icon(
                           _showFilters
                               ? Icons.filter_alt_off_outlined
@@ -198,9 +211,8 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
                                   children: [
                                     TextField(
                                       controller: _searchController,
-                                      onChanged: (value) => setState(
-                                        () => _searchQuery = value,
-                                      ),
+                                      onChanged: (value) =>
+                                          setState(() => _searchQuery = value),
                                       decoration: const InputDecoration(
                                         labelText: 'Search orders',
                                         hintText:
@@ -214,33 +226,34 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
                                       builder: (context, constraints) {
                                         final compact =
                                             constraints.maxWidth < 620;
-                                        final status = DropdownButtonFormField<
-                                          FulfilmentStatus?
-                                        >(
-                                          initialValue: _statusFilter,
-                                          isExpanded: true,
-                                          decoration: const InputDecoration(
-                                            labelText: 'Status',
-                                            isDense: true,
-                                          ),
-                                          items: [
-                                            const DropdownMenuItem(
-                                              value: null,
-                                              child: Text('All statuses'),
-                                            ),
-                                            for (final value
-                                                in FulfilmentStatus.values)
-                                              DropdownMenuItem(
-                                                value: value,
-                                                child: Text(
-                                                  _statusLabel(value),
-                                                ),
+                                        final status =
+                                            DropdownButtonFormField<
+                                              FulfilmentStatus?
+                                            >(
+                                              initialValue: _statusFilter,
+                                              isExpanded: true,
+                                              decoration: const InputDecoration(
+                                                labelText: 'Status',
+                                                isDense: true,
                                               ),
-                                          ],
-                                          onChanged: (value) => setState(
-                                            () => _statusFilter = value,
-                                          ),
-                                        );
+                                              items: [
+                                                const DropdownMenuItem(
+                                                  value: null,
+                                                  child: Text('All statuses'),
+                                                ),
+                                                for (final value
+                                                    in FulfilmentStatus.values)
+                                                  DropdownMenuItem(
+                                                    value: value,
+                                                    child: Text(
+                                                      _statusLabel(value),
+                                                    ),
+                                                  ),
+                                              ],
+                                              onChanged: (value) => setState(
+                                                () => _statusFilter = value,
+                                              ),
+                                            );
                                         final dates = OutlinedButton.icon(
                                           onPressed: _chooseDateRange,
                                           icon: const Icon(
@@ -743,8 +756,7 @@ class _LegacyCancellationDialog extends StatefulWidget {
       _LegacyCancellationDialogState();
 }
 
-class _LegacyCancellationDialogState
-    extends State<_LegacyCancellationDialog> {
+class _LegacyCancellationDialogState extends State<_LegacyCancellationDialog> {
   final TextEditingController _reasonController = TextEditingController();
   final TextEditingController _pinController = TextEditingController();
 

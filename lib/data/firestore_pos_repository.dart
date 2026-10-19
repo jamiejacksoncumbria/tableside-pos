@@ -343,13 +343,10 @@ class FirestorePosRepository {
       await for (final snapshot
           in _firestore
               .collection('tenants/${scope.tenantId}/menuSections')
+              .where('venueId', isEqualTo: scope.venueId)
               .orderBy('sortOrder')
               .snapshots()) {
         final items = snapshot.docs
-            .where(
-              (document) =>
-                  (document.data()['venueId'] as String?) == scope.venueId,
-            )
             .map((document) {
               final data = document.data();
               return MenuSection(
@@ -383,6 +380,7 @@ class FirestorePosRepository {
       await for (final snapshot
           in _firestore
               .collection('tenants/${scope.tenantId}/products')
+              .where('venueId', isEqualTo: scope.venueId)
               .orderBy('name')
               .snapshots()) {
         final productDataById = <String, Map<String, dynamic>>{
@@ -391,8 +389,7 @@ class FirestorePosRepository {
         final items = snapshot.docs
             .where(
               (document) =>
-                  (document.data()['venueId'] as String?) == scope.venueId &&
-                  (includeArchived || document.data()['archived'] != true),
+                  includeArchived || document.data()['archived'] != true,
             )
             .map((document) {
               final data = document.data();
@@ -488,14 +485,11 @@ class FirestorePosRepository {
   Stream<List<DiningTable>> watchTables(VenueScope scope) {
     return _firestore
         .collection('tenants/${scope.tenantId}/tables')
+        .where('venueId', isEqualTo: scope.venueId)
         .orderBy('label')
         .snapshots()
         .map(
           (snapshot) => snapshot.docs
-              .where(
-                (document) =>
-                    (document.data()['venueId'] as String?) == scope.venueId,
-              )
               .map((document) {
                 final data = document.data();
                 final currentOrderId = data['currentOrderId'] as String?;
@@ -1638,6 +1632,7 @@ class FirestorePosRepository {
   Stream<List<OrderFlowOrder>> watchOrderFlow(VenueScope scope) {
     return _firestore
         .collection('tenants/${scope.tenantId}/productionTickets')
+        .where('venueId', isEqualTo: scope.venueId)
         .orderBy('ticketReleasedAt', descending: true)
         .limit(200)
         .snapshots()
@@ -1692,7 +1687,8 @@ class FirestorePosRepository {
   Stream<List<PosOrder>> watchVenueOpenOrders(VenueScope scope) {
     return _firestore
         .collection('tenants/${scope.tenantId}/orders')
-        .limit(1000)
+        .where('venueId', isEqualTo: scope.venueId)
+        .where('status', whereIn: const <String>['open', 'sent'])
         .snapshots()
         .map(
           (snapshot) => snapshot.docs
@@ -1700,7 +1696,6 @@ class FirestorePosRepository {
                 (document) => _orderFromSnapshot(scope: scope, order: document),
               )
               .whereType<PosOrder>()
-              .where((order) => order.venueId == scope.venueId)
               .toList(growable: false),
         );
   }

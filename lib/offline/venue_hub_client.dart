@@ -381,13 +381,20 @@ class VenueHubClient {
     return Map<String, Object?>.from(decoded);
   }
 
-  Future<List<Map<String, Object?>>> fetchPrintJobs() async {
+  Future<List<Map<String, Object?>>> fetchPrintJobs({
+    Set<String>? statuses,
+    DateTime? sinceUtc,
+    int? limit,
+  }) async {
     final sessionId = configuration.staffSessionId;
     final sessionToken = configuration.staffSessionToken;
     if (sessionId == null || sessionToken == null) return const [];
     final body = <String, Object?>{
       'staffSessionId': sessionId,
       'staffSessionToken': sessionToken,
+      if (statuses?.isNotEmpty == true) 'statuses': statuses!.toList(),
+      if (sinceUtc != null) 'sinceUtc': sinceUtc.toUtc().toIso8601String(),
+      if (limit != null) 'limit': limit,
     };
     final response = await _signedPost('/v1/print/jobs', body);
     if (response.statusCode != 200) {

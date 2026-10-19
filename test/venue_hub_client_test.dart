@@ -147,6 +147,49 @@ void main() {
       ),
     );
   });
+
+  test(
+    'requests only the bounded print-job view required by a screen',
+    () async {
+      final credential =
+          await VenueHubDeviceCredentialStore(
+            secrets: _MemorySecrets(),
+          ).getOrCreate(
+            tenantId: 'tenant-a',
+            venueId: 'venue-a',
+            deviceId: 'device-a',
+          );
+      late Map<String, dynamic> sent;
+      final client = VenueHubClient(
+        configuration: VenueHubClientConfiguration(
+          endpoint: Uri.parse('https://hub.example.test:8443'),
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'device-a',
+          staffId: 'staff-a',
+          staffSessionId: 'session-a',
+          staffSessionToken: '01234567890123456789012345678901',
+          hubEpoch: 2,
+          credential: credential,
+        ),
+        httpClient: MockClient((request) async {
+          sent = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(jsonEncode({'jobs': <Object>[]}), 200);
+        }),
+      );
+      final since = DateTime.utc(2026, 9, 1);
+
+      await client.fetchPrintJobs(
+        statuses: const {'printed'},
+        sinceUtc: since,
+        limit: 250,
+      );
+
+      expect(sent['body']['statuses'], ['printed']);
+      expect(sent['body']['sinceUtc'], since.toIso8601String());
+      expect(sent['body']['limit'], 250);
+    },
+  );
 }
 
 class _MemorySecrets implements VenueHubSecretStore {
