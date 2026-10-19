@@ -32,10 +32,16 @@ class VenueHubRealtimeClient {
   Timer? _staleTimer;
   DateTime? _lastReadyAt;
   bool _serverOnline = false;
+  bool _ready = false;
   Future<void>? _configuration;
+  final StreamController<bool> _availabilityChanges =
+      StreamController<bool>.broadcast();
 
   bool isReadyFor(VenueScope scope, int hubEpoch) =>
-      _scope == scope && _hubEpoch == hubEpoch && _database != null;
+      _ready &&
+      _scope == scope &&
+      _hubEpoch == hubEpoch &&
+      _database != null;
 
   bool get hubOnline =>
       _serverOnline &&
@@ -43,6 +49,29 @@ class VenueHubRealtimeClient {
       DateTime.now().difference(_lastReadyAt!) <= _staleAfter;
 
   Stream<Map<String, DateTime>> get printerPresence => _printerPresence.stream;
+
+  /// Waits briefly for the first live presence event instead of declaring the
+  /// hub offline while Firebase is still opening its realtime socket.
+  ///
+  /// Configuration and presence are intentionally separate states. A client
+  /// can be authenticated and subscribed before the server has delivered the
+  /// first value; treating that short interval as a failed configuration left
+  /// the old implementation half-configured and unable to retry.
+  Future<void> waitUntilHubOnline({
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (hubOnline) return;
+    try {
+      await _availabilityChanges.stream
+          .firstWhere((online) => online)
+          .timeout(timeout);
+    } on TimeoutException {
+      throw StateError(
+        'The venue hub realtime presence was not confirmed. Check that the '
+        'hub is running and connected to the internet.',
+      );
+    }
+  }
 
   Future<void> ensureConfigured({
     required VenueScope scope,
@@ -71,100 +100,115 @@ class VenueHubRealtimeClient {
     required ProductionCommandRepository repository,
   }) async {
     await _clearSession(markOffline: false);
-    final session = await repository.issueRealtimePosSession(scope: scope);
-    final token = session['customToken'];
-    final databaseUrl = session['databaseUrl'];
-    final deviceId = session['hubDeviceId'];
-    final returnedEpoch = session['hubEpoch'];
-    if (token is! String ||
-        token.isEmpty ||
-        databaseUrl is! String ||
-        !databaseUrl.startsWith('https://') ||
-        deviceId is! String ||
-        deviceId.isEmpty ||
-        returnedEpoch is! int ||
-        returnedEpoch != hubEpoch) {
-      throw StateError('The server returned an invalid realtime POS session.');
-    }
-
-    final primary = Firebase.app();
-    FirebaseApp app;
     try {
-      app = Firebase.app(_secondaryAppName);
-    } on FirebaseException {
-      app = await Firebase.initializeApp(
-        name: _secondaryAppName,
-        options: primary.options.copyWith(databaseURL: databaseUrl),
-      );
-    }
-    await FirebaseAuth.instanceFor(app: app).signInWithCustomToken(token);
-    final database = FirebaseDatabase.instanceFor(
-      app: app,
-      databaseURL: databaseUrl,
-    );
-    _scope = scope;
-    _hubEpoch = hubEpoch;
-    _app = app;
-    _database = database;
-    final presenceReference = database.ref(
-      'hubPresence/${scope.tenantId}/${scope.venueId}/$deviceId',
-    );
-    void applyPresence(DataSnapshot snapshot) {
-      final raw = snapshot.value;
-      final value = raw is Map ? raw : const <Object?, Object?>{};
-      final millis = value['lastReadyAt'];
-      _serverOnline = value['online'] == true && value['hubEpoch'] == hubEpoch;
-      _lastReadyAt = millis is int
-          ? DateTime.fromMillisecondsSinceEpoch(millis)
-          : null;
-      _publishAvailability();
-    }
+      final session = await repository.issueRealtimePosSession(scope: scope);
+      final token = session['customToken'];
+      final databaseUrl = session['databaseUrl'];
+      final deviceId = session['hubDeviceId'];
+      final returnedEpoch = session['hubEpoch'];
+      if (token is! String ||
+          token.isEmpty ||
+          databaseUrl is! String ||
+          !databaseUrl.startsWith('https://') ||
+          deviceId is! String ||
+          deviceId.isEmpty ||
+          returnedEpoch is! int ||
+          returnedEpoch != hubEpoch) {
+        throw StateError(
+          'The server returned an invalid realtime POS session.',
+        );
+      }
 
-    _presenceSubscription = presenceReference.onValue.listen(
-      (event) => applyPresence(event.snapshot),
-      onError: (Object error, StackTrace stackTrace) {
-        _serverOnline = false;
-        _publishAvailability(detail: error.toString());
-        AppLogger.error('Watch realtime venue hub presence', error, stackTrace);
-      },
-    );
-    // Do not make the first order guess while the initial stream event is in
-    // flight. One direct RTDB read is still a socket operation, not a Function
-    // invocation, and normally completes from the just-opened connection.
-    applyPresence(
-      await presenceReference.get().timeout(const Duration(seconds: 5)),
-    );
-    _printerPresenceSubscription = database
-        .ref('printerPresence/${scope.tenantId}/${scope.venueId}')
-        .onValue
-        .listen((event) {
-          final result = <String, DateTime>{};
-          final raw = event.snapshot.value;
-          if (raw is Map) {
-            for (final entry in raw.entries) {
-              final value = entry.value;
-              if (entry.key is! String ||
-                  value is! Map ||
-                  value['online'] != true) {
-                continue;
-              }
-              final millis = value['lastReadyAt'];
-              if (millis is int) {
-                result[entry.key as String] =
-                    DateTime.fromMillisecondsSinceEpoch(millis);
+      final primary = Firebase.app();
+      FirebaseApp app;
+      try {
+        app = Firebase.app(_secondaryAppName);
+      } on FirebaseException {
+        app = await Firebase.initializeApp(
+          name: _secondaryAppName,
+          options: primary.options.copyWith(databaseURL: databaseUrl),
+        );
+      }
+      await FirebaseAuth.instanceFor(app: app).signInWithCustomToken(token);
+      final database = FirebaseDatabase.instanceFor(
+        app: app,
+        databaseURL: databaseUrl,
+      );
+
+      _scope = scope;
+      _hubEpoch = hubEpoch;
+      _app = app;
+      _database = database;
+      final presenceReference = database.ref(
+        'hubPresence/${scope.tenantId}/${scope.venueId}/$deviceId',
+      );
+      void applyPresence(DataSnapshot snapshot) {
+        final raw = snapshot.value;
+        final value = raw is Map ? raw : const <Object?, Object?>{};
+        final millis = value['lastReadyAt'];
+        _serverOnline =
+            value['online'] == true && value['hubEpoch'] == hubEpoch;
+        _lastReadyAt = millis is int
+            ? DateTime.fromMillisecondsSinceEpoch(millis)
+            : null;
+        _publishAvailability();
+      }
+
+      _presenceSubscription = presenceReference.onValue.listen(
+        (event) => applyPresence(event.snapshot),
+        onError: (Object error, StackTrace stackTrace) {
+          _serverOnline = false;
+          _publishAvailability(detail: error.toString());
+          AppLogger.error(
+            'Watch realtime venue hub presence',
+            error,
+            stackTrace,
+          );
+        },
+      );
+      _printerPresenceSubscription = database
+          .ref('printerPresence/${scope.tenantId}/${scope.venueId}')
+          .onValue
+          .listen((event) {
+            final result = <String, DateTime>{};
+            final raw = event.snapshot.value;
+            if (raw is Map) {
+              for (final entry in raw.entries) {
+                final value = entry.value;
+                if (entry.key is! String ||
+                    value is! Map ||
+                    value['online'] != true) {
+                  continue;
+                }
+                final millis = value['lastReadyAt'];
+                if (millis is int) {
+                  result[entry.key as String] =
+                      DateTime.fromMillisecondsSinceEpoch(millis);
+                }
               }
             }
-          }
-          _printerPresence.add(result);
-        });
-    _staleTimer = Timer.periodic(
-      const Duration(seconds: 2),
-      (_) => _publishAvailability(),
-    );
+            _printerPresence.add(result);
+          });
+      _staleTimer = Timer.periodic(
+        const Duration(seconds: 2),
+        (_) => _publishAvailability(),
+      );
+      _ready = true;
+      _publishAvailability(
+        detail: 'Connecting to the venue hub realtime channel…',
+      );
+    } on Object {
+      // Never retain a partially configured database after authentication or
+      // subscription setup fails. A later command can then retry cleanly.
+      await _clearSession(markOffline: false);
+      rethrow;
+    }
   }
 
   void _publishAvailability({String? detail}) {
-    if (hubOnline) {
+    final online = hubOnline;
+    _availabilityChanges.add(online);
+    if (online) {
       final wasOffline = VenueHubAvailability.issue.value != null;
       VenueHubAvailability.markOnline();
       if (wasOffline) AppLogger.info('Venue hub is back online and ready.');
@@ -212,18 +256,22 @@ class VenueHubRealtimeClient {
   Future<void> _clearSession({required bool markOffline}) async {
     _staleTimer?.cancel();
     _staleTimer = null;
-    await _presenceSubscription?.cancel();
+    final presenceSubscription = _presenceSubscription;
     _presenceSubscription = null;
-    await _printerPresenceSubscription?.cancel();
+    final printerPresenceSubscription = _printerPresenceSubscription;
     _printerPresenceSubscription = null;
+    final app = _app;
+    _app = null;
+    _ready = false;
     _scope = null;
     _hubEpoch = null;
     _database = null;
     _serverOnline = false;
     _lastReadyAt = null;
+    _availabilityChanges.add(false);
     if (markOffline) VenueHubAvailability.markOffline();
-    final app = _app;
-    _app = null;
+    await presenceSubscription?.cancel();
+    await printerPresenceSubscription?.cancel();
     if (app != null) {
       try {
         await FirebaseAuth.instanceFor(app: app).signOut();

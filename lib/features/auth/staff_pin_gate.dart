@@ -85,6 +85,10 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
   void lock() {
     StaffPinSessionStore.current = null;
     VenueHubClientRegistry.instance.clear();
+    // The realtime custom token is staff-scoped. Drop it whenever the PIN
+    // session locks so the next staff member cannot inherit the prior staff
+    // member's command-status access.
+    unawaited(VenueHubRealtimeClient.instance.clear());
     state = null;
     ref.read(trainingModeProvider.notifier).clear();
     ref.read(appThemeControllerProvider.notifier).clearUserPreference();

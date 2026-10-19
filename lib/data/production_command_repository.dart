@@ -2097,11 +2097,7 @@ class ProductionCommandRepository {
       hubEpoch: epoch,
       repository: this,
     );
-    if (!realtime.hubOnline) {
-      throw StateError(
-        'The venue hub is offline. Join the venue network or wait for it to reconnect.',
-      );
-    }
+    await realtime.waitUntilHubOnline();
     return _remoteHub.send(
       scope: scope,
       hubEpoch: epoch,
