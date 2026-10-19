@@ -176,6 +176,16 @@ class VenueOfflineCatalogue {
         if (lineId is String) {
           linePayloads[lineId] = Map<String, Object?>.from(event.payload);
         }
+      } else if (event.type == 'order.itemsAdded') {
+        final items = event.payload['items'];
+        if (items is List) {
+          for (final raw in items) {
+            if (raw is! Map) continue;
+            final item = Map<String, Object?>.from(raw);
+            final lineId = item['lineId'];
+            if (lineId is String) linePayloads[lineId] = item;
+          }
+        }
       } else if (event.type == 'order.itemQuantityChanged') {
         final lineId = event.payload['lineId'];
         final quantity = event.payload['quantity'];
@@ -275,6 +285,33 @@ class VenueOfflineCatalogue {
       throw const VenueOfflineCatalogueException(
         'Only a manager may override offline stock.',
       );
+    }
+    if (eventType == 'order.itemsAdded') {
+      final orderId = _requiredText(payload, 'orderId');
+      final rawItems = payload['items'];
+      if (rawItems is! List || rawItems.isEmpty || rawItems.length > 25) {
+        throw const VenueOfflineCatalogueException(
+          'A basket batch must contain between 1 and 25 items.',
+        );
+      }
+      final canonicalItems = <Map<String, Object?>>[];
+      final lineIds = <String>{};
+      for (final raw in rawItems) {
+        final item = _map(raw, 'basket item');
+        final canonical = await validateEvent(
+          'order.itemAdded',
+          <String, Object?>{...item, 'orderId': orderId},
+          grant,
+        );
+        final lineId = canonical['lineId']! as String;
+        if (!lineIds.add(lineId)) {
+          throw const VenueOfflineCatalogueException(
+            'A basket line was included more than once.',
+          );
+        }
+        canonicalItems.add(canonical);
+      }
+      return <String, Object?>{'orderId': orderId, 'items': canonicalItems};
     }
     if (eventType != 'order.itemAdded') return payload;
     final productId = _requiredText(payload, 'productId');

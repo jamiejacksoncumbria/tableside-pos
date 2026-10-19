@@ -3,6 +3,64 @@ import 'package:tableside_pos/offline/offline_event.dart';
 import 'package:tableside_pos/offline/offline_order_projection.dart';
 
 void main() {
+  test('basket batch adds every line atomically to the projection', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemsAdded', {
+        'orderId': 'order-a',
+        'items': [
+          {
+            'orderId': 'order-a',
+            'lineId': 'line-a',
+            'productId': 'product-a',
+            'productName': 'Starter',
+            'quantity': 1,
+            'unitPriceMinor': 500,
+          },
+          {
+            'orderId': 'order-a',
+            'lineId': 'line-b',
+            'productId': 'product-b',
+            'productName': 'Main',
+            'quantity': 2,
+            'unitPriceMinor': 1200,
+          },
+        ],
+      }),
+    ]);
+
+    expect(projection.lines.keys, containsAll(['line-a', 'line-b']));
+    expect(projection.totalMinor, 2900);
+  });
+
+  test('basket batch rejects duplicate line identities', () {
+    expect(
+      () => projectOfflineOrder([
+        _event(1, 'order.opened', {'orderId': 'order-a'}),
+        _event(2, 'order.itemsAdded', {
+          'orderId': 'order-a',
+          'items': [
+            {
+              'lineId': 'line-a',
+              'productId': 'product-a',
+              'productName': 'Starter',
+              'quantity': 1,
+              'unitPriceMinor': 500,
+            },
+            {
+              'lineId': 'line-a',
+              'productId': 'product-b',
+              'productName': 'Main',
+              'quantity': 1,
+              'unitPriceMinor': 1200,
+            },
+          ],
+        }),
+      ]),
+      throwsA(isA<OfflineProjectionException>()),
+    );
+  });
+
   test('replay produces a paid, closed deterministic order', () {
     final projection = projectOfflineOrder([
       _event(1, 'order.opened', {'orderId': 'order-a'}),

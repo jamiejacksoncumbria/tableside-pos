@@ -395,6 +395,41 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     }
   }
 
+  void addItem(Map<String, Object?> payload, DateTime createdAtUtc) {
+    _requireOpened(opened);
+    final lineId = _requiredString(payload, 'lineId');
+    if (lines.containsKey(lineId)) {
+      final existing = lines[lineId]!;
+      // A same-epoch recovery baseline already contains cloud-projected
+      // lines. Replaying the original add is idempotent when its immutable
+      // sale identity matches; later quantity events still replay below.
+      final sameCloudLine =
+          baseline != null &&
+          existing.productId == _requiredString(payload, 'productId') &&
+          existing.name == _requiredString(payload, 'productName') &&
+          existing.unitPriceMinor == _nonNegativeInt(payload, 'unitPriceMinor');
+      if (sameCloudLine) return;
+      throw const OfflineProjectionException(
+        'An order line ID was used more than once.',
+      );
+    }
+    final quantity = _positiveInt(payload, 'quantity');
+    final unitPriceMinor = _nonNegativeInt(payload, 'unitPriceMinor');
+    lines[lineId] = OfflineProjectedLine(
+      id: lineId,
+      productId: _requiredString(payload, 'productId'),
+      name: _requiredString(payload, 'productName'),
+      quantity: quantity,
+      unitPriceMinor: unitPriceMinor,
+      productionArea: payload['productionArea'] as String? ?? 'kitchen',
+      details: _productionDetails(payload),
+      taxRateBasisPoints: (payload['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
+      taxRateName: payload['taxRateName'] as String? ?? 'Zero Rate',
+      sent: false,
+      addedAtUtc: createdAtUtc,
+    );
+  }
+
   for (final event in events) {
     if (event.tenantId != first.tenantId || event.venueId != first.venueId) {
       throw const OfflineProjectionException(
@@ -476,42 +511,22 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
             : 'awaitingPreparation';
         break;
       case 'order.itemAdded':
+        addItem(event.payload, event.createdAtUtc);
+        break;
+      case 'order.itemsAdded':
         _requireOpened(opened);
-        final lineId = _requiredString(event.payload, 'lineId');
-        if (lines.containsKey(lineId)) {
-          final existing = lines[lineId]!;
-          // A same-epoch recovery baseline already contains cloud-projected
-          // lines. Replaying the original add is idempotent when its immutable
-          // sale identity matches; later quantity events still replay below.
-          final sameCloudLine =
-              baseline != null &&
-              existing.productId ==
-                  _requiredString(event.payload, 'productId') &&
-              existing.name == _requiredString(event.payload, 'productName') &&
-              existing.unitPriceMinor ==
-                  _nonNegativeInt(event.payload, 'unitPriceMinor');
-          if (sameCloudLine) break;
+        final rawItems = event.payload['items'];
+        if (rawItems is! List || rawItems.isEmpty) {
           throw const OfflineProjectionException(
-            'An order line ID was used more than once.',
+            'The basket batch is empty or invalid.',
           );
         }
-        final quantity = _positiveInt(event.payload, 'quantity');
-        final unitPriceMinor = _nonNegativeInt(event.payload, 'unitPriceMinor');
-        lines[lineId] = OfflineProjectedLine(
-          id: lineId,
-          productId: _requiredString(event.payload, 'productId'),
-          name: _requiredString(event.payload, 'productName'),
-          quantity: quantity,
-          unitPriceMinor: unitPriceMinor,
-          productionArea:
-              event.payload['productionArea'] as String? ?? 'kitchen',
-          details: _productionDetails(event.payload),
-          taxRateBasisPoints:
-              (event.payload['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
-          taxRateName: event.payload['taxRateName'] as String? ?? 'Zero Rate',
-          sent: false,
-          addedAtUtc: event.createdAtUtc,
-        );
+        for (final raw in rawItems) {
+          if (raw is! Map) {
+            throw const OfflineProjectionException('A basket item is invalid.');
+          }
+          addItem(Map<String, Object?>.from(raw), event.createdAtUtc);
+        }
         break;
       case 'order.itemQuantityChanged':
         _requireOpened(opened);

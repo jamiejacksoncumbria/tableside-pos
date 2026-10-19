@@ -37,6 +37,43 @@ void main() {
     },
   );
 
+  test('basket batch canonicalises every item at the hub', () async {
+    final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
+    final payload = await catalogue.validateEvent('order.itemsAdded', {
+      'orderId': 'order-a',
+      'items': [
+        {
+          'lineId': 'line-a',
+          'productId': 'steak',
+          'quantity': 1,
+          'variantId': 'large',
+          'modifierSelections': [
+            {'groupId': 'cooking', 'optionId': 'medium'},
+          ],
+          'unitPriceMinor': 1,
+        },
+        {
+          'lineId': 'line-b',
+          'productId': 'steak',
+          'quantity': 2,
+          'variantId': 'large',
+          'modifierSelections': [
+            {'groupId': 'cooking', 'optionId': 'medium'},
+          ],
+          'productName': 'Untrusted name',
+        },
+      ],
+    }, grant);
+
+    final items = payload['items'] as List<Map<String, Object?>>;
+    expect(items, hasLength(2));
+    expect(
+      items.every((item) => item['productName'] == 'Sirloin Steak'),
+      isTrue,
+    );
+    expect(items.every((item) => item['unitPriceMinor'] == 2800), isTrue);
+  });
+
   test('required modifier cannot be omitted', () async {
     final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
     expect(

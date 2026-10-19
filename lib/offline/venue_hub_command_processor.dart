@@ -84,6 +84,7 @@ class VenueHubCommandProcessor {
   static const _permissionByEvent = <String, String>{
     'order.opened': 'order',
     'order.itemAdded': 'order',
+    'order.itemsAdded': 'order',
     'order.itemQuantityChanged': 'order',
     'order.lineAdjusted': 'manager',
     'order.sent': 'order',

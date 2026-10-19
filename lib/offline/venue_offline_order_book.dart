@@ -177,6 +177,9 @@ class VenueOfflineOrderBook {
         'order.itemQuantityChanged' ||
         'order.lineAdjusted' =>
           event.payload['lineId'] == draft.payload['lineId'],
+        'order.itemsAdded' =>
+          _canonicalJson(event.payload['items']) ==
+              _canonicalJson(draft.payload['items']),
         'payment.recorded' =>
           event.payload['paymentId'] == draft.payload['paymentId'],
         'payment.batchRecorded' =>
@@ -386,6 +389,29 @@ class VenueOfflineOrderBook {
           throw const OfflineProjectionException(
             'The order line ID is invalid.',
           );
+        }
+        break;
+      case 'order.itemsAdded':
+        final rawItems = draft.payload['items'];
+        if (rawItems is! List || rawItems.isEmpty) {
+          throw const OfflineProjectionException(
+            'The basket batch is empty or invalid.',
+          );
+        }
+        final lineIds = <String>{};
+        for (final raw in rawItems) {
+          if (raw is! Map) {
+            throw const OfflineProjectionException('A basket item is invalid.');
+          }
+          final lineId = raw['lineId'];
+          if (lineId is! String ||
+              lineId.isEmpty ||
+              !lineIds.add(lineId) ||
+              current.lines.containsKey(lineId)) {
+            throw const OfflineProjectionException(
+              'A basket line ID is invalid.',
+            );
+          }
         }
         break;
       case 'order.itemQuantityChanged':

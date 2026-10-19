@@ -1217,7 +1217,27 @@ class ProductionCommandRepository {
     required PosOrder order,
     required OrderLine line,
     bool channelAvailabilityOverride = false,
+  }) => addDraftLines(
+    scope: scope,
+    order: order,
+    additions: [
+      (line: line, channelAvailabilityOverride: channelAvailabilityOverride),
+    ],
+  );
+
+  /// Saves a burst of basket taps as one atomic hub event. The UI can add the
+  /// lines optimistically, while the authoritative hub still validates every
+  /// product, variant, modifier and channel price before accepting any line.
+  Future<void> addDraftLines({
+    required VenueScope scope,
+    required PosOrder order,
+    required List<({OrderLine line, bool channelAvailabilityOverride})>
+    additions,
   }) async {
+    if (additions.isEmpty) return;
+    if (additions.length > 25) {
+      throw StateError('No more than 25 basket items may be saved at once.');
+    }
     final hub = VenueHubClientRegistry.instance;
     if (hub.requiresHub(scope)) {
       await _ensureHubOrderOpened(
@@ -1239,65 +1259,66 @@ class ProductionCommandRepository {
         scheduledFor: order.scheduledFor,
         assignedDriverId: order.assignedDriverId,
         assignedDriverName: order.assignedDriverName,
+        background: true,
       );
-      await _sendHubEvent(
+      await _sendHubEventUnblocked(
         scope: scope,
-        eventType: 'order.itemAdded',
+        eventType: 'order.itemsAdded',
         payload: <String, Object?>{
           'orderId': order.id,
-          'lineId': line.id,
-          'productId': line.productId,
-          'quantity': line.quantity,
-          'channel': order.channel.name,
-          if (channelAvailabilityOverride) 'channelAvailabilityOverride': true,
-          if (line.variantId?.trim().isNotEmpty == true)
-            'variantId': line.variantId!.trim(),
-          'modifierSelections': _modifierSelections(line),
-          if (line.itemNote.trim().isNotEmpty) 'itemNote': line.itemNote.trim(),
-          'courseId': line.courseId,
-          'courseName': line.courseName,
-          'courseSequence': line.courseSequence,
-          'courseReleasePolicy': line.courseReleasePolicy.name,
+          'items': [
+            for (final addition in additions)
+              _draftHubLinePayload(
+                addition.line,
+                order.channel,
+                addition.channelAvailabilityOverride,
+              ),
+          ],
         },
       );
       return;
     }
-    await _call('addOrderDraftLine', {
-      'tenantId': scope.tenantId,
-      'venueId': scope.venueId,
-      'orderId': order.id,
-      'tableId': order.tableId,
-      'tabName': order.tabName,
-      'channel': order.channel.name,
-      'customerId': order.customerId,
-      'customerName': order.customerName,
-      'customerPhone': order.customerPhone,
-      'deliveryAddress': order.deliveryAddress,
-      'deliveryAddressLabel': order.deliveryAddressLabel,
-      'deliveryLatitude': order.deliveryLatitude,
-      'deliveryLongitude': order.deliveryLongitude,
-      'serviceAreaId': order.serviceAreaId,
-      'serviceAreaName': order.serviceAreaName,
-      'deliveryFeeMinor': order.deliveryFeeMinor,
-      'scheduledForMillis': order.scheduledFor?.millisecondsSinceEpoch,
-      'primaryWaiterId': order.primaryWaiterId,
-      'primaryWaiterName': order.primaryWaiterName,
-      'assignedDriverId': order.assignedDriverId,
-      if (channelAvailabilityOverride) 'channelAvailabilityOverride': true,
-      'clientObservedAtMillis': DateTime.now().toUtc().millisecondsSinceEpoch,
-      'line': {
-        'id': line.id,
-        'productId': line.productId,
-        'quantity': line.quantity,
-        'variantId': line.variantId,
-        'modifierSelections': _modifierSelections(line),
-        'itemNote': line.itemNote,
-        'courseId': line.courseId,
-        'courseName': line.courseName,
-        'courseSequence': line.courseSequence,
-        'courseReleasePolicy': line.courseReleasePolicy.name,
-      },
-    });
+    // Legacy/demo venues which do not yet use a hub retain the established
+    // protected API. Production hub venues use the single atomic event above.
+    for (final addition in additions) {
+      await _call('addOrderDraftLine', {
+        'tenantId': scope.tenantId,
+        'venueId': scope.venueId,
+        'orderId': order.id,
+        'tableId': order.tableId,
+        'tabName': order.tabName,
+        'channel': order.channel.name,
+        'customerId': order.customerId,
+        'customerName': order.customerName,
+        'customerPhone': order.customerPhone,
+        'deliveryAddress': order.deliveryAddress,
+        'deliveryAddressLabel': order.deliveryAddressLabel,
+        'deliveryLatitude': order.deliveryLatitude,
+        'deliveryLongitude': order.deliveryLongitude,
+        'serviceAreaId': order.serviceAreaId,
+        'serviceAreaName': order.serviceAreaName,
+        'deliveryFeeMinor': order.deliveryFeeMinor,
+        'scheduledForMillis': order.scheduledFor?.millisecondsSinceEpoch,
+        'primaryWaiterId': order.primaryWaiterId,
+        'primaryWaiterName': order.primaryWaiterName,
+        'assignedDriverId': order.assignedDriverId,
+        if (addition.channelAvailabilityOverride)
+          'channelAvailabilityOverride': true,
+        'clientObservedAtMillis': DateTime.now().toUtc().millisecondsSinceEpoch,
+        'line': {
+          'id': addition.line.id,
+          'productId': addition.line.productId,
+          'quantity': addition.line.quantity,
+          'variantId': addition.line.variantId,
+          'modifierSelections': _modifierSelections(addition.line),
+          'itemNote': addition.line.itemNote,
+          'courseId': addition.line.courseId,
+          'courseName': addition.line.courseName,
+          'courseSequence': addition.line.courseSequence,
+          'courseReleasePolicy': addition.line.courseReleasePolicy.name,
+        },
+      });
+    }
   }
 
   /// Changes an unsent draft line. A quantity of zero removes it. The server
@@ -1985,6 +2006,7 @@ class ProductionCommandRepository {
     DateTime? scheduledFor,
     String? assignedDriverId,
     String? assignedDriverName,
+    bool background = false,
   }) async {
     final hub = VenueHubClientRegistry.instance;
     if (hub.hasUsableSession(scope)) {
@@ -2010,40 +2032,49 @@ class ProductionCommandRepository {
       );
       return;
     }
-    await _sendHubEvent(
-      scope: scope,
-      eventType: 'order.opened',
-      payload: <String, Object?>{
-        'orderId': orderId,
-        if (tableId?.trim().isNotEmpty == true) 'tableId': tableId!.trim(),
-        if (tabName?.trim().isNotEmpty == true) 'tabName': tabName!.trim(),
-        'channel': channel.name,
-        if (customerId?.trim().isNotEmpty == true)
-          'customerId': customerId!.trim(),
-        if (customerName?.trim().isNotEmpty == true)
-          'customerName': customerName!.trim(),
-        if (customerPhone?.trim().isNotEmpty == true)
-          'customerPhone': customerPhone!.trim(),
-        if (deliveryAddress?.trim().isNotEmpty == true)
-          'deliveryAddress': deliveryAddress!.trim(),
-        if (deliveryAddressLabel?.trim().isNotEmpty == true)
-          'deliveryAddressLabel': deliveryAddressLabel!.trim(),
-        if (deliveryLatitude != null) 'deliveryLatitude': deliveryLatitude,
-        if (deliveryLongitude != null) 'deliveryLongitude': deliveryLongitude,
-        if (serviceAreaId?.trim().isNotEmpty == true)
-          'serviceAreaId': serviceAreaId!.trim(),
-        if (serviceAreaName?.trim().isNotEmpty == true)
-          'serviceAreaName': serviceAreaName!.trim(),
-        if (channel == OrderChannel.delivery)
-          'deliveryFeeMinor': deliveryFeeMinor,
-        if (scheduledFor != null)
-          'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
-        if (assignedDriverId?.trim().isNotEmpty == true)
-          'assignedDriverId': assignedDriverId!.trim(),
-        if (assignedDriverName?.trim().isNotEmpty == true)
-          'assignedDriverName': assignedDriverName!.trim(),
-      },
-    );
+    final payload = <String, Object?>{
+      'orderId': orderId,
+      if (tableId?.trim().isNotEmpty == true) 'tableId': tableId!.trim(),
+      if (tabName?.trim().isNotEmpty == true) 'tabName': tabName!.trim(),
+      'channel': channel.name,
+      if (customerId?.trim().isNotEmpty == true)
+        'customerId': customerId!.trim(),
+      if (customerName?.trim().isNotEmpty == true)
+        'customerName': customerName!.trim(),
+      if (customerPhone?.trim().isNotEmpty == true)
+        'customerPhone': customerPhone!.trim(),
+      if (deliveryAddress?.trim().isNotEmpty == true)
+        'deliveryAddress': deliveryAddress!.trim(),
+      if (deliveryAddressLabel?.trim().isNotEmpty == true)
+        'deliveryAddressLabel': deliveryAddressLabel!.trim(),
+      if (deliveryLatitude != null) 'deliveryLatitude': deliveryLatitude,
+      if (deliveryLongitude != null) 'deliveryLongitude': deliveryLongitude,
+      if (serviceAreaId?.trim().isNotEmpty == true)
+        'serviceAreaId': serviceAreaId!.trim(),
+      if (serviceAreaName?.trim().isNotEmpty == true)
+        'serviceAreaName': serviceAreaName!.trim(),
+      if (channel == OrderChannel.delivery)
+        'deliveryFeeMinor': deliveryFeeMinor,
+      if (scheduledFor != null)
+        'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
+      if (assignedDriverId?.trim().isNotEmpty == true)
+        'assignedDriverId': assignedDriverId!.trim(),
+      if (assignedDriverName?.trim().isNotEmpty == true)
+        'assignedDriverName': assignedDriverName!.trim(),
+    };
+    if (background) {
+      await _sendHubEventUnblocked(
+        scope: scope,
+        eventType: 'order.opened',
+        payload: payload,
+      );
+    } else {
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'order.opened',
+        payload: payload,
+      );
+    }
   }
 
   Future<VenueHubEventAcknowledgement> _sendHubEvent({
@@ -2283,4 +2314,24 @@ class ProductionCommandRepository {
         )
         .toList(growable: false);
   }
+
+  Map<String, Object?> _draftHubLinePayload(
+    OrderLine line,
+    OrderChannel channel,
+    bool channelAvailabilityOverride,
+  ) => <String, Object?>{
+    'lineId': line.id,
+    'productId': line.productId,
+    'quantity': line.quantity,
+    'channel': channel.name,
+    if (channelAvailabilityOverride) 'channelAvailabilityOverride': true,
+    if (line.variantId?.trim().isNotEmpty == true)
+      'variantId': line.variantId!.trim(),
+    'modifierSelections': _modifierSelections(line),
+    if (line.itemNote.trim().isNotEmpty) 'itemNote': line.itemNote.trim(),
+    'courseId': line.courseId,
+    'courseName': line.courseName,
+    'courseSequence': line.courseSequence,
+    'courseReleasePolicy': line.courseReleasePolicy.name,
+  };
 }

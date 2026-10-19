@@ -2482,7 +2482,7 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
 const remoteHubCommandTtlMs = 2 * 60 * 1000;
 const remoteHubClaimLeaseMs = 15 * 1000;
 const remoteHubEventTypes = new Set([
-  "order.opened", "order.itemAdded", "order.itemQuantityChanged", "order.lineAdjusted",
+  "order.opened", "order.itemAdded", "order.itemsAdded", "order.itemQuantityChanged", "order.lineAdjusted",
   "order.sent", "order.fulfilmentChanged", "payment.recorded", "payment.batchRecorded",
   "order.closed", "order.cancelled", "receipt.requested",
 ]);
@@ -4336,6 +4336,35 @@ function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline
       ...payload, id: payload.lineId, isSentToProduction: false,
       addedAt: eventTime, addedAtMillis: eventTime.getTime(),
     });
+    next.lines = lines;
+    return next;
+  }
+  if (event.type === "order.itemsAdded") {
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (items.length < 1 || items.length > 25) {
+      throw new HttpsError("failed-precondition", "The offline basket batch is invalid.");
+    }
+    const batchIds = new Set();
+    for (const item of items) {
+      const lineId = typeof item?.lineId === "string" ? item.lineId : "";
+      if (lineId.length === 0 || batchIds.has(lineId)) {
+        throw new HttpsError("failed-precondition", "The offline basket contains a duplicate line.");
+      }
+      batchIds.add(lineId);
+      const existingLine = lines.find((line) => line.id === lineId);
+      if (existingLine != null) {
+        if (existingLine.productId === item.productId &&
+            existingLine.productName === item.productName &&
+            Number(existingLine.unitPriceMinor) === Number(item.unitPriceMinor)) {
+          continue;
+        }
+        throw new HttpsError("already-exists", "An offline basket line already exists.");
+      }
+      lines.push({
+        ...item, id: lineId, isSentToProduction: false,
+        addedAt: eventTime, addedAtMillis: eventTime.getTime(),
+      });
+    }
     next.lines = lines;
     return next;
   }
