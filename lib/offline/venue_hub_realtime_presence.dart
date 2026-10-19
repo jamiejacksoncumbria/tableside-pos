@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../data/production_command_repository.dart';
+import 'transient_realtime_database.dart';
 import 'venue_hub_device_credential.dart';
 
 /// Maintains server-observed hub presence without a periodic Cloud Function.
@@ -69,9 +70,9 @@ class VenueHubRealtimePresence {
     }
     _app = app;
     await FirebaseAuth.instanceFor(app: app).signInWithCustomToken(token);
-    final database = FirebaseDatabase.instanceFor(
+    final database = TransientRealtimeDatabase.instanceFor(
       app: app,
-      databaseURL: databaseUrl,
+      databaseUrl: databaseUrl,
     );
     final presence = database.ref(
       'hubPresence/${scope.tenantId}/${scope.venueId}/$deviceId',

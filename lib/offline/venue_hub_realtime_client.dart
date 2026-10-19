@@ -7,6 +7,7 @@ import 'package:firebase_database/firebase_database.dart';
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../data/production_command_repository.dart';
+import 'transient_realtime_database.dart';
 import 'venue_hub_availability.dart';
 
 /// A staff-scoped realtime control channel for remote POS terminals.
@@ -130,9 +131,9 @@ class VenueHubRealtimeClient {
         );
       }
       await FirebaseAuth.instanceFor(app: app).signInWithCustomToken(token);
-      final database = FirebaseDatabase.instanceFor(
+      final database = TransientRealtimeDatabase.instanceFor(
         app: app,
-        databaseURL: databaseUrl,
+        databaseUrl: databaseUrl,
       );
 
       _scope = scope;

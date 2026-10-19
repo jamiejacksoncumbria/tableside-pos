@@ -7,6 +7,7 @@ import 'package:firebase_database/firebase_database.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
+import '../../offline/transient_realtime_database.dart';
 
 /// Publishes enrolled printer presence over RTDB and wakes its worker without
 /// periodic Cloud Function heartbeat calls. Claims and completions still use
@@ -61,9 +62,9 @@ class PrinterRealtimePresence {
     }
     _app = app;
     await FirebaseAuth.instanceFor(app: app).signInWithCustomToken(token);
-    final database = FirebaseDatabase.instanceFor(
+    final database = TransientRealtimeDatabase.instanceFor(
       app: app,
-      databaseURL: databaseUrl,
+      databaseUrl: databaseUrl,
     );
     final presence = database.ref(
       'printerPresence/${scope.tenantId}/${scope.venueId}/$deviceId',
