@@ -375,7 +375,9 @@ class VenueOfflineOrderBook {
       throw const OfflineProjectionException('The order is not open.');
     }
     final current = _projectOrderEvents(orderEvents);
-    if (current.isClosed) {
+    if (current.isClosed &&
+        draft.type != 'order.fulfilmentChanged' &&
+        draft.type != 'receipt.requested') {
       throw const OfflineProjectionException(
         'A closed offline order cannot be changed.',
       );

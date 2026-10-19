@@ -4290,8 +4290,13 @@ function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline
       openedAt: eventTime, openedOffline: true, createdByStaffId: event.staffId,
     };
   }
+  const allowedAfterFinancialClose = new Set([
+    "order.cloudBaseline",
+    "order.fulfilmentChanged",
+    "receipt.requested",
+  ]);
   if (current == null || current.venueId !== venueId ||
-      (current.status === "closed" && event.type !== "order.cloudBaseline")) {
+      (current.status === "closed" && !allowedAfterFinancialClose.has(event.type))) {
     throw new HttpsError("failed-precondition", "The offline order is unavailable in cloud data.");
   }
   const next = {...current};

@@ -456,7 +456,9 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
       // sequence after closure is a no-op rather than a post-close mutation.
       continue;
     }
-    if (closed) {
+    if (closed &&
+        event.type != 'order.fulfilmentChanged' &&
+        event.type != 'receipt.requested') {
       throw const OfflineProjectionException(
         'A closed offline order cannot be changed.',
       );

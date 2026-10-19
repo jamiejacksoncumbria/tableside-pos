@@ -147,30 +147,34 @@ class OrderFlowOrder {
   final String? assignedDriverName;
   final bool driverDeclined;
 
-  OrderFlowOrder copyWith({OrderFlowStatus? status, bool? isDelayed}) =>
-      OrderFlowOrder(
-        id: id,
-        tenantId: tenantId,
-        venueId: venueId,
-        reference: reference,
-        productionArea: productionArea,
-        status: status ?? this.status,
-        ticketReleasedAt: ticketReleasedAt,
-        itemSummary: itemSummary,
-        tableLabel: tableLabel,
-        tabName: tabName,
-        createdByName: createdByName,
-        hasAllergyAlert: hasAllergyAlert,
-        isDelayed: isDelayed ?? this.isDelayed,
-        note: note,
-        channel: channel,
-        customerName: customerName,
-        scheduledFor: scheduledFor,
-        courseName: courseName,
-        orderId: orderId,
-        assignedDriverName: assignedDriverName,
-        driverDeclined: driverDeclined,
-      );
+  OrderFlowOrder copyWith({
+    OrderFlowStatus? status,
+    bool? isDelayed,
+    String? assignedDriverName,
+    bool? driverDeclined,
+  }) => OrderFlowOrder(
+    id: id,
+    tenantId: tenantId,
+    venueId: venueId,
+    reference: reference,
+    productionArea: productionArea,
+    status: status ?? this.status,
+    ticketReleasedAt: ticketReleasedAt,
+    itemSummary: itemSummary,
+    tableLabel: tableLabel,
+    tabName: tabName,
+    createdByName: createdByName,
+    hasAllergyAlert: hasAllergyAlert,
+    isDelayed: isDelayed ?? this.isDelayed,
+    note: note,
+    channel: channel,
+    customerName: customerName,
+    scheduledFor: scheduledFor,
+    courseName: courseName,
+    orderId: orderId,
+    assignedDriverName: assignedDriverName ?? this.assignedDriverName,
+    driverDeclined: driverDeclined ?? this.driverDeclined,
+  );
 }
 
 enum PrintJobStatus { queued, claimed, printed, failed, cancelled }

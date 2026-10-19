@@ -427,11 +427,13 @@ class FulfilmentRepository {
     required String orderId,
     required FulfilmentStatus status,
     String? driverId,
+    bool background = false,
   }) => _commands.manageFulfilment(
     scope: scope,
     operation: 'updateOrderFulfilment',
     documentId: orderId,
     values: {'status': status.name, if (driverId != null) 'driverId': driverId},
+    background: background,
   );
 
   /// Cancels an unpaid collection or delivery left behind by an older hub

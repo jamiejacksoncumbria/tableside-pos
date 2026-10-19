@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:tableside_pos/core/app_busy_state.dart';
 import 'package:tableside_pos/core/tenant_scope.dart';
 import 'package:tableside_pos/offline/venue_hub_availability.dart';
 import 'package:tableside_pos/offline/venue_hub_remote_command_client.dart';
@@ -40,6 +41,38 @@ void main() {
 
     expect(acknowledgement.eventId, 'event-a');
     expect(acknowledgement.sequence, 9);
+  });
+
+  test('background command never activates the foreground busy overlay', () async {
+    AppBusyState.pending.value = 0;
+    RemoteHubWaitState.pending.value = 0;
+    final client = VenueHubRemoteCommandClient(
+      timeout: const Duration(seconds: 1),
+    );
+
+    await client.send(
+      scope: scope,
+      hubEpoch: 3,
+      eventType: 'order.itemsAdded',
+      payload: const <String, Object?>{'orderId': 'order-a'},
+      showBusy: false,
+      submit: (request) async => <String, Object?>{
+        'commandId': request['commandId'],
+      },
+      waitForStatus: (request) async => <String, Object?>{
+        'commandId': request['commandId'],
+        'status': 'accepted',
+        'result': <String, Object?>{
+          'eventId': 'event-background-a',
+          'sequence': 10,
+          'eventHash': 'hash-background-a',
+          'committedAtUtc': '2026-10-11T18:00:00.000Z',
+        },
+      },
+    );
+
+    expect(AppBusyState.pending.value, 0);
+    expect(RemoteHubWaitState.pending.value, 0);
   });
 
   test('never treats a non-terminal server status as saved', () async {

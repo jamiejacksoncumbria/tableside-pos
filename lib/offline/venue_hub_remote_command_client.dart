@@ -39,18 +39,19 @@ class VenueHubRemoteCommandClient {
     required RemoteHubSubmitter submit,
     required RemoteHubStatusWaiter waitForStatus,
     DateTime? businessTimestampUtc,
+    bool showBusy = true,
   }) async {
-    return AppBusyState.guard(
-      () => _sendUnblocked(
-        scope: scope,
-        hubEpoch: hubEpoch,
-        eventType: eventType,
-        payload: payload,
-        submit: submit,
-        waitForStatus: waitForStatus,
-        businessTimestampUtc: businessTimestampUtc,
-      ),
+    Future<VenueHubEventAcknowledgement> operation() => _sendUnblocked(
+      scope: scope,
+      hubEpoch: hubEpoch,
+      eventType: eventType,
+      payload: payload,
+      submit: submit,
+      waitForStatus: waitForStatus,
+      businessTimestampUtc: businessTimestampUtc,
+      showWaitIndicator: showBusy,
     );
+    return showBusy ? AppBusyState.guard(operation) : operation();
   }
 
   Future<VenueHubEventAcknowledgement> _sendUnblocked({
@@ -61,10 +62,11 @@ class VenueHubRemoteCommandClient {
     required RemoteHubSubmitter submit,
     required RemoteHubStatusWaiter waitForStatus,
     DateTime? businessTimestampUtc,
+    required bool showWaitIndicator,
   }) async {
     final commandId =
         'remote-${DateTime.now().microsecondsSinceEpoch}-${UniqueKey().hashCode.abs()}';
-    RemoteHubWaitState.begin();
+    if (showWaitIndicator) RemoteHubWaitState.begin();
     try {
       final request = <String, Object?>{
         'tenantId': scope.tenantId,
@@ -217,7 +219,7 @@ class VenueHubRemoteCommandClient {
       }
       rethrow;
     } finally {
-      RemoteHubWaitState.end();
+      if (showWaitIndicator) RemoteHubWaitState.end();
     }
   }
 

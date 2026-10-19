@@ -626,6 +626,47 @@ void main() {
     },
   );
 
+  test('paid delivery can continue its audited fulfilment workflow', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {
+        'orderId': 'order-a',
+        'channel': 'delivery',
+        'customerId': 'customer-a',
+        'customerName': 'Jamie Jackson',
+        'deliveryAddress': 'Kyrenia Centre',
+        'serviceAreaId': 'kyrenia',
+        'serviceAreaName': 'Kyrenia',
+      }),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 1000,
+      }),
+      _event(3, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 1000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }),
+      _event(4, 'order.closed', {'orderId': 'order-a'}),
+      _event(5, 'order.fulfilmentChanged', {
+        'orderId': 'order-a',
+        'status': 'assigned',
+        'driverId': 'driver-a',
+        'managerAuthorized': true,
+      }, staffId: 'manager-a'),
+    ]);
+
+    expect(projection.isClosed, isTrue);
+    expect(projection.balanceDueMinor, 0);
+    expect(projection.assignedDriverId, 'driver-a');
+    expect(projection.fulfilmentStatus, 'assigned');
+  });
+
   test(
     'legacy delivery orders remain replayable after service-area upgrade',
     () {

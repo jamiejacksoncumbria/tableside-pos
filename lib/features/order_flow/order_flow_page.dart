@@ -50,7 +50,8 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   Timer? _sessionKeepAlive;
   ProductionArea? _area;
   _FlowFilter _filter = _FlowFilter.all;
-  final Map<String, OrderFlowOrder> _demoOverrides = {};
+  final Map<String, OrderFlowOrder> _optimisticOverrides = {};
+  final Set<String> _pendingOrderIds = <String>{};
   final Set<String> _seenTicketIds = <String>{};
   final Set<String> _redAlertedTicketIds = <String>{};
   final Set<String> _activeAllergyTicketIds = <String>{};
@@ -123,16 +124,29 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
         return scope == null ? demoOrderFlow : const <OrderFlowOrder>[];
       },
     );
+    final confirmedOverrideIds = rawOrders
+        .where((order) {
+          final optimistic = _optimisticOverrides[order.id];
+          return optimistic != null && _sameVisibleState(order, optimistic);
+        })
+        .map((order) => order.id)
+        .toList(growable: false);
+    if (confirmedOverrideIds.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() {
+          for (final id in confirmedOverrideIds) {
+            _optimisticOverrides.remove(id);
+          }
+        });
+      });
+    }
     final orders = rawOrders
-        .map(
-          (order) => scope == null ? _demoOverrides[order.id] ?? order : order,
-        )
+        .map((order) => _optimisticOverrides[order.id] ?? order)
         .where(_matchesFilters)
         .toList(growable: false);
     final allOrders = rawOrders
-        .map(
-          (order) => scope == null ? _demoOverrides[order.id] ?? order : order,
-        )
+        .map((order) => _optimisticOverrides[order.id] ?? order)
         .toList(growable: false);
     final tables =
         ref.watch(diningTablesProvider).value ?? const <DiningTable>[];
@@ -604,6 +618,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     OrderFlowOrder order,
     _OrderFlowAction action,
   ) async {
+    if (_pendingOrderIds.contains(order.id)) return;
     final updated = switch (action) {
       _OrderFlowAction.releaseCourse => order.copyWith(
         status: OrderFlowStatus.newOrder,
@@ -625,8 +640,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       ),
     };
     final scope = ref.read(activeVenueScopeProvider);
+    setState(() {
+      _optimisticOverrides[order.id] = updated;
+      _pendingOrderIds.add(order.id);
+    });
     if (scope == null) {
-      setState(() => _demoOverrides[order.id] = updated);
+      setState(() => _pendingOrderIds.remove(order.id));
       return;
     }
     try {
@@ -637,17 +656,21 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
             ticketId: order.id,
             flowStatus: updated.status.name,
             isDelayed: updated.isDelayed,
+            background: true,
           );
     } on Object catch (error, stackTrace) {
       AppLogger.error('Update order flow status', error, stackTrace);
       if (!mounted) return;
+      setState(() => _optimisticOverrides.remove(order.id));
       showAppNotification(
         context,
         ref: ref,
         title: 'Order flow update failed',
-        message: 'The order status could not be updated. Please retry.',
+        message: '$error',
         level: AppNotificationLevel.error,
       );
+    } finally {
+      if (mounted) setState(() => _pendingOrderIds.remove(order.id));
     }
   }
 
@@ -761,6 +784,15 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       ),
     );
     if (selected == null || !mounted) return;
+    if (_pendingOrderIds.contains(order.id)) return;
+    final updated = order.copyWith(
+      assignedDriverName: selected.name,
+      driverDeclined: false,
+    );
+    setState(() {
+      _optimisticOverrides[order.id] = updated;
+      _pendingOrderIds.add(order.id);
+    });
     try {
       await ref
           .read(fulfilmentRepositoryProvider)
@@ -769,10 +801,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
             orderId: order.orderId!,
             status: FulfilmentStatus.assigned,
             driverId: selected.id,
+            background: true,
           );
     } on Object catch (error, stackTrace) {
       AppLogger.error('Assign driver from order flow', error, stackTrace);
       if (!mounted) return;
+      setState(() => _optimisticOverrides.remove(order.id));
       showAppNotification(
         context,
         ref: ref,
@@ -780,8 +814,16 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
         message: '$error',
         level: AppNotificationLevel.error,
       );
+    } finally {
+      if (mounted) setState(() => _pendingOrderIds.remove(order.id));
     }
   }
+
+  bool _sameVisibleState(OrderFlowOrder live, OrderFlowOrder optimistic) =>
+      live.status == optimistic.status &&
+      live.isDelayed == optimistic.isDelayed &&
+      live.assignedDriverName == optimistic.assignedDriverName &&
+      live.driverDeclined == optimistic.driverDeclined;
 
   /// Prints the address-bearing driver copy from the live order rather than
   /// the kitchen ticket. The server reconstructs prices, customer details and

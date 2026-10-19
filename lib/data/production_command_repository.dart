@@ -426,20 +426,33 @@ class ProductionCommandRepository {
     required String operation,
     String? documentId,
     Map<String, Object?> values = const <String, Object?>{},
+    bool background = false,
   }) {
     final hub = VenueHubClientRegistry.instance;
     if (operation == 'updateOrderFulfilment' &&
         documentId != null &&
         hub.requiresHub(scope)) {
-      return _sendHubEvent(
-        scope: scope,
-        eventType: 'order.fulfilmentChanged',
-        payload: <String, Object?>{
-          'orderId': documentId,
-          'status': values['status'],
-          if (values['driverId'] != null) 'driverId': values['driverId'],
-        },
-      ).then(
+      final event = background
+          ? _sendHubEventUnblocked(
+              scope: scope,
+              eventType: 'order.fulfilmentChanged',
+              payload: <String, Object?>{
+                'orderId': documentId,
+                'status': values['status'],
+                if (values['driverId'] != null) 'driverId': values['driverId'],
+              },
+              showBusy: false,
+            )
+          : _sendHubEvent(
+              scope: scope,
+              eventType: 'order.fulfilmentChanged',
+              payload: <String, Object?>{
+                'orderId': documentId,
+                'status': values['status'],
+                if (values['driverId'] != null) 'driverId': values['driverId'],
+              },
+            );
+      return event.then(
         (acknowledgement) => <String, dynamic>{
           'documentId': documentId,
           'eventId': acknowledgement.eventId,
@@ -447,14 +460,18 @@ class ProductionCommandRepository {
         },
       );
     }
-    return _call('manageFulfilment', {
+    final request = <String, Object?>{
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'operation': operation,
       if (documentId != null && documentId.trim().isNotEmpty)
         'documentId': documentId,
       'values': values,
-    }).then((response) async {
+    };
+    final operationResult = background
+        ? _callUnblocked('manageFulfilment', request)
+        : _call('manageFulfilment', request);
+    return operationResult.then((response) async {
       await _refreshHubConfiguration(scope);
       return response;
     });
@@ -1275,6 +1292,7 @@ class ProductionCommandRepository {
               ),
           ],
         },
+        showBusy: false,
       );
       return;
     }
@@ -1478,14 +1496,19 @@ class ProductionCommandRepository {
     required String ticketId,
     required String flowStatus,
     required bool isDelayed,
+    bool background = false,
   }) {
-    return _call('updateProductionTicket', {
+    final request = <String, Object?>{
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'ticketId': ticketId,
       'flowStatus': flowStatus,
       'isDelayed': isDelayed,
-    });
+    };
+    final operation = background
+        ? _callUnblocked('updateProductionTicket', request)
+        : _call('updateProductionTicket', request);
+    return operation.then((_) {});
   }
 
   /// Releases scheduled collection/delivery tickets whose venue lead-time
@@ -2067,6 +2090,7 @@ class ProductionCommandRepository {
         scope: scope,
         eventType: 'order.opened',
         payload: payload,
+        showBusy: false,
       );
     } else {
       await _sendHubEvent(
@@ -2088,6 +2112,7 @@ class ProductionCommandRepository {
       eventType: eventType,
       payload: payload,
       businessTimestampUtc: businessTimestampUtc,
+      showBusy: false,
     ),
   );
 
@@ -2100,6 +2125,7 @@ class ProductionCommandRepository {
     required String eventType,
     required Map<String, Object?> payload,
     DateTime? businessTimestampUtc,
+    bool showBusy = true,
   }) async {
     final hub = VenueHubClientRegistry.instance;
     if (!hub.requiresHub(scope)) {
@@ -2135,7 +2161,10 @@ class ProductionCommandRepository {
       eventType: eventType,
       payload: payload,
       businessTimestampUtc: businessTimestampUtc,
-      submit: (request) => _call('submitRemoteHubCommand', request),
+      showBusy: showBusy,
+      submit: (request) => showBusy
+          ? _call('submitRemoteHubCommand', request)
+          : _callUnblocked('submitRemoteHubCommand', request),
       waitForStatus: (request) async {
         try {
           return await realtime.waitForCommand(
@@ -2147,7 +2176,9 @@ class ProductionCommandRepository {
           // RTDB is the normal low-latency path. A single protected long poll
           // preserves a durable acknowledgement if its metadata publish was
           // interrupted after Firestore already committed the result.
-          return _call('waitForRemoteHubCommand', request);
+          return showBusy
+              ? _call('waitForRemoteHubCommand', request)
+              : _callUnblocked('waitForRemoteHubCommand', request);
         }
       },
     );
