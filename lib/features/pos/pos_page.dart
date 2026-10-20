@@ -3356,6 +3356,219 @@ Future<void> _showPendingOrderItems(
   );
 }
 
+/// Shows the complete bill without leaving checkout. This is deliberately
+/// read-only: staff can read every item and price back to the customer while
+/// the authoritative order and any prepared payment allocations stay intact.
+Future<void> _showCheckoutBillPreview(
+  BuildContext context, {
+  required PosOrder order,
+  required String currencyCode,
+  required int pendingPaymentMinor,
+}) async {
+  final itemSubtotalMinor = order.lines.fold<int>(
+    0,
+    (total, line) => total + line.totalMinor,
+  );
+  final deliveryFeeMinor = order.channel == OrderChannel.delivery
+      ? order.deliveryFeeMinor
+      : 0;
+  final pendingBalanceMinor = (order.balanceDueMinor - pendingPaymentMinor)
+      .clamp(0, order.totalMinor)
+      .toInt();
+  await showAppDialog<void>(
+    context: context,
+    builder: (dialogContext) {
+      final theme = Theme.of(dialogContext);
+      return Dialog(
+        key: const ValueKey('checkout-bill-preview'),
+        insetPadding: const EdgeInsets.all(16),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 900, maxHeight: 760),
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 8, 12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.receipt_long_rounded),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Full bill',
+                            style: theme.textTheme.titleLarge?.copyWith(
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          Text(
+                            '${order.lines.length} item line${order.lines.length == 1 ? '' : 's'}',
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close bill view',
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: order.lines.isEmpty
+                    ? const Center(
+                        child: Text('There are no items on this bill.'),
+                      )
+                    : ListView.separated(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 12,
+                        ),
+                        itemCount: order.lines.length,
+                        separatorBuilder: (_, _) => const Divider(height: 20),
+                        itemBuilder: (context, index) {
+                          final line = order.lines[index];
+                          return Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              CircleAvatar(
+                                radius: 18,
+                                child: Text('${line.quantity}'),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      line.productName,
+                                      style: theme.textTheme.titleSmall
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      '${line.quantity} × ${formatMoney(line.unitPriceMinor, currencyCode: currencyCode)}',
+                                      style: theme.textTheme.bodySmall,
+                                    ),
+                                    if (line.productionDetails.isNotEmpty) ...[
+                                      const SizedBox(height: 3),
+                                      Text(
+                                        line.productionDetails.join(' · '),
+                                        style: theme.textTheme.bodySmall,
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Text(
+                                formatMoney(
+                                  line.totalMinor,
+                                  currencyCode: currencyCode,
+                                ),
+                                style: theme.textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+              ),
+              const Divider(height: 1),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+                child: Column(
+                  children: [
+                    _BillPreviewTotalRow(
+                      label: 'Items subtotal',
+                      amountMinor: itemSubtotalMinor,
+                      currencyCode: currencyCode,
+                    ),
+                    if (deliveryFeeMinor > 0)
+                      _BillPreviewTotalRow(
+                        label: 'Delivery charge',
+                        amountMinor: deliveryFeeMinor,
+                        currencyCode: currencyCode,
+                      ),
+                    _BillPreviewTotalRow(
+                      label: 'Bill total',
+                      amountMinor: order.totalMinor,
+                      currencyCode: currencyCode,
+                      emphasize: true,
+                    ),
+                    if (order.paidMinor > 0)
+                      _BillPreviewTotalRow(
+                        label: 'Already paid',
+                        amountMinor: order.paidMinor,
+                        currencyCode: currencyCode,
+                      ),
+                    if (pendingPaymentMinor > 0)
+                      _BillPreviewTotalRow(
+                        label: 'Prepared payments',
+                        amountMinor: pendingPaymentMinor,
+                        currencyCode: currencyCode,
+                      ),
+                    const Divider(height: 18),
+                    _BillPreviewTotalRow(
+                      label: 'Remaining after prepared payments',
+                      amountMinor: pendingBalanceMinor,
+                      currencyCode: currencyCode,
+                      emphasize: true,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+class _BillPreviewTotalRow extends StatelessWidget {
+  const _BillPreviewTotalRow({
+    required this.label,
+    required this.amountMinor,
+    required this.currencyCode,
+    this.emphasize = false,
+  });
+
+  final String label;
+  final int amountMinor;
+  final String currencyCode;
+  final bool emphasize;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = emphasize
+        ? Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800)
+        : Theme.of(context).textTheme.bodyMedium;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Expanded(child: Text(label, style: style)),
+          const SizedBox(width: 12),
+          Text(
+            formatMoney(amountMinor, currencyCode: currencyCode),
+            style: style,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 Future<void> _showCheckoutSheet(
   BuildContext pageContext, {
   required WidgetRef ref,
@@ -3461,16 +3674,49 @@ Future<void> _showCheckoutSheet(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(
-                    isTraining ? 'Simulate payment' : 'Take payment',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    order.tabName?.trim().isNotEmpty == true
-                        ? 'Named tab: ${order.tabName}'
-                        : 'Table bill',
-                    style: Theme.of(context).textTheme.bodySmall,
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              isTraining ? 'Simulate payment' : 'Take payment',
+                              style: Theme.of(context).textTheme.titleLarge,
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              order.tabName?.trim().isNotEmpty == true
+                                  ? 'Named tab: ${order.tabName}'
+                                  : 'Table bill',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      OutlinedButton.icon(
+                        key: const ValueKey('checkout-view-bill-button'),
+                        onPressed: saving
+                            ? null
+                            : () => _showCheckoutBillPreview(
+                                sheetContext,
+                                order: order,
+                                currencyCode: currencyCode,
+                                pendingPaymentMinor: recordedBaseMinor,
+                              ),
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                        ),
+                        icon: const Icon(Icons.list_alt_rounded, size: 18),
+                        label: const Text('View bill'),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 16),
                   Card(
