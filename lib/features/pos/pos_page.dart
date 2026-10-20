@@ -3034,6 +3034,21 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                         style: Theme.of(context).textTheme.headlineSmall
                             ?.copyWith(fontWeight: FontWeight.w800),
                       ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        key: const ValueKey('order-view-bill-button'),
+                        onPressed: order.lines.isEmpty
+                            ? null
+                            : () => _showCheckoutBillPreview(
+                                context,
+                                order: order,
+                                currencyCode: widget.currencyCode,
+                                pendingPaymentMinor: 0,
+                              ),
+                        style: compactOutlinedButtonStyle,
+                        icon: const Icon(Icons.list_alt_rounded, size: 17),
+                        label: const Text('Items'),
+                      ),
                     ],
                   ),
                   if (order.paidMinor > 0) ...[
@@ -3356,9 +3371,9 @@ Future<void> _showPendingOrderItems(
   );
 }
 
-/// Shows the complete bill without leaving checkout. This is deliberately
-/// read-only: staff can read every item and price back to the customer while
-/// the authoritative order and any prepared payment allocations stay intact.
+/// Shows the complete bill without leaving the order or payment screen. This
+/// is deliberately read-only: staff can read every item and price back to the
+/// customer while the authoritative order and prepared payments stay intact.
 Future<void> _showCheckoutBillPreview(
   BuildContext context, {
   required PosOrder order,
