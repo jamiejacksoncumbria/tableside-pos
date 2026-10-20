@@ -3674,47 +3674,19 @@ Future<void> _showCheckoutSheet(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Row(
+                  Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              isTraining ? 'Simulate payment' : 'Take payment',
-                              style: Theme.of(context).textTheme.titleLarge,
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              order.tabName?.trim().isNotEmpty == true
-                                  ? 'Named tab: ${order.tabName}'
-                                  : 'Table bill',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          ],
-                        ),
+                      Text(
+                        isTraining ? 'Simulate payment' : 'Take payment',
+                        style: Theme.of(context).textTheme.titleLarge,
                       ),
-                      const SizedBox(width: 12),
-                      OutlinedButton.icon(
-                        key: const ValueKey('checkout-view-bill-button'),
-                        onPressed: saving
-                            ? null
-                            : () => _showCheckoutBillPreview(
-                                sheetContext,
-                                order: order,
-                                currencyCode: currencyCode,
-                                pendingPaymentMinor: recordedBaseMinor,
-                              ),
-                        style: OutlinedButton.styleFrom(
-                          visualDensity: VisualDensity.compact,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
-                          ),
-                        ),
-                        icon: const Icon(Icons.list_alt_rounded, size: 18),
-                        label: const Text('View bill'),
+                      const SizedBox(height: 6),
+                      Text(
+                        order.tabName?.trim().isNotEmpty == true
+                            ? 'Named tab: ${order.tabName}'
+                            : 'Table bill',
+                        style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
                   ),
@@ -3734,6 +3706,27 @@ Future<void> _showCheckoutSheet(
                             ),
                             style: Theme.of(context).textTheme.headlineSmall
                                 ?.copyWith(fontWeight: FontWeight.w800),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            key: const ValueKey('checkout-view-bill-button'),
+                            onPressed: saving
+                                ? null
+                                : () => _showCheckoutBillPreview(
+                                    sheetContext,
+                                    order: order,
+                                    currencyCode: currencyCode,
+                                    pendingPaymentMinor: recordedBaseMinor,
+                                  ),
+                            style: OutlinedButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 8,
+                              ),
+                            ),
+                            icon: const Icon(Icons.list_alt_rounded, size: 18),
+                            label: const Text('Items'),
                           ),
                         ],
                       ),
