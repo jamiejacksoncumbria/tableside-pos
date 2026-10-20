@@ -435,6 +435,36 @@ void main() {
       expect(orders['split-a']!.splitFromOrderId, 'order-a');
       expect(orders['split-a']!.lines.values.single.sent, isTrue);
 
+      final splitEventCount = (await ledger.eventsForVenue(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        hubEpoch: 3,
+      )).length;
+      final ensuredChild = await orderBook.commit(
+        OfflineEventDraft(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'terminal-b',
+          staffId: 'staff-a',
+          type: 'order.opened',
+          payload: const <String, Object?>{
+            'orderId': 'split-a',
+            'channel': 'dineIn',
+            'tableId': 'table-a',
+          },
+        ),
+        3,
+      );
+      expect(ensuredChild.type, 'order.splitCreated');
+      expect(
+        (await ledger.eventsForVenue(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          hubEpoch: 3,
+        )).length,
+        splitEventCount,
+      );
+
       await commit('payment.batchRecorded', {
         'orderId': 'split-a',
         'splitFromOrderId': 'order-a',

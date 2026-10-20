@@ -125,6 +125,34 @@ class VenueOfflineOrderBook {
       }
     }
     if (draft.type == 'order.opened') {
+      final splitMatches = existing
+          .where(
+            (event) =>
+                event.type == 'order.splitCreated' &&
+                event.payload['splitOrderId'] == draft.payload['orderId'],
+          )
+          .toList(growable: false);
+      if (splitMatches.isNotEmpty) {
+        final split = splitMatches.last;
+        final child = _projectOrderEvents(
+          _eventsForOrder(existing, draft.payload['orderId']! as String),
+        );
+        final childIdentity = <String, Object?>{
+          'orderId': child.orderId,
+          'tableId': child.tableId,
+          'tabName': child.tabName,
+          'channel': child.channel,
+        };
+        if (!_sameOpenedOrderIdentity(childIdentity, draft.payload)) {
+          throw const OfflineProjectionException(
+            'The split bill identity does not match this table or tab.',
+          );
+        }
+        // A split child is created by the single atomic split event rather
+        // than a second order.opened write. Treat the normal pre-payment
+        // ensureOrderOpened request as an idempotent assertion of that child.
+        return split;
+      }
       final baselineMatches = existing
           .where(
             (event) =>
@@ -697,7 +725,8 @@ List<OfflineEvent> _eventsForOrder(
       .toList(growable: false);
   final source = _projectOrderEvents(sourceEvents);
   final allocations = <String, int>{
-    for (final raw in (splitEvent.payload['splitLines'] as List).whereType<Map>())
+    for (final raw
+        in (splitEvent.payload['splitLines'] as List).whereType<Map>())
       raw['lineId']! as String: (raw['quantity']! as num).toInt(),
   };
   var index = 0;
