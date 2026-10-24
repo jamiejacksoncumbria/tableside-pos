@@ -3,12 +3,14 @@ import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart';
 
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../data/production_command_repository.dart';
 import 'transient_realtime_database.dart';
 import 'venue_hub_availability.dart';
+import 'windows_realtime_rest_session.dart';
 
 /// A staff-scoped realtime control channel for remote POS terminals.
 ///
@@ -26,8 +28,9 @@ class VenueHubRealtimeClient {
   int? _hubEpoch;
   FirebaseApp? _app;
   FirebaseDatabase? _database;
-  StreamSubscription<DatabaseEvent>? _presenceSubscription;
-  StreamSubscription<DatabaseEvent>? _printerPresenceSubscription;
+  WindowsRealtimeRestSession? _windowsSession;
+  StreamSubscription<Object?>? _presenceSubscription;
+  StreamSubscription<Object?>? _printerPresenceSubscription;
   final StreamController<Map<String, DateTime>> _printerPresence =
       StreamController<Map<String, DateTime>>.broadcast();
   Timer? _staleTimer;
@@ -42,7 +45,7 @@ class VenueHubRealtimeClient {
       _ready &&
       _scope == scope &&
       _hubEpoch == hubEpoch &&
-      _database != null;
+      (_database != null || _windowsSession != null);
 
   bool get hubOnline =>
       _serverOnline &&
@@ -121,6 +124,54 @@ class VenueHubRealtimeClient {
       }
 
       final primary = Firebase.app();
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+        final windowsSession = WindowsRealtimeRestSession(
+          databaseUrl: databaseUrl,
+          apiKey: primary.options.apiKey,
+          customToken: token,
+        );
+        _windowsSession = windowsSession;
+        await windowsSession.authenticate();
+        _scope = scope;
+        _hubEpoch = hubEpoch;
+        void applyPresenceValue(Object? raw) {
+          final value = raw is Map ? raw : const <Object?, Object?>{};
+          final millis = value['lastReadyAt'];
+          _serverOnline =
+              value['online'] == true && value['hubEpoch'] == hubEpoch;
+          _lastReadyAt = millis is int
+              ? DateTime.fromMillisecondsSinceEpoch(millis)
+              : null;
+          _publishAvailability();
+        }
+
+        _presenceSubscription = windowsSession
+            .watch('hubPresence/${scope.tenantId}/${scope.venueId}/$deviceId')
+            .listen(
+              applyPresenceValue,
+              onError: (Object error, StackTrace stackTrace) {
+                _serverOnline = false;
+                _publishAvailability(detail: error.toString());
+                AppLogger.error(
+                  'Watch realtime venue hub presence',
+                  error,
+                  stackTrace,
+                );
+              },
+            );
+        _printerPresenceSubscription = windowsSession
+            .watch('printerPresence/${scope.tenantId}/${scope.venueId}')
+            .listen(
+              _applyPrinterPresence,
+              onError: (Object error, StackTrace stackTrace) => AppLogger.error(
+                'Watch realtime printer presence',
+                error,
+                stackTrace,
+              ),
+            );
+        _finishConfiguration();
+        return;
+      }
       FirebaseApp app;
       try {
         app = Firebase.app(_secondaryAppName);
@@ -170,40 +221,44 @@ class VenueHubRealtimeClient {
       _printerPresenceSubscription = database
           .ref('printerPresence/${scope.tenantId}/${scope.venueId}')
           .onValue
-          .listen((event) {
-            final result = <String, DateTime>{};
-            final raw = event.snapshot.value;
-            if (raw is Map) {
-              for (final entry in raw.entries) {
-                final value = entry.value;
-                if (entry.key is! String ||
-                    value is! Map ||
-                    value['online'] != true) {
-                  continue;
-                }
-                final millis = value['lastReadyAt'];
-                if (millis is int) {
-                  result[entry.key as String] =
-                      DateTime.fromMillisecondsSinceEpoch(millis);
-                }
-              }
-            }
-            _printerPresence.add(result);
-          });
-      _staleTimer = Timer.periodic(
-        const Duration(seconds: 2),
-        (_) => _publishAvailability(),
-      );
-      _ready = true;
-      _publishAvailability(
-        detail: 'Connecting to the venue hub realtime channel…',
-      );
+          .listen((event) => _applyPrinterPresence(event.snapshot.value));
+      _finishConfiguration();
     } on Object {
       // Never retain a partially configured database after authentication or
       // subscription setup fails. A later command can then retry cleanly.
       await _clearSession(markOffline: false);
       rethrow;
     }
+  }
+
+  void _applyPrinterPresence(Object? raw) {
+    final result = <String, DateTime>{};
+    if (raw is Map) {
+      for (final entry in raw.entries) {
+        final value = entry.value;
+        if (entry.key is! String || value is! Map || value['online'] != true) {
+          continue;
+        }
+        final millis = value['lastReadyAt'];
+        if (millis is int) {
+          result[entry.key as String] = DateTime.fromMillisecondsSinceEpoch(
+            millis,
+          );
+        }
+      }
+    }
+    _printerPresence.add(result);
+  }
+
+  void _finishConfiguration() {
+    _staleTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => _publishAvailability(),
+    );
+    _ready = true;
+    _publishAvailability(
+      detail: 'Connecting to the venue hub realtime channel…',
+    );
   }
 
   void _publishAvailability({String? detail}) {
@@ -228,13 +283,32 @@ class VenueHubRealtimeClient {
     required Duration timeout,
   }) async {
     final database = _database;
-    if (database == null || _scope != scope) {
+    final windowsSession = _windowsSession;
+    if ((database == null && windowsSession == null) || _scope != scope) {
       throw StateError('The realtime venue hub channel is not connected.');
     }
-    final reference = database.ref(
-      'remoteCommandStatus/${scope.tenantId}/${scope.venueId}/$commandId',
-    );
-    final event = await reference.onValue
+    final path =
+        'remoteCommandStatus/${scope.tenantId}/${scope.venueId}/$commandId';
+    if (windowsSession != null) {
+      final raw = await windowsSession
+          .watch(path)
+          .firstWhere((raw) {
+            if (raw is! Map) return false;
+            return const {
+              'accepted',
+              'rejected',
+              'expired',
+            }.contains(raw['status']);
+          })
+          .timeout(timeout);
+      if (raw is! Map) {
+        throw StateError('The venue hub returned an invalid acknowledgement.');
+      }
+      return Map<String, Object?>.from(raw);
+    }
+    final event = await database!
+        .ref(path)
+        .onValue
         .firstWhere((event) {
           final raw = event.snapshot.value;
           if (raw is! Map) return false;
@@ -262,7 +336,9 @@ class VenueHubRealtimeClient {
     final printerPresenceSubscription = _printerPresenceSubscription;
     _printerPresenceSubscription = null;
     final app = _app;
+    final windowsSession = _windowsSession;
     _app = null;
+    _windowsSession = null;
     _ready = false;
     _scope = null;
     _hubEpoch = null;
@@ -273,6 +349,7 @@ class VenueHubRealtimeClient {
     if (markOffline) VenueHubAvailability.markOffline();
     await presenceSubscription?.cancel();
     await printerPresenceSubscription?.cancel();
+    await windowsSession?.close();
     if (app != null) {
       try {
         await FirebaseAuth.instanceFor(app: app).signOut();

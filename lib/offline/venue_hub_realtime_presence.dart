@@ -10,6 +10,7 @@ import '../core/tenant_scope.dart';
 import '../data/production_command_repository.dart';
 import 'transient_realtime_database.dart';
 import 'venue_hub_device_credential.dart';
+import 'windows_realtime_rest_session.dart';
 
 /// Maintains server-observed hub presence without a periodic Cloud Function.
 class VenueHubRealtimePresence {
@@ -22,19 +23,21 @@ class VenueHubRealtimePresence {
   final StreamController<void> _commandSignals =
       StreamController<void>.broadcast();
   final StreamController<bool> _authority = StreamController<bool>.broadcast();
-  StreamSubscription<DatabaseEvent>? _connectionSubscription;
-  StreamSubscription<DatabaseEvent>? _signalSubscription;
-  StreamSubscription<DatabaseEvent>? _authoritySubscription;
+  StreamSubscription<dynamic>? _connectionSubscription;
+  StreamSubscription<dynamic>? _signalSubscription;
+  StreamSubscription<dynamic>? _authoritySubscription;
   DatabaseReference? _presence;
   OnDisconnect? _onDisconnect;
   Timer? _leaseTimer;
   FirebaseApp? _app;
+  WindowsRealtimeRestSession? _windowsSession;
+  String? _windowsPresencePath;
 
   /// Emits only a wake-up hint; the hub still claims and validates each
   /// command through the signed POS API before committing it locally.
   Stream<void> get commandSignals => _commandSignals.stream;
   Stream<bool> get authority => _authority.stream;
-  bool get started => _presence != null;
+  bool get started => _presence != null || _windowsSession != null;
 
   Future<void> start({
     required VenueScope scope,
@@ -59,6 +62,64 @@ class VenueHubRealtimePresence {
     }
 
     final primary = Firebase.app();
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+      final windowsSession = WindowsRealtimeRestSession(
+        databaseUrl: databaseUrl,
+        apiKey: primary.options.apiKey,
+        customToken: token,
+      );
+      _windowsSession = windowsSession;
+      await windowsSession.authenticate();
+      final presencePath =
+          'hubPresence/${scope.tenantId}/${scope.venueId}/$deviceId';
+      _windowsPresencePath = presencePath;
+      _signalSubscription = windowsSession
+          .watch('hubSignals/${scope.tenantId}/${scope.venueId}')
+          .listen(
+            (_) => _commandSignals.add(null),
+            onError: (Object error, StackTrace stackTrace) => AppLogger.error(
+              'Listen for realtime hub commands',
+              error,
+              stackTrace,
+            ),
+          );
+      _authoritySubscription = windowsSession
+          .watch('hubAuthorities/${scope.tenantId}/${scope.venueId}')
+          .listen((raw) {
+            final value = raw is Map ? raw : const <Object?, Object?>{};
+            _authority.add(
+              value['enabled'] == true &&
+                  value['deviceId'] == deviceId &&
+                  value['hubEpoch'] == hubEpoch,
+            );
+          }, onError: (Object _, StackTrace _) => _authority.add(false));
+      await windowsSession.set(presencePath, <String, Object?>{
+        'online': true,
+        'hubEpoch': hubEpoch,
+        'connectedAt': WindowsRealtimeRestSession.serverTimestamp,
+        'lastReadyAt': WindowsRealtimeRestSession.serverTimestamp,
+      });
+      connected.value = true;
+      AppLogger.info('Venue hub realtime presence connected over Windows SSE.');
+      _leaseTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+        if (!connected.value || _windowsPresencePath != presencePath) return;
+        try {
+          await windowsSession.update(presencePath, <String, Object?>{
+            'online': true,
+            'hubEpoch': hubEpoch,
+            'lastReadyAt': WindowsRealtimeRestSession.serverTimestamp,
+          });
+        } on Object catch (error, stackTrace) {
+          connected.value = false;
+          AppLogger.error(
+            'Refresh venue hub realtime lease',
+            error,
+            stackTrace,
+          );
+        }
+      });
+      return;
+    }
     FirebaseApp app;
     try {
       app = Firebase.app(_secondaryAppName);
@@ -172,6 +233,24 @@ class VenueHubRealtimePresence {
     _signalSubscription = null;
     await _authoritySubscription?.cancel();
     _authoritySubscription = null;
+    final windowsSession = _windowsSession;
+    final windowsPresencePath = _windowsPresencePath;
+    _windowsSession = null;
+    _windowsPresencePath = null;
+    if (windowsSession != null) {
+      if (windowsPresencePath != null) {
+        try {
+          await windowsSession.update(windowsPresencePath, <String, Object?>{
+            'online': false,
+            'disconnectedAt': WindowsRealtimeRestSession.serverTimestamp,
+          });
+        } on Object {
+          // The lease becomes stale within fifteen seconds if shutdown cannot
+          // publish the explicit offline state.
+        }
+      }
+      await windowsSession.close();
+    }
     try {
       await _onDisconnect?.cancel();
       await _presence?.update(<String, Object?>{

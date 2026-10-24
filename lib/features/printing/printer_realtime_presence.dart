@@ -3,11 +3,13 @@ import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
 import '../../offline/transient_realtime_database.dart';
+import '../../offline/windows_realtime_rest_session.dart';
 
 /// Publishes enrolled printer presence over RTDB and wakes its worker without
 /// periodic Cloud Function heartbeat calls. Claims and completions still use
@@ -24,14 +26,18 @@ class PrinterRealtimePresence {
   VenueScope? _scope;
   String? _deviceId;
   FirebaseApp? _app;
+  WindowsRealtimeRestSession? _windowsSession;
+  String? _windowsPresencePath;
   DatabaseReference? _presence;
   OnDisconnect? _onDisconnect;
-  StreamSubscription<DatabaseEvent>? _connectionSubscription;
-  StreamSubscription<DatabaseEvent>? _signalSubscription;
+  StreamSubscription<dynamic>? _connectionSubscription;
+  StreamSubscription<dynamic>? _signalSubscription;
   Timer? _leaseTimer;
 
   bool isConfigured(VenueScope scope, String deviceId) =>
-      _scope == scope && _deviceId == deviceId && _presence != null;
+      _scope == scope &&
+      _deviceId == deviceId &&
+      (_presence != null || _windowsSession != null);
 
   Future<void> start({
     required VenueScope scope,
@@ -51,6 +57,50 @@ class PrinterRealtimePresence {
       throw StateError('The server returned an invalid printer session.');
     }
     final primary = Firebase.app();
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+      final windowsSession = WindowsRealtimeRestSession(
+        databaseUrl: databaseUrl,
+        apiKey: primary.options.apiKey,
+        customToken: token,
+      );
+      _windowsSession = windowsSession;
+      await windowsSession.authenticate();
+      final presencePath =
+          'printerPresence/${scope.tenantId}/${scope.venueId}/$deviceId';
+      _scope = scope;
+      _deviceId = deviceId;
+      _windowsPresencePath = presencePath;
+      _signalSubscription = windowsSession
+          .watch('printerSignals/${scope.tenantId}/${scope.venueId}/$deviceId')
+          .listen(
+            (_) => _signals.add(null),
+            onError: (Object error, StackTrace stackTrace) => AppLogger.error(
+              'Listen for realtime printer signals',
+              error,
+              stackTrace,
+            ),
+          );
+      await windowsSession.set(presencePath, <String, Object?>{
+        'online': true,
+        'lastReadyAt': WindowsRealtimeRestSession.serverTimestamp,
+      });
+      _leaseTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+        if (_windowsPresencePath != presencePath) return;
+        try {
+          await windowsSession.update(presencePath, <String, Object?>{
+            'online': true,
+            'lastReadyAt': WindowsRealtimeRestSession.serverTimestamp,
+          });
+        } on Object catch (error, stackTrace) {
+          AppLogger.error(
+            'Refresh printer realtime presence',
+            error,
+            stackTrace,
+          );
+        }
+      });
+      return;
+    }
     FirebaseApp app;
     try {
       app = Firebase.app(_secondaryAppName);
@@ -116,6 +166,23 @@ class PrinterRealtimePresence {
     await _signalSubscription?.cancel();
     _connectionSubscription = null;
     _signalSubscription = null;
+    final windowsSession = _windowsSession;
+    final windowsPresencePath = _windowsPresencePath;
+    _windowsSession = null;
+    _windowsPresencePath = null;
+    if (windowsSession != null) {
+      if (windowsPresencePath != null) {
+        try {
+          await windowsSession.update(windowsPresencePath, <String, Object?>{
+            'online': false,
+            'disconnectedAt': WindowsRealtimeRestSession.serverTimestamp,
+          });
+        } on Object {
+          // Other devices treat the printer as offline when its lease is stale.
+        }
+      }
+      await windowsSession.close();
+    }
     try {
       await _onDisconnect?.cancel();
       await _presence?.update(<String, Object?>{
