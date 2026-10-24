@@ -10,6 +10,7 @@ import '../core/firebase_bootstrap.dart';
 import '../core/firebase_environment_options.dart';
 import '../core/platform_admin_pin_session_store.dart';
 import '../core/staff_pin_session_store.dart';
+import '../features/printing/local_printer_device_identity.dart';
 
 final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
   (ref) => PlatformAdminRepository(),
@@ -38,11 +39,21 @@ class PlatformAdminRepository {
   }
 
   Future<PlatformAdminPinSession> verifyPlatformAdminPin(String pin) async {
-    final data = await _call('verifyPlatformAdminPin', {'pin': pin});
+    final deviceId = await LocalPrinterDeviceIdentity().getOrCreate();
+    final data = await _call('verifyPlatformAdminPin', {
+      'pin': pin,
+      'deviceId': deviceId,
+    });
     final session = PlatformAdminPinSession(
       sessionId: data['sessionId'] as String,
       sessionToken: data['sessionToken'] as String,
       expiresAt: DateTime.parse(data['expiresAt'] as String),
+      // Keep a rolling deployment usable while an older Function is still
+      // returning the pre-device-binding response. Once the updated server is
+      // live it validates this same ID on every privileged request.
+      deviceId: data['deviceId'] is String
+          ? data['deviceId'] as String
+          : deviceId,
     );
     PlatformAdminPinSessionStore.current = session;
     return session;
@@ -330,6 +341,7 @@ class PlatformAdminRepository {
       if (staffSession == null && activePlatformSession != null) ...{
         'platformAdminPinSessionId': activePlatformSession.sessionId,
         'platformAdminPinSessionToken': activePlatformSession.sessionToken,
+        'platformAdminPinSessionDeviceId': activePlatformSession.deviceId,
       },
     };
     final response = await http.post(

@@ -3,11 +3,13 @@ class PlatformAdminPinSession {
     required this.sessionId,
     required this.sessionToken,
     required this.expiresAt,
+    required this.deviceId,
   });
 
   final String sessionId;
   final String sessionToken;
   final DateTime expiresAt;
+  final String deviceId;
 
   bool get isValid => expiresAt.isAfter(DateTime.now());
 }

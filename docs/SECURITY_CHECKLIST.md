@@ -25,3 +25,5 @@ PIN-specific controls:
   client, and bound to both the Firebase host account and physical device ID.
 - Failed attempts record tenant, venue, staff, host account, device and server
   time without recording the submitted PIN.
+- Platform-administrator PIN sessions follow the same physical-device binding;
+  copying an in-memory session token to a different installation is rejected.

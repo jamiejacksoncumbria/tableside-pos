@@ -6050,6 +6050,7 @@ async function verifyPlatformAdminPinFor(caller, rawData) {
   await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
   const pin = requiredSixDigitPin(data);
+  const deviceId = requiredDocumentId(data, "deviceId");
   const pinRef = db.doc(`platformAdminPins/${caller.uid}`);
   const verification = await db.runTransaction(async (transaction) => {
     const document = await transaction.get(pinRef);
@@ -6109,6 +6110,8 @@ async function verifyPlatformAdminPinFor(caller, rawData) {
         ? "platformAdminPinLocked"
         : "platformAdminPinFailed",
       userId: caller.uid,
+      hostUserId: caller.uid,
+      deviceId,
       failedAttempts: verification.failedAttempts,
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -6125,22 +6128,25 @@ async function verifyPlatformAdminPinFor(caller, rawData) {
   await sessionRef.set({
     userId: caller.uid,
     hostUserId: caller.uid,
+    deviceId,
     pinVersion: verification.pinVersion,
     tokenHash: createHash("sha256").update(token).digest("base64"),
     expiresAt,
     createdAt: FieldValue.serverTimestamp(),
   });
-  await writeAudit(caller.uid, "verifyPlatformAdminPin", caller.uid, {});
+  await writeAudit(caller.uid, "verifyPlatformAdminPin", caller.uid, {deviceId});
   return {
     sessionId: sessionRef.id,
     sessionToken: token,
     expiresAt: expiresAt.toISOString(),
+    deviceId,
   };
 }
 
 async function requirePlatformAdminPinSession(caller, data) {
   const sessionId = requiredText(data, "platformAdminPinSessionId", 128);
   const sessionToken = requiredText(data, "platformAdminPinSessionToken", 128);
+  const deviceId = requiredDocumentId(data, "platformAdminPinSessionDeviceId");
   const session = await db.doc(`platformAdminPinSessions/${sessionId}`).get();
   if (!session.exists) {
     throw new HttpsError("unauthenticated", "The platform PIN session no longer exists.");
@@ -6160,6 +6166,7 @@ async function requirePlatformAdminPinSession(caller, data) {
   if (!hashesMatch ||
       sessionData.userId !== caller.uid ||
       sessionData.hostUserId !== caller.uid ||
+      sessionData.deviceId !== deviceId ||
       sessionData.pinVersion !== currentPinVersion ||
       expiresAt == null ||
       expiresAt.getTime() <= Date.now()) {
