@@ -34,7 +34,9 @@ dependencies:
   # Version 13 requires preview Android SDK 37. Version 12 supports the
   # Bluetooth runtime-permission API while remaining compatible with SDK 36.
   permission_handler: ^12.0.1
-  print_bluetooth_thermal: ^1.2.2
+  # 1.2.3+ uses AGP 9's built-in Kotlin support instead of applying the
+  # deprecated Kotlin Gradle Plugin from inside the package.
+  print_bluetooth_thermal: ^1.2.5
   shared_preferences: ^2.5.5
   qr_flutter: ^4.1.0
   qr: ^3.0.2

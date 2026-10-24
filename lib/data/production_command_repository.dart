@@ -59,6 +59,7 @@ class StaffPinVerification {
     required this.expiresAt,
     required this.tenantId,
     required this.venueId,
+    required this.deviceId,
     required this.userId,
     required this.displayName,
     required this.isPlatformAdmin,
@@ -73,6 +74,7 @@ class StaffPinVerification {
   final DateTime expiresAt;
   final String tenantId;
   final String venueId;
+  final String deviceId;
   final String userId;
   final String displayName;
   final bool isPlatformAdmin;
@@ -87,6 +89,7 @@ class StaffPinVerification {
     expiresAt: expiresAt ?? this.expiresAt,
     tenantId: tenantId,
     venueId: venueId,
+    deviceId: deviceId,
     userId: userId,
     displayName: displayName,
     isPlatformAdmin: isPlatformAdmin,
@@ -973,6 +976,7 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String userId,
     required String pin,
+    required String deviceId,
     bool repairOfflineVerifier = false,
   }) async {
     final response = await _call('verifyStaffPin', {
@@ -980,6 +984,7 @@ class ProductionCommandRepository {
       'venueId': scope.venueId,
       'userId': userId,
       'pin': pin,
+      'deviceId': deviceId,
       if (repairOfflineVerifier) 'repairOfflineVerifier': true,
     });
     return StaffPinVerification(
@@ -988,6 +993,14 @@ class ProductionCommandRepository {
       expiresAt: DateTime.parse(response['expiresAt'] as String),
       tenantId: scope.tenantId,
       venueId: scope.venueId,
+      // During a rolling deployment an older Function can return a valid
+      // session without echoing the newly introduced device binding. Keep the
+      // locally supplied identity so that the same client works before and
+      // after the server update; the updated server still validates it on
+      // every protected command.
+      deviceId: response['deviceId'] is String
+          ? response['deviceId'] as String
+          : deviceId,
       userId: response['userId'] as String,
       displayName: response['displayName'] as String,
       isPlatformAdmin: response['isPlatformAdmin'] == true,
@@ -2317,6 +2330,7 @@ class ProductionCommandRepository {
       if (staffSession != null) 'staffPinSessionId': staffSession.sessionId,
       if (staffSession != null)
         'staffPinSessionToken': staffSession.sessionToken,
+      if (staffSession != null) 'staffPinSessionDeviceId': staffSession.deviceId,
     };
     final response = await http.post(
       endpoint,

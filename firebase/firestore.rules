@@ -29,47 +29,57 @@ service cloud.firestore {
       return isMember(tenantId) && membership(tenantId).data.roles.hasAny(['owner', 'manager']);
     }
 
-    // A printer-only Firebase account is the recommended host identity for a
-    // shared till. It can discover venues before PIN entry and operate its
-    // assigned printer, but it cannot read operational data until a real
-    // staff member has selected their name and passed PIN verification.
-    function isPrinterOnlyHost(tenantId) {
-      return isMember(tenantId)
-        && membership(tenantId).data.roles.hasAny(['printer'])
-        && !membership(tenantId).data.roles.hasAny(['owner', 'manager', 'waiter', 'cashier', 'kitchen']);
-    }
-
     function hasActivePinAuthorization(tenantId) {
       let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
+      let authorization = get(authorizationPath);
+      let staffMembershipPath = /databases/$(database)/documents/tenants/$(tenantId)/members/$(authorization.data.userId);
+      let staffPinPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPins/$(authorization.data.venueId + '_' + authorization.data.userId);
       return exists(authorizationPath)
-        && get(authorizationPath).data.expiresAt > request.time;
+        && authorization.data.expiresAt > request.time
+        && authorization.data.userId is string
+        && authorization.data.venueId is string
+        && authorization.data.sessionId is string
+        && exists(staffMembershipPath)
+        && get(staffMembershipPath).data.get('active', true) != false
+        && get(staffMembershipPath).data.get('membershipVersion', 0)
+          == authorization.data.get('membershipVersion', 0)
+        && exists(staffPinPath)
+        && get(staffPinPath).data.get('locked', false) != true
+        && get(staffPinPath).data.get('pinVersion', 0)
+          == authorization.data.get('pinVersion', 0);
     }
 
     function canReadOperationalData(tenantId) {
-      return isMember(tenantId)
-        && (!isPrinterOnlyHost(tenantId) || hasActivePinAuthorization(tenantId));
+      // The Firebase host identity establishes only which restaurant the
+      // physical device belongs to. Every operational read is authorised by
+      // the currently selected staff member's short-lived PIN lease.
+      return isMember(tenantId) && hasActivePinAuthorization(tenantId);
+    }
+
+    function canReadVenueOperationalData(tenantId, venueId) {
+      let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
+      return canReadOperationalData(tenantId)
+        && venueId is string
+        && get(authorizationPath).data.venueId == venueId;
     }
 
     function hasDriverOnlyPinAuthorization(tenantId) {
       let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
-      return exists(authorizationPath)
-        && get(authorizationPath).data.expiresAt > request.time
+      return hasActivePinAuthorization(tenantId)
         && get(authorizationPath).data.roles.hasAny(['driver'])
         && !get(authorizationPath).data.roles.hasAny(['owner', 'manager']);
     }
 
     function canReadOrder(tenantId) {
       let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
-      return canReadOperationalData(tenantId)
+      return canReadVenueOperationalData(tenantId, resource.data.venueId)
         && (!hasDriverOnlyPinAuthorization(tenantId)
           || resource.data.assignedDriverId == get(authorizationPath).data.userId);
     }
 
     function managesTenantWithActivePin(tenantId) {
       let authorizationPath = /databases/$(database)/documents/tenants/$(tenantId)/staffPinAuthorizations/$(request.auth.uid);
-      return isMember(tenantId)
-        && exists(authorizationPath)
-        && get(authorizationPath).data.expiresAt > request.time
+      return hasActivePinAuthorization(tenantId)
         && (
           get(authorizationPath).data.roles.hasAny(['owner', 'manager'])
           || get(authorizationPath).data.get('platformAdmin', false) == true
@@ -146,7 +156,7 @@ service cloud.firestore {
         // only writer through the signed server APIs, and collection listing
         // is deliberately denied to prevent command enumeration.
         match /remoteHubCommands/{commandId} {
-          allow get: if canReadOperationalData(tenantId)
+          allow get: if canReadVenueOperationalData(tenantId, venueId)
             && resource.data.hostUid == request.auth.uid;
           allow list, write: if false;
         }
@@ -154,18 +164,18 @@ service cloud.firestore {
         // The short-lived hub heartbeat is operational connectivity state.
         // It contains no order payload and remains server-owned.
         match /remoteHubState/{stateId} {
-          allow read: if canReadOperationalData(tenantId);
+          allow read: if canReadVenueOperationalData(tenantId, venueId);
           allow write: if false;
         }
       }
 
       match /menuSections/{sectionId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
       match /products/{productId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
@@ -173,7 +183,7 @@ service cloud.firestore {
       // store only the group ids; authoritative order pricing/validation is
       // performed by the server function when a line is added or released.
       match /modifierGroups/{groupId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
@@ -181,7 +191,7 @@ service cloud.firestore {
       // named rate and fixed basis-point value; the order function snapshots
       // that value again when a sale is made.
       match /taxRates/{taxRateId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
@@ -197,7 +207,7 @@ service cloud.firestore {
       }
 
       match /variantSets/{variantSetId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
@@ -239,7 +249,7 @@ service cloud.firestore {
       }
 
       match /tables/{tableId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
@@ -247,7 +257,7 @@ service cloud.firestore {
       // stream them after staff-PIN authorization, but all mutations go
       // through the audited POS API for conflict checks.
       match /bookings/{bookingId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
@@ -255,12 +265,12 @@ service cloud.firestore {
       // contain contact/address data, so both are PIN-scoped and server-only
       // for writes; a modified client cannot bypass duplicate checks/audits.
       match /courses/{courseId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
       match /venueCustomers/{customerId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
@@ -268,7 +278,7 @@ service cloud.firestore {
       // filters recipients using the active PIN identity; clients cannot
       // create or acknowledge another person's event.
       match /notificationEvents/{eventId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
@@ -279,7 +289,7 @@ service cloud.firestore {
 
       // Open named tabs are server-managed, venue-local unique-name records.
       match /openTabNames/{tabId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
@@ -293,7 +303,7 @@ service cloud.firestore {
       // Production tickets contain kitchen/bar-safe order summaries only. New
       // tickets and state changes come from trusted, auditable commands.
       match /productionTickets/{ticketId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow write: if false;
       }
 
@@ -355,7 +365,7 @@ service cloud.firestore {
       }
 
       match /paymentRequests/{requestId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         // A server function validates the bill amount, creates the provider
         // payment intent, and is the only actor allowed to change its status.
         allow create: if false;
@@ -363,11 +373,10 @@ service cloud.firestore {
       }
 
       match /devices/{deviceId} {
-        // Every active venue member may see printer device health. This lets a
-        // waiter who sent an order be alerted when its kitchen/bar printer is
-        // offline, while only managers may register, route, or alter a device.
-        allow get: if isMember(tenantId);
-        allow list: if isMember(tenantId);
+        // Device health is operational data and is visible only for the venue
+        // selected by the active PIN lease. Background printer agents use a
+        // scoped device credential and the server API instead of Firestore.
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow create: if false;
         allow delete: if false;
         // Enrollment and heartbeats use the server API with a rotating device
@@ -379,15 +388,16 @@ service cloud.firestore {
       // paid-receipt tickets go. The trusted command verifies a configured
       // device belongs to this venue before creating the job.
       match /printerRoutes/{routeId} {
-        allow read: if canReadOperationalData(tenantId);
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow create, update, delete: if false;
       }
 
       match /printJobs/{jobId} {
-        // The content is kitchen/bar-safe and all venue staff need real-time
-        // delivery warnings. Claiming remains restricted to the assigned
-        // physical printer device below.
-        allow read: if isMember(tenantId);
+        // PIN-authorized staff can monitor their current venue. Background
+        // printer agents receive wake signals through RTDB and claim content
+        // through the device-credential API, so no host-account bypass is
+        // needed here.
+        allow read: if canReadVenueOperationalData(tenantId, resource.data.venueId);
         allow create, delete: if false;
         // Claim/retry/completion are atomic server commands authenticated with
         // the physical device credential, never the currently selected user.

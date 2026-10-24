@@ -7,6 +7,11 @@
 
 An adaptive Flutter foundation for a multi-restaurant restaurant POS. It targets Android, iOS, web, and Windows, uses Riverpod for UI state, and is structured to use Firebase Authentication, Cloud Firestore, and Cloud Storage.
 
+Android production APKs/App Bundles intentionally fail to build until private
+release signing is configured. Follow
+[`docs/android-release-signing.md`](docs/android-release-signing.md); release
+builds never fall back to Flutter's debug key.
+
 The starter deliberately runs with local demo data before Firebase has been configured. This makes it safe to review the responsive POS workflow first; the repository classes and deployment files describe the production connection points.
 
 ## What is included

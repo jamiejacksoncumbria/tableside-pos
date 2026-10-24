@@ -1,0 +1,13 @@
+# Copy this file to android/key.properties. The real file is ignored by Git.
+# Use forward slashes in Windows paths because backslashes are escape characters
+# in Java properties files.
+storeFile=C:/secure/TableSideCY/android-upload-keystore.jks
+keyAlias=tablesidecy-upload
+
+# Prefer the following environment variables instead of putting passwords here:
+# TABLESIDECY_ANDROID_STORE_PASSWORD
+# TABLESIDECY_ANDROID_KEY_PASSWORD
+#
+# CI may also provide these values without key.properties:
+# TABLESIDECY_ANDROID_KEYSTORE_PATH
+# TABLESIDECY_ANDROID_KEY_ALIAS

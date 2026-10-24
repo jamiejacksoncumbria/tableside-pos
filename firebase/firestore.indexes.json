@@ -17,6 +17,14 @@
       ]
     },
     {
+      "collectionGroup": "modifierGroups",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "venueId", "order": "ASCENDING" },
+        { "fieldPath": "name", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "tables",
       "queryScope": "COLLECTION",
       "fields": [

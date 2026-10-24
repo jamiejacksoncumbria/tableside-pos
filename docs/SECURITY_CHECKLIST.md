@@ -15,3 +15,13 @@ printing, inventory, reports, or Firebase:
    or customer data.
 8. Test ordinary staff, manager, owner, printer-device, retired-user, and
    cross-venue behaviour.
+
+PIN-specific controls:
+
+- New and replacement PINs reject repeated digits and common number sequences.
+- PIN hashes carry an explicit cost profile; legacy hashes are upgraded only
+  after a successful constant-time verification.
+- Cloud PIN sessions are short-lived, held only in process memory on the
+  client, and bound to both the Firebase host account and physical device ID.
+- Failed attempts record tenant, venue, staff, host account, device and server
+  time without recording the submitted PIN.

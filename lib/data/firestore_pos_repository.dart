@@ -858,6 +858,7 @@ class FirestorePosRepository {
     }
     return _firestore
         .collection('tenants/${scope.tenantId}/orders')
+        .where('venueId', isEqualTo: scope.venueId)
         .where('splitFromOrderId', isEqualTo: sourceOrderId)
         .snapshots()
         .map((snapshot) {
@@ -935,9 +936,11 @@ class FirestorePosRepository {
   }) async {
     final sections = await _firestore
         .collection('tenants/${scope.tenantId}/menuSections')
+        .where('venueId', isEqualTo: scope.venueId)
         .get();
     final products = await _firestore
         .collection('tenants/${scope.tenantId}/products')
+        .where('venueId', isEqualTo: scope.venueId)
         .get();
     final hasChild = sections.docs.any(
       (document) =>
@@ -1288,6 +1291,7 @@ class FirestorePosRepository {
   Stream<List<MenuModifierGroup>> watchModifierGroups(VenueScope scope) {
     return _firestore
         .collection('tenants/${scope.tenantId}/modifierGroups')
+        .where('venueId', isEqualTo: scope.venueId)
         .orderBy('name')
         .snapshots()
         .map(
@@ -1410,6 +1414,7 @@ class FirestorePosRepository {
   }) async {
     final products = await _firestore
         .collection('tenants/${scope.tenantId}/products')
+        .where('venueId', isEqualTo: scope.venueId)
         .get();
     final inUse = products.docs.any((product) {
       final data = product.data();
@@ -1497,15 +1502,16 @@ class FirestorePosRepository {
     return name;
   }
 
-  CollectionReference<Map<String, dynamic>> _taxRates(String tenantId) =>
-      _firestore.collection('tenants/$tenantId/taxRates');
+  Query<Map<String, dynamic>> _taxRates(VenueScope scope) => _firestore
+      .collection('tenants/${scope.tenantId}/taxRates')
+      .where('venueId', isEqualTo: scope.venueId);
 
   Stream<List<TaxRate>> watchTaxRates(VenueScope scope) async* {
     AppLogger.info(
       'Load tax rates: tenant=${scope.tenantId}, venue=${scope.venueId}.',
     );
     try {
-      await for (final snapshot in _taxRates(scope.tenantId).snapshots()) {
+      await for (final snapshot in _taxRates(scope).snapshots()) {
         final rates =
             snapshot.docs
                 .where(
@@ -1575,6 +1581,7 @@ class FirestorePosRepository {
   }) async {
     final products = await _firestore
         .collection('tenants/${scope.tenantId}/products')
+        .where('venueId', isEqualTo: scope.venueId)
         .where('taxRateId', isEqualTo: rate.id)
         .get();
     final inUse = products.docs.any(
@@ -1611,7 +1618,7 @@ class FirestorePosRepository {
     String? exceptId,
   }) async {
     final normalised = name.toLowerCase();
-    final existing = await _taxRates(scope.tenantId).get();
+    final existing = await _taxRates(scope).get();
     if (existing.docs.any(
       (document) =>
           document.id != exceptId &&

@@ -69,6 +69,7 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
       sessionToken: session.sessionToken,
       tenantId: scope.tenantId,
       venueId: scope.venueId,
+      deviceId: session.deviceId,
     );
     state = session;
     ref
@@ -116,6 +117,7 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
       sessionToken: session.sessionToken,
       tenantId: session.tenantId,
       venueId: session.venueId,
+      deviceId: session.deviceId,
     );
     return true;
   }
@@ -347,6 +349,9 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           'The cloud is unavailable and this device has no saved venue hub configuration.',
         );
       }
+      final deviceId = await LocalPrinterDeviceIdentity().deviceIdForScope(
+        widget.scope,
+      );
       if (kIsWeb) {
         // Browsers do not retain the hub's native device key. Their
         // PIN-authenticated mutations use the short-lived Firebase queue and
@@ -359,6 +364,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           scope: widget.scope,
           userId: staff.userId,
           pin: pin,
+          deviceId: deviceId,
         );
         ref
             .read(activeStaffPinSessionProvider.notifier)
@@ -383,9 +389,6 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         _scheduleExpiryCheck();
         return;
       }
-      final deviceId = await LocalPrinterDeviceIdentity().deviceIdForScope(
-        widget.scope,
-      );
       final credential = await VenueHubDeviceCredentialStore().getOrCreate(
         tenantId: widget.scope.tenantId,
         venueId: widget.scope.venueId,
@@ -432,6 +435,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             scope: widget.scope,
             userId: staff.userId,
             pin: pin,
+            deviceId: deviceId,
             repairOfflineVerifier: verifierRejected,
           );
           if (VenueHubRuntime.instance.activeScope != widget.scope) {
@@ -492,6 +496,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             scope: widget.scope,
             userId: staff.userId,
             pin: pin,
+            deviceId: deviceId,
           );
         } catch (error, stackTrace) {
           if (!bootstrap.enabled || hubLogin == null) rethrow;
@@ -506,6 +511,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             expiresAt: hubLogin.expiresAtUtc,
             tenantId: widget.scope.tenantId,
             venueId: widget.scope.venueId,
+            deviceId: deviceId,
             userId: staff.userId,
             displayName: staff.displayName,
             isPlatformAdmin: false,

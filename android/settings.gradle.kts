@@ -23,6 +23,8 @@ plugins {
     // START: FlutterFire Configuration
     id("com.google.gms.google-services") version("4.4.4") apply false
     // END: FlutterFire Configuration
+    // Declares the compiler version used by Flutter's temporary AGP 9
+    // compatibility bridge. The app module does not apply KGP directly.
     id("org.jetbrains.kotlin.android") version "2.3.20" apply false
 }
 

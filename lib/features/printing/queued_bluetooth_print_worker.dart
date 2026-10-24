@@ -1,14 +1,13 @@
 import 'dart:io';
 
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' show ClientException;
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/print_job_repository.dart';
-import '../../data/printer_device_repository.dart';
 import 'local_printer_device_identity.dart';
 import 'native_print_worker.dart';
 import 'printer_realtime_presence.dart';
@@ -23,15 +22,11 @@ import '../../offline/venue_hub_runtime.dart';
 class QueuedNativePrintWorker {
   QueuedNativePrintWorker({
     PrintJobRepository? queue,
-    PrinterDeviceRepository? devices,
     LocalPrinterDeviceIdentity? identity,
   }) : _queue = queue ?? PrintJobRepository(FirebaseFirestore.instance),
-       _devices =
-           devices ?? PrinterDeviceRepository(FirebaseFirestore.instance),
        _identity = identity ?? LocalPrinterDeviceIdentity();
 
   final PrintJobRepository _queue;
-  final PrinterDeviceRepository _devices;
   final LocalPrinterDeviceIdentity _identity;
   final PrinterRealtimePresence _realtime = PrinterRealtimePresence();
   String? _lastReadinessDiagnostic;
@@ -52,24 +47,24 @@ class QueuedNativePrintWorker {
   /// Signals that a venue has queued work. The host listens to this stream and
   /// claims jobs immediately; it does not wait for a periodic scan.
   Stream<int> watchQueuedJobCount(VenueScope scope) {
-    final queue = _queue.watchQueuedJobCount(
-      tenantId: scope.tenantId,
-      venueId: scope.venueId,
-    );
     return Stream<int>.multi((controller) {
-      var latest = 0;
-      final queueSubscription = queue.listen((queuedCount) {
-        latest = queuedCount;
-        controller.add(queuedCount);
-      }, onError: controller.addError);
+      // The encrypted venue-hub queue is inspected by processNext. Cloud jobs
+      // wake this worker through RTDB and are then claimed atomically through
+      // the device-credential API. This deliberately avoids a Firestore read
+      // before a member has entered a PIN.
+      controller.add(0);
+      final localQueue = VenueHubRuntime.instance.localPrintJobs(scope);
+      final localSubscription = localQueue?.listen(
+        (jobs) => controller.add(
+          jobs.where((job) => job['status'] == 'queued').length,
+        ),
+        onError: controller.addError,
+      );
       final signalSubscription = _realtime.signals.listen((_) {
-        // A realtime signal wakes the worker even before the Firestore/local
-        // queue snapshot arrives. Atomic claim still decides whether work
-        // exists, so duplicate signals are harmless.
-        controller.add(latest == 0 ? 1 : latest);
+        controller.add(1);
       }, onError: controller.addError);
       controller.onCancel = () async {
-        await queueSubscription.cancel();
+        await localSubscription?.cancel();
         await signalSubscription.cancel();
       };
     });
@@ -94,16 +89,8 @@ class QueuedNativePrintWorker {
       }
       if (deviceCredential == null || deviceCredential.isEmpty) return;
       if (_realtime.isConfigured(scope, deviceId)) return;
-      final device = await _devices.getDevice(
-        tenantId: scope.tenantId,
-        deviceId: deviceId,
-      );
-      if (device == null ||
-          !device.active ||
-          device.venueId != scope.venueId ||
-          !device.transports.contains(requiredTransport)) {
-        return;
-      }
+      // issueRealtimePrinterSession validates the credential, venue,
+      // enrollment, active state and transport on the trusted server.
       await _realtime.start(
         scope: scope,
         deviceId: deviceId,
@@ -152,19 +139,6 @@ class QueuedNativePrintWorker {
       // only when no real credential exists; a real credential is required to
       // drain legacy/server-created cloud jobs after the local queue is empty.
       deviceCredential = 'venue-hub-device-credential';
-    } else {
-      final device = await _devices.getDevice(
-        tenantId: scope.tenantId,
-        deviceId: deviceId,
-      );
-      if (device == null ||
-          !device.active ||
-          device.venueId != scope.venueId ||
-          !device.transports.contains(requiredTransport)) {
-        return _notReady(
-          'Printer registration is missing, inactive, assigned to another venue, or lacks transport $requiredTransport. device=$deviceId.',
-        );
-      }
     }
 
     final readyDiagnostic =
@@ -222,5 +196,5 @@ class QueuedNativePrintWorker {
 /// full Windows restart installs the native printer channel.
 @Deprecated('Use QueuedNativePrintWorker instead.')
 class QueuedBluetoothPrintWorker extends QueuedNativePrintWorker {
-  QueuedBluetoothPrintWorker({super.queue, super.devices, super.identity});
+  QueuedBluetoothPrintWorker({super.queue, super.identity});
 }

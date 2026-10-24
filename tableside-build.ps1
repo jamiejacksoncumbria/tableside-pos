@@ -228,7 +228,45 @@ function Invoke-WithAndroidNativeFirebaseConfig([scriptblock]$Operation) {
     }
 }
 
+function Assert-AndroidReleaseSigning {
+    $propertiesPath = Join-Path $script:RepoRoot 'android\key.properties'
+    $properties = @{}
+    if (Test-Path -LiteralPath $propertiesPath) {
+        $properties = Get-Content -Raw -LiteralPath $propertiesPath |
+            ConvertFrom-StringData
+    }
+
+    function Resolve-SigningValue([string]$PropertyName, [string]$EnvironmentName) {
+        $environmentValue = [Environment]::GetEnvironmentVariable($EnvironmentName)
+        if (-not [string]::IsNullOrWhiteSpace($environmentValue)) {
+            return $environmentValue.Trim()
+        }
+        $propertyValue = [string]$properties[$PropertyName]
+        if (-not [string]::IsNullOrWhiteSpace($propertyValue)) {
+            return $propertyValue.Trim()
+        }
+        return $null
+    }
+
+    $storeFile = Resolve-SigningValue 'storeFile' 'TABLESIDECY_ANDROID_KEYSTORE_PATH'
+    $requiredValues = @(
+        @{ Name = 'keystore path'; Value = $storeFile },
+        @{ Name = 'store password'; Value = (Resolve-SigningValue 'storePassword' 'TABLESIDECY_ANDROID_STORE_PASSWORD') },
+        @{ Name = 'key alias'; Value = (Resolve-SigningValue 'keyAlias' 'TABLESIDECY_ANDROID_KEY_ALIAS') },
+        @{ Name = 'key password'; Value = (Resolve-SigningValue 'keyPassword' 'TABLESIDECY_ANDROID_KEY_PASSWORD') }
+    )
+    $missing = @($requiredValues | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Value) })
+    if ($missing.Count -gt 0) {
+        $missingNames = ($missing | ForEach-Object { $_.Name }) -join ', '
+        throw "Android release signing is incomplete ($missingNames). Run tools/create-android-upload-keystore.ps1 and follow docs/android-release-signing.md."
+    }
+    if (-not (Test-Path -LiteralPath $storeFile -PathType Leaf)) {
+        throw "The configured Android release keystore does not exist: $storeFile"
+    }
+}
+
 function Invoke-AndroidBuild([string]$Target) {
+    Assert-AndroidReleaseSigning
     Invoke-WithAndroidNativeFirebaseConfig {
         Flutter build $Target --release $script:FirebaseBuildArgument
     }
@@ -236,6 +274,7 @@ function Invoke-AndroidBuild([string]$Target) {
 
 function Build-Apk {
     Write-Heading 'Android APK (release)'
+    Assert-AndroidReleaseSigning
     Prepare-Build
     Invoke-AndroidBuild 'apk'
     Write-Host "APK: $script:RepoRoot\build\app\outputs\flutter-apk\app-release.apk" -ForegroundColor Green
@@ -243,6 +282,7 @@ function Build-Apk {
 
 function Build-AppBundle {
     Write-Heading 'Android App Bundle (release)'
+    Assert-AndroidReleaseSigning
     Prepare-Build
     Invoke-AndroidBuild 'appbundle'
     Write-Host "Bundle: $script:RepoRoot\build\app\outputs\bundle\release\app-release.aab" -ForegroundColor Green
@@ -264,6 +304,7 @@ function Build-Web {
 
 function Build-All {
     Write-Heading 'Prepare all release builds'
+    Assert-AndroidReleaseSigning
     Prepare-Build
     Write-Heading 'Android APK (release)'
     Invoke-AndroidBuild 'apk'
@@ -290,6 +331,9 @@ function Package-Windows {
 
 function Invoke-ShorebirdRelease([string]$Platform, [bool]$Patch) {
     Assert-ShorebirdReady
+    if ($Platform -eq 'android') {
+        Assert-AndroidReleaseSigning
+    }
     Prepare-Build
     $operation = if ($Patch) { 'patch' } else { 'release' }
     $publicKey = [string]$env:SHOREBIRD_PUBLIC_KEY_PATH

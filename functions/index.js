@@ -4928,11 +4928,32 @@ function requiredSixDigitPin(data) {
   return pin;
 }
 
+// Six digits are retained for fast shared-terminal entry, so newly selected
+// PINs must not come from the small set an attacker will try first. Existing
+// weak PINs remain verifiable long enough for staff to sign in and rotate them.
+function requiredNewSixDigitPin(data) {
+  const pin = requiredSixDigitPin(data);
+  const predictableSequences = new Set([
+    "012345", "123456", "234567", "345678", "456789",
+    "987654", "876543", "765432", "654321", "543210",
+    "121212", "112233", "123123",
+  ]);
+  if (/^(\d)\1{5}$/.test(pin) || predictableSequences.has(pin)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Choose a less predictable six-digit PIN. Avoid repeated digits and number sequences.",
+    );
+  }
+  return pin;
+}
+
 function staffPinDocumentId(venueId, userId) {
   return `${venueId}_${userId}`;
 }
 
-async function queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId}) {
+async function queueManagerSecurityAlert({
+  tenantId, venueId, userId, hostUserId, deviceId = "unknown",
+}) {
   const managers = await db.collection(`tenants/${tenantId}/members`).get();
   const recipientIds = managers.docs
     .filter((member) => member.data().active !== false &&
@@ -4947,7 +4968,8 @@ async function queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId}
   const staff = await auth.getUser(userId).catch(() => null);
   const subject = "TableSideCY security alert: staff PIN locked";
   const text = `A staff PIN was locked after three failed attempts. Venue: ${venueId}. ` +
-    `Staff: ${staff?.displayName || staff?.email || userId}. Device account: ${hostUserId}. ` +
+    `Staff: ${staff?.displayName || staff?.email || userId}. ` +
+    `Device account: ${hostUserId}. Device: ${deviceId}. ` +
     "Open TableSideCY and use a manager PIN to review and unlock it if appropriate.";
   // The official Firebase Trigger Email extension watches this collection.
   // Without its one-time installation, the alert remains safely recorded in
@@ -4960,8 +4982,28 @@ async function queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId}
   });
 }
 
-function hashStaffPin(pin, salt) {
-  return scryptSync(pin, salt, 32).toString("base64");
+const staffPinHashProfile = "scrypt-n32768-r8-p1-v2";
+
+// New PIN hashes deliberately cost more than the original Node defaults. The
+// explicit profile lets verification remain backward compatible and upgrade a
+// legacy hash after a successful login without ever storing the plaintext PIN.
+function hashStaffPin(pin, salt, profile = staffPinHashProfile) {
+  if (profile !== staffPinHashProfile) {
+    return scryptSync(pin, salt, 32).toString("base64");
+  }
+  return scryptSync(pin, salt, 32, {
+    N: 32768,
+    r: 8,
+    p: 1,
+    maxmem: 64 * 1024 * 1024,
+  }).toString("base64");
+}
+
+function suppliedStaffPinHash(pin, pinData) {
+  const profile = pinData?.pinHashProfile === staffPinHashProfile
+    ? staffPinHashProfile
+    : "legacy-scrypt-v1";
+  return hashStaffPin(pin, pinData?.salt, profile);
 }
 
 function offlinePinFields(pin) {
@@ -5023,7 +5065,7 @@ async function setOwnStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  const pin = requiredSixDigitPin(data);
+  const pin = requiredNewSixDigitPin(data);
   await requireTenantHostMember(caller, tenantId);
   const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
   if (!venue.exists || venue.data().status === "deleting") {
@@ -5038,6 +5080,7 @@ async function setOwnStaffPinFor(caller, rawData) {
     venueId,
     salt,
     pinHash: hashStaffPin(pin, salt),
+    pinHashProfile: staffPinHashProfile,
     ...offlinePinFields(pin),
     pinVersion: FieldValue.increment(1),
     failedAttempts: 0,
@@ -5056,7 +5099,7 @@ async function changeOwnStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  const pin = requiredSixDigitPin(data);
+  const pin = requiredNewSixDigitPin(data);
   await requireTenantOperationalMember(caller, tenantId);
   const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
   if (!venue.exists || venue.data().status === "deleting") {
@@ -5068,6 +5111,7 @@ async function changeOwnStaffPinFor(caller, rawData) {
     venueId,
     salt,
     pinHash: hashStaffPin(pin, salt),
+    pinHashProfile: staffPinHashProfile,
     ...offlinePinFields(pin),
     pinVersion: FieldValue.increment(1),
     failedAttempts: 0,
@@ -5251,7 +5295,7 @@ async function resetStaffPinFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const userId = requiredText(data, "userId", 128);
-  const newPin = requiredSixDigitPin({pin: data.newPin});
+  const newPin = requiredNewSixDigitPin({pin: data.newPin});
   const {roles} = await requireTenantOperationalMember(caller, tenantId);
   if (!roles.some((role) => role === "owner" || role === "manager")) {
     throw new HttpsError("permission-denied", "Only a manager can reset a staff PIN.");
@@ -5281,6 +5325,7 @@ async function resetStaffPinFor(caller, rawData) {
     venueId,
     salt,
     pinHash: hashStaffPin(newPin, salt),
+    pinHashProfile: staffPinHashProfile,
     ...offlinePinFields(newPin),
     pinVersion: FieldValue.increment(1),
     failedAttempts: 0,
@@ -5296,7 +5341,7 @@ async function recoverOwnStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  const newPin = requiredSixDigitPin({pin: data.newPin});
+  const newPin = requiredNewSixDigitPin({pin: data.newPin});
   const authTime = Number(caller.token.auth_time);
   const nowSeconds = Math.floor(Date.now() / 1000);
   if (!Number.isFinite(authTime) || authTime > nowSeconds || nowSeconds - authTime > 5 * 60) {
@@ -5328,6 +5373,7 @@ async function recoverOwnStaffPinFor(caller, rawData) {
   const salt = randomBytes(16).toString("base64");
   await pinRef.update({
     pinHash: hashStaffPin(newPin, salt),
+    pinHashProfile: staffPinHashProfile,
     ...offlinePinFields(newPin),
     salt,
     pinVersion: FieldValue.increment(1),
@@ -5354,6 +5400,7 @@ async function verifyStaffPinFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const userId = requiredText(data, "userId", 128);
+  const deviceId = requiredDocumentId(data, "deviceId");
   const pin = requiredSixDigitPin(data);
   const repairOfflineVerifier = data.repairOfflineVerifier === true;
   await requireTenantHostMember(caller, tenantId);
@@ -5382,7 +5429,7 @@ async function verifyStaffPinFor(caller, rawData) {
       throw new HttpsError("resource-exhausted", "This staff PIN is locked. Ask a manager to unlock it.");
     }
     const expected = Buffer.from(pinData.pinHash, "base64");
-    const supplied = Buffer.from(hashStaffPin(pin, pinData.salt), "base64");
+    const supplied = Buffer.from(suppliedStaffPinHash(pin, pinData), "base64");
     const valid = expected.length === supplied.length && timingSafeEqual(expected, supplied);
     if (!valid) {
       const failedAttempts = (Number.isInteger(pinData.failedAttempts)
@@ -5397,9 +5444,17 @@ async function verifyStaffPinFor(caller, rawData) {
     }
     const offlineVerifierReady = offlinePinVerifierReady(pinData);
     const rotateOfflineVerifier = repairOfflineVerifier || !offlineVerifierReady;
+    const upgradePinHash = pinData.pinHashProfile !== staffPinHashProfile;
+    const upgradedSalt = upgradePinHash ? randomBytes(16).toString("base64url") : null;
     transaction.update(pinRef, {
       failedAttempts: 0,
       lastVerifiedAt: FieldValue.serverTimestamp(),
+      ...(upgradePinHash ? {
+        salt: upgradedSalt,
+        pinHash: hashStaffPin(pin, upgradedSalt),
+        pinHashProfile: staffPinHashProfile,
+        pinHashUpgradedAt: FieldValue.serverTimestamp(),
+      } : {}),
       ...(rotateOfflineVerifier ? offlinePinFields(pin) : {}),
     });
     return {
@@ -5416,12 +5471,15 @@ async function verifyStaffPinFor(caller, rawData) {
       venueId,
       userId,
       hostUserId: caller.uid,
+      deviceId,
       failedAttempts: verification.failedAttempts,
       requiresManagerAttention: verification.failedAttempts >= 3,
       createdAt: FieldValue.serverTimestamp(),
     });
     if (verification.failedAttempts >= 3) {
-      await queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId: caller.uid});
+      await queueManagerSecurityAlert({
+        tenantId, venueId, userId, hostUserId: caller.uid, deviceId,
+      });
     }
     throw new HttpsError(
       verification.failedAttempts >= 3 ? "resource-exhausted" : "permission-denied",
@@ -5450,7 +5508,9 @@ async function verifyStaffPinFor(caller, rawData) {
     userId,
     venueId,
     hostUserId: caller.uid,
+    deviceId,
     pinVersion: verification.pinVersion,
+    membershipVersion: Number(verifiedMembership.data()?.membershipVersion ?? 0),
     tokenHash: createHash("sha256").update(token).digest("base64"),
     expiresAt,
     createdAt: FieldValue.serverTimestamp(),
@@ -5462,8 +5522,11 @@ async function verifyStaffPinFor(caller, rawData) {
     userId,
     venueId,
     roles: verifiedRoles,
+    pinVersion: verification.pinVersion,
+    membershipVersion: Number(verifiedMembership.data()?.membershipVersion ?? 0),
     platformAdmin: platformAdmin.exists || user.customClaims?.platformAdmin === true,
     sessionId: sessionRef.id,
+    deviceId,
     expiresAt,
     updatedAt: FieldValue.serverTimestamp(),
   });
@@ -5473,11 +5536,13 @@ async function verifyStaffPinFor(caller, rawData) {
     venueId,
     offlineVerifierUpgraded: verification.offlineVerifierUpgraded === true,
     offlineVerifierRepaired: verification.offlineVerifierRepaired === true,
+    deviceId,
   });
   return {
     sessionId: sessionRef.id,
     sessionToken: token,
     expiresAt: expiresAt.toISOString(),
+    deviceId,
     userId,
     displayName: user.displayName || user.email || "Staff member",
     isPlatformAdmin: platformAdmin.exists || user.customClaims?.platformAdmin === true,
@@ -5497,13 +5562,14 @@ async function verifyStaffPinFor(caller, rawData) {
 async function actingCallerFromStaffSession(hostCaller, data) {
   const sessionId = optionalText(data, "staffPinSessionId", 128);
   const sessionToken = optionalText(data, "staffPinSessionToken", 128);
+  const deviceId = optionalText(data, "staffPinSessionDeviceId", 180);
   if (!sessionId && !sessionToken) {
     throw new HttpsError(
       "unauthenticated",
       "Select your staff name and enter your PIN before using the POS.",
     );
   }
-  if (!sessionId || !sessionToken) {
+  if (!sessionId || !sessionToken || !deviceId) {
     throw new HttpsError("unauthenticated", "The shared-device staff session is incomplete.");
   }
   const tenantId = optionalText(data, "staffPinSessionTenantId", 128) ||
@@ -5526,6 +5592,7 @@ async function actingCallerFromStaffSession(hostCaller, data) {
   const expiresAt = sessionData.expiresAt?.toDate?.() ?? null;
   if (!hashesMatch ||
       sessionData.hostUserId !== hostCaller.uid ||
+      sessionData.deviceId !== deviceId ||
       sessionData.venueId !== venueId ||
       expiresAt == null ||
       expiresAt.getTime() <= Date.now()) {
@@ -5542,6 +5609,9 @@ async function actingCallerFromStaffSession(hostCaller, data) {
   const currentPinVersion = Number.isInteger(currentPin.data()?.pinVersion)
     ? currentPin.data().pinVersion
     : 0;
+  const currentMembershipVersion = Number.isInteger(
+    membership.data()?.membershipVersion,
+  ) ? membership.data().membershipVersion : 0;
   if (!hostMembership.exists || hostMembership.data().active === false) {
     throw new HttpsError("permission-denied", "This device's Firebase account no longer has restaurant access.");
   }
@@ -5549,8 +5619,12 @@ async function actingCallerFromStaffSession(hostCaller, data) {
     throw new HttpsError("permission-denied", "The selected staff account is no longer active.");
   }
   if (!currentPin.exists || currentPin.data().locked === true ||
-      currentPinVersion !== sessionData.pinVersion) {
-    throw new HttpsError("unauthenticated", "The staff PIN changed or was locked. Enter the current PIN again.");
+      currentPinVersion !== sessionData.pinVersion ||
+      currentMembershipVersion !== Number(sessionData.membershipVersion ?? 0)) {
+    throw new HttpsError(
+      "unauthenticated",
+      "The staff PIN or access changed. Enter the current PIN again.",
+    );
   }
   return {...hostCaller, uid: actingUserId, hostUid: hostCaller.uid};
 }
@@ -5582,7 +5656,7 @@ async function requireFreshManagerPin(
       throw new HttpsError("resource-exhausted", "This manager PIN is locked.");
     }
     const expected = Buffer.from(String(pinData.pinHash ?? ""), "base64");
-    const supplied = Buffer.from(hashStaffPin(pin, pinData.salt), "base64");
+    const supplied = Buffer.from(suppliedStaffPinHash(pin, pinData), "base64");
     const valid = expected.length === supplied.length && timingSafeEqual(expected, supplied);
     if (!valid) {
       const failedAttempts = (Number.isInteger(pinData.failedAttempts)
@@ -5595,9 +5669,17 @@ async function requireFreshManagerPin(
       });
       return {valid: false, failedAttempts};
     }
+    const upgradePinHash = pinData.pinHashProfile !== staffPinHashProfile;
+    const upgradedSalt = upgradePinHash ? randomBytes(16).toString("base64url") : null;
     transaction.update(pinRef, {
       failedAttempts: 0,
       lastSensitiveApprovalAt: FieldValue.serverTimestamp(),
+      ...(upgradePinHash ? {
+        salt: upgradedSalt,
+        pinHash: hashStaffPin(pin, upgradedSalt),
+        pinHashProfile: staffPinHashProfile,
+        pinHashUpgradedAt: FieldValue.serverTimestamp(),
+      } : {}),
     });
     return {valid: true, failedAttempts: 0};
   });
@@ -5866,6 +5948,7 @@ async function revokeMembershipsFor(userUid, actorUid) {
     for (const document of documents.slice(start, start + 450)) {
       batch.set(document.ref, {
         active: false,
+        membershipVersion: FieldValue.increment(1),
         retiredAt: FieldValue.serverTimestamp(),
         retiredBy: actorUid,
       }, {merge: true});
@@ -5937,7 +6020,7 @@ async function platformAdminPinStatusFor(caller) {
 async function setPlatformAdminPinFor(caller, rawData) {
   await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
-  const pin = requiredSixDigitPin(data);
+  const pin = requiredNewSixDigitPin(data);
   const pinRef = db.doc(`platformAdminPins/${caller.uid}`);
   await db.runTransaction(async (transaction) => {
     const existing = await transaction.get(pinRef);
@@ -5952,6 +6035,7 @@ async function setPlatformAdminPinFor(caller, rawData) {
       userId: caller.uid,
       salt,
       pinHash: hashStaffPin(pin, salt),
+      pinHashProfile: staffPinHashProfile,
       pinVersion: 1,
       failedAttempts: 0,
       createdAt: FieldValue.serverTimestamp(),
@@ -5984,7 +6068,7 @@ async function verifyPlatformAdminPinFor(caller, rawData) {
       );
     }
     const expected = Buffer.from(pinData.pinHash, "base64");
-    const supplied = Buffer.from(hashStaffPin(pin, pinData.salt), "base64");
+    const supplied = Buffer.from(suppliedStaffPinHash(pin, pinData), "base64");
     const valid = expected.length === supplied.length &&
       timingSafeEqual(expected, supplied);
     if (!valid) {
@@ -6001,10 +6085,18 @@ async function verifyPlatformAdminPinFor(caller, rawData) {
       });
       return {valid: false, failedAttempts};
     }
+    const upgradePinHash = pinData.pinHashProfile !== staffPinHashProfile;
+    const upgradedSalt = upgradePinHash ? randomBytes(16).toString("base64url") : null;
     transaction.update(pinRef, {
       failedAttempts: 0,
       lockedUntil: FieldValue.delete(),
       lastVerifiedAt: FieldValue.serverTimestamp(),
+      ...(upgradePinHash ? {
+        salt: upgradedSalt,
+        pinHash: hashStaffPin(pin, upgradedSalt),
+        pinHashProfile: staffPinHashProfile,
+        pinHashUpgradedAt: FieldValue.serverTimestamp(),
+      } : {}),
     });
     return {
       valid: true,
@@ -6275,6 +6367,7 @@ async function createTenantFor(caller, rawData) {
     });
     transaction.create(memberRef, {
       userId: owner.uid,
+      membershipVersion: 1,
       roles: ["owner"],
       defaultVenueId: venueRef.id,
       email: owner.email ?? "",
@@ -6550,6 +6643,7 @@ async function assignUserToTenantFor(caller, rawData) {
 
   await db.doc(`tenants/${tenantId}/members/${user.uid}`).set({
     userId: user.uid,
+    membershipVersion: FieldValue.increment(1),
     roles,
     defaultVenueId,
     email: user.email ?? "",
@@ -8245,6 +8339,9 @@ async function refreshStaffPinSessionFor(caller, rawData) {
   ));
   const membership = await db.doc(`tenants/${tenantId}/members/${caller.uid}`).get();
   const roles = Array.isArray(membership.data()?.roles) ? membership.data().roles : [];
+  const pin = await db.doc(
+    `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`,
+  ).get();
   const batch = db.batch();
   batch.update(sessionRef, {
     expiresAt,
@@ -8254,6 +8351,8 @@ async function refreshStaffPinSessionFor(caller, rawData) {
     userId: caller.uid,
     venueId,
     roles,
+    pinVersion: Number(pin.data()?.pinVersion ?? 0),
+    membershipVersion: Number(membership.data()?.membershipVersion ?? 0),
     sessionId,
     expiresAt,
     updatedAt: FieldValue.serverTimestamp(),
