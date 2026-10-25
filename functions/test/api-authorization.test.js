@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import {createHash, generateKeyPairSync, sign as signMessage} from "node:crypto";
+import {
+  createHash,
+  generateKeyPairSync,
+  scryptSync,
+  sign as signMessage,
+} from "node:crypto";
 import {after, before, beforeEach, describe, test} from "node:test";
 import fs from "node:fs";
 import path from "node:path";
@@ -340,6 +345,181 @@ describe("venue hub cloud reconciliation", () => {
   });
 });
 
+describe("financial integrity", () => {
+  test("mixed tender, voucher redemption and refund retain immutable totals", async () => {
+    await seedFinancialOrder("order-financial");
+
+    const voucherIssue = await callPos("manageVoucher", {
+      ...managerSession(),
+      tenantId: "tenant-a",
+      venueId: "venue-a",
+      operation: "issue",
+      amountMinor: 1000,
+      chargeable: true,
+      issueReason: "Customer gift voucher purchase",
+      paymentMethod: "cash",
+      expiresAtMillis: Date.now() + 30 * 24 * 60 * 60 * 1000,
+    });
+    assert.equal(voucherIssue.status, 200, JSON.stringify(voucherIssue.body));
+    const voucher = voucherIssue.body.data;
+
+    const partialRequest = {
+      ...managerSession(),
+      tenantId: "tenant-a",
+      venueId: "venue-a",
+      orderId: "order-financial",
+      requestId: "payment-financial-partial",
+      printReceipt: false,
+      payments: [{
+        method: "cash",
+        amountMinor: 1000,
+        currencyCode: "EUR",
+        exchangeRateToBase: "0.8",
+        cashChangeBaseMinor: 0,
+        exchangeRateSource: "Test fixed rate",
+        exchangeRatePublishedDate: "2026-10-25",
+        exchangeRateFetchedAt: new Date().toISOString(),
+      }],
+    };
+    const partial = await callPos("closeOrder", partialRequest);
+    assert.equal(partial.status, 200, JSON.stringify(partial.body));
+    assert.equal(partial.body.data.orderClosed, false);
+    assert.equal(partial.body.data.paidThisTimeMinor, 800);
+    assert.equal(partial.body.data.balanceDueMinor, 2200);
+
+    const finalRequest = {
+      ...managerSession(),
+      tenantId: "tenant-a",
+      venueId: "venue-a",
+      orderId: "order-financial",
+      requestId: "payment-financial-final",
+      printReceipt: false,
+      payments: [
+        {
+          method: "voucher",
+          amountMinor: 1000,
+          currencyCode: "GBP",
+          voucherCode: voucher.code,
+        },
+        {
+          method: "cash",
+          amountMinor: 1200,
+          currencyCode: "GBP",
+          cashChangeBaseMinor: 0,
+        },
+      ],
+    };
+    const finalPayment = await callPos("closeOrder", finalRequest);
+    const finalReplay = await callPos("closeOrder", finalRequest);
+    assert.equal(finalPayment.status, 200, JSON.stringify(finalPayment.body));
+    assert.equal(finalReplay.status, 200, JSON.stringify(finalReplay.body));
+    assert.equal(finalPayment.body.data.orderClosed, true);
+    assert.equal(finalPayment.body.data.paidTotalMinor, 3000);
+    assert.equal(finalPayment.body.data.balanceDueMinor, 0);
+    assert.equal(finalReplay.body.data.receiptNumber, finalPayment.body.data.receiptNumber);
+
+    const refundRequest = {
+      ...managerSession(),
+      tenantId: "tenant-a",
+      venueId: "venue-a",
+      billId: "order-financial",
+      requestId: "refund-financial-a",
+      managerPin: "123456",
+      reason: "Customer returned one meal",
+      printReceipt: false,
+      lines: [{lineId: "line-food", quantity: 1}],
+    };
+    const refund = await callPos("createRefund", refundRequest);
+    const refundReplay = await callPos("createRefund", refundRequest);
+    assert.equal(refund.status, 200, JSON.stringify(refund.body));
+    assert.equal(refundReplay.status, 200, JSON.stringify(refundReplay.body));
+    assert.equal(refund.body.data.totalMinor, 1000);
+    assert.equal(refund.body.data.stockAdjustmentRequired, true);
+    assert.equal(refundReplay.body.data.alreadyRefunded, true);
+
+    const overRefund = await callPos("createRefund", {
+      ...refundRequest,
+      requestId: "refund-financial-over",
+      lines: [{lineId: "line-food", quantity: 2}],
+    });
+    assert.equal(overRefund.status, 412);
+
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const firestore = context.firestore();
+      const [order, bill, refundDoc, voucherDoc, stock] = await Promise.all([
+        getDoc(doc(firestore, "tenants/tenant-a/orders/order-financial")),
+        getDoc(doc(firestore, "tenants/tenant-a/bills/order-financial")),
+        getDoc(doc(firestore, "tenants/tenant-a/refunds/refund-financial-a")),
+        getDoc(doc(firestore, `tenants/tenant-a/vouchers/${voucher.id}`)),
+        getDoc(doc(firestore, "tenants/tenant-a/products/stock-curry")),
+      ]);
+      assert.equal(order.data().status, "closed");
+      assert.equal(order.data().payments.length, 3);
+      assert.equal(bill.data().grossTotalMinor, 3000);
+      assert.equal(bill.data().taxTotalMinor, 424);
+      assert.equal(bill.data().netTotalMinor, 2576);
+      assert.equal(bill.data().lines.length, 2);
+      assert.equal(bill.data().payments[0].tenderedCurrencyCode, "EUR");
+      assert.equal(bill.data().payments[0].exchangeRateToBase, "0.8");
+      assert.equal(refundDoc.data().grossMinor, 1000);
+      assert.equal(refundDoc.data().taxMinor, 167);
+      assert.equal(refundDoc.data().netMinor, 833);
+      assert.deepEqual(
+        refundDoc.data().paymentAllocations.map((value) => value.baseAmountMinor),
+        [800, 200],
+      );
+      assert.equal(voucherDoc.data().remainingValueMinor, 200);
+      assert.equal(voucherDoc.data().status, "active");
+      assert.equal(stock.data().stockOnHand, 18);
+      assert.equal(refundDoc.data().stockRestored, false);
+      assert.equal(
+        bill.data().grossTotalMinor - refundDoc.data().grossMinor,
+        2000,
+      );
+      assert.equal(
+        bill.data().taxTotalMinor - refundDoc.data().taxMinor,
+        257,
+      );
+    });
+  });
+
+  test("split bill preserves value and is idempotent", async () => {
+    await seedFinancialOrder("order-split");
+    const request = {
+      ...managerSession(),
+      tenantId: "tenant-a",
+      venueId: "venue-a",
+      orderId: "order-split",
+      splitOrderId: "order-split-child",
+      splitLines: [{lineId: "line-food", quantity: 1}],
+    };
+    const first = await callPos("splitOrder", request);
+    const replay = await callPos("splitOrder", request);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(replay.status, 200, JSON.stringify(replay.body));
+    assert.equal(first.body.data.splitTotalMinor, 1000);
+    assert.equal(first.body.data.remainingTotalMinor, 2000);
+    assert.equal(replay.body.data.alreadySplit, true);
+
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const firestore = context.firestore();
+      const [parent, child, table] = await Promise.all([
+        getDoc(doc(firestore, "tenants/tenant-a/orders/order-split")),
+        getDoc(doc(firestore, "tenants/tenant-a/orders/order-split-child")),
+        getDoc(doc(firestore, "tenants/tenant-a/tables/table-a")),
+      ]);
+      const parentTotal = orderLinesTotal(parent.data().lines);
+      const childTotal = orderLinesTotal(child.data().lines);
+      assert.equal(parentTotal, 2000);
+      assert.equal(childTotal, 1000);
+      assert.equal(parentTotal + childTotal, 3000);
+      assert.deepEqual(parent.data().openSplitOrderIds, ["order-split-child"]);
+      assert.equal(child.data().splitFromOrderId, "order-split");
+      assert.equal(table.data().currentOrderId, "order-split");
+    });
+  });
+});
+
 function approvedBootstrapActions() {
   return [
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
@@ -472,12 +652,15 @@ function membership(userId, roles) {
 }
 
 function pin(userId) {
+  const salt = `test-salt-${userId}`;
   return {
     userId,
     venueId: "venue-a",
     locked: false,
     failedAttempts: 0,
     pinVersion: 1,
+    salt,
+    pinHash: scryptSync("123456", salt, 32).toString("base64"),
   };
 }
 
@@ -593,6 +776,75 @@ async function assertCloudSaleProjection() {
     assert.equal(table.data().hasOpenOrder, false);
     assert.equal(table.data().currentOrderId, null);
   });
+}
+
+async function seedFinancialOrder(orderId) {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    const firestore = context.firestore();
+    await Promise.all([
+      setDoc(doc(firestore, `tenants/tenant-a/orders/${orderId}`), {
+        venueId: "venue-a",
+        tableId: "table-a",
+        tableLabel: "Table 1",
+        channel: "dineIn",
+        status: "sent",
+        openedAt: Timestamp.now(),
+        payments: [],
+        openSplitOrderIds: [],
+        lines: [
+          {
+            id: "line-food",
+            productId: "stock-curry",
+            productName: "House Curry",
+            quantity: 2,
+            unitPriceMinor: 1000,
+            taxRateId: "tax-standard",
+            taxRateName: "Standard 20%",
+            taxRateBasisPoints: 2000,
+            productionArea: "kitchen",
+            isSentToProduction: true,
+          },
+          {
+            id: "line-drink",
+            productId: "drink-a",
+            productName: "Soft Drink",
+            quantity: 1,
+            unitPriceMinor: 1000,
+            taxRateId: "tax-reduced",
+            taxRateName: "Reduced 10%",
+            taxRateBasisPoints: 1000,
+            productionArea: "bar",
+            isSentToProduction: true,
+          },
+        ],
+      }),
+      setDoc(doc(firestore, "tenants/tenant-a/tables/table-a"), {
+        venueId: "venue-a",
+        label: "Table 1",
+        currentOrderId: orderId,
+        hasOpenOrder: true,
+      }),
+      setDoc(doc(firestore, "tenants/tenant-a/products/stock-curry"), {
+        venueId: "venue-a",
+        name: "Curry Portion",
+        trackStock: true,
+        stockOnHand: 18,
+        stockUnit: "portion",
+      }),
+      setDoc(doc(firestore, "tenants/tenant-a/products/drink-a"), {
+        venueId: "venue-a",
+        name: "Soft Drink",
+        trackStock: false,
+        stockOnHand: null,
+        stockUnit: "each",
+      }),
+    ]);
+  });
+}
+
+function orderLinesTotal(lines) {
+  return lines.reduce((total, line) =>
+    total + Number(line.quantity) * Number(line.unitPriceMinor), 0);
 }
 
 async function createAuthUser(email) {
