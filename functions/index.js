@@ -11644,6 +11644,29 @@ function validatedDraftOrderLines(value) {
   });
 }
 
+function inventoryMutationIdentity({tenantRef, data, operation, documentId, values}) {
+  const requestId = requiredDocumentId(data, "requestId");
+  const requestDigest = createHash("sha256").update(JSON.stringify(canonicalJsonValue({
+    operation, documentId, values,
+  }))).digest("base64url");
+  return {
+    requestId,
+    requestDigest,
+    reference: tenantRef.collection("inventoryOperations").doc(requestId),
+  };
+}
+
+function inventoryMutationWasReplayed(snapshot, requestDigest) {
+  if (!snapshot.exists) return false;
+  if (snapshot.data().requestDigest !== requestDigest) {
+    throw new HttpsError(
+      "already-exists",
+      "That inventory request key was already used for different data.",
+    );
+  }
+  return true;
+}
+
 /// Manager-only stock and purchasing surface. All costs, pack conversions,
 /// product balances and recommendations are derived or reloaded server-side.
 /// Purchase receipts and stock movements are immutable audit evidence.
@@ -11970,8 +11993,17 @@ async function manageInventoryFor(caller, rawData) {
     if (documentId == null) throw new HttpsError("invalid-argument", "documentId is required.");
     const receipts = validatedReceiptLines(values.lines);
     const reference = tenantRef.collection("purchaseOrders").doc(documentId);
-    await db.runTransaction(async (transaction) => {
-      const order = await transaction.get(reference);
+    const mutation = inventoryMutationIdentity({
+      tenantRef, data, operation, documentId, values,
+    });
+    const replayed = await db.runTransaction(async (transaction) => {
+      const [order, existingMutation] = await Promise.all([
+        transaction.get(reference),
+        transaction.get(mutation.reference),
+      ]);
+      if (inventoryMutationWasReplayed(existingMutation, mutation.requestDigest)) {
+        return true;
+      }
       if (!order.exists || order.data().venueId !== venueId) {
         throw new HttpsError("not-found", "That purchase order was not found.");
       }
@@ -12024,9 +12056,17 @@ async function manageInventoryFor(caller, rawData) {
         lastReceivedAt: FieldValue.serverTimestamp(), lastReceivedByActor: actor,
         updatedAt: FieldValue.serverTimestamp(),
       });
+      transaction.create(mutation.reference, {
+        tenantId, venueId, operation, documentId,
+        requestDigest: mutation.requestDigest,
+        actor,
+        createdAt: FieldValue.serverTimestamp(),
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      });
+      return false;
     });
-    await audit(documentId, {resource: "purchaseReceipt"});
-    return {documentId};
+    if (!replayed) await audit(documentId, {resource: "purchaseReceipt"});
+    return {documentId, alreadyApplied: replayed};
   }
 
   if (operation === "adjustStock") {
@@ -12048,9 +12088,18 @@ async function manageInventoryFor(caller, rawData) {
     }
     const reason = requiredText(values, "reason", 500);
     const productRef = tenantRef.collection("products").doc(productId);
+    const mutation = inventoryMutationIdentity({
+      tenantRef, data, operation, documentId: productId, values,
+    });
     let appliedQuantity = requestedQuantity;
-    await db.runTransaction(async (transaction) => {
-      const product = await transaction.get(productRef);
+    const replayed = await db.runTransaction(async (transaction) => {
+      const [product, existingMutation] = await Promise.all([
+        transaction.get(productRef),
+        transaction.get(mutation.reference),
+      ]);
+      if (inventoryMutationWasReplayed(existingMutation, mutation.requestDigest)) {
+        return true;
+      }
       if (!product.exists || product.data().venueId !== venueId || product.data().trackStock !== true) {
         throw new HttpsError("not-found", "That stock-tracked product was not found at this venue.");
       }
@@ -12076,11 +12125,21 @@ async function manageInventoryFor(caller, rawData) {
           : {}),
         actor, createdAt: FieldValue.serverTimestamp(),
       });
+      transaction.create(mutation.reference, {
+        tenantId, venueId, operation, documentId: productId,
+        requestDigest: mutation.requestDigest,
+        actor,
+        createdAt: FieldValue.serverTimestamp(),
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      });
+      return false;
     });
-    await audit(productId, {
-      resource: "stockAdjustment", adjustmentType, quantity: appliedQuantity, reason,
-    });
-    return {documentId: productId};
+    if (!replayed) {
+      await audit(productId, {
+        resource: "stockAdjustment", adjustmentType, quantity: appliedQuantity, reason,
+      });
+    }
+    return {documentId: productId, alreadyApplied: replayed};
   }
 
   throw new HttpsError("invalid-argument", "That inventory operation is not supported.");

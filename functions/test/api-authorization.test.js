@@ -13,8 +13,10 @@ import {fileURLToPath} from "node:url";
 import {initializeTestEnvironment} from "@firebase/rules-unit-testing";
 import {
   Timestamp,
+  collection,
   doc,
   getDoc,
+  getDocs,
   setDoc,
 } from "firebase/firestore";
 import {ref, set} from "firebase/database";
@@ -709,6 +711,204 @@ describe("printer delivery reliability", () => {
   });
 });
 
+describe("stock and purchasing integrity", () => {
+  test("recommendation, ordering and decimal pack receipts preserve stock and cost", async () => {
+    await seedPurchasingFixture();
+    const supplier = await callPos("manageInventory", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "saveSupplier",
+      values: {name: "Island Drinks", active: true},
+    });
+    assert.equal(supplier.status, 200, JSON.stringify(supplier.body));
+    const supplierId = supplier.body.data.documentId;
+
+    const mapping = await callPos("manageInventory", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "saveSupplierProduct",
+      values: {
+        supplierId,
+        productId: "vodka-stock",
+        packName: "1 litre bottle",
+        stockUnitsPerPack: 1000,
+        packCostMinor: 1500,
+        currencyCode: "GBP",
+        preferred: true,
+      },
+    });
+    assert.equal(mapping.status, 200, JSON.stringify(mapping.body));
+    const duplicateMapping = await callPos("manageInventory", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "saveSupplierProduct",
+      values: {
+        supplierId,
+        productId: "vodka-stock",
+        packName: "Duplicate",
+        stockUnitsPerPack: 1000,
+        packCostMinor: 1500,
+        currencyCode: "GBP",
+      },
+    });
+    assert.equal(duplicateMapping.status, 409);
+
+    const recommendation = await callPos("manageInventory", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "createRecommendedOrder",
+      values: {supplierId, coverageDays: 7},
+    });
+    assert.equal(recommendation.status, 200, JSON.stringify(recommendation.body));
+    const purchaseOrderId = recommendation.body.data.documentId;
+    const draft = await readDocument(
+      `tenants/tenant-a/purchaseOrders/${purchaseOrderId}`,
+    );
+    assert.equal(draft.status, "draft");
+    assert.equal(draft.lines.length, 1);
+    assert.equal(draft.lines[0].recentDailyUsage, 100);
+    assert.equal(draft.lines[0].priorYearDailyUsage, 50);
+    assert.equal(draft.lines[0].recommendedPacks, 1);
+
+    const lineId = draft.lines[0].id;
+    const update = await callPos("manageInventory", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "updateDraftOrder", documentId: purchaseOrderId,
+      values: {lines: [{lineId, orderedPacks: 2}]},
+    });
+    assert.equal(update.status, 200, JSON.stringify(update.body));
+    const ordered = await callPos("manageInventory", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "markOrderOrdered", documentId: purchaseOrderId,
+    });
+    assert.equal(ordered.status, 200, JSON.stringify(ordered.body));
+
+    const receiptRequest = {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "receiveOrder", documentId: purchaseOrderId,
+      requestId: "inventory-receipt-a",
+      values: {lines: [{lineId, receivedPacks: 0.5}]},
+    };
+    const firstReceipt = await callPos("manageInventory", receiptRequest);
+    const replayedReceipt = await callPos("manageInventory", receiptRequest);
+    assert.equal(firstReceipt.status, 200, JSON.stringify(firstReceipt.body));
+    assert.equal(replayedReceipt.status, 200, JSON.stringify(replayedReceipt.body));
+    assert.equal(firstReceipt.body.data.alreadyApplied, false);
+    assert.equal(replayedReceipt.body.data.alreadyApplied, true);
+    const alteredReplay = await callPos("manageInventory", {
+      ...receiptRequest,
+      values: {lines: [{lineId, receivedPacks: 0.25}]},
+    });
+    assert.equal(alteredReplay.status, 409);
+
+    let product = await readDocument("tenants/tenant-a/products/vodka-stock");
+    let purchaseOrder = await readDocument(
+      `tenants/tenant-a/purchaseOrders/${purchaseOrderId}`,
+    );
+    assert.equal(product.stockOnHand, 600);
+    assert.equal(product.latestUnitCostMinor, 1.5);
+    assert.equal(purchaseOrder.status, "partiallyReceived");
+    assert.equal(purchaseOrder.lines[0].receivedPacks, 0.5);
+
+    const finalReceipt = await callPos("manageInventory", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "receiveOrder", documentId: purchaseOrderId,
+      requestId: "inventory-receipt-b",
+      values: {lines: [{lineId, receivedPacks: 1.5}]},
+    });
+    assert.equal(finalReceipt.status, 200, JSON.stringify(finalReceipt.body));
+    product = await readDocument("tenants/tenant-a/products/vodka-stock");
+    purchaseOrder = await readDocument(
+      `tenants/tenant-a/purchaseOrders/${purchaseOrderId}`,
+    );
+    assert.equal(product.stockOnHand, 2100);
+    assert.equal(purchaseOrder.status, "received");
+    assert.equal(purchaseOrder.lines[0].receivedPacks, 2);
+
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const movements = await getDocs(collection(
+        context.firestore(), "tenants/tenant-a/stockMovements",
+      ));
+      const receipts = movements.docs
+        .map((item) => item.data())
+        .filter((item) => item.reason === "purchaseReceipt");
+      assert.equal(receipts.length, 2);
+      assert.deepEqual(receipts.map((item) => item.quantity).sort((a, b) => a - b), [500, 1500]);
+    });
+  });
+
+  test("wastage and physical counts are decimal, audited and replay safe", async () => {
+    await seedStockProduct("beef-stock", {
+      name: "Prepared beef",
+      stockOnHand: 10,
+      stockUnit: "kg",
+    });
+    const waiterAttempt = await callPos("manageInventory", {
+      ...waiterSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "adjustStock", requestId: "waiter-wastage",
+      values: {
+        productId: "beef-stock", adjustmentType: "wastage",
+        quantity: -1, reason: "Test waiter rejection",
+      },
+    });
+    assert.equal(waiterAttempt.status, 403);
+
+    const wastageRequest = {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "adjustStock", requestId: "inventory-wastage-a",
+      values: {
+        productId: "beef-stock", adjustmentType: "wastage",
+        quantity: -1.25, reason: "Trim waste",
+      },
+    };
+    const wastage = await callPos("manageInventory", wastageRequest);
+    const wastageReplay = await callPos("manageInventory", wastageRequest);
+    assert.equal(wastage.status, 200, JSON.stringify(wastage.body));
+    assert.equal(wastageReplay.status, 200, JSON.stringify(wastageReplay.body));
+    assert.equal(wastage.body.data.alreadyApplied, false);
+    assert.equal(wastageReplay.body.data.alreadyApplied, true);
+
+    const alteredReplay = await callPos("manageInventory", {
+      ...wastageRequest,
+      values: {...wastageRequest.values, quantity: -2},
+    });
+    assert.equal(alteredReplay.status, 409);
+    const invalidWastage = await callPos("manageInventory", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "adjustStock", requestId: "inventory-wastage-invalid",
+      values: {
+        productId: "beef-stock", adjustmentType: "wastage",
+        quantity: 1, reason: "Invalid positive wastage",
+      },
+    });
+    assert.equal(invalidWastage.status, 400);
+
+    const count = await callPos("manageInventory", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      operation: "adjustStock", requestId: "inventory-count-a",
+      values: {
+        productId: "beef-stock", adjustmentType: "physicalCount",
+        countedQuantity: 7.5, reason: "Weekly physical count",
+      },
+    });
+    assert.equal(count.status, 200, JSON.stringify(count.body));
+    const product = await readDocument("tenants/tenant-a/products/beef-stock");
+    assert.equal(product.stockOnHand, 7.5);
+
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const movements = await getDocs(collection(
+        context.firestore(), "tenants/tenant-a/stockMovements",
+      ));
+      const values = movements.docs.map((item) => item.data());
+      assert.equal(values.length, 2);
+      assert.deepEqual(
+        values.map((item) => item.quantity).sort((a, b) => a - b),
+        [-1.25, -1.25],
+      );
+      assert.deepEqual(
+        values.map((item) => item.reason).sort(),
+        ["physicalCount", "wastage"],
+      );
+    });
+  });
+});
+
 function approvedBootstrapActions() {
   return [
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
@@ -1075,6 +1275,60 @@ async function seedPrinterFixture({
     }
     await Promise.all(writes);
   });
+}
+
+async function seedPurchasingFixture() {
+  await seedStockProduct("vodka-stock", {
+    name: "Vodka",
+    stockOnHand: 100,
+    stockUnit: "ml",
+  });
+  const currentDate = new Date();
+  currentDate.setUTCDate(currentDate.getUTCDate() - 10);
+  const priorDate = new Date();
+  priorDate.setUTCFullYear(priorDate.getUTCFullYear() - 1);
+  priorDate.setUTCDate(priorDate.getUTCDate() - 10);
+  await environment.withSecurityRulesDisabled(async (context) => {
+    const firestore = context.firestore();
+    await Promise.all([
+      setDoc(doc(firestore, "tenants/tenant-a/bills/current-stock-sales"), {
+        venueId: "venue-a",
+        businessDate: purchaseDateKey(currentDate),
+        lines: [{
+          productId: "vodka-cocktail",
+          quantity: 60,
+          stockComponents: [{productId: "vodka-stock", quantityPerSale: 50}],
+        }],
+      }),
+      setDoc(doc(firestore, "tenants/tenant-a/bills/prior-stock-sales"), {
+        venueId: "venue-a",
+        businessDate: purchaseDateKey(priorDate),
+        lines: [{
+          productId: "vodka-cocktail",
+          quantity: 30,
+          stockComponents: [{productId: "vodka-stock", quantityPerSale: 50}],
+        }],
+      }),
+    ]);
+  });
+}
+
+async function seedStockProduct(productId, values) {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(
+      context.firestore(), `tenants/tenant-a/products/${productId}`,
+    ), {
+      venueId: "venue-a",
+      trackStock: true,
+      archived: false,
+      stockPerSale: 1,
+      ...values,
+    });
+  });
+}
+
+function purchaseDateKey(date) {
+  return date.toISOString().slice(0, 10);
 }
 
 function printJob(targetDeviceId, status, createdAtMillis) {

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:firebase_auth/firebase_auth.dart';
@@ -395,10 +396,14 @@ class ProductionCommandRepository {
     String? documentId,
     Map<String, Object?> values = const {},
   }) async {
+    final requestNonce = Random.secure().nextInt(0x7fffffff).toRadixString(16);
+    final requestId =
+        'inventory-$operation-${DateTime.now().microsecondsSinceEpoch}-$requestNonce';
     final response = await _call('manageInventory', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'operation': operation,
+      'requestId': requestId,
       if (documentId != null && documentId.trim().isNotEmpty)
         'documentId': documentId,
       'values': values,
