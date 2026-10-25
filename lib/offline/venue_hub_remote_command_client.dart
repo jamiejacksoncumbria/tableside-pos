@@ -133,8 +133,20 @@ class VenueHubRemoteCommandClient {
             'Remote hub command $commandId: status=$status, stage=$stage, '
             'claimedBy=$claimedBy.',
           );
-          if (status == 'accepted') break;
+          if (status == 'accepted') {
+            // A durable acknowledgement proves the authoritative hub is
+            // responding. Clear any stale transport warning immediately so a
+            // recovered terminal is not left looking offline.
+            VenueHubAvailability.markOnline();
+            break;
+          }
           if (status == 'rejected' || status == 'expired') {
+            // A hub-side business rejection is also proof of connectivity.
+            // Cloud expiry without a claimant is not: in that case the hub
+            // may genuinely still be unavailable.
+            if (stage == 'hubRejected' || claimedBy != 'none') {
+              VenueHubAvailability.markOnline();
+            }
             final message = value['rejectionMessage'];
             throw StateError(
               message is String && message.trim().isNotEmpty

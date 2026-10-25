@@ -14,6 +14,24 @@ import '../offline/venue_hub_remote_command_client.dart';
 import '../offline/venue_hub_availability.dart';
 import 'home_shell.dart';
 
+@visibleForTesting
+({double hubTop, double pendingTop, double updatesTop})
+appStatusOverlayOffsets({
+  required double topInset,
+  required bool showStaging,
+  required bool showHubIssue,
+  required bool showPending,
+}) {
+  final firstTop = topInset + (showStaging ? 42 : 8);
+  final hubHeight = showHubIssue ? 58.0 : 0.0;
+  final pendingHeight = showPending ? 58.0 : 0.0;
+  return (
+    hubTop: firstTop,
+    pendingTop: firstTop + hubHeight,
+    updatesTop: firstTop + hubHeight + pendingHeight,
+  );
+}
+
 // MaterialApp's builder is above its Navigator in the element tree. The root
 // key gives global connectivity notices a context owned by the Navigator
 // overlay instead of attempting showDialog with the builder's invalid parent
@@ -47,6 +65,12 @@ class TableSideCYApp extends ConsumerWidget {
               final showStaging =
                   FirebaseRuntimeConfig.enabled && AppEnvironment.isStaging;
               final topInset = MediaQuery.paddingOf(context).top;
+              final overlayOffsets = appStatusOverlayOffsets(
+                topInset: topInset,
+                showStaging: showStaging,
+                showHubIssue: hubIssue != null,
+                showPending: pending > 0,
+              );
               return _HubOfflineDialogHost(
                 issue: hubIssue,
                 child: Stack(
@@ -81,7 +105,7 @@ class TableSideCYApp extends ConsumerWidget {
                       ),
                     if (pending > 0)
                       Positioned(
-                        top: topInset + (showStaging ? 42 : 8),
+                        top: overlayOffsets.pendingTop,
                         left: 16,
                         right: 16,
                         child: Material(
@@ -122,7 +146,7 @@ class TableSideCYApp extends ConsumerWidget {
                       ),
                     if (hubIssue != null)
                       Positioned(
-                        top: topInset + (showStaging ? 42 : 8),
+                        top: overlayOffsets.hubTop,
                         left: 16,
                         right: 16,
                         child: Material(
@@ -152,12 +176,7 @@ class TableSideCYApp extends ConsumerWidget {
                           ),
                         ),
                       ),
-                    ShorebirdUpdateHost(
-                      top:
-                          topInset +
-                          (showStaging ? 42 : 8) +
-                          (pending > 0 ? 58 : 0),
-                    ),
+                    ShorebirdUpdateHost(top: overlayOffsets.updatesTop),
                     if (busy > 0) ...[
                       const Positioned.fill(
                         child: ModalBarrier(

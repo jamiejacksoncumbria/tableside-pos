@@ -166,6 +166,82 @@ void main() {
   });
 
   test(
+    'replacement hub restores and continues an older-epoch open order',
+    () async {
+      final database = sqlite3.openInMemory();
+      final store = NativeOfflineEventStore(
+        database: database,
+        crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
+      );
+      addTearDown(store.close);
+      final ledger = OfflineEventLedger.forTesting(store);
+      await ledger.initialize();
+      final replacement = VenueOfflineOrderBook(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        hubEpoch: 4,
+        ledger: ledger,
+      );
+
+      await replacement.installCloudBaselines(const <String, Object?>{
+        'openOrders': <Object?>[
+          <String, Object?>{
+            'orderId': 'order-a',
+            'sourceOfflineHubEpoch': 3,
+            'openedAtUtc': '2026-10-13T10:00:00.000Z',
+            'channel': 'dineIn',
+            'tableId': 'table-a',
+            'deliveryFeeMinor': 0,
+            'lines': <Object?>[],
+            'payments': <Object?>[],
+          },
+        ],
+      });
+
+      final opening = await replacement.commit(
+        OfflineEventDraft(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'terminal-a',
+          staffId: 'staff-a',
+          type: 'order.opened',
+          payload: <String, Object?>{
+            'orderId': 'order-a',
+            'channel': 'dineIn',
+            'tableId': 'table-a',
+          },
+        ),
+        4,
+      );
+      expect(opening.type, 'order.cloudBaseline');
+
+      await replacement.commit(
+        OfflineEventDraft(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'terminal-a',
+          staffId: 'staff-a',
+          type: 'order.itemAdded',
+          payload: <String, Object?>{
+            'orderId': 'order-a',
+            'lineId': 'line-a',
+            'productId': 'product-a',
+            'productName': 'Meal',
+            'quantity': 1,
+            'unitPriceMinor': 1200,
+          },
+        ),
+        4,
+      );
+
+      final restored = await replacement.order('order-a');
+      expect(restored.tableId, 'table-a');
+      expect(restored.lines, hasLength(1));
+      expect(restored.balanceDueMinor, 1200);
+    },
+  );
+
+  test(
     'redundant baseline cannot poison an already closed local order',
     () async {
       final database = sqlite3.openInMemory();

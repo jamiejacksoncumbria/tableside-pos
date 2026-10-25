@@ -2,8 +2,31 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tableside_pos/app/pos_app.dart';
+import 'package:tableside_pos/core/app_theme_controller.dart';
 
 void main() {
+  for (final size in const <Size>[
+    Size(360, 640),
+    Size(600, 800),
+    Size(800, 500),
+    Size(1280, 720),
+  ]) {
+    testWidgets(
+      'POS shell has no layout exception at ${size.width.toInt()}x${size.height.toInt()}',
+      (tester) async {
+        tester.view.physicalSize = size;
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        await tester.pumpWidget(_testApp());
+        await tester.pumpAndSettle();
+
+        expect(find.text('New order'), findsOneWidget);
+      },
+    );
+  }
+
   testWidgets('wide workspace navigation remains bounded and visible', (
     tester,
   ) async {
@@ -12,7 +35,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.pumpWidget(const ProviderScope(child: TableSideCYApp()));
+    await tester.pumpWidget(_testApp());
     await tester.pumpAndSettle();
 
     expect(find.text('TableSideCY Hospitality'), findsOneWidget);
@@ -28,7 +51,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.pumpWidget(const ProviderScope(child: TableSideCYApp()));
+    await tester.pumpWidget(_testApp());
     await tester.pumpAndSettle();
 
     expect(find.text('New order'), findsOneWidget);
@@ -48,7 +71,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.pumpWidget(const ProviderScope(child: TableSideCYApp()));
+    await tester.pumpWidget(_testApp());
     await tester.pumpAndSettle();
 
     expect(find.text('New order'), findsOneWidget);
@@ -69,7 +92,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.pumpWidget(const ProviderScope(child: TableSideCYApp()));
+    await tester.pumpWidget(_testApp());
     await tester.pumpAndSettle();
 
     final search = find.byType(TextField).first;
@@ -78,4 +101,16 @@ void main() {
     expect(tester.widget<TextField>(search).controller?.text, 'draft');
     expect(tester.takeException(), isNull);
   });
+}
+
+Widget _testApp() => ProviderScope(
+  overrides: [
+    appThemeControllerProvider.overrideWith(_TestThemeController.new),
+  ],
+  child: const TableSideCYApp(),
+);
+
+class _TestThemeController extends AppThemeController {
+  @override
+  AppThemeSelection build() => const AppThemeSelection();
 }

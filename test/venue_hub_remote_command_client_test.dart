@@ -43,37 +43,40 @@ void main() {
     expect(acknowledgement.sequence, 9);
   });
 
-  test('background command never activates the foreground busy overlay', () async {
-    AppBusyState.pending.value = 0;
-    RemoteHubWaitState.pending.value = 0;
-    final client = VenueHubRemoteCommandClient(
-      timeout: const Duration(seconds: 1),
-    );
+  test(
+    'background command never activates the foreground busy overlay',
+    () async {
+      AppBusyState.pending.value = 0;
+      RemoteHubWaitState.pending.value = 0;
+      final client = VenueHubRemoteCommandClient(
+        timeout: const Duration(seconds: 1),
+      );
 
-    await client.send(
-      scope: scope,
-      hubEpoch: 3,
-      eventType: 'order.itemsAdded',
-      payload: const <String, Object?>{'orderId': 'order-a'},
-      showBusy: false,
-      submit: (request) async => <String, Object?>{
-        'commandId': request['commandId'],
-      },
-      waitForStatus: (request) async => <String, Object?>{
-        'commandId': request['commandId'],
-        'status': 'accepted',
-        'result': <String, Object?>{
-          'eventId': 'event-background-a',
-          'sequence': 10,
-          'eventHash': 'hash-background-a',
-          'committedAtUtc': '2026-10-11T18:00:00.000Z',
+      await client.send(
+        scope: scope,
+        hubEpoch: 3,
+        eventType: 'order.itemsAdded',
+        payload: const <String, Object?>{'orderId': 'order-a'},
+        showBusy: false,
+        submit: (request) async => <String, Object?>{
+          'commandId': request['commandId'],
         },
-      },
-    );
+        waitForStatus: (request) async => <String, Object?>{
+          'commandId': request['commandId'],
+          'status': 'accepted',
+          'result': <String, Object?>{
+            'eventId': 'event-background-a',
+            'sequence': 10,
+            'eventHash': 'hash-background-a',
+            'committedAtUtc': '2026-10-11T18:00:00.000Z',
+          },
+        },
+      );
 
-    expect(AppBusyState.pending.value, 0);
-    expect(RemoteHubWaitState.pending.value, 0);
-  });
+      expect(AppBusyState.pending.value, 0);
+      expect(RemoteHubWaitState.pending.value, 0);
+    },
+  );
 
   test('never treats a non-terminal server status as saved', () async {
     final client = VenueHubRemoteCommandClient(
@@ -98,7 +101,7 @@ void main() {
   });
 
   test('surfaces a terminal hub rejection without retrying it', () async {
-    VenueHubAvailability.markOnline();
+    VenueHubAvailability.markOffline('Previous connection failure.');
     final client = VenueHubRemoteCommandClient(
       timeout: const Duration(seconds: 3),
     );
@@ -139,6 +142,32 @@ void main() {
       isNull,
       reason: 'A hub business rejection proves that the hub is online.',
     );
+  });
+
+  test('cloud expiry does not falsely clear an offline warning', () async {
+    VenueHubAvailability.markOffline('Hub heartbeat is stale.');
+    final client = VenueHubRemoteCommandClient(
+      timeout: const Duration(seconds: 1),
+    );
+
+    await expectLater(
+      client.send(
+        scope: scope,
+        hubEpoch: 3,
+        eventType: 'order.itemAdded',
+        payload: const <String, Object?>{'orderId': 'order-a'},
+        submit: (request) async => <String, Object?>{
+          'commandId': request['commandId'],
+        },
+        waitForStatus: (_) async => const <String, Object?>{
+          'status': 'expired',
+          'stage': 'expired',
+        },
+      ),
+      throwsA(isA<StateError>()),
+    );
+
+    expect(VenueHubAvailability.issue.value, 'Hub heartbeat is stale.');
   });
 
   test('resumes the same command after an acknowledgement outage', () async {

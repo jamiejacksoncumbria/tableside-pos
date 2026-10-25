@@ -4,6 +4,44 @@ import 'package:tableside_pos/core/safe_dialog.dart';
 import 'package:tableside_pos/features/auth/staff_pin_gate.dart';
 
 void main() {
+  for (final size in const <Size>[
+    Size(320, 480),
+    Size(600, 360),
+    Size(600, 800),
+    Size(1280, 720),
+  ]) {
+    for (final brightness in Brightness.values) {
+      testWidgets(
+        'PIN pad fits ${size.width.toInt()}x${size.height.toInt()} in ${brightness.name} mode',
+        (tester) async {
+          tester.view.physicalSize = size;
+          tester.view.devicePixelRatio = 1;
+          tester.platformDispatcher.platformBrightnessTestValue = brightness;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          addTearDown(
+            tester.platformDispatcher.clearPlatformBrightnessTestValue,
+          );
+
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: ThemeData.light(),
+              darkTheme: ThemeData.dark(),
+              themeMode: ThemeMode.system,
+              home: _PinDialogHarness(),
+            ),
+          );
+          await tester.tap(find.text('Open PIN'));
+          await tester.pumpAndSettle();
+
+          expect(find.text('Enter PIN'), findsOneWidget);
+          expect(find.text('Cancel'), findsOneWidget);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
   testWidgets(
     'PIN pad remains laid out and submits on a compact touch screen',
     (tester) async {

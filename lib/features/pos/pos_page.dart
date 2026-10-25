@@ -143,6 +143,7 @@ class _PosPageState extends ConsumerState<PosPage>
                       .fold<int>(0, (total, line) => total + line.quantity);
                   final shownCount = pending > 0 ? pending : sent;
                   final badgeColor = pending > 0 ? Colors.red : Colors.green;
+                  final showTabLabels = constraints.maxWidth >= 400;
                   return SizedBox(
                     // Keep navigation touchable while returning vertical room
                     // to the table, product and order workspaces on tablets.
@@ -156,47 +157,74 @@ class _PosPageState extends ConsumerState<PosPage>
                           .read(posCompactTabProvider.notifier)
                           .select(index),
                       tabs: [
-                        const Tab(
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.table_restaurant_rounded, size: 17),
-                              SizedBox(width: 4),
-                              Text('Tables'),
-                            ],
-                          ),
-                        ),
-                        const Tab(
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.restaurant_menu_rounded, size: 17),
-                              SizedBox(width: 4),
-                              Text('Menu'),
-                            ],
-                          ),
+                        Tab(
+                          child: showTabLabels
+                              ? const Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.table_restaurant_rounded,
+                                      size: 17,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Flexible(child: Text('Tables')),
+                                  ],
+                                )
+                              : const Icon(
+                                  Icons.table_restaurant_rounded,
+                                  size: 18,
+                                ),
                         ),
                         Tab(
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              shownCount == 0
-                                  ? const Icon(
-                                      Icons.receipt_long_rounded,
+                          child: showTabLabels
+                              ? const Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.restaurant_menu_rounded,
                                       size: 17,
-                                    )
-                                  : Badge.count(
-                                      count: shownCount,
-                                      backgroundColor: badgeColor,
-                                      child: const Icon(
-                                        Icons.receipt_long_rounded,
-                                        size: 17,
-                                      ),
                                     ),
-                              const SizedBox(width: 4),
-                              const Text('Order'),
-                            ],
-                          ),
+                                    SizedBox(width: 4),
+                                    Flexible(child: Text('Menu')),
+                                  ],
+                                )
+                              : const Icon(
+                                  Icons.restaurant_menu_rounded,
+                                  size: 18,
+                                ),
+                        ),
+                        Tab(
+                          child: showTabLabels
+                              ? Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    shownCount == 0
+                                        ? const Icon(
+                                            Icons.receipt_long_rounded,
+                                            size: 17,
+                                          )
+                                        : Badge.count(
+                                            count: shownCount,
+                                            backgroundColor: badgeColor,
+                                            child: const Icon(
+                                              Icons.receipt_long_rounded,
+                                              size: 17,
+                                            ),
+                                          ),
+                                    const SizedBox(width: 4),
+                                    const Flexible(child: Text('Order')),
+                                  ],
+                                )
+                              : shownCount == 0
+                              ? const Icon(Icons.receipt_long_rounded, size: 18)
+                              : Badge.count(
+                                  count: shownCount,
+                                  backgroundColor: badgeColor,
+                                  child: const Icon(
+                                    Icons.receipt_long_rounded,
+                                    size: 18,
+                                  ),
+                                ),
                         ),
                       ],
                     ),
@@ -2099,7 +2127,9 @@ class _ProductTileState extends State<_ProductTile> {
               borderRadius: BorderRadius.circular(16),
             ),
             child: Padding(
-              padding: const EdgeInsets.all(14),
+              // Twelve pixels keeps two product-name lines, price and the
+              // category visible on narrow phone grids without clipping.
+              padding: const EdgeInsets.all(12),
               child: LayoutBuilder(
                 builder: (context, constraints) {
                   // Phone grids intentionally use a short tile. Keep its most
