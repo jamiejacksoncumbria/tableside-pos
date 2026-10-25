@@ -4852,10 +4852,35 @@ async function completeDevicePrintJobFor(caller, rawData) {
   await db.runTransaction(async (transaction) => {
     const job = await transaction.get(jobRef);
     const value = job.data();
-    if (!job.exists || value.venueId !== device.venueId ||
-        value.targetDeviceId !== device.deviceId || value.status !== "claimed" ||
-        value.claimedByDeviceId !== device.deviceId) {
+    const belongsToDevice = job.exists && value.venueId === device.venueId &&
+      value.targetDeviceId === device.deviceId &&
+      value.claimedByDeviceId === device.deviceId;
+    // A network failure can hide the original successful response after the
+    // transaction commits. Accept an exact repeat from the device that owned
+    // the claim so the worker does not raise a false failure or try to recover
+    // a ticket that is already durably terminal. The job itself is unchanged.
+    const repeatsTerminalResult = belongsToDevice &&
+      ((printed && value.status === "printed") ||
+       (!printed && value.status === "failed"));
+    if (repeatsTerminalResult) return;
+    if (!belongsToDevice || value.status !== "claimed") {
       throw new HttpsError("failed-precondition", "This printer no longer owns the queued ticket.");
+    }
+    let linkedPrimaryRef = null;
+    let linkedPrimary = null;
+    if (printed && typeof value.fallbackFromJobId === "string" &&
+        value.fallbackFromJobId.length > 0) {
+      linkedPrimaryRef = db.doc(
+        `tenants/${device.tenantId}/printJobs/${value.fallbackFromJobId}`,
+      );
+      linkedPrimary = await transaction.get(linkedPrimaryRef);
+      if (linkedPrimary.exists &&
+          linkedPrimary.data().venueId !== device.venueId) {
+        throw new HttpsError(
+          "failed-precondition",
+          "The linked printer job belongs to another venue.",
+        );
+      }
     }
     const attempts = Number.isInteger(value.attempts) ? value.attempts : 1;
     if (printed) {
@@ -4865,6 +4890,15 @@ async function completeDevicePrintJobFor(caller, rawData) {
         failureReason: FieldValue.delete(),
         nextAttemptAt: FieldValue.delete(),
       });
+      // Clear the primary failure alarm atomically with fallback completion.
+      // The document trigger below remains a repair path for legacy clients,
+      // but normal printing no longer waits for an asynchronous cold start.
+      if (linkedPrimaryRef != null && linkedPrimary?.exists) {
+        transaction.update(linkedPrimaryRef, {
+          fallbackDeliveryStatus: "printed",
+          fallbackPrintedAt: FieldValue.serverTimestamp(),
+        });
+      }
     } else if (attempts < 3) {
       transaction.update(jobRef, {
         status: "queued",
@@ -4874,11 +4908,68 @@ async function completeDevicePrintJobFor(caller, rawData) {
         claimedAt: FieldValue.delete(),
       });
     } else {
+      // Hand the ticket to its configured fallback in the same transaction
+      // that marks the primary failed. Relying only on an asynchronous
+      // Firestore trigger leaves a cold-start window where no printer owns an
+      // urgent kitchen ticket. The existing trigger remains a repair path for
+      // legacy/manual failed-job writes and observes this deterministic job as
+      // already created.
+      const fallbackDeviceId = typeof value.fallbackDeviceId === "string"
+        ? value.fallbackDeviceId : "";
+      const productionArea = typeof value.productionArea === "string"
+        ? value.productionArea : "";
+      let fallbackQueued = false;
+      if (fallbackDeviceId.length > 0 &&
+          fallbackDeviceId !== device.deviceId && productionArea.length > 0) {
+        const tenantRef = db.doc(`tenants/${device.tenantId}`);
+        const fallbackDeviceRef = tenantRef.collection("devices").doc(fallbackDeviceId);
+        const fallbackJobRef = tenantRef.collection("printJobs").doc(`${jobId}_fallback`);
+        const [fallbackDevice, existingFallback] = await Promise.all([
+          transaction.get(fallbackDeviceRef),
+          transaction.get(fallbackJobRef),
+        ]);
+        if (activeRouteDevice(fallbackDevice, device.venueId, productionArea) &&
+            !existingFallback.exists) {
+          transaction.create(fallbackJobRef, {
+            venueId: device.venueId,
+            targetDeviceId: fallbackDeviceId,
+            fallbackDeviceId: null,
+            orderId: value.orderId ?? "",
+            ticketId: value.ticketId ?? null,
+            productionArea,
+            status: "queued",
+            attempts: 0,
+            idempotencyKey: `${jobId}_fallback`,
+            payload: value.payload ?? {},
+            fallbackFromJobId: jobId,
+            createdAt: FieldValue.serverTimestamp(),
+          });
+          transaction.create(
+            tenantRef.collection("auditEvents").doc(`printFallback_${jobId}`),
+            {
+              action: "queueFallbackPrintJob",
+              venueId: device.venueId,
+              orderId: value.orderId ?? null,
+              ticketId: value.ticketId ?? null,
+              productionArea,
+              failedJobId: jobId,
+              fallbackJobId: `${jobId}_fallback`,
+              primaryDeviceId: device.deviceId,
+              fallbackDeviceId,
+              createdAt: FieldValue.serverTimestamp(),
+            },
+          );
+          fallbackQueued = true;
+        }
+      }
       transaction.update(jobRef, {
         status: "failed",
         completedAt: FieldValue.serverTimestamp(),
         failureReason: failureReason || "The printer failed after three attempts.",
         nextAttemptAt: FieldValue.delete(),
+        ...(fallbackQueued ? {
+          fallbackQueuedAt: FieldValue.serverTimestamp(),
+        } : {}),
       });
     }
   });

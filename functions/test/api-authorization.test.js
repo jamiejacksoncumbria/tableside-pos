@@ -11,7 +11,12 @@ import path from "node:path";
 import {fileURLToPath} from "node:url";
 
 import {initializeTestEnvironment} from "@firebase/rules-unit-testing";
-import {Timestamp, doc, getDoc, setDoc} from "firebase/firestore";
+import {
+  Timestamp,
+  doc,
+  getDoc,
+  setDoc,
+} from "firebase/firestore";
 import {ref, set} from "firebase/database";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -32,6 +37,8 @@ const posApiUrl = `http://${functionsHost}/${projectId}/europe-west2/posApi`;
 const waiterToken = "waiter-session-token";
 const managerToken = "manager-session-token";
 const deviceId = "device-a";
+const printerCredentialA = "printer-credential-a";
+const printerCredentialB = "printer-credential-b";
 const hubCredentialId = "credential-a";
 const hubDeviceId = "hub-a";
 const hubEpoch = 7;
@@ -520,6 +527,188 @@ describe("financial integrity", () => {
   });
 });
 
+describe("printer delivery reliability", () => {
+  test("PIN-independent claims are device isolated and terminal acknowledgements are idempotent", async () => {
+    await seedPrinterFixture();
+
+    const firstClaim = await callPos("claimDevicePrintJob", printerRequest(
+      "printer-a", printerCredentialA,
+    ));
+    const repeatedClaim = await callPos("claimDevicePrintJob", printerRequest(
+      "printer-a", printerCredentialA,
+    ));
+    const otherClaim = await callPos("claimDevicePrintJob", printerRequest(
+      "printer-b", printerCredentialB,
+    ));
+    assert.equal(firstClaim.status, 200, JSON.stringify(firstClaim.body));
+    assert.equal(repeatedClaim.status, 200, JSON.stringify(repeatedClaim.body));
+    assert.equal(otherClaim.status, 200, JSON.stringify(otherClaim.body));
+    assert.equal(firstClaim.body.data.job.id, "print-primary");
+    assert.equal(repeatedClaim.body.data.job.id, "print-primary");
+    assert.equal(repeatedClaim.body.data.job.attempts, 1);
+    assert.equal(otherClaim.body.data.job.id, "print-secondary");
+
+    const invalidCredential = await callPos("claimDevicePrintJob", printerRequest(
+      "printer-a", "wrong-printer-credential",
+    ));
+    assert.equal(invalidCredential.status, 403);
+
+    const completion = {
+      ...printerRequest("printer-a", printerCredentialA),
+      jobId: "print-primary",
+      printed: true,
+    };
+    const completed = await callPos("completeDevicePrintJob", completion);
+    const repeatedCompletion = await callPos("completeDevicePrintJob", completion);
+    assert.equal(completed.status, 200, JSON.stringify(completed.body));
+    assert.equal(repeatedCompletion.status, 200, JSON.stringify(repeatedCompletion.body));
+
+    const noMoreWork = await callPos("claimDevicePrintJob", printerRequest(
+      "printer-a", printerCredentialA,
+    ));
+    assert.equal(noMoreWork.status, 200, JSON.stringify(noMoreWork.body));
+    assert.equal(noMoreWork.body.data.job, null);
+
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const job = await getDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/printJobs/print-primary",
+      ));
+      assert.equal(job.data().status, "printed");
+      assert.equal(job.data().attempts, 1);
+      assert.equal(job.data().claimedByDeviceId, "printer-a");
+    });
+  });
+
+  test("third failure creates one fallback that clears the primary alarm after printing", async () => {
+    await seedPrinterFixture({primaryStatus: "claimed", primaryAttempts: 3});
+    const failure = {
+      ...printerRequest("printer-a", printerCredentialA),
+      jobId: "print-primary",
+      printed: false,
+      failureReason: "Printer is unavailable",
+    };
+    const failed = await callPos("completeDevicePrintJob", failure);
+    const repeatedFailure = await callPos("completeDevicePrintJob", failure);
+    assert.equal(failed.status, 200, JSON.stringify(failed.body));
+    assert.equal(repeatedFailure.status, 200, JSON.stringify(repeatedFailure.body));
+
+    const fallback = await readDocument(
+      "tenants/tenant-a/printJobs/print-primary_fallback",
+    );
+    assert.equal(fallback.status, "queued");
+    assert.equal(fallback.targetDeviceId, "printer-b");
+    assert.equal(fallback.fallbackFromJobId, "print-primary");
+
+    // The fallback device already has an older queued ticket, which must keep
+    // FIFO priority. Completing it should expose the fallback next without
+    // losing or jumping either job.
+    const earlierClaim = await callPos("claimDevicePrintJob", printerRequest(
+      "printer-b", printerCredentialB,
+    ));
+    assert.equal(earlierClaim.status, 200, JSON.stringify(earlierClaim.body));
+    assert.equal(earlierClaim.body.data.job.id, "print-secondary");
+    const earlierCompleted = await callPos("completeDevicePrintJob", {
+      ...printerRequest("printer-b", printerCredentialB),
+      jobId: "print-secondary",
+      printed: true,
+    });
+    assert.equal(earlierCompleted.status, 200, JSON.stringify(earlierCompleted.body));
+
+    const claim = await callPos("claimDevicePrintJob", printerRequest(
+      "printer-b", printerCredentialB,
+    ));
+    assert.equal(claim.status, 200, JSON.stringify(claim.body));
+    assert.equal(claim.body.data.job.id, "print-primary_fallback");
+    const completed = await callPos("completeDevicePrintJob", {
+      ...printerRequest("printer-b", printerCredentialB),
+      jobId: "print-primary_fallback",
+      printed: true,
+    });
+    assert.equal(completed.status, 200, JSON.stringify(completed.body));
+
+    const primary = await readDocument(
+      "tenants/tenant-a/printJobs/print-primary",
+    );
+    assert.equal(primary.status, "failed");
+    assert.equal(primary.fallbackDeliveryStatus, "printed");
+  });
+
+  test("manager recovery protects active claims and bounds historical reprints", async () => {
+    await seedPrinterFixture({includeQueueJobs: false});
+    const now = Date.now();
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const firestore = context.firestore();
+      await Promise.all([
+        setDoc(doc(firestore, "tenants/tenant-a/printJobs/active-claim"), {
+          ...printJob("printer-a", "claimed", now),
+          claimedByDeviceId: "printer-a",
+          claimedAt: Timestamp.fromMillis(now),
+        }),
+        setDoc(doc(firestore, "tenants/tenant-a/printJobs/stale-claim"), {
+          ...printJob("printer-a", "claimed", now - 10 * 60 * 1000),
+          claimedByDeviceId: "printer-a",
+          claimedAt: Timestamp.fromMillis(now - 10 * 60 * 1000),
+        }),
+        setDoc(doc(firestore, "tenants/tenant-a/printJobs/recent-print"), {
+          ...printJob("printer-a", "printed", now - 60 * 60 * 1000),
+          completedAt: Timestamp.fromMillis(now - 60 * 60 * 1000),
+        }),
+        setDoc(doc(firestore, "tenants/tenant-a/printJobs/expired-print"), {
+          ...printJob("printer-a", "printed", now - 6 * 24 * 60 * 60 * 1000),
+          completedAt: Timestamp.fromMillis(now - 6 * 24 * 60 * 60 * 1000),
+        }),
+      ]);
+    });
+
+    const activeClear = await callPos("cancelPrintJob", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      jobId: "active-claim", reason: "Testing active claim protection",
+    });
+    assert.equal(activeClear.status, 412);
+    const staleClear = await callPos("cancelPrintJob", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      jobId: "stale-claim", reason: "Printer lost power during testing",
+    });
+    assert.equal(staleClear.status, 200, JSON.stringify(staleClear.body));
+
+    const waiterReprint = await callPos("reprintPrintedJob", {
+      ...waiterSession(), tenantId: "tenant-a", venueId: "venue-a",
+      jobId: "recent-print",
+    });
+    assert.equal(waiterReprint.status, 403);
+    const recentReprint = await callPos("reprintPrintedJob", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      jobId: "recent-print",
+    });
+    assert.equal(recentReprint.status, 200, JSON.stringify(recentReprint.body));
+    const expiredReprint = await callPos("reprintPrintedJob", {
+      ...managerSession(), tenantId: "tenant-a", venueId: "venue-a",
+      jobId: "expired-print",
+    });
+    assert.equal(expiredReprint.status, 412);
+
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const firestore = context.firestore();
+      const [active, stale, original, reprint] = await Promise.all([
+        getDoc(doc(firestore, "tenants/tenant-a/printJobs/active-claim")),
+        getDoc(doc(firestore, "tenants/tenant-a/printJobs/stale-claim")),
+        getDoc(doc(firestore, "tenants/tenant-a/printJobs/recent-print")),
+        getDoc(doc(
+          firestore,
+          `tenants/tenant-a/printJobs/${recentReprint.body.data.jobId}`,
+        )),
+      ]);
+      assert.equal(active.data().status, "claimed");
+      assert.equal(stale.data().status, "cancelled");
+      assert.equal(original.data().status, "printed");
+      assert.equal(reprint.data().status, "queued");
+      assert.equal(reprint.data().payload.isReprint, true);
+      assert.equal(reprint.data().reprintOfJobId, "recent-print");
+    });
+  });
+});
+
 function approvedBootstrapActions() {
   return [
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
@@ -840,6 +1029,87 @@ async function seedFinancialOrder(orderId) {
       }),
     ]);
   });
+}
+
+async function seedPrinterFixture({
+  primaryStatus = "queued",
+  primaryAttempts = 0,
+  includeQueueJobs = true,
+} = {}) {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    const firestore = context.firestore();
+    const writes = [
+      setDoc(doc(firestore, "tenants/tenant-a/devices/printer-a"), {
+        venueId: "venue-a",
+        name: "Kitchen printer",
+        active: true,
+        platform: "windows",
+        productionAreas: ["kitchen", "receipt"],
+        credentialHash: createHash("sha256")
+          .update(printerCredentialA).digest("base64"),
+      }),
+      setDoc(doc(firestore, "tenants/tenant-a/devices/printer-b"), {
+        venueId: "venue-a",
+        name: "Fallback printer",
+        active: true,
+        platform: "windows",
+        productionAreas: ["kitchen", "receipt"],
+        credentialHash: createHash("sha256")
+          .update(printerCredentialB).digest("base64"),
+      }),
+    ];
+    if (includeQueueJobs) {
+      writes.push(
+        setDoc(doc(firestore, "tenants/tenant-a/printJobs/print-primary"), {
+          ...printJob("printer-a", primaryStatus, Date.now()),
+          attempts: primaryAttempts,
+          fallbackDeviceId: "printer-b",
+          ...(primaryStatus === "claimed" ? {
+            claimedByDeviceId: "printer-a",
+            claimedAt: Timestamp.now(),
+          } : {}),
+        }),
+        setDoc(doc(firestore, "tenants/tenant-a/printJobs/print-secondary"),
+          printJob("printer-b", "queued", Date.now() + 1)),
+      );
+    }
+    await Promise.all(writes);
+  });
+}
+
+function printJob(targetDeviceId, status, createdAtMillis) {
+  return {
+    venueId: "venue-a",
+    targetDeviceId,
+    fallbackDeviceId: null,
+    orderId: "order-print-test",
+    ticketId: "ticket-print-test",
+    productionArea: "kitchen",
+    status,
+    attempts: 0,
+    idempotencyKey: `print-${targetDeviceId}-${createdAtMillis}`,
+    payload: {type: "production", lines: [{name: "Test meal", quantity: 1}]},
+    createdAt: Timestamp.fromMillis(createdAtMillis),
+  };
+}
+
+function printerRequest(printerDeviceId, deviceCredential) {
+  return {
+    tenantId: "tenant-a",
+    venueId: "venue-a",
+    deviceId: printerDeviceId,
+    deviceCredential,
+  };
+}
+
+async function readDocument(documentPath) {
+  let value;
+  await environment.withSecurityRulesDisabled(async (context) => {
+    const snapshot = await getDoc(doc(context.firestore(), documentPath));
+    assert.equal(snapshot.exists(), true, `${documentPath} was not created.`);
+    value = snapshot.data();
+  });
+  return value;
 }
 
 function orderLinesTotal(lines) {
