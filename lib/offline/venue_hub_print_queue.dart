@@ -467,7 +467,13 @@ class VenueHubPrintQueue {
       if (job.status == 'queued' &&
           route != null &&
           route.primaryDeviceId.isNotEmpty &&
-          job.targetDeviceId != route.primaryDeviceId) {
+          job.targetDeviceId != route.primaryDeviceId &&
+          job.targetDeviceId != route.fallbackDeviceId) {
+        // A job deliberately moved to the configured fallback after three
+        // failed primary attempts is already on a valid route. Reassigning it
+        // to the primary here creates an endless primary/fallback loop. A
+        // genuinely changed route still repairs the job because its previous
+        // target matches neither current device.
         _jobs[job.id] = job.copyWith(
           targetDeviceId: route.primaryDeviceId,
           clearClaim: true,
