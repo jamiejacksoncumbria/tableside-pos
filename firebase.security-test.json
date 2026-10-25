@@ -5,18 +5,29 @@
   "database": {
     "rules": "firebase/database.rules.json"
   },
+  "functions": {
+    "source": "functions"
+  },
   "emulators": {
     "firestore": {
       "host": "127.0.0.1",
-      "port": 28080
+      "port": 51080
     },
     "database": {
       "host": "127.0.0.1",
-      "port": 29000
+      "port": 51000
+    },
+    "auth": {
+      "host": "127.0.0.1",
+      "port": 51099
+    },
+    "functions": {
+      "host": "127.0.0.1",
+      "port": 51102
     },
     "hub": {
       "host": "127.0.0.1",
-      "port": 24501
+      "port": 51501
     },
     "ui": {
       "enabled": false

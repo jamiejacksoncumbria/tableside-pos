@@ -11,6 +11,8 @@
   },
   "scripts": {
     "check": "node --check index.js",
+    "test:api": "node --test test/api-authorization.test.js",
+    "test:api:emulator": "firebase emulators:exec --config ../firebase.security-test.json --project demo-tableside-security --only auth,firestore,database,functions:posApi \"npm run test:api\"",
     "test:security": "node --test test/security-rules.test.js",
     "test:security:emulator": "firebase emulators:exec --config ../firebase.security-test.json --project demo-tableside-security --only firestore,database \"npm run test:security\"",
     "serve": "firebase emulators:start --only functions",

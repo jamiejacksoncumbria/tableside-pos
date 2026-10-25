@@ -25,7 +25,13 @@ const auth = getAuth();
 const appCheck = getAppCheck();
 const db = getFirestore();
 const region = "europe-west2";
-const initialPlatformAdminEmail = defineString("INITIAL_PLATFORM_ADMIN_EMAIL");
+// An unset bootstrap email must fail closed. The explicit empty default also
+// lets non-interactive emulator and CI runs load the Functions module without
+// pausing for a deployment parameter that the security tests never use.
+const initialPlatformAdminEmail = defineString(
+  "INITIAL_PLATFORM_ADMIN_EMAIL",
+  {default: ""},
+);
 // Monitor first: old Windows/web clients must not be locked out while their
 // attestation provider is being registered and verified.
 const requireAppCheck = defineBoolean("REQUIRE_APP_CHECK", {default: false});
@@ -2690,8 +2696,33 @@ async function waitForRemoteHubCommandFor(caller, rawData) {
   });
 }
 
+function resolvedRealtimeDatabaseUrl() {
+  const configuredUrl = databaseURL.value().trim();
+  if (/^https:\/\/[a-z0-9.-]+\/?$/u.test(configuredUrl)) return configuredUrl;
+
+  const testUrl = (process.env.TABLESIDE_REALTIME_DATABASE_EMULATOR_URL || "").trim();
+  if (/^https:\/\/demo-[a-z0-9-]+-default-rtdb\.firebaseio\.com\/?$/u
+    .test(testUrl)) {
+    return testUrl;
+  }
+
+  // The Firebase Functions emulator does not always include databaseURL in
+  // FIREBASE_CONFIG, even when the Realtime Database emulator is running.
+  // Derive only the namespace URL in that emulator-specific situation; the
+  // Admin SDK still routes the connection exclusively through the configured
+  // local emulator host. Production remains fail-closed when no RTDB URL is
+  // configured and never falls back to a guessed live database.
+  const emulatorHost = (process.env.FIREBASE_DATABASE_EMULATOR_HOST || "").trim();
+  const projectId = (process.env.GCLOUD_PROJECT ||
+    process.env.GOOGLE_CLOUD_PROJECT || "").trim();
+  if (emulatorHost.length > 0 && /^[a-z0-9-]+$/u.test(projectId)) {
+    return `https://${projectId}-default-rtdb.firebaseio.com`;
+  }
+  return "";
+}
+
 function configuredRealtimeDatabase() {
-  const url = databaseURL.value().trim();
+  const url = resolvedRealtimeDatabaseUrl();
   if (url.length === 0 || !/^https:\/\/[a-z0-9.-]+\/?$/u.test(url)) {
     throw new HttpsError(
       "failed-precondition",
@@ -2702,7 +2733,7 @@ function configuredRealtimeDatabase() {
 }
 
 async function syncRealtimeHubAuthority(tenantId, venueId, authority) {
-  const url = databaseURL.value().trim();
+  const url = resolvedRealtimeDatabaseUrl();
   if (url.length === 0) return;
   const configured = configuredRealtimeDatabase();
   await configured.database
@@ -2713,7 +2744,7 @@ async function syncRealtimeHubAuthority(tenantId, venueId, authority) {
 async function syncRealtimePrinterAuthority(
   tenantId, venueId, deviceId, active,
 ) {
-  const url = databaseURL.value().trim();
+  const url = resolvedRealtimeDatabaseUrl();
   if (url.length === 0) return;
   await configuredRealtimeDatabase().database
     .ref(`printerAuthorities/${tenantId}/${venueId}/${deviceId}`)
@@ -2723,7 +2754,7 @@ async function syncRealtimePrinterAuthority(
 async function publishRealtimeCommandStatus(
   tenantId, venueId, commandId, value,
 ) {
-  const url = databaseURL.value().trim();
+  const url = resolvedRealtimeDatabaseUrl();
   if (url.length === 0) return;
   try {
     await configuredRealtimeDatabase().database
@@ -5572,10 +5603,23 @@ async function actingCallerFromStaffSession(hostCaller, data) {
   if (!sessionId || !sessionToken || !deviceId) {
     throw new HttpsError("unauthenticated", "The shared-device staff session is incomplete.");
   }
+  const actionTenantId = optionalText(data, "tenantId", 128);
+  const actionVenueId = optionalText(data, "venueId", 128);
   const tenantId = optionalText(data, "staffPinSessionTenantId", 128) ||
     requiredText(data, "tenantId", 128);
   const venueId = optionalText(data, "staffPinSessionVenueId", 128) ||
     requiredText(data, "venueId", 128);
+  // The opaque session fields identify the scope in which the PIN was
+  // verified. Never let a modified client validate that session against one
+  // venue and then send the business command to another venue or tenant.
+  // Central enforcement protects every current and future POS handler.
+  if ((actionTenantId.length > 0 && actionTenantId !== tenantId) ||
+      (actionVenueId.length > 0 && actionVenueId !== venueId)) {
+    throw new HttpsError(
+      "permission-denied",
+      "The staff PIN session does not belong to the selected venue.",
+    );
+  }
   const session = await db.doc(
     `tenants/${tenantId}/staffPinSessions/${sessionId}`,
   ).get();
@@ -5617,6 +5661,19 @@ async function actingCallerFromStaffSession(hostCaller, data) {
   }
   if (!membership.exists || membership.data().active === false) {
     throw new HttpsError("permission-denied", "The selected staff account is no longer active.");
+  }
+  const staffVenueIds = Array.isArray(membership.data().venueIds)
+    ? membership.data().venueIds
+    : [];
+  const hostVenueIds = Array.isArray(hostMembership.data().venueIds)
+    ? hostMembership.data().venueIds
+    : [];
+  if ((staffVenueIds.length > 0 && !staffVenueIds.includes(venueId)) ||
+      (hostVenueIds.length > 0 && !hostVenueIds.includes(venueId))) {
+    throw new HttpsError(
+      "permission-denied",
+      "This staff member or shared device is not assigned to the selected venue.",
+    );
   }
   if (!currentPin.exists || currentPin.data().locked === true ||
       currentPinVersion !== sessionData.pinVersion ||
@@ -10408,7 +10465,7 @@ export const signalQueuedPrinter = onDocumentWritten(
     const deviceId = typeof after.targetDeviceId === "string"
       ? after.targetDeviceId : "";
     if (!venueId || !deviceId) return;
-    const url = databaseURL.value().trim();
+    const url = resolvedRealtimeDatabaseUrl();
     if (url.length === 0) return;
     await configuredRealtimeDatabase().database
       .ref(`printerSignals/${event.params.tenantId}/${venueId}/${deviceId}`)
@@ -10424,7 +10481,7 @@ export const signalQueuedPrinter = onDocumentWritten(
 export const cleanupRealtimeRemoteCommand = onDocumentDeleted(
   "tenants/{tenantId}/venues/{venueId}/remoteHubCommands/{commandId}",
   async (event) => {
-    const url = databaseURL.value().trim();
+    const url = resolvedRealtimeDatabaseUrl();
     if (url.length === 0) return;
     await configuredRealtimeDatabase().database.ref(
       `remoteCommandStatus/${event.params.tenantId}/${event.params.venueId}/${event.params.commandId}`,
