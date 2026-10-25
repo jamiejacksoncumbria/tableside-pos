@@ -291,6 +291,84 @@ void main() {
         expect(harness.printQueue.visibleJobs.single['status'], 'printed');
       },
     );
+
+    test(
+      'remote terminal retries a pre-commit outage without phantom state',
+      () async {
+        final harness = await _EposHarness.create();
+        addTearDown(harness.dispose);
+
+        await harness.send('order.opened', const <String, Object?>{
+          'orderId': 'order-pre-commit-retry',
+          'channel': 'dineIn',
+          'tableId': 'table-a',
+        }, failFirstBeforeCommit: true);
+
+        final order = await harness.orderBook.order('order-pre-commit-retry');
+        expect(order.isClosed, isFalse);
+        expect(order.tableId, 'table-a');
+        final events = await harness.events();
+        expect(
+          events.where(
+            (event) => event.payload['orderId'] == 'order-pre-commit-retry',
+          ),
+          hasLength(1),
+          reason: 'A failed submission must not create a phantom order.',
+        );
+      },
+    );
+
+    test(
+      'hub restart safely recovers a claimed but unacknowledged print job',
+      () async {
+        final harness = await _EposHarness.create();
+        addTearDown(harness.dispose);
+        await harness.send('order.opened', const <String, Object?>{
+          'orderId': 'order-printer-power-loss',
+          'channel': 'dineIn',
+          'tableId': 'table-a',
+        });
+        await harness.send('order.itemAdded', const <String, Object?>{
+          'orderId': 'order-printer-power-loss',
+          'lineId': 'line-curry',
+          'productId': 'curry',
+          'quantity': 1,
+          'channel': 'dineIn',
+        });
+        await harness.send('order.sent', const <String, Object?>{
+          'orderId': 'order-printer-power-loss',
+          'lineIds': <String>['line-curry'],
+          'printRequired': true,
+        });
+
+        final interrupted = await harness.printQueue.claim('printer-kitchen');
+        expect(interrupted, isNotNull);
+        expect(interrupted!['status'], 'claimed');
+
+        // Simulate power loss after the operating system received the ticket
+        // but before it acknowledged printing. Startup deliberately retries
+        // the same durable job ID so it is visible and can never be lost.
+        final restarted = harness.restartedPrintQueue();
+        addTearDown(restarted.dispose);
+        await restarted.initialize();
+        final recovered = await restarted.claim('printer-kitchen');
+        expect(recovered, isNotNull);
+        expect(recovered!['id'], interrupted['id']);
+        expect(recovered['attempts'], 2);
+        await restarted.complete(
+          deviceId: 'printer-kitchen',
+          jobId: recovered['id']! as String,
+          printed: true,
+        );
+
+        final verifiedRestart = harness.restartedPrintQueue();
+        addTearDown(verifiedRestart.dispose);
+        await verifiedRestart.initialize();
+        expect(await verifiedRestart.claim('printer-kitchen'), isNull);
+        expect(verifiedRestart.visibleJobs, hasLength(1));
+        expect(verifiedRestart.visibleJobs.single['status'], 'printed');
+      },
+    );
   });
 }
 
@@ -392,6 +470,7 @@ class _EposHarness {
     String eventType,
     Map<String, Object?> payload, {
     bool loseFirstAcknowledgement = false,
+    bool failFirstBeforeCommit = false,
   }) async {
     final client = VenueHubRemoteCommandClient(
       timeout: const Duration(seconds: 5),
@@ -406,6 +485,9 @@ class _EposHarness {
         final commandId = request['commandId']! as String;
         final attempts = (_submissionAttempts[commandId] ?? 0) + 1;
         _submissionAttempts[commandId] = attempts;
+        if (failFirstBeforeCommit && attempts == 1) {
+          throw StateError('Network connection interrupted before hub commit.');
+        }
         final acknowledgement = await processor.processRemote(
           commandId: commandId,
           eventType: request['eventType']! as String,
