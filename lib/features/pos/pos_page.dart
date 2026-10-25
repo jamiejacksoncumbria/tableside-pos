@@ -4688,7 +4688,7 @@ String _displayVoucherCode(String raw) {
 
 Future<String?> _scanVoucherQr(BuildContext context) async {
   var detected = false;
-  return showModalBottomSheet<String>(
+  return await showAppModalBottomSheet<String>(
     context: context,
     isScrollControlled: true,
     builder: (sheetContext) => SafeArea(
@@ -5942,7 +5942,7 @@ Future<void> _showSplitBillSheet(
     for (final line in order.lines) line.id: 0,
   };
   var saving = false;
-  await showModalBottomSheet<void>(
+  await showAppModalBottomSheet<void>(
     context: pageContext,
     showDragHandle: true,
     isScrollControlled: true,

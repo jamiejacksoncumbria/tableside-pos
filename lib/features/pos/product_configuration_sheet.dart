@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/money.dart';
+import '../../core/safe_modal_bottom_sheet.dart';
 import 'domain.dart';
 
 /// Lets staff choose a product variant, reusable option groups and an
@@ -14,6 +16,7 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
   required String currencyCode,
 }) async {
   final note = TextEditingController();
+  final noteFocus = FocusNode(debugLabel: 'Product item note');
   final groupsById = <String, MenuModifierGroup>{
     for (final group in availableGroups) group.id: group,
   };
@@ -47,7 +50,7 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
   String? validationMessage;
 
   try {
-    return await showModalBottomSheet<ProductConfigurationSelection>(
+    return await showAppModalBottomSheet<ProductConfigurationSelection>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
@@ -211,13 +214,24 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
                           const SizedBox(height: 4),
                           TextField(
                             controller: note,
+                            focusNode: noteFocus,
                             minLines: 1,
                             maxLines: 3,
                             maxLength: 500,
                             textCapitalization: TextCapitalization.sentences,
-                            decoration: const InputDecoration(
+                            decoration: InputDecoration(
                               hintText:
                                   'Optional instruction for kitchen or bar, for example “allergy discussed”.',
+                              suffixIcon: IconButton(
+                                tooltip: 'Open keyboard for item note',
+                                onPressed: () {
+                                  noteFocus.requestFocus();
+                                  SystemChannels.textInput.invokeMethod<void>(
+                                    'TextInput.show',
+                                  );
+                                },
+                                icon: const Icon(Icons.keyboard_alt_outlined),
+                              ),
                             ),
                             onChanged: (_) {
                               if (validationMessage != null) {
@@ -305,6 +319,7 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
       ),
     );
   } finally {
+    noteFocus.dispose();
     note.dispose();
   }
 }

@@ -240,6 +240,7 @@ class _HubOfflineDialogHost extends StatefulWidget {
 class _HubOfflineDialogHostState extends State<_HubOfflineDialogHost> {
   DateTime? _lastShown;
   bool _dialogOpen = false;
+  DialogRoute<void>? _dialogRoute;
 
   @override
   void initState() {
@@ -251,10 +252,17 @@ class _HubOfflineDialogHostState extends State<_HubOfflineDialogHost> {
   void didUpdateWidget(covariant _HubOfflineDialogHost oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.issue != null && widget.issue == null) {
-      // Recovery must remove the blocking explanation immediately. Waiting
-      // for staff to dismiss a now-stale offline dialog made a restored hub
-      // still look unavailable.
-      if (_dialogOpen) _rootNavigatorKey.currentState?.pop();
+      // Never pop the root Navigator here. A payment or product sheet may be
+      // above this dialog, and popping that unrelated route while its overlay
+      // is rebuilding can corrupt inherited dependencies. Remove only the
+      // exact hub dialog after the current widget frame is complete.
+      final route = _dialogRoute;
+      if (route != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          final navigator = route.navigator;
+          if (navigator != null) navigator.removeRoute(route);
+        });
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final messengerContext = _rootNavigatorKey.currentContext;
         if (!mounted || messengerContext == null) return;
@@ -291,7 +299,8 @@ class _HubOfflineDialogHostState extends State<_HubOfflineDialogHost> {
       }
       _dialogOpen = true;
       _lastShown = DateTime.now();
-      await showDialog<void>(
+      final navigator = Navigator.of(dialogContext);
+      final route = DialogRoute<void>(
         context: dialogContext,
         builder: (dialogContext) => AlertDialog(
           icon: const Icon(Icons.cloud_off_rounded),
@@ -307,6 +316,10 @@ class _HubOfflineDialogHostState extends State<_HubOfflineDialogHost> {
           ],
         ),
       );
+      _dialogRoute = route;
+      await navigator.push<void>(route);
+      await route.completed;
+      if (identical(_dialogRoute, route)) _dialogRoute = null;
       _dialogOpen = false;
       if (mounted && widget.issue != null) _scheduleIfNeeded();
     });
