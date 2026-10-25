@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {createHash} from "node:crypto";
+import {createHash, generateKeyPairSync, sign as signMessage} from "node:crypto";
 import {after, before, beforeEach, describe, test} from "node:test";
 import fs from "node:fs";
 import path from "node:path";
@@ -27,6 +27,14 @@ const posApiUrl = `http://${functionsHost}/${projectId}/europe-west2/posApi`;
 const waiterToken = "waiter-session-token";
 const managerToken = "manager-session-token";
 const deviceId = "device-a";
+const hubCredentialId = "credential-a";
+const hubDeviceId = "hub-a";
+const hubEpoch = 7;
+const hubKeys = generateKeyPairSync("ed25519");
+const hubPublicKeyBase64 = hubKeys.publicKey.export({
+  format: "der",
+  type: "spki",
+}).subarray(-32).toString("base64url");
 
 let environment;
 let identities;
@@ -263,6 +271,75 @@ describe("POS role and replay protection", () => {
   });
 });
 
+describe("venue hub cloud reconciliation", () => {
+  test("projects a signed sale exactly once into orders, bills, stock and production", async () => {
+    const createdAt = new Date().toISOString();
+    const events = [
+      hubEvent(1, "event-open", "", "hash-open", "order.opened", {
+        orderId: "order-cloud-a",
+        channel: "dineIn",
+        tableId: "table-a",
+      }, createdAt),
+      hubEvent(2, "event-item", "hash-open", "hash-item", "order.itemAdded", {
+        orderId: "order-cloud-a",
+        lineId: "line-curry",
+        productId: "menu-curry",
+        productName: "House Curry",
+        quantity: 1,
+        unitPriceMinor: 1500,
+        taxRateBasisPoints: 2000,
+        currencyCode: "GBP",
+        productionArea: "kitchen",
+        showOnOrderFlow: true,
+        trackStock: true,
+        stockComponents: [{
+          productId: "stock-curry",
+          productName: "Curry Portion",
+          quantityPerSale: 2,
+          stockUnit: "portion",
+        }],
+      }, createdAt),
+      hubEvent(3, "event-sent", "hash-item", "hash-sent", "order.sent", {
+        orderId: "order-cloud-a",
+        lineIds: ["line-curry"],
+        printRequired: true,
+      }, createdAt),
+      hubEvent(4, "event-paid", "hash-sent", "hash-paid", "payment.recorded", {
+        orderId: "order-cloud-a",
+        paymentId: "payment-cloud-a",
+        method: "cash",
+        currencyCode: "GBP",
+        tenderedAmountMinor: 2000,
+        baseAmountMinor: 1500,
+        exchangeRateToBase: "1",
+        cashChangeBaseMinor: 500,
+      }, createdAt),
+      hubEvent(5, "event-close", "hash-paid", "hash-close", "order.closed", {
+        orderId: "order-cloud-a",
+        receiptNumber: "R-CLOUD-1",
+      }, createdAt),
+    ];
+
+    const first = await callPos("ingestOfflineHubEvents", signedHubUpload(events, "nonce-a"));
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.deepEqual(first.body.data.acknowledgedEventIds, events.map((event) => event.id));
+
+    await assertCloudSaleProjection();
+
+    // A lost acknowledgement can make a hub upload the identical immutable
+    // events again. A fresh signed nonce must acknowledge that replay without
+    // duplicating stock, tickets, bills, payments, or order lines.
+    const replay = await callPos(
+      "ingestOfflineHubEvents",
+      signedHubUpload(events, "nonce-b"),
+    );
+    assert.equal(replay.status, 200, JSON.stringify(replay.body));
+    assert.deepEqual(replay.body.data.acknowledgedEventIds, events.map((event) => event.id));
+
+    await assertCloudSaleProjection();
+  });
+});
+
 function approvedBootstrapActions() {
   return [
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
@@ -302,7 +379,14 @@ async function seedAuthorisationFixture() {
       "tenants/tenant-a/venues/venue-a": {
         name: "Venue A",
         status: "active",
-        offlineHub: {enabled: true, deviceId: "hub-a", epoch: 7},
+        timeZone: "Europe/London",
+        businessDayCutoffMinutes: 240,
+        offlineHub: {
+          enabled: true,
+          deviceId: hubDeviceId,
+          credentialId: hubCredentialId,
+          epoch: hubEpoch,
+        },
       },
       "tenants/tenant-a/venues/venue-b": {name: "Venue B", status: "active"},
       "tenants/tenant-b": {displayName: "Tenant B", currencyCode: "GBP"},
@@ -346,6 +430,26 @@ async function seedAuthorisationFixture() {
         managerToken,
         future,
       ),
+      [`tenants/tenant-a/offlineDeviceCredentials/${hubCredentialId}`]: {
+        active: true,
+        venueId: "venue-a",
+        deviceId: hubDeviceId,
+        algorithm: "Ed25519",
+        publicKeyBase64: hubPublicKeyBase64,
+      },
+      "tenants/tenant-a/products/stock-curry": {
+        venueId: "venue-a",
+        name: "Curry Portion",
+        trackStock: true,
+        stockOnHand: 20,
+        stockUnit: "portion",
+      },
+      "tenants/tenant-a/tables/table-a": {
+        venueId: "venue-a",
+        label: "Table 1",
+        currentOrderId: "order-cloud-a",
+        hasOpenOrder: true,
+      },
     };
     await Promise.all(Object.entries(documents).map(([documentPath, data]) =>
       setDoc(doc(firestore, documentPath), data)));
@@ -388,6 +492,107 @@ function session(hostUserId, userId, token, expiresAt) {
     tokenHash: createHash("sha256").update(token).digest("base64"),
     expiresAt,
   };
+}
+
+function hubEvent(sequence, id, previousHash, eventHash, type, payload, createdAtUtc) {
+  return {
+    id,
+    sequence,
+    tenantId: "tenant-a",
+    venueId: "venue-a",
+    hubEpoch,
+    previousHash,
+    eventHash,
+    type,
+    payload,
+    staffId: identities.manager.localId,
+    deviceId: hubDeviceId,
+    createdAtUtc,
+  };
+}
+
+function signedHubUpload(events, nonce) {
+  const body = {events};
+  const bodyHash = createHash("sha256")
+    .update(JSON.stringify(canonicalJsonValue(body)))
+    .digest("base64url");
+  const envelope = {
+    tenantId: "tenant-a",
+    venueId: "venue-a",
+    credentialId: hubCredentialId,
+    deviceId: hubDeviceId,
+    staffId: identities.manager.localId,
+    method: "POST",
+    path: "/v1/cloud-sync",
+    hubEpoch,
+    sentAtUtcMillis: Date.now(),
+    nonce,
+    bodyHash,
+  };
+  const canonicalHeaders = [
+    "v1",
+    envelope.credentialId,
+    envelope.tenantId,
+    envelope.venueId,
+    envelope.deviceId,
+    envelope.staffId,
+    envelope.method,
+    envelope.path,
+    envelope.hubEpoch,
+    envelope.sentAtUtcMillis,
+    envelope.nonce,
+    envelope.bodyHash,
+  ].join("\n");
+  envelope.signature = signMessage(
+    null,
+    Buffer.from(canonicalHeaders, "utf8"),
+    hubKeys.privateKey,
+  ).toString("base64url");
+  return {envelope, body};
+}
+
+function canonicalJsonValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (value != null && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [
+      key,
+      canonicalJsonValue(value[key]),
+    ]));
+  }
+  return value;
+}
+
+async function assertCloudSaleProjection() {
+  await environment.withSecurityRulesDisabled(async (context) => {
+    const firestore = context.firestore();
+    const [order, bill, product, movement, ticket, table] = await Promise.all([
+      getDoc(doc(firestore, "tenants/tenant-a/orders/order-cloud-a")),
+      getDoc(doc(firestore, "tenants/tenant-a/bills/offline-order-cloud-a")),
+      getDoc(doc(firestore, "tenants/tenant-a/products/stock-curry")),
+      getDoc(doc(
+        firestore,
+        "tenants/tenant-a/stockMovements/offline_event-sent_stock-curry",
+      )),
+      getDoc(doc(
+        firestore,
+        "tenants/tenant-a/productionTickets/offline_event-sent_kitchen",
+      )),
+      getDoc(doc(firestore, "tenants/tenant-a/tables/table-a")),
+    ]);
+    assert.equal(order.data().status, "closed");
+    assert.equal(order.data().lines.length, 1);
+    assert.equal(order.data().payments.length, 1);
+    assert.equal(order.data().payments[0].cashChangeBaseMinor, 500);
+    assert.equal(bill.data().receiptNumber, "R-CLOUD-1");
+    assert.equal(bill.data().grossTotalMinor, 1500);
+    assert.equal(bill.data().payments.length, 1);
+    assert.equal(product.data().stockOnHand, 18);
+    assert.equal(movement.data().quantity, -2);
+    assert.equal(ticket.data().orderId, "order-cloud-a");
+    assert.equal(ticket.data().productionItems[0].name, "House Curry");
+    assert.equal(table.data().hasOpenOrder, false);
+    assert.equal(table.data().currentOrderId, null);
+  });
 }
 
 async function createAuthUser(email) {
