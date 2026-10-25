@@ -242,6 +242,316 @@ void main() {
     );
 
     test(
+      'manager adjustment, split bill and mixed currencies settle exactly once',
+      () async {
+        final harness = await _EposHarness.create();
+        addTearDown(harness.dispose);
+
+        await harness.send('order.opened', const <String, Object?>{
+          'orderId': 'order-split-main',
+          'channel': 'dineIn',
+          'tableId': 'table-a',
+        });
+        await harness.send('order.itemsAdded', const <String, Object?>{
+          'orderId': 'order-split-main',
+          'items': <Object?>[
+            <String, Object?>{
+              'lineId': 'line-curry',
+              'productId': 'curry',
+              'quantity': 2,
+              'channel': 'dineIn',
+            },
+            <String, Object?>{
+              'lineId': 'line-rice',
+              'productId': 'rice',
+              'quantity': 1,
+              'channel': 'dineIn',
+            },
+          ],
+        });
+        await harness.send('order.lineAdjusted', const <String, Object?>{
+          'orderId': 'order-split-main',
+          'lineId': 'line-rice',
+          'operation': 'discountUnitAmount',
+          'valueMinor': 100,
+          'reason': 'Service recovery discount',
+        });
+        await harness.send('order.sent', const <String, Object?>{
+          'orderId': 'order-split-main',
+          'lineIds': <String>['line-curry', 'line-rice'],
+          'printRequired': false,
+        });
+        await harness.send('order.splitCreated', const <String, Object?>{
+          'orderId': 'order-split-main',
+          'splitOrderId': 'order-split-child',
+          'splitLines': <Object?>[
+            <String, Object?>{'lineId': 'line-curry', 'quantity': 1},
+          ],
+        });
+
+        var main = await harness.orderBook.order('order-split-main');
+        var child = await harness.orderBook.order('order-split-child');
+        expect(main.totalMinor, 1500);
+        expect(child.totalMinor, 1200);
+        expect(main.openSplitOrderIds, <String>['order-split-child']);
+
+        await harness.send('payment.recorded', const <String, Object?>{
+          'orderId': 'order-split-child',
+          'paymentId': 'payment-child-eur',
+          'baseAmountMinor': 1200,
+          'tenderedAmountMinor': 1400,
+          'cashChangeBaseMinor': 0,
+          'method': 'cash',
+          'currencyCode': 'EUR',
+          'exchangeRateToBase': '0.85714286',
+        });
+        await harness.send('order.closed', const <String, Object?>{
+          'orderId': 'order-split-child',
+          'receiptNumber': 'R-SPLIT-1',
+          'printReceipt': false,
+        });
+        await harness.send('payment.batchRecorded', const <String, Object?>{
+          'orderId': 'order-split-main',
+          'batchId': 'batch-main-mixed',
+          'payments': <Object?>[
+            <String, Object?>{
+              'paymentId': 'payment-main-usd',
+              'baseAmountMinor': 500,
+              'tenderedAmountMinor': 625,
+              'method': 'cash',
+              'currencyCode': 'USD',
+              'exchangeRateToBase': '0.8',
+            },
+            <String, Object?>{
+              'paymentId': 'payment-main-gbp',
+              'baseAmountMinor': 1000,
+              'tenderedAmountMinor': 1000,
+              'method': 'card',
+              'currencyCode': 'GBP',
+              'exchangeRateToBase': '1',
+            },
+          ],
+        });
+        await harness.send('order.closed', const <String, Object?>{
+          'orderId': 'order-split-main',
+          'receiptNumber': 'R-SPLIT-2',
+          'printReceipt': true,
+        });
+
+        main = await harness.orderBook.order('order-split-main');
+        child = await harness.orderBook.order('order-split-child');
+        expect(main.isClosed, isTrue);
+        expect(child.isClosed, isTrue);
+        expect(main.balanceDueMinor, 0);
+        expect(child.balanceDueMinor, 0);
+        expect(main.openSplitOrderIds, isEmpty);
+        expect(main.payments.map((payment) => payment.currencyCode), <String>[
+          'USD',
+          'GBP',
+        ]);
+        expect(child.payments.single.currencyCode, 'EUR');
+        expect(child.payments.single.exchangeRateToBase, '0.85714286');
+
+        final receipt = await harness.printQueue.claim('printer-receipt');
+        expect(receipt, isNotNull);
+        final payload = Map<String, Object?>.from(receipt!['payload']! as Map);
+        expect(receipt['orderId'], 'order-split-main');
+        expect(payload['payments'], hasLength(2));
+        await harness.printQueue.complete(
+          deviceId: 'printer-receipt',
+          jobId: receipt['id']! as String,
+          printed: true,
+        );
+        await harness.printQueue.reprint(receipt['id']! as String);
+        final reprint = await harness.printQueue.claim('printer-receipt');
+        expect(reprint, isNotNull);
+        expect(reprint!['orderId'], 'order-split-main');
+        expect((reprint['payload']! as Map)['isReprint'], isTrue);
+        await harness.printQueue.complete(
+          deviceId: 'printer-receipt',
+          jobId: reprint['id']! as String,
+          printed: true,
+        );
+
+        final replayed = harness.restartedOrderBook();
+        expect((await replayed.order('order-split-main')).balanceDueMinor, 0);
+        expect((await replayed.order('order-split-child')).balanceDueMinor, 0);
+        expect(
+          (await harness.events()).where(
+            (event) => event.type == 'order.splitCreated',
+          ),
+          hasLength(1),
+        );
+      },
+    );
+
+    test(
+      'delivery driver and collection production states survive closure and restart',
+      () async {
+        final harness = await _EposHarness.create();
+        addTearDown(harness.dispose);
+
+        await harness.send('order.opened', const <String, Object?>{
+          'orderId': 'order-delivery-flow',
+          'channel': 'delivery',
+          'customerId': 'customer-delivery',
+          'customerName': 'Delivery Customer',
+          'customerPhone': '+905551112233',
+          'deliveryAddress': '12 Harbour Road',
+          'deliveryAddressLabel': 'Home',
+          'serviceAreaId': 'area-a',
+          'serviceAreaName': 'Kyrenia',
+          'deliveryFeeMinor': 300,
+          'scheduledForUtc': '2026-10-26T18:30:00.000Z',
+        });
+        await harness.send('order.itemAdded', const <String, Object?>{
+          'orderId': 'order-delivery-flow',
+          'lineId': 'line-delivery-curry',
+          'productId': 'curry',
+          'quantity': 1,
+          'channel': 'delivery',
+          'modifierSelections': <Object?>[
+            <String, Object?>{
+              'groupId': 'curry-heat',
+              'optionId': 'extra-hot',
+            },
+          ],
+        });
+        await harness.send('order.sent', const <String, Object?>{
+          'orderId': 'order-delivery-flow',
+          'lineIds': <String>['line-delivery-curry'],
+          'printRequired': false,
+        });
+        await harness.send('order.fulfilmentChanged', const <String, Object?>{
+          'orderId': 'order-delivery-flow',
+          'status': 'assigned',
+          'driverId': 'staff-a',
+          'managerAuthorized': true,
+        });
+        await harness.send('order.fulfilmentChanged', const <String, Object?>{
+          'orderId': 'order-delivery-flow',
+          'status': 'outForDelivery',
+        });
+        await harness.send('order.fulfilmentChanged', const <String, Object?>{
+          'orderId': 'order-delivery-flow',
+          'status': 'delivered',
+        });
+        await harness.send('payment.recorded', const <String, Object?>{
+          'orderId': 'order-delivery-flow',
+          'paymentId': 'payment-delivery',
+          'baseAmountMinor': 1600,
+          'tenderedAmountMinor': 1600,
+          'method': 'cash',
+          'currencyCode': 'GBP',
+          'exchangeRateToBase': '1',
+        });
+        await harness.send('order.closed', const <String, Object?>{
+          'orderId': 'order-delivery-flow',
+          'receiptNumber': 'R-DELIVERY-1',
+          'printReceipt': false,
+        });
+
+        await harness.send('order.opened', const <String, Object?>{
+          'orderId': 'order-collection-flow',
+          'channel': 'collection',
+          'customerId': 'customer-collection',
+          'customerName': 'Collection Customer',
+        });
+        await harness.send('order.itemAdded', const <String, Object?>{
+          'orderId': 'order-collection-flow',
+          'lineId': 'line-collection-rice',
+          'productId': 'rice',
+          'quantity': 1,
+          'channel': 'collection',
+        });
+        await harness.send('order.sent', const <String, Object?>{
+          'orderId': 'order-collection-flow',
+          'lineIds': <String>['line-collection-rice'],
+          'printRequired': false,
+        });
+        await harness.send('order.fulfilmentChanged', const <String, Object?>{
+          'orderId': 'order-collection-flow',
+          'status': 'readyForCollection',
+          'managerAuthorized': true,
+        });
+        await harness.send('order.fulfilmentChanged', const <String, Object?>{
+          'orderId': 'order-collection-flow',
+          'status': 'collected',
+          'managerAuthorized': true,
+        });
+
+        final replayed = harness.restartedOrderBook();
+        final delivery = await replayed.order('order-delivery-flow');
+        final collection = await replayed.order('order-collection-flow');
+        expect(delivery.isClosed, isTrue);
+        expect(delivery.fulfilmentStatus, 'delivered');
+        expect(delivery.assignedDriverId, 'staff-a');
+        expect(delivery.totalMinor, 1600);
+        expect(delivery.lines.values.single.details, contains('Extra Hot'));
+        expect(delivery.scheduledForUtc, DateTime.utc(2026, 10, 26, 18, 30));
+        expect(collection.isClosed, isFalse);
+        expect(collection.fulfilmentStatus, 'collected');
+        expect(collection.balanceDueMinor, 400);
+      },
+    );
+
+    test(
+      'remote outage creates no phantom sale while local hub work remains durable',
+      () async {
+        final harness = await _EposHarness.create();
+        addTearDown(harness.dispose);
+        final before = await harness.events();
+        final remote = VenueHubRemoteCommandClient(
+          timeout: const Duration(milliseconds: 250),
+        );
+
+        await expectLater(
+          remote.send(
+            scope: _EposHarness.scope,
+            hubEpoch: _EposHarness.hubEpoch,
+            eventType: 'order.opened',
+            payload: const <String, Object?>{
+              'orderId': 'order-remote-offline',
+              'channel': 'dineIn',
+              'tableId': 'table-a',
+            },
+            showBusy: false,
+            submit: (_) async => throw StateError(
+              'The venue hub is offline. Join the venue network or wait for it to reconnect.',
+            ),
+            waitForStatus: (_) async => const <String, Object?>{},
+          ),
+          throwsA(isA<StateError>()),
+        );
+        expect(await harness.events(), hasLength(before.length));
+
+        // The authoritative local ledger remains usable during the cloud
+        // outage and survives a process restart.
+        await harness.orderBook.commit(
+          OfflineEventDraft(
+            tenantId: 'tenant-a',
+            venueId: 'venue-a',
+            deviceId: 'lan-terminal-a',
+            staffId: 'staff-a',
+            type: 'order.opened',
+            payload: <String, Object?>{
+              'orderId': 'order-lan-offline',
+              'channel': 'dineIn',
+              'tableId': 'table-a',
+            },
+          ),
+          _EposHarness.hubEpoch,
+        );
+        final replayed = harness.restartedOrderBook();
+        expect((await replayed.order('order-lan-offline')).tableId, 'table-a');
+        await expectLater(
+          replayed.order('order-remote-offline'),
+          throwsA(isA<OfflineProjectionException>()),
+        );
+      },
+    );
+
+    test(
       'print retry uses one ticket and safely switches to fallback',
       () async {
         final harness = await _EposHarness.create();
@@ -588,9 +898,28 @@ Map<String, Object?> _venueSnapshot() => <String, Object?>{
       'primaryDeviceId': 'printer-receipt',
     },
   ],
-  'modifierGroups': <Object?>[],
+  'modifierGroups': <Object?>[
+    <String, Object?>{
+      'id': 'curry-heat',
+      'name': 'Heat',
+      'minimumSelections': 0,
+      'maximumSelections': 1,
+      'isAvailable': true,
+      'options': <Object?>[
+        <String, Object?>{
+          'id': 'extra-hot',
+          'name': 'Extra Hot',
+          'priceDeltaMinor': 100,
+          'isAvailable': true,
+        },
+      ],
+    },
+  ],
   'products': <Object?>[
-    _product('curry', 'Chicken Curry', 1200, 'kitchen'),
+    <String, Object?>{
+      ..._product('curry', 'Chicken Curry', 1200, 'kitchen'),
+      'modifierGroupIds': <String>['curry-heat'],
+    },
     _product('rice', 'Pilau Rice', 400, 'kitchen'),
     _product('water', 'Mineral Water', 200, 'kitchen'),
   ],
