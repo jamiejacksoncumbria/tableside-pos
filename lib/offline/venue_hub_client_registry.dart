@@ -212,7 +212,6 @@ class VenueHubClientRegistry {
       );
       return null;
     }
-    _deviceEnrolled = true;
     final trustedCertificate = await _secrets.read(
       key: _venueCertificateKey(scope),
     );
@@ -222,6 +221,10 @@ class VenueHubClientRegistry {
         'Import the public venue certificate before using the LAN hub.',
       );
     }
+    // A native terminal is operationally enrolled only when both its signing
+    // credential is authorised by the server and its venue certificate is
+    // pinned locally. This flag also gates the protected remote queue.
+    _deviceEnrolled = true;
     final loginClient = VenueHubClient(
       configuration: VenueHubClientConfiguration(
         endpoint: endpoint,

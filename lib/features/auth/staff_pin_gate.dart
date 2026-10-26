@@ -551,8 +551,8 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           SnackBar(
             content: Text(
               hubConnectionUnavailable
-                  ? 'Signed in online. Orders will use the protected remote hub queue while its heartbeat is live. Install the venue certificate for LAN offline use.'
-                  : 'Signed in online. Orders will use the protected remote hub queue; enrol this device only if it also needs LAN offline use.',
+                  ? 'Signed in for recovery only. A manager must enrol this device and import the venue certificate before it can process orders.'
+                  : 'Signed in for recovery only. Enrol this device in Venue offline hub settings before it can process orders.',
             ),
           ),
         );

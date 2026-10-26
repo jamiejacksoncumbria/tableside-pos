@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:tableside_pos/core/tenant_scope.dart';
@@ -2203,6 +2203,12 @@ class ProductionCommandRepository {
         eventType: eventType,
         payload: payload,
         businessTimestampUtc: businessTimestampUtc,
+      );
+    }
+    if (!kIsWeb && !hub.isDeviceEnrolled(scope)) {
+      throw StateError(
+        'This device is not authorised for this venue. A manager must enrol '
+        'it and import the pinned venue certificate before it can process orders.',
       );
     }
     if (hub.isLocalHubHost(scope)) {
