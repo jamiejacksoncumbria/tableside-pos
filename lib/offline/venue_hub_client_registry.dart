@@ -216,6 +216,12 @@ class VenueHubClientRegistry {
     final trustedCertificate = await _secrets.read(
       key: _venueCertificateKey(scope),
     );
+    if (trustedCertificate?.trim().isNotEmpty != true) {
+      throw StateError(
+        'This device is enrolled but has no pinned venue certificate. '
+        'Import the public venue certificate before using the LAN hub.',
+      );
+    }
     final loginClient = VenueHubClient(
       configuration: VenueHubClientConfiguration(
         endpoint: endpoint,
@@ -375,6 +381,12 @@ class VenueHubPrinterClientRegistry {
     final trustedCertificate = await _secrets.read(
       key: _venueCertificateKey(scope),
     );
+    if (trustedCertificate?.trim().isNotEmpty != true) {
+      // Printer claiming must never fall back to Android/Windows trust roots.
+      // It carries operational authority even while no member of staff is
+      // signed in, so absence of the venue pin is a hard failure.
+      return;
+    }
     _client = VenueHubClient(
       configuration: VenueHubClientConfiguration(
         endpoint: endpoint,
