@@ -15,4 +15,19 @@ class VenueHubAvailability {
         ? detail!.trim()
         : 'The venue hub is offline. Join the same Wi-Fi as the hub and check that it is running.';
   }
+
+  /// Records a cloud/realtime presence failure without hiding a healthy LAN
+  /// hub. The cloud heartbeat proves that remote terminals can reach the hub;
+  /// it is not the authority for an enrolled terminal already connected to
+  /// the hub's pinned HTTPS endpoint on the venue network.
+  static void markRemoteOffline({
+    required bool lanSessionAvailable,
+    String? detail,
+  }) {
+    if (lanSessionAvailable) {
+      markOnline();
+      return;
+    }
+    markOffline(detail);
+  }
 }

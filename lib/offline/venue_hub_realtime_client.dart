@@ -10,6 +10,7 @@ import '../core/tenant_scope.dart';
 import '../data/production_command_repository.dart';
 import 'transient_realtime_database.dart';
 import 'venue_hub_availability.dart';
+import 'venue_hub_client_registry.dart';
 import 'windows_realtime_rest_session.dart';
 
 /// A staff-scoped realtime control channel for remote POS terminals.
@@ -270,8 +271,13 @@ class VenueHubRealtimeClient {
       if (wasOffline) AppLogger.info('Venue hub is back online and ready.');
       return;
     }
-    VenueHubAvailability.markOffline(
-      detail ?? 'The venue hub realtime presence is offline.',
+    final scope = _scope;
+    final lanSessionAvailable =
+        scope != null &&
+        VenueHubClientRegistry.instance.hasUsableSession(scope);
+    VenueHubAvailability.markRemoteOffline(
+      lanSessionAvailable: lanSessionAvailable,
+      detail: detail ?? 'The venue hub realtime presence is offline.',
     );
   }
 
