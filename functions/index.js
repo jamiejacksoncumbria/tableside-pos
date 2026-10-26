@@ -1757,6 +1757,18 @@ async function manageVenueConfigurationFor(caller, rawData) {
       .get();
     const credentialRef = credentials.doc(credentialId);
     const existingCredential = await credentialRef.get();
+    const activeIdentityCollision = existingForDevice.docs.find((current) =>
+      current.id !== credentialId && current.data().active === true);
+    if (activeIdentityCollision) {
+      // Never rotate another key merely because it presented the same text
+      // device ID. That behaviour allowed a cloned/colliding installation to
+      // displace the real till or hub. Recovery now requires the manager to
+      // revoke the old credential explicitly, which leaves an audit trail.
+      throw new HttpsError(
+        "already-exists",
+        "Another signing key already owns this device identity. Revoke the old device credential or reset this installation.",
+      );
+    }
     if (existingCredential.exists &&
         (existingCredential.data().venueId !== venueId ||
           existingCredential.data().deviceId !== deviceId ||
@@ -1765,16 +1777,6 @@ async function manageVenueConfigurationFor(caller, rawData) {
       throw new HttpsError("already-exists", "That device credential ID is already in use.");
     }
     const batch = db.batch();
-    for (const current of existingForDevice.docs) {
-      if (current.id !== credentialId && current.data().active === true) {
-        batch.update(current.ref, {
-          active: false,
-          revokedAt: FieldValue.serverTimestamp(),
-          revokedByActor: actor,
-          revokeReason: "rotated",
-        });
-      }
-    }
     batch.set(credentialRef, {
       venueId,
       deviceId,

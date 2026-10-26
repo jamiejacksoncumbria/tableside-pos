@@ -413,7 +413,22 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                         : 'This device is POS-client only. Android or Windows must host the venue hub.',
                   ),
                   const SizedBox(height: 8),
-                  SelectableText('Device: ${deviceId ?? 'loading'}'),
+                  SelectableText(
+                    'This device ID: ${deviceId ?? 'loading'}',
+                  ),
+                  if (_credential != null)
+                    SelectableText(
+                      'This device key: ${_credential!.credentialId}',
+                    ),
+                  if (bootstrap?.enabled == true) ...[
+                    const SizedBox(height: 4),
+                    SelectableText(
+                      'Active hub ID: ${bootstrap!.hubDeviceId ?? 'missing'}',
+                    ),
+                    SelectableText(
+                      'Active hub key: ${bootstrap.hubCredentialId ?? 'missing'}',
+                    ),
+                  ],
                   if (canHostVenueHub) ...[
                     const SizedBox(height: 12),
                     Row(
