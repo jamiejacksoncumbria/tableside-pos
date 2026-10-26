@@ -42,6 +42,7 @@ functions/.env.*
 functions/.runtimeconfig.json
 config/firebase-production.json
 config/firebase-production/
+/local-secrets/
 .npm-cache/
 
 # Symbolication related
