@@ -132,6 +132,23 @@ function requiredDocumentId(data, name) {
   return value;
 }
 
+// Native hub/till identities created before v2 lived in ordinary preferences
+// and could be copied by Android backup or emulator cloning. They are no
+// longer security principals. The final eight hexadecimal characters scope a
+// physical installation ID to one tenant/venue without exposing those IDs.
+const currentVenueDeviceIdPattern =
+  /^device-v2-[0-9a-f]{32}-[0-9a-f]{8}$/u;
+
+function requireCurrentVenueDeviceId(value, label = "deviceId") {
+  if (!currentVenueDeviceIdPattern.test(value)) {
+    throw new HttpsError(
+      "failed-precondition",
+      `The ${label} uses a retired device identity. Re-enrol this device.`,
+    );
+  }
+  return value;
+}
+
 function optionalText(data, name, maxLength = 500) {
   const value = data[name];
   if (value == null) return "";
@@ -1718,7 +1735,9 @@ async function manageVenueConfigurationFor(caller, rawData) {
       updatedByActor: actor,
     });
   } else if (resource === "offlineHubDeviceCredential") {
-    const deviceId = requiredDocumentId(values, "deviceId");
+    const deviceId = requireCurrentVenueDeviceId(
+      requiredDocumentId(values, "deviceId"),
+    );
     const credentialId = requiredDocumentId(values, "credentialId");
     const suppliedPublicKeyBase64 = requiredText(
       values, "publicKeyBase64", 128,
@@ -1805,7 +1824,9 @@ async function manageVenueConfigurationFor(caller, rawData) {
     await batch.commit();
     result = {saved: true, revoked: true};
   } else if (resource === "offlineHubActivation") {
-    const deviceId = requiredDocumentId(values, "deviceId");
+    const deviceId = requireCurrentVenueDeviceId(
+      requiredDocumentId(values, "deviceId"),
+    );
     const credentialId = requiredDocumentId(values, "credentialId");
     const endpointHost = requiredText(values, "endpointHost", 253).toLowerCase();
     const endpointPort = Number(values.endpointPort ?? 8443);
@@ -2471,12 +2492,16 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
     hubCredentialId: typeof hub.credentialId === "string" ? hub.credentialId : null,
     hubEndpoint: typeof hub.endpoint === "string" ? hub.endpoint : null,
     hubEpoch: Number.isSafeInteger(Number(hub.epoch)) ? Number(hub.epoch) : 0,
-    credentials: credentialSnapshot.docs.map((credential) => ({
+    credentials: credentialSnapshot.docs
+      .filter((credential) => currentVenueDeviceIdPattern.test(
+        String(credential.data().deviceId ?? ""),
+      ))
+      .map((credential) => ({
       credentialId: credential.id,
       deviceId: credential.data().deviceId,
       algorithm: credential.data().algorithm,
       publicKeyBase64: credential.data().publicKeyBase64,
-    })),
+      })),
     serverTimeMillis: Date.now(),
   };
 }
@@ -2968,7 +2993,9 @@ async function verifiedOfflineHubUpload(
   const tenantId = requiredText(envelope, "tenantId", 128);
   const venueId = requiredText(envelope, "venueId", 128);
   const credentialId = requiredDocumentId(envelope, "credentialId");
-  const deviceId = requiredDocumentId(envelope, "deviceId");
+  const deviceId = requireCurrentVenueDeviceId(
+    requiredDocumentId(envelope, "deviceId"),
+  );
   const staffId = requiredText(envelope, "staffId", 160);
   const method = requiredText(envelope, "method", 12).toUpperCase();
   const path = requiredText(envelope, "path", 128);

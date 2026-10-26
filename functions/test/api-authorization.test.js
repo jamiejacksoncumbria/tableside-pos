@@ -42,7 +42,7 @@ const deviceId = "device-a";
 const printerCredentialA = "printer-credential-a";
 const printerCredentialB = "printer-credential-b";
 const hubCredentialId = "credential-a";
-const hubDeviceId = "hub-a";
+const hubDeviceId = "device-v2-0123456789abcdef0123456789abcdef-89abcdef";
 const hubEpoch = 7;
 const hubKeys = generateKeyPairSync("ed25519");
 const hubPublicKeyBase64 = hubKeys.publicKey.export({
@@ -1022,7 +1022,7 @@ async function seedAuthorisationFixture() {
     };
     await Promise.all(Object.entries(documents).map(([documentPath, data]) =>
       setDoc(doc(firestore, documentPath), data)));
-    await set(ref(context.database(), "hubPresence/tenant-a/venue-a/hub-a"), {
+    await set(ref(context.database(), `hubPresence/tenant-a/venue-a/${hubDeviceId}`), {
       online: true,
       hubEpoch: 7,
       lastReadyAt: Date.now(),
