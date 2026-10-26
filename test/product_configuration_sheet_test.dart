@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tableside_pos/features/pos/domain.dart';
 import 'package:tableside_pos/features/pos/product_configuration_sheet.dart';
@@ -8,6 +9,20 @@ void main() {
     tester,
   ) async {
     ProductConfigurationSelection? selection;
+    final textInputMethods = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.textInput,
+      (call) async {
+        textInputMethods.add(call.method);
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.textInput,
+        null,
+      ),
+    );
     const product = MenuProduct(
       id: 'product-a',
       name: 'Test Product',
@@ -46,6 +61,7 @@ void main() {
     await tester.pump();
     final field = tester.widget<TextField>(find.byType(TextField));
     expect(field.focusNode?.hasFocus, isTrue);
+    expect(textInputMethods, contains('TextInput.show'));
 
     await tester.enterText(find.byType(TextField), 'No onions');
     await tester.tap(find.text('Add to order'));

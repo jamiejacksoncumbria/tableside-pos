@@ -225,10 +225,19 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
                               suffixIcon: IconButton(
                                 tooltip: 'Open keyboard for item note',
                                 onPressed: () {
-                                  noteFocus.requestFocus();
-                                  SystemChannels.textInput.invokeMethod<void>(
-                                    'TextInput.show',
-                                  );
+                                  FocusScope.of(context).requestFocus(noteFocus);
+                                  // Android can ignore TextInput.show when it
+                                  // arrives in the same frame as the focus
+                                  // change. Wait until the TextField owns the
+                                  // input connection before asking for IME.
+                                  WidgetsBinding.instance.addPostFrameCallback((
+                                    _,
+                                  ) {
+                                    if (noteFocus.hasFocus) {
+                                      SystemChannels.textInput
+                                          .invokeMethod<void>('TextInput.show');
+                                    }
+                                  });
                                 },
                                 icon: const Icon(Icons.keyboard_alt_outlined),
                               ),

@@ -686,6 +686,59 @@ class VenueHubRuntime {
         return null;
       }
 
+      Future<void> completeRemoteCommandReliably({
+        required String commandId,
+        required String claimToken,
+        required bool accepted,
+        Map<String, Object?> result = const <String, Object?>{},
+        String? rejectionMessage,
+      }) async {
+        Object? lastError;
+        StackTrace? lastStack;
+        for (var attempt = 1; attempt <= 3; attempt++) {
+          if (_activeScope != scope) return;
+          try {
+            await _repository
+                .completeRemoteHubCommand(
+                  scope: scope,
+                  deviceId: deviceId,
+                  hubEpoch: bootstrap.hubEpoch,
+                  credential: credential,
+                  commandId: commandId,
+                  claimToken: claimToken,
+                  accepted: accepted,
+                  result: result,
+                  rejectionMessage: rejectionMessage,
+                )
+                .timeout(const Duration(seconds: 12));
+            if (attempt > 1) {
+              AppLogger.info(
+                'Remote hub command $commandId: acknowledgement restored on '
+                'attempt $attempt.',
+              );
+            }
+            return;
+          } catch (error, stackTrace) {
+            lastError = error;
+            lastStack = stackTrace;
+            if (attempt < 3 && _activeScope == scope) {
+              AppLogger.info(
+                'Remote hub command $commandId: acknowledgement attempt '
+                '$attempt was interrupted; retrying the same committed result.',
+              );
+              await Future<void>.delayed(Duration(milliseconds: 400 * attempt));
+            }
+          }
+        }
+        AppLogger.error(
+          accepted
+              ? 'Confirm projected remote command $commandId after retries'
+              : 'Report rejected remote command $commandId after retries',
+          lastError ?? StateError('Remote command acknowledgement failed.'),
+          lastStack ?? StackTrace.current,
+        );
+      }
+
       Future<void> remoteTick() async {
         if (_activeScope != scope) return;
         if (remoteTickRunning) {
@@ -751,26 +804,12 @@ class VenueHubRuntime {
                 error,
                 stackTrace,
               );
-              try {
-                await _repository
-                    .completeRemoteHubCommand(
-                      scope: scope,
-                      deviceId: deviceId,
-                      hubEpoch: bootstrap.hubEpoch,
-                      credential: credential,
-                      commandId: commandId,
-                      claimToken: claimToken,
-                      accepted: false,
-                      rejectionMessage: error.toString(),
-                    )
-                    .timeout(const Duration(seconds: 12));
-              } catch (acknowledgementError, acknowledgementStack) {
-                AppLogger.error(
-                  'Report rejected remote command $commandId',
-                  acknowledgementError,
-                  acknowledgementStack,
-                );
-              }
+              await completeRemoteCommandReliably(
+                commandId: commandId,
+                claimToken: claimToken,
+                accepted: false,
+                rejectionMessage: error.toString(),
+              );
               continue;
             }
 
@@ -797,40 +836,25 @@ class VenueHubRuntime {
               );
               continue;
             }
-            try {
-              // For a new event, ingestion has already acknowledged this
-              // command transactionally. For an idempotent order-open retry,
-              // the reused event may belong to an older command; completing it
-              // here is safe because that event is now confirmed cloud-synced.
-              await _repository
-                  .completeRemoteHubCommand(
-                    scope: scope,
-                    deviceId: deviceId,
-                    hubEpoch: bootstrap.hubEpoch,
-                    credential: credential,
-                    commandId: commandId,
-                    claimToken: claimToken,
-                    accepted: true,
-                    result: <String, Object?>{
-                      'eventId': committedAcknowledgement.eventId,
-                      'sequence': committedAcknowledgement.sequence,
-                      'eventHash': committedAcknowledgement.eventHash,
-                      'committedAtUtc': committedAcknowledgement.committedAtUtc
-                          .toUtc()
-                          .toIso8601String(),
-                    },
-                  )
-                  .timeout(const Duration(seconds: 12));
-            } catch (error, stackTrace) {
-              // A new event was already accepted by ingestion. An interrupted
-              // response is therefore ambiguous, never a business rejection;
-              // the remote waiter can safely observe the stored command state.
-              AppLogger.error(
-                'Confirm projected remote command $commandId',
-                error,
-                stackTrace,
-              );
-            }
+            // For a new event, ingestion has already acknowledged this
+            // command transactionally. For an idempotent order-open retry,
+            // the reused event may belong to an older command. Retry only this
+            // idempotent acknowledgement; never re-run the committed order.
+            unawaited(
+              completeRemoteCommandReliably(
+                commandId: commandId,
+                claimToken: claimToken,
+                accepted: true,
+                result: <String, Object?>{
+                  'eventId': committedAcknowledgement.eventId,
+                  'sequence': committedAcknowledgement.sequence,
+                  'eventHash': committedAcknowledgement.eventHash,
+                  'committedAtUtc': committedAcknowledgement.committedAtUtc
+                      .toUtc()
+                      .toIso8601String(),
+                },
+              ),
+            );
           }
         } catch (error, stackTrace) {
           if (remoteClaimAvailable) {
