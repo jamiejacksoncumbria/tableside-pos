@@ -399,6 +399,13 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           pin: pin,
           deviceId: deviceId,
         );
+        await _hubCache.saveStaffPreferences(
+          widget.scope,
+          userId: session.userId,
+          themeModePreference: session.themeModePreference,
+          posCategoryViewPreference: session.posCategoryViewPreference,
+          posProductSortPreference: session.posProductSortPreference,
+        );
         ref
             .read(activeStaffPinSessionProvider.notifier)
             .unlock(session, widget.scope);
@@ -527,6 +534,10 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           bootstrap,
         );
       }
+      final cachedPreferences = await _hubCache.readStaffPreferences(
+        widget.scope,
+        staff.userId,
+      );
       StaffPinVerification session;
       if (widget.offlineHubOnly) {
         if (hubLogin == null) {
@@ -546,9 +557,12 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           // Preserve the venue default restored from local preferences while
           // Firebase is unavailable. "system" previously passed through a
           // light/dark-only parser and incorrectly forced the light theme.
-          themeModePreference: 'venue',
-          posCategoryViewPreference: 'bars',
-          posProductSortPreference: 'alphabetical',
+          themeModePreference:
+              cachedPreferences['themeModePreference'] ?? 'venue',
+          posCategoryViewPreference:
+              cachedPreferences['posCategoryViewPreference'] ?? 'bars',
+          posProductSortPreference:
+              cachedPreferences['posProductSortPreference'] ?? 'alphabetical',
         );
       } else if (migratedCloudSession != null) {
         session = migratedCloudSession;
@@ -578,9 +592,12 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             displayName: staff.displayName,
             isPlatformAdmin: false,
             roles: staff.roles,
-            themeModePreference: 'system',
-            posCategoryViewPreference: 'bars',
-            posProductSortPreference: 'alphabetical',
+            themeModePreference:
+                cachedPreferences['themeModePreference'] ?? 'venue',
+            posCategoryViewPreference:
+                cachedPreferences['posCategoryViewPreference'] ?? 'bars',
+            posProductSortPreference:
+                cachedPreferences['posProductSortPreference'] ?? 'alphabetical',
           );
         }
       }
@@ -588,6 +605,13 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           hubLogin.expiresAtUtc.isBefore(session.expiresAt)) {
         session = session.copyWith(expiresAt: hubLogin.expiresAtUtc);
       }
+      await _hubCache.saveStaffPreferences(
+        widget.scope,
+        userId: session.userId,
+        themeModePreference: session.themeModePreference,
+        posCategoryViewPreference: session.posCategoryViewPreference,
+        posProductSortPreference: session.posProductSortPreference,
+      );
       ref
           .read(activeStaffPinSessionProvider.notifier)
           .unlock(session, widget.scope);

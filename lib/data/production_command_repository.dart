@@ -19,6 +19,7 @@ import '../offline/venue_hub_device_credential.dart';
 import '../offline/venue_hub_protocol.dart';
 import '../offline/venue_hub_client_registry.dart';
 import '../offline/venue_hub_client.dart';
+import '../offline/venue_hub_availability.dart';
 import '../offline/venue_hub_remote_command_client.dart';
 import '../offline/venue_hub_realtime_client.dart';
 import '../offline/venue_hub_runtime.dart';
@@ -2010,8 +2011,7 @@ class ProductionCommandRepository {
       );
       var splitTotalMinor = 0;
       for (final line in order.lines) {
-        splitTotalMinor +=
-            line.unitPriceMinor * (lineQuantities[line.id] ?? 0);
+        splitTotalMinor += line.unitPriceMinor * (lineQuantities[line.id] ?? 0);
       }
       return OrderSplitResult(
         splitOrderId: splitOrderId,
@@ -2197,6 +2197,14 @@ class ProductionCommandRepository {
     if (!hub.requiresHub(scope)) {
       throw StateError('The venue hub is not authoritative for this venue.');
     }
+    final hubConnectivity = VenueHubAvailability.status.value.connectivity;
+    if (hubConnectivity == VenueHubConnectivity.unavailable ||
+        hubConnectivity == VenueHubConnectivity.checking) {
+      throw StateError(
+        VenueHubAvailability.status.value.detail ??
+            'The venue hub is offline. Orders are blocked until it reconnects.',
+      );
+    }
     if (hub.hasUsableSession(scope)) {
       return hub.send(
         scope: scope,
@@ -2341,7 +2349,8 @@ class ProductionCommandRepository {
       if (staffSession != null) 'staffPinSessionId': staffSession.sessionId,
       if (staffSession != null)
         'staffPinSessionToken': staffSession.sessionToken,
-      if (staffSession != null) 'staffPinSessionDeviceId': staffSession.deviceId,
+      if (staffSession != null)
+        'staffPinSessionDeviceId': staffSession.deviceId,
     };
     final response = await http.post(
       endpoint,

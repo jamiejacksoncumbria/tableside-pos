@@ -8,6 +8,7 @@ import 'offline_event.dart';
 import 'offline_event_ledger.dart';
 import 'offline_order_projection.dart';
 import 'venue_hub_bootstrap.dart';
+import 'venue_hub_availability.dart';
 import 'venue_hub_cloud_sync.dart';
 import 'venue_hub_command_processor.dart';
 import 'venue_hub_device_credential.dart';
@@ -60,6 +61,7 @@ class VenueHubRuntime {
   VenueHubCloudSync? _sync;
   VenueHubPrintQueue? _printQueue;
   VenueHubRealtimePresence? _realtimePresence;
+  void Function()? _realtimeConnectedListener;
   StreamSubscription<void>? _realtimeSignalSubscription;
   StreamSubscription<bool>? _realtimeAuthoritySubscription;
   Timer? _realtimeReconnectTimer;
@@ -634,6 +636,23 @@ class VenueHubRuntime {
       // connection without restarting the hub or re-opening its local ledger.
       final activeRealtimePresence = _realtimePresence ??=
           VenueHubRealtimePresence(repository: _repository);
+      final oldConnectionListener = _realtimeConnectedListener;
+      if (oldConnectionListener != null) {
+        activeRealtimePresence.connected.removeListener(oldConnectionListener);
+      }
+      void publishConnectionStatus() {
+        if (_activeScope != scope) return;
+        // The native HTTPS listener is authoritative and remains usable over
+        // LAN without internet. RTDB connectivity determines only whether
+        // remote/mobile-data terminals can reach this hub.
+        VenueHubAvailability.markLanOnline(
+          internetAvailable: activeRealtimePresence.connected.value,
+        );
+      }
+
+      _realtimeConnectedListener = publishConnectionStatus;
+      activeRealtimePresence.connected.addListener(publishConnectionStatus);
+      publishConnectionStatus();
       try {
         await activeRealtimePresence.start(
           scope: scope,
@@ -971,6 +990,7 @@ class VenueHubRuntime {
           endpoint: endpoint,
         ),
       );
+      publishConnectionStatus();
       unawaited(reconcileClosedCloudOrders());
       var refreshingAuthority = false;
       Future<void> refreshAuthority() async {
@@ -1098,6 +1118,7 @@ class VenueHubRuntime {
       await AndroidVenueHubService.start();
     } catch (error, stackTrace) {
       AppLogger.error('Start venue offline hub', error, stackTrace);
+      VenueHubAvailability.markOffline(error.toString());
       await _server.stop();
       _emit(
         VenueHubRuntimeStatus(
@@ -1156,7 +1177,13 @@ class VenueHubRuntime {
     _realtimeSignalSubscription = null;
     await _realtimeAuthoritySubscription?.cancel();
     _realtimeAuthoritySubscription = null;
-    await _realtimePresence?.stop();
+    final realtimePresence = _realtimePresence;
+    final realtimeConnectedListener = _realtimeConnectedListener;
+    if (realtimePresence != null && realtimeConnectedListener != null) {
+      realtimePresence.connected.removeListener(realtimeConnectedListener);
+    }
+    _realtimeConnectedListener = null;
+    await realtimePresence?.stop();
     await _pendingSubscription?.cancel();
     _pendingSubscription = null;
     _sync?.dispose();
@@ -1175,6 +1202,7 @@ class VenueHubRuntime {
         pendingEvents: 0,
       ),
     );
+    VenueHubAvailability.reset();
   }
 
   Future<Map<String, Object?>?> claimLocalPrintJob(String deviceId) {

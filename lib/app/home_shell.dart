@@ -25,6 +25,7 @@ import '../features/printing/print_delivery_monitor.dart';
 import '../features/reports/reports_page.dart';
 import '../features/settings/settings_page.dart';
 import '../features/training/training_mode_page.dart';
+import '../offline/venue_hub_client_cache.dart';
 
 enum HomeSection {
   pos,
@@ -495,6 +496,16 @@ Future<void> _changeOwnAppearance({
         .read(productionCommandRepositoryProvider)
         .updateOwnThemePreference(scope: scope, themeMode: selected);
     ref.read(appThemeControllerProvider.notifier).applyUserPreference(selected);
+    final session = ref.read(activeStaffPinSessionProvider);
+    if (session != null) {
+      await VenueHubClientCache().saveStaffPreferences(
+        scope,
+        userId: session.userId,
+        themeModePreference: selected,
+        posCategoryViewPreference: session.posCategoryViewPreference,
+        posProductSortPreference: session.posProductSortPreference,
+      );
+    }
     if (context.mounted) {
       showAppNotification(
         context,

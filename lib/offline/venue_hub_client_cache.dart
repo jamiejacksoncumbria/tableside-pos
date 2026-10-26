@@ -207,4 +207,48 @@ class VenueHubClientCache {
       return const [];
     }
   }
+
+  String _staffPreferenceKey(VenueScope scope, String userId) =>
+      _key(scope, 'staffPreference.${Uri.encodeComponent(userId)}');
+
+  /// Saves presentation-only staff choices for a terminal that may restart
+  /// without Firebase. This contains no PIN, permission or session authority.
+  Future<void> saveStaffPreferences(
+    VenueScope scope, {
+    required String userId,
+    required String themeModePreference,
+    required String posCategoryViewPreference,
+    required String posProductSortPreference,
+  }) async {
+    try {
+      await _preferences.setString(
+        _staffPreferenceKey(scope, userId),
+        jsonEncode(<String, String>{
+          'themeModePreference': themeModePreference,
+          'posCategoryViewPreference': posCategoryViewPreference,
+          'posProductSortPreference': posProductSortPreference,
+        }),
+      );
+    } on Object {
+      // Preferences never participate in authentication or POS authority.
+    }
+  }
+
+  Future<Map<String, String>> readStaffPreferences(
+    VenueScope scope,
+    String userId,
+  ) async {
+    try {
+      final raw = await _preferences.getString(
+        _staffPreferenceKey(scope, userId),
+      );
+      final decoded = raw == null ? null : jsonDecode(raw);
+      if (decoded is! Map) return const <String, String>{};
+      return decoded.map(
+        (key, value) => MapEntry(key.toString(), value.toString()),
+      );
+    } on Object {
+      return const <String, String>{};
+    }
+  }
 }

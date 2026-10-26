@@ -32,6 +32,9 @@ class VenueHubClientRegistry {
   String? _connectionFailure;
   StreamSubscription<List<Map<String, Object?>>>? _orderSubscription;
   Timer? _orderReconnectTimer;
+  Timer? _healthTimer;
+  bool _healthCheckRunning = false;
+  bool _lanHealthy = false;
   int _streamGeneration = 0;
   final Set<String> _openedOrderIds = <String>{};
 
@@ -56,6 +59,7 @@ class VenueHubClientRegistry {
 
   bool hasUsableSession(VenueScope scope) =>
       requiresHub(scope) &&
+      _lanHealthy &&
       _client != null &&
       _sessionExpiresAtUtc?.isAfter(TrustedClock.instance.nowUtc()) == true;
 
@@ -124,39 +128,44 @@ class VenueHubClientRegistry {
       return;
     }
     if (_openedOrderIds.contains(orderId)) return;
-    await client.sendEvent(
-      eventType: 'order.opened',
-      payload: <String, Object?>{
-        'orderId': orderId,
-        if (tableId?.trim().isNotEmpty == true) 'tableId': tableId!.trim(),
-        if (tabName?.trim().isNotEmpty == true) 'tabName': tabName!.trim(),
-        'channel': channel.name,
-        if (customerId?.trim().isNotEmpty == true)
-          'customerId': customerId!.trim(),
-        if (customerName?.trim().isNotEmpty == true)
-          'customerName': customerName!.trim(),
-        if (customerPhone?.trim().isNotEmpty == true)
-          'customerPhone': customerPhone!.trim(),
-        if (deliveryAddress?.trim().isNotEmpty == true)
-          'deliveryAddress': deliveryAddress!.trim(),
-        if (deliveryAddressLabel?.trim().isNotEmpty == true)
-          'deliveryAddressLabel': deliveryAddressLabel!.trim(),
-        'deliveryLatitude': ?deliveryLatitude,
-        'deliveryLongitude': ?deliveryLongitude,
-        if (serviceAreaId?.trim().isNotEmpty == true)
-          'serviceAreaId': serviceAreaId!.trim(),
-        if (serviceAreaName?.trim().isNotEmpty == true)
-          'serviceAreaName': serviceAreaName!.trim(),
-        if (channel == OrderChannel.delivery)
-          'deliveryFeeMinor': deliveryFeeMinor,
-        if (scheduledFor != null)
-          'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
-        if (assignedDriverId?.trim().isNotEmpty == true)
-          'assignedDriverId': assignedDriverId!.trim(),
-        if (assignedDriverName?.trim().isNotEmpty == true)
-          'assignedDriverName': assignedDriverName!.trim(),
-      },
-    );
+    try {
+      await client.sendEvent(
+        eventType: 'order.opened',
+        payload: <String, Object?>{
+          'orderId': orderId,
+          if (tableId?.trim().isNotEmpty == true) 'tableId': tableId!.trim(),
+          if (tabName?.trim().isNotEmpty == true) 'tabName': tabName!.trim(),
+          'channel': channel.name,
+          if (customerId?.trim().isNotEmpty == true)
+            'customerId': customerId!.trim(),
+          if (customerName?.trim().isNotEmpty == true)
+            'customerName': customerName!.trim(),
+          if (customerPhone?.trim().isNotEmpty == true)
+            'customerPhone': customerPhone!.trim(),
+          if (deliveryAddress?.trim().isNotEmpty == true)
+            'deliveryAddress': deliveryAddress!.trim(),
+          if (deliveryAddressLabel?.trim().isNotEmpty == true)
+            'deliveryAddressLabel': deliveryAddressLabel!.trim(),
+          'deliveryLatitude': ?deliveryLatitude,
+          'deliveryLongitude': ?deliveryLongitude,
+          if (serviceAreaId?.trim().isNotEmpty == true)
+            'serviceAreaId': serviceAreaId!.trim(),
+          if (serviceAreaName?.trim().isNotEmpty == true)
+            'serviceAreaName': serviceAreaName!.trim(),
+          if (channel == OrderChannel.delivery)
+            'deliveryFeeMinor': deliveryFeeMinor,
+          if (scheduledFor != null)
+            'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
+          if (assignedDriverId?.trim().isNotEmpty == true)
+            'assignedDriverId': assignedDriverId!.trim(),
+          if (assignedDriverName?.trim().isNotEmpty == true)
+            'assignedDriverName': assignedDriverName!.trim(),
+        },
+      );
+    } on Object catch (error) {
+      _recordLanFailureIfTransport(error);
+      rethrow;
+    }
     _openedOrderIds.add(orderId);
   }
 
@@ -174,11 +183,16 @@ class VenueHubClientRegistry {
             : 'Offline hub routing is not enabled for this venue.',
       );
     }
-    return client.sendEvent(
-      eventType: eventType,
-      payload: payload,
-      businessTimestampUtc: businessTimestampUtc,
-    );
+    try {
+      return await client.sendEvent(
+        eventType: eventType,
+        payload: payload,
+        businessTimestampUtc: businessTimestampUtc,
+      );
+    } on Object catch (error) {
+      _recordLanFailureIfTransport(error);
+      rethrow;
+    }
   }
 
   Future<VenueHubLoginResult?> configure({
@@ -191,14 +205,21 @@ class VenueHubClientRegistry {
     Uri? endpointOverride,
   }) async {
     clear();
+    VenueHubAvailability.markChecking('Checking the venue hub…');
     _scope = scope;
     _bootstrap = bootstrap;
-    if (!bootstrap.enabled) return null;
+    if (!bootstrap.enabled) {
+      VenueHubAvailability.reset();
+      return null;
+    }
     _isLocalHubHost =
         bootstrap.hubDeviceId == deviceId &&
         bootstrap.hubCredentialId == credential.credentialId;
     final endpoint = endpointOverride ?? bootstrap.endpoint;
     if (endpoint == null) {
+      VenueHubAvailability.markOffline(
+        'The venue hub endpoint is not configured.',
+      );
       throw StateError('The venue hub endpoint is not configured.');
     }
     final enrolled = bootstrap.credentials[credential.credentialId];
@@ -210,12 +231,18 @@ class VenueHubClientRegistry {
       AppLogger.info(
         'This device is online-only until a manager enrols it with the venue hub.',
       );
+      VenueHubAvailability.markOffline(
+        'This device is not enrolled with the venue hub. Orders are blocked.',
+      );
       return null;
     }
     final trustedCertificate = await _secrets.read(
       key: _venueCertificateKey(scope),
     );
     if (trustedCertificate?.trim().isNotEmpty != true) {
+      VenueHubAvailability.markOffline(
+        'This device has no pinned venue certificate. Orders are blocked.',
+      );
       throw StateError(
         'This device is enrolled but has no pinned venue certificate. '
         'Import the public venue certificate before using the LAN hub.',
@@ -259,11 +286,14 @@ class VenueHubClientRegistry {
           credential: credential,
           trustedCertificatePem: trustedCertificate,
         ),
+        timeout: const Duration(seconds: 2),
       );
       _sessionExpiresAtUtc = login.expiresAtUtc;
       VenueHubOfflineView.instance.install(await _client!.fetchCatalogue());
+      _lanHealthy = true;
+      _startLanHealthMonitor();
       _startOrderStream();
-      VenueHubAvailability.markOnline();
+      VenueHubAvailability.markLanOnline();
       return login;
     } catch (error) {
       loginClient.close();
@@ -288,6 +318,10 @@ class VenueHubClientRegistry {
     _streamGeneration++;
     _orderReconnectTimer?.cancel();
     _orderReconnectTimer = null;
+    _healthTimer?.cancel();
+    _healthTimer = null;
+    _healthCheckRunning = false;
+    _lanHealthy = false;
     unawaited(_orderSubscription?.cancel());
     _orderSubscription = null;
     _client?.close();
@@ -302,6 +336,63 @@ class VenueHubClientRegistry {
     _sessionExpiresAtUtc = null;
     _openedOrderIds.clear();
     VenueHubOfflineView.instance.clear();
+  }
+
+  void _startLanHealthMonitor() {
+    _healthTimer?.cancel();
+    _healthTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      final client = _client;
+      if (client == null || _healthCheckRunning) return;
+      _healthCheckRunning = true;
+      try {
+        final healthy = await client.isHealthy();
+        if (healthy) {
+          final recovered = !_lanHealthy;
+          _lanHealthy = true;
+          VenueHubAvailability.markLanOnline();
+          if (recovered) {
+            AppLogger.info('Venue hub LAN connection is back online.');
+          }
+        } else {
+          _recordLanFailure(
+            StateError(
+              client.lastHealthFailure ?? 'The venue hub did not respond.',
+            ),
+          );
+        }
+      } finally {
+        _healthCheckRunning = false;
+      }
+    });
+  }
+
+  void _recordLanFailure(Object error) {
+    _lanHealthy = false;
+    VenueHubAvailability.markOffline(error.toString());
+  }
+
+  /// Business validation errors (for example an invalid modifier) prove that
+  /// the hub answered and must not turn the terminal's connection indicator
+  /// red. Only transport failures invalidate the live LAN health state.
+  void _recordLanFailureIfTransport(Object error) {
+    if (error is TimeoutException) {
+      _recordLanFailure(error);
+      return;
+    }
+    final message = error.toString().toLowerCase();
+    if (const <String>[
+      'socketexception',
+      'clientexception',
+      'connection refused',
+      'connection reset',
+      'connection closed',
+      'network is unreachable',
+      'failed host lookup',
+      'timed out',
+      'timeout',
+    ].any(message.contains)) {
+      _recordLanFailure(error);
+    }
   }
 
   void _startOrderStream() {
