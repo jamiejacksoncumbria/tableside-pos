@@ -11,6 +11,8 @@ import 'venue_hub_bootstrap.dart';
 class VenueHubClientCache {
   final SharedPreferencesAsync _preferences = SharedPreferencesAsync();
 
+  static const _lastScopeKey = 'tableside.hubCache.lastScope';
+
   String _key(VenueScope scope, String kind) =>
       'tableside.hubCache.${scope.tenantId}.${scope.venueId}.$kind';
 
@@ -20,10 +22,74 @@ class VenueHubClientCache {
         _key(scope, 'bootstrap'),
         jsonEncode(value.toJson()),
       );
+      // This is discovery data, not authority. Cold-start recovery validates
+      // the installation-bound device ID, Ed25519 credential, hub epoch and
+      // encrypted snapshot again before it opens the offline workspace.
+      await _preferences.setString(
+        _lastScopeKey,
+        jsonEncode(<String, String>{
+          'tenantId': scope.tenantId,
+          'venueId': scope.venueId,
+        }),
+      );
     } on Object {
       // Discovery caching is best-effort. A local storage fault must never
       // turn a successful cloud response into a failed venue load.
     }
+  }
+
+  /// Returns possible cached scopes in most-recent-first order.
+  ///
+  /// Older installations pre-date [lastScope], so bootstrap preference keys
+  /// are also inspected. A scope discovered here is never trusted on its own;
+  /// the offline startup verifier must still match this physical device and
+  /// its private signing credential to the cloud-signed cached bootstrap.
+  Future<List<VenueScope>> readCandidateScopes() async {
+    final result = <VenueScope>[];
+    final seen = <String>{};
+
+    void add(VenueScope scope) {
+      final key = '${scope.tenantId}\u0000${scope.venueId}';
+      if (seen.add(key)) result.add(scope);
+    }
+
+    try {
+      final raw = await _preferences.getString(_lastScopeKey);
+      final decoded = raw == null ? null : jsonDecode(raw);
+      if (decoded is Map) {
+        final tenantId = decoded['tenantId'];
+        final venueId = decoded['venueId'];
+        if (tenantId is String &&
+            tenantId.isNotEmpty &&
+            venueId is String &&
+            venueId.isNotEmpty) {
+          add(VenueScope(tenantId: tenantId, venueId: venueId));
+        }
+      }
+    } catch (_) {
+      // Fall through to legacy key discovery.
+    }
+
+    try {
+      const prefix = 'tableside.hubCache.';
+      const suffix = '.bootstrap';
+      final keys = await _preferences.getKeys();
+      for (final key in keys) {
+        if (!key.startsWith(prefix) || !key.endsWith(suffix)) continue;
+        final middle = key.substring(prefix.length, key.length - suffix.length);
+        final separator = middle.indexOf('.');
+        if (separator <= 0 || separator == middle.length - 1) continue;
+        add(
+          VenueScope(
+            tenantId: middle.substring(0, separator),
+            venueId: middle.substring(separator + 1),
+          ),
+        );
+      }
+    } catch (_) {
+      // Missing/corrupt preferences correctly produce no offline workspace.
+    }
+    return result;
   }
 
   Future<VenueHubBootstrap?> readBootstrap(VenueScope scope) async {

@@ -14,6 +14,7 @@ import '../../core/trusted_clock_host.dart';
 import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
 import '../../offline/venue_hub_auto_start_host.dart';
+import '../../offline/venue_hub_offline_workspace.dart';
 import '../platform_admin/platform_admin_page.dart';
 import '../platform_admin/platform_admin_pin_gate.dart';
 import '../printing/queued_print_worker_host.dart';
@@ -49,6 +50,68 @@ class FirebaseAuthGate extends ConsumerWidget {
       data: (user) => user == null
           ? const SignInPage()
           : AuthenticatedWorkspace(userId: user.uid),
+    );
+  }
+}
+
+/// Opens the last authenticated venue only on its designated native hub when
+/// Firebase cannot initialise during a cold start. The loader has already
+/// matched the installation-bound device credential, TLS identity, hub epoch
+/// and encrypted snapshot; staff must still enter and pass their own PIN.
+class OfflineHubWorkspace extends ConsumerStatefulWidget {
+  const OfflineHubWorkspace({
+    super.key,
+    required this.workspace,
+    required this.onRetryOnline,
+  });
+
+  final VenueHubOfflineWorkspace workspace;
+  final VoidCallback onRetryOnline;
+
+  @override
+  ConsumerState<OfflineHubWorkspace> createState() =>
+      _OfflineHubWorkspaceState();
+}
+
+class _OfflineHubWorkspaceState extends ConsumerState<OfflineHubWorkspace> {
+  @override
+  void initState() {
+    super.initState();
+    ref.read(activeVenueScopeProvider.notifier).select(widget.workspace.scope);
+  }
+
+  void _retryOnline() {
+    ref.read(activeStaffPinSessionProvider.notifier).lock();
+    ref.read(activeVenueScopeProvider.notifier).clear();
+    widget.onRetryOnline();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final workspace = widget.workspace;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const QueuedPrintWorkerHost(),
+        VenueHubAutoStartHost(
+          scope: workspace.scope,
+          cloudRefreshEnabled: false,
+        ),
+        StaffPinGate(
+          scope: workspace.scope,
+          backgroundLockSeconds: workspace.venue.backgroundLockSeconds,
+          offlineHubOnly: true,
+          onSwitchVenue: _retryOnline,
+          onSignOut: _retryOnline,
+          child: HomeShell(
+            profileOverride: workspace.profile,
+            venueOverride: workspace.venue,
+            persistCompanyProfile: false,
+            onSwitchVenue: _retryOnline,
+            onSignOut: _retryOnline,
+          ),
+        ),
+      ],
     );
   }
 }

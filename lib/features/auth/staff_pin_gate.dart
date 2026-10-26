@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -22,6 +23,15 @@ import '../../offline/venue_hub_client.dart';
 import '../../offline/venue_hub_device_credential.dart';
 import '../../offline/venue_hub_runtime.dart';
 import '../../offline/venue_hub_realtime_client.dart';
+
+User? get _currentFirebaseUser =>
+    Firebase.apps.isEmpty ? null : FirebaseAuth.instance.currentUser;
+
+/// Internal control flow used to avoid touching Firebase during a verified
+/// native hub cold start. It is never shown to the operator.
+class _UseCachedHubBootstrap implements Exception {
+  const _UseCachedHubBootstrap();
+}
 
 final activeStaffPinSessionProvider =
     NotifierProvider<ActiveStaffPinSessionController, StaffPinVerification?>(
@@ -186,6 +196,7 @@ class StaffPinGate extends ConsumerStatefulWidget {
     required this.onSwitchVenue,
     required this.onSignOut,
     this.backgroundLockSeconds = 120,
+    this.offlineHubOnly = false,
   });
 
   final VenueScope scope;
@@ -193,6 +204,7 @@ class StaffPinGate extends ConsumerStatefulWidget {
   final VoidCallback onSwitchVenue;
   final VoidCallback onSignOut;
   final int backgroundLockSeconds;
+  final bool offlineHubOnly;
 
   @override
   ConsumerState<StaffPinGate> createState() => _StaffPinGateState();
@@ -268,13 +280,29 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       _error = null;
     });
     try {
+      if (widget.offlineHubOnly) {
+        final cached = await _hubCache.readStaff(widget.scope);
+        if (cached.isEmpty) {
+          throw StateError(
+            'No cached staff list is available. Reconnect this hub to the internet once.',
+          );
+        }
+        if (!mounted) return;
+        setState(() {
+          _staff = cached;
+          _selectedUserId = cached.firstOrNull?.userId;
+          _loading = false;
+          _error = 'Internet unavailable. Using the encrypted venue hub.';
+        });
+        return;
+      }
       final staff = await _repository.listVenuePinStaff(widget.scope);
       // The cache is optional. Its implementation absorbs local-storage
       // failures so a successfully loaded cloud list always opens the PIN
       // screen instead of being misclassified as an offline failure.
       await _hubCache.saveStaff(widget.scope, staff);
       if (!mounted) return;
-      final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+      final currentUserId = _currentFirebaseUser?.uid;
       setState(() {
         _staff = staff;
         _selectedUserId = staff.any((item) => item.userId == currentUserId)
@@ -322,13 +350,18 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       setState(() => _submitting = true);
       VenueHubBootstrap? bootstrap;
       try {
+        if (widget.offlineHubOnly) {
+          throw const _UseCachedHubBootstrap();
+        }
         final rawBootstrap = await _repository.fetchOfflineHubBootstrap(
           scope: widget.scope,
         );
         bootstrap = VenueHubBootstrap.fromJson(rawBootstrap);
         await _hubCache.saveBootstrap(widget.scope, bootstrap);
       } catch (error, stackTrace) {
-        AppLogger.error('Refresh venue hub discovery', error, stackTrace);
+        if (error is! _UseCachedHubBootstrap) {
+          AppLogger.error('Refresh venue hub discovery', error, stackTrace);
+        }
         bootstrap = await _hubCache.readBootstrap(widget.scope);
         // The hub host already passed cloud authority checks when its runtime
         // started. Prefer that in-memory authority if the router loses its
@@ -426,6 +459,13 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           final verifierMissing = error.code == 'offline_verifier_unavailable';
           final verifierRejected = error.code == 'invalid_pin';
           if (!verifierMissing && !verifierRejected) rethrow;
+          if (widget.offlineHubOnly) {
+            throw StateError(
+              verifierMissing
+                  ? 'This PIN needs one successful online login before it can be used offline.'
+                  : 'The venue hub rejected this staff PIN.',
+            );
+          }
           AppLogger.info(
             verifierMissing
                 ? 'Upgrading a legacy staff PIN for encrypted offline verification.'
@@ -488,7 +528,26 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         );
       }
       StaffPinVerification session;
-      if (migratedCloudSession != null) {
+      if (widget.offlineHubOnly) {
+        if (hubLogin == null) {
+          throw StateError('The local venue hub did not verify this PIN.');
+        }
+        session = StaffPinVerification(
+          sessionId: hubLogin.sessionId,
+          sessionToken: hubLogin.sessionToken,
+          expiresAt: hubLogin.expiresAtUtc,
+          tenantId: widget.scope.tenantId,
+          venueId: widget.scope.venueId,
+          deviceId: deviceId,
+          userId: staff.userId,
+          displayName: staff.displayName,
+          isPlatformAdmin: false,
+          roles: staff.roles,
+          themeModePreference: 'system',
+          posCategoryViewPreference: 'bars',
+          posProductSortPreference: 'alphabetical',
+        );
+      } else if (migratedCloudSession != null) {
         session = migratedCloudSession;
       } else {
         try {
@@ -529,7 +588,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       ref
           .read(activeStaffPinSessionProvider.notifier)
           .unlock(session, widget.scope);
-      if (bootstrap.enabled) {
+      if (bootstrap.enabled && !widget.offlineHubOnly) {
         unawaited(
           VenueHubRealtimeClient.instance
               .ensureConfigured(
@@ -628,7 +687,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   }
 
   Future<void> _recoverOwnPin(VenuePinStaff staff) async {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = _currentFirebaseUser;
     final email = user?.email;
     if (user == null || user.uid != staff.userId || email == null) {
       setState(() {
@@ -730,7 +789,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     final pinEntryStaff = staff
         .where((item) => item.userId == _pinEntryUserId)
         .firstOrNull;
-    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    final currentUserId = _currentFirebaseUser?.uid;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Staff PIN'),

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -12,6 +14,7 @@ import '../core/shorebird_update_host.dart';
 import '../features/auth/auth_gate.dart';
 import '../offline/venue_hub_remote_command_client.dart';
 import '../offline/venue_hub_availability.dart';
+import '../offline/venue_hub_offline_workspace.dart';
 import 'home_shell.dart';
 
 @visibleForTesting
@@ -337,20 +340,42 @@ class _FirebaseBootstrapGate extends StatefulWidget {
 }
 
 class _FirebaseBootstrapGateState extends State<_FirebaseBootstrapGate> {
-  late final Future<void> _bootstrap = _initialize();
+  late Future<_FirebaseStartupResult> _bootstrap = _initialize();
 
-  Future<void> _initialize() async {
+  Future<_FirebaseStartupResult> _initialize() async {
     try {
-      await initializeFirebase();
+      AppLogger.info('Starting Firebase bootstrap.');
+      await initializeFirebase().timeout(const Duration(seconds: 8));
+      return const _FirebaseStartupResult.online();
+    } on TimeoutException catch (error, stackTrace) {
+      AppLogger.error('Firebase cold-start timeout', error, stackTrace);
+      final offline = await VenueHubOfflineWorkspaceLoader().load();
+      if (offline != null) {
+        AppLogger.info(
+          'Firebase is unavailable; opening the verified encrypted workspace '
+          'for local hub venue=${offline.scope.venueId}.',
+        );
+        return _FirebaseStartupResult.offline(offline);
+      }
+      return _FirebaseStartupResult.failure(
+        'Firebase did not respond and this installation is not the verified '
+        'offline hub for a cached venue.',
+      );
     } on Object catch (error, stackTrace) {
       AppLogger.error('Firebase startup', error, stackTrace);
-      rethrow;
+      final offline = await VenueHubOfflineWorkspaceLoader().load();
+      if (offline != null) return _FirebaseStartupResult.offline(offline);
+      return _FirebaseStartupResult.failure('$error');
     }
+  }
+
+  void _retry() {
+    setState(() => _bootstrap = _initialize());
   }
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<void>(
+    return FutureBuilder<_FirebaseStartupResult>(
       future: _bootstrap,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
@@ -358,21 +383,53 @@ class _FirebaseBootstrapGateState extends State<_FirebaseBootstrapGate> {
             body: Center(child: CircularProgressIndicator()),
           );
         }
-        if (snapshot.hasError) {
+        final result = snapshot.data;
+        if (result == null || result.error != null) {
           return Scaffold(
             body: Center(
               child: Padding(
                 padding: const EdgeInsets.all(24),
-                child: Text(
-                  'Firebase could not start. Verify the selected staging or production configuration.\n\n${snapshot.error}',
-                  textAlign: TextAlign.center,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.cloud_off_rounded, size: 42),
+                    const SizedBox(height: 16),
+                    Text(
+                      'TableSideCY could not start its online services.\n\n'
+                      '${result?.error ?? snapshot.error}',
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 20),
+                    FilledButton.icon(
+                      onPressed: _retry,
+                      icon: const Icon(Icons.refresh_rounded),
+                      label: const Text('Retry connection'),
+                    ),
+                  ],
                 ),
               ),
             ),
+          );
+        }
+        if (result.offlineWorkspace case final workspace?) {
+          return OfflineHubWorkspace(
+            workspace: workspace,
+            onRetryOnline: _retry,
           );
         }
         return const FirebaseAuthGate();
       },
     );
   }
+}
+
+class _FirebaseStartupResult {
+  const _FirebaseStartupResult.online() : offlineWorkspace = null, error = null;
+
+  const _FirebaseStartupResult.offline(this.offlineWorkspace) : error = null;
+
+  const _FirebaseStartupResult.failure(this.error) : offlineWorkspace = null;
+
+  final VenueHubOfflineWorkspace? offlineWorkspace;
+  final String? error;
 }
