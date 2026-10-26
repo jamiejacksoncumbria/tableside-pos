@@ -1289,6 +1289,12 @@ List<String> checkoutTenderCurrencies(String baseCurrencyCode) => <String>{
   'USD',
 }.toList(growable: false);
 
+/// Produces the locale-independent decimal snapshot stored with a foreign
+/// payment. Touch keyboards may emit either `,` or `.`, while the hub and
+/// cloud validators deliberately accept one canonical audited representation.
+String normalizeExchangeRateInput(String raw) =>
+    raw.trim().replaceAll(',', '.');
+
 /// Restaurants normally issue a paid receipt. A user may opt out for an
 /// individual payment, but every newly opened checkout starts selected.
 const defaultPrintPaidReceipt = true;

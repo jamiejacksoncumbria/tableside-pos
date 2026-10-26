@@ -18,6 +18,7 @@ import '../../core/training_mode.dart';
 import '../../data/production_command_repository.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_offline_view.dart';
+import '../../offline/venue_hub_realtime_client.dart';
 import '../auth/staff_pin_gate.dart';
 import '../fulfilment/customer_editor.dart';
 import '../fulfilment/fulfilment_domain.dart';
@@ -3630,24 +3631,26 @@ Future<void> _showCheckoutSheet(
   final exchangeRateController = TextEditingController(text: '1');
   final currencyChoices = checkoutTenderCurrencies(baseCurrencyCode);
   _CompletedCheckout? completed;
+  // Keep mutable checkout state outside the route builder. Opening a native
+  // keyboard changes MediaQuery.viewInsets and can rebuild that builder; when
+  // these values lived inside it, a selected foreign currency silently reset
+  // to the venue currency as soon as staff entered an amount.
+  var method = PaymentMethod.cash;
+  var tenderedCurrencyCode = baseCurrencyCode;
+  var cardApproved = false;
+  var saving = false;
+  var printReceipt = isTraining ? false : defaultPrintPaidReceipt;
+  var loadingOfficialRate = false;
+  var showAmountKeypad = false;
+  var showRateKeypad = false;
+  ExchangeRateQuote? officialRateQuote;
+  var voucherSuggestions = <String>[];
+  final paymentEntries = <_CheckoutPaymentDraft>[];
   await showAppModalBottomSheet<void>(
     context: pageContext,
     showDragHandle: true,
     isScrollControlled: true,
     builder: (sheetContext) {
-      var method = PaymentMethod.cash;
-      var tenderedCurrencyCode = baseCurrencyCode;
-      var cardApproved = false;
-      var saving = false;
-      // Paid receipts are normally required in a restaurant. Staff can still
-      // opt out for a particular payment, but the safe operational default is
-      // to queue one to the venue's dedicated receipt printer.
-      var printReceipt = isTraining ? false : defaultPrintPaidReceipt;
-      var loadingOfficialRate = false;
-      var showAmountKeypad = false;
-      ExchangeRateQuote? officialRateQuote;
-      var voucherSuggestions = <String>[];
-      final paymentEntries = <_CheckoutPaymentDraft>[];
       return StatefulBuilder(
         builder: (context, setSheetState) {
           final tenderedMinor = _minorFromMoneyInput(
@@ -3707,6 +3710,14 @@ Future<void> _showCheckoutSheet(
               ? 'This payment allocation is more than the amount remaining.'
               : 'This payment cannot be added.';
           final loadedOfficialRate = officialRateQuote;
+          final activeScope = ref.read(activeVenueScopeProvider);
+          final requiresHub =
+              activeScope != null &&
+              VenueHubClientRegistry.instance.requiresHub(activeScope);
+          final usingOfflineLanHub =
+              requiresHub &&
+              !VenueHubRealtimeClient.instance.hubOnline &&
+              VenueHubClientRegistry.instance.hasUsableSession(activeScope);
           return SafeArea(
             child: SingleChildScrollView(
               padding: EdgeInsets.fromLTRB(
@@ -3831,6 +3842,7 @@ Future<void> _showCheckoutSheet(
                                 method == PaymentMethod.voucher) {
                               tenderedCurrencyCode = baseCurrencyCode;
                               exchangeRateController.text = '1';
+                              showRateKeypad = false;
                               tenderedAmountController.text =
                                   _moneyInputFromMinor(
                                     order.balanceDueMinor,
@@ -4015,34 +4027,98 @@ Future<void> _showCheckoutSheet(
                   ),
                   if (showAmountKeypad) ...[
                     const SizedBox(height: 10),
-                    _DecimalKeypad(
-                      controller: tenderedAmountController,
-                      decimalDigits: currencyDecimalDigits(
-                        tenderedCurrencyCode,
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 340),
+                        child: _DecimalKeypad(
+                          controller: tenderedAmountController,
+                          decimalDigits: currencyDecimalDigits(
+                            tenderedCurrencyCode,
+                          ),
+                          onChanged: () => setSheetState(() {}),
+                        ),
                       ),
-                      onChanged: () => setSheetState(() {}),
                     ),
                   ],
                   if (isForeignCash) ...[
                     const SizedBox(height: 12),
+                    if (usingOfflineLanHub)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.tertiaryContainer,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(Icons.cloud_off_rounded, size: 20),
+                            SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Offline mode: the official rate cannot be checked. Enter and verify the exchange rate manually; the exact rate will be retained with the payment audit record.',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     TextField(
                       controller: exchangeRateController,
                       enabled: !saving,
                       keyboardType: const TextInputType.numberWithOptions(
                         decimal: true,
                       ),
+                      inputFormatters: const [_ExchangeRateInputFormatter()],
                       decoration: InputDecoration(
                         labelText:
                             '1 $tenderedCurrencyCode = how many $currencyCode?',
-                        helperText:
-                            'Use the official rate as a starting point, then review or override it. The exact rate is retained on the bill.',
+                        suffixIcon: IconButton(
+                          tooltip: showRateKeypad
+                              ? 'Hide rate keypad'
+                              : 'Show rate keypad',
+                          onPressed: saving
+                              ? null
+                              : () => setSheetState(
+                                  () => showRateKeypad = !showRateKeypad,
+                                ),
+                          icon: Icon(
+                            showRateKeypad
+                                ? Icons.keyboard_hide_rounded
+                                : Icons.dialpad_rounded,
+                          ),
+                        ),
+                        helperText: usingOfflineLanHub
+                            ? 'Enter the approved manual rate. Example: 1 $tenderedCurrencyCode = 52.50 $currencyCode.'
+                            : 'Use the official rate as a starting point, then review or override it. The exact rate is retained on the bill.',
                       ),
-                      onChanged: (_) =>
-                          setSheetState(() => officialRateQuote = null),
+                      onChanged: (_) => setSheetState(() {
+                        officialRateQuote = null;
+                      }),
                     ),
+                    if (showRateKeypad) ...[
+                      const SizedBox(height: 10),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 340),
+                          child: _DecimalKeypad(
+                            controller: exchangeRateController,
+                            decimalDigits: 6,
+                            onChanged: () => setSheetState(() {
+                              officialRateQuote = null;
+                            }),
+                          ),
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     OutlinedButton.icon(
-                      onPressed: saving || loadingOfficialRate
+                      onPressed:
+                          saving || loadingOfficialRate || usingOfflineLanHub
                           ? null
                           : () async {
                               final scope = ref.read(activeVenueScopeProvider);
@@ -4103,6 +4179,8 @@ Future<void> _showCheckoutSheet(
                       label: Text(
                         loadingOfficialRate
                             ? 'Loading official rate…'
+                            : usingOfflineLanHub
+                            ? 'Official rate unavailable offline'
                             : 'Use official CBRT rate',
                       ),
                     ),
@@ -4309,7 +4387,9 @@ Future<void> _showCheckoutSheet(
                                         tenderedCurrencyCode:
                                             tenderedCurrencyCode,
                                         exchangeRateToBase:
-                                            exchangeRateController.text.trim(),
+                                            normalizeExchangeRateInput(
+                                              exchangeRateController.text,
+                                            ),
                                         baseAmountMinor: appliedBaseMinor,
                                         cardPaymentApproved: cardApproved,
                                         terminalLabel: terminalController.text
@@ -4317,7 +4397,12 @@ Future<void> _showCheckoutSheet(
                                         cashChangeBaseMinor:
                                             cashChangeBaseMinor,
                                         exchangeRateSource:
-                                            officialRateQuote?.source,
+                                            officialRateQuote?.source ??
+                                            (isForeignCash
+                                                ? usingOfflineLanHub
+                                                      ? 'Manual offline rate'
+                                                      : 'Manual rate'
+                                                : null),
                                         exchangeRatePublishedDate:
                                             officialRateQuote?.publishedDate,
                                         exchangeRateFetchedAt:
@@ -4340,6 +4425,7 @@ Future<void> _showCheckoutSheet(
                                     cardApproved = false;
                                     exchangeRateController.text = '1';
                                     officialRateQuote = null;
+                                    showRateKeypad = false;
                                     terminalController.clear();
                                     voucherCodeController.clear();
                                     tenderedAmountController.text =
@@ -4764,7 +4850,7 @@ int? _convertedBaseMinor({
   required String exchangeRateText,
 }) {
   if (tenderedCurrencyCode == baseCurrencyCode) return tenderedMinor;
-  final normalizedRate = exchangeRateText.trim();
+  final normalizedRate = normalizeExchangeRateInput(exchangeRateText);
   if (!RegExp(r'^(?:0|[1-9]\d{0,8})(?:\.\d{1,6})?$').hasMatch(normalizedRate)) {
     return null;
   }
@@ -4884,6 +4970,22 @@ class _MoneyAmountInputFormatter extends TextInputFormatter {
   }
 }
 
+class _ExchangeRateInputFormatter extends TextInputFormatter {
+  const _ExchangeRateInputFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    // Six decimal places retain substantially more precision than cash input
+    // while still keeping the signed/audited rate bounded and readable.
+    return RegExp(r'^\d{0,9}(?:[.,]\d{0,6})?$').hasMatch(newValue.text)
+        ? newValue
+        : oldValue;
+  }
+}
+
 class _DecimalKeypad extends StatelessWidget {
   const _DecimalKeypad({
     required this.controller,
@@ -4933,16 +5035,16 @@ class _DecimalKeypad extends StatelessWidget {
       border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
     ),
     child: Padding(
-      padding: const EdgeInsets.all(10),
+      padding: const EdgeInsets.all(8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           GridView.count(
             shrinkWrap: true,
             crossAxisCount: 3,
-            mainAxisSpacing: 8,
-            crossAxisSpacing: 8,
-            childAspectRatio: 2.2,
+            mainAxisSpacing: 6,
+            crossAxisSpacing: 6,
+            childAspectRatio: 2.6,
             physics: const NeverScrollableScrollPhysics(),
             children: [
               for (final key in const [
@@ -4957,27 +5059,42 @@ class _DecimalKeypad extends StatelessWidget {
                 '9',
               ])
                 FilledButton.tonal(
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
                   onPressed: () => _enter(key),
-                  child: Text(key, style: const TextStyle(fontSize: 18)),
+                  child: Text(key, style: const TextStyle(fontSize: 16)),
                 ),
               OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
                 onPressed: controller.text.isEmpty ? null : () => _replace(''),
                 child: const Text('Clear'),
               ),
               FilledButton.tonal(
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
                 onPressed: () => _enter('0'),
-                child: const Text('0', style: TextStyle(fontSize: 18)),
+                child: const Text('0', style: TextStyle(fontSize: 16)),
               ),
               FilledButton.tonal(
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
                 onPressed: decimalDigits == 0 ? null : () => _enter('.'),
-                child: const Text('.', style: TextStyle(fontSize: 22)),
+                child: const Text('.', style: TextStyle(fontSize: 18)),
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+              ),
               onPressed: controller.text.isEmpty
                   ? null
                   : () => _replace(
