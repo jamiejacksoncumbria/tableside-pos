@@ -12,6 +12,26 @@ import 'transient_realtime_database.dart';
 import 'venue_hub_device_credential.dart';
 import 'windows_realtime_rest_session.dart';
 
+/// Interprets only a complete, authenticated RTDB authority document.
+///
+/// `null` means no authority decision was received. In particular, a socket
+/// error, an empty initial SSE value, or an internet outage must never be
+/// converted into revocation: the encrypted LAN hub is designed to continue
+/// operating during exactly that partition. A complete document which is
+/// disabled or names a different hub/epoch is an explicit revocation.
+bool? parseVenueHubAuthority(
+  Object? raw, {
+  required String deviceId,
+  required int hubEpoch,
+}) {
+  if (raw is! Map || raw['enabled'] is! bool) return null;
+  if (raw['enabled'] == false) return false;
+  final authorityDeviceId = raw['deviceId'];
+  final authorityEpoch = raw['hubEpoch'];
+  if (authorityDeviceId is! String || authorityEpoch is! int) return null;
+  return authorityDeviceId == deviceId && authorityEpoch == hubEpoch;
+}
+
 /// Maintains server-observed hub presence without a periodic Cloud Function.
 class VenueHubRealtimePresence {
   VenueHubRealtimePresence({ProductionCommandRepository? repository})
@@ -85,14 +105,30 @@ class VenueHubRealtimePresence {
           );
       _authoritySubscription = windowsSession
           .watch('hubAuthorities/${scope.tenantId}/${scope.venueId}')
-          .listen((raw) {
-            final value = raw is Map ? raw : const <Object?, Object?>{};
-            _authority.add(
-              value['enabled'] == true &&
-                  value['deviceId'] == deviceId &&
-                  value['hubEpoch'] == hubEpoch,
-            );
-          }, onError: (Object _, StackTrace _) => _authority.add(false));
+          .listen(
+            (raw) {
+              final active = parseVenueHubAuthority(
+                raw,
+                deviceId: deviceId,
+                hubEpoch: hubEpoch,
+              );
+              if (active != null) {
+                if (active) connected.value = true;
+                _authority.add(active);
+              }
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              // Loss of RTDB is an internet outage, not evidence that another
+              // device has taken authority. Keep the LAN hub alive and let the
+              // authenticated authority document decide after reconnection.
+              connected.value = false;
+              AppLogger.error(
+                'Watch venue hub realtime authority; LAN remains active',
+                error,
+                stackTrace,
+              );
+            },
+          );
       await windowsSession.set(presencePath, <String, Object?>{
         'online': true,
         'hubEpoch': hubEpoch,
@@ -155,15 +191,24 @@ class VenueHubRealtimePresence {
     _authoritySubscription = database
         .ref('hubAuthorities/${scope.tenantId}/${scope.venueId}')
         .onValue
-        .listen((event) {
-          final raw = event.snapshot.value;
-          final value = raw is Map ? raw : const <Object?, Object?>{};
-          _authority.add(
-            value['enabled'] == true &&
-                value['deviceId'] == deviceId &&
-                value['hubEpoch'] == hubEpoch,
-          );
-        }, onError: (Object _, StackTrace _) => _authority.add(false));
+        .listen(
+          (event) {
+            final active = parseVenueHubAuthority(
+              event.snapshot.value,
+              deviceId: deviceId,
+              hubEpoch: hubEpoch,
+            );
+            if (active != null) _authority.add(active);
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            connected.value = false;
+            AppLogger.error(
+              'Watch venue hub realtime authority; LAN remains active',
+              error,
+              stackTrace,
+            );
+          },
+        );
     _connectionSubscription = database
         .ref('.info/connected')
         .onValue

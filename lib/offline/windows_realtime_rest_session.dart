@@ -66,6 +66,7 @@ class WindowsRealtimeRestSession {
   Stream<Object?> watch(String path) {
     late StreamController<Object?> controller;
     var cancelled = false;
+    var errorReported = false;
     Object? state = const _UnsetRealtimeValue();
 
     Future<void> run() async {
@@ -82,6 +83,7 @@ class WindowsRealtimeRestSession {
               'Realtime listener failed (${response.statusCode}): $body',
             );
           }
+          errorReported = false;
           retry = const Duration(milliseconds: 250);
           String? eventName;
           final data = StringBuffer();
@@ -121,7 +123,13 @@ class WindowsRealtimeRestSession {
           }
         } on Object catch (error, stackTrace) {
           if (cancelled || _closed) return;
-          if (!controller.isClosed) controller.addError(error, stackTrace);
+          // One notification per outage is enough for diagnostics. The SSE
+          // loop continues reconnecting with backoff, but repeating the same
+          // socket exception every few seconds hid useful operational logs.
+          if (!errorReported && !controller.isClosed) {
+            errorReported = true;
+            controller.addError(error, stackTrace);
+          }
         }
         if (cancelled || _closed) return;
         await Future<void>.delayed(retry);
