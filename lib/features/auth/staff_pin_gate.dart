@@ -543,7 +543,10 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           displayName: staff.displayName,
           isPlatformAdmin: false,
           roles: staff.roles,
-          themeModePreference: 'system',
+          // Preserve the venue default restored from local preferences while
+          // Firebase is unavailable. "system" previously passed through a
+          // light/dark-only parser and incorrectly forced the light theme.
+          themeModePreference: 'venue',
           posCategoryViewPreference: 'bars',
           posProductSortPreference: 'alphabetical',
         );

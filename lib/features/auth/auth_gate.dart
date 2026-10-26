@@ -14,6 +14,7 @@ import '../../core/trusted_clock_host.dart';
 import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
 import '../../offline/venue_hub_auto_start_host.dart';
+import '../../offline/venue_hub_client_cache.dart';
 import '../../offline/venue_hub_offline_workspace.dart';
 import '../platform_admin/platform_admin_page.dart';
 import '../platform_admin/platform_admin_pin_gate.dart';
@@ -78,6 +79,13 @@ class _OfflineHubWorkspaceState extends ConsumerState<OfflineHubWorkspace> {
   void initState() {
     super.initState();
     ref.read(activeVenueScopeProvider.notifier).select(widget.workspace.scope);
+    if (widget.workspace.hasVenueTheme) {
+      unawaited(
+        ref
+            .read(appThemeControllerProvider.notifier)
+            .applyVenueDefault(widget.workspace.venue.defaultThemeMode),
+      );
+    }
   }
 
   void _retryOnline() {
@@ -288,22 +296,43 @@ class AuthenticatedWorkspace extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     AppLogger.info('Authenticated workspace: checking restaurant memberships.');
+    final cachedLanWorkspace = ref.watch(cachedLanWorkspaceProvider);
+    Widget? lanFallback() {
+      final workspace = cachedLanWorkspace.value;
+      if (workspace == null) return null;
+      return OfflineHubWorkspace(
+        workspace: workspace,
+        onRetryOnline: () {
+          ref.invalidate(platformAdminProvider);
+          ref.invalidate(membershipsProvider(userId));
+          ref.invalidate(cachedLanWorkspaceProvider);
+        },
+      );
+    }
+
     final platformAdmin = ref.watch(platformAdminProvider);
     if (platformAdmin.isLoading) {
+      final fallback = lanFallback();
+      if (fallback != null) return fallback;
       return const _LoadingScreen(label: 'Checking your access…');
     }
     if (platformAdmin.hasError) {
+      final fallback = lanFallback();
+      if (fallback != null) return fallback;
       return const _ErrorScreen(message: 'Could not verify account access.');
     }
     final isPlatformAdmin = platformAdmin.requireValue;
     final memberships = ref.watch(membershipsProvider(userId));
     return memberships.when(
-      loading: () => isPlatformAdmin
-          ? _PlatformAdminScaffold(
-              onSignOut: () => ref.read(authRepositoryProvider).signOut(),
-            )
-          : const _NoMembershipScreen(checkingMembership: true),
+      loading: () =>
+          lanFallback() ??
+          (isPlatformAdmin
+              ? _PlatformAdminScaffold(
+                  onSignOut: () => ref.read(authRepositoryProvider).signOut(),
+                )
+              : const _NoMembershipScreen(checkingMembership: true)),
       error: (error, _) =>
+          lanFallback() ??
           _ErrorScreen(message: 'Could not load restaurant access: $error'),
       data: (items) {
         AppLogger.info(
@@ -562,6 +591,9 @@ class _TenantWorkspace extends ConsumerWidget {
       );
     }
     AppLogger.info('Venue workspace ready: ${venue.name}.');
+    unawaited(
+      VenueHubClientCache().saveWorkspace(scope, profile.requireValue, venue),
+    );
     return Stack(
       fit: StackFit.expand,
       children: [

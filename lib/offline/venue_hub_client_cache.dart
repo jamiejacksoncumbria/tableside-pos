@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/tenant_scope.dart';
+import '../features/pos/domain.dart';
 import '../data/production_command_repository.dart';
 import 'venue_hub_bootstrap.dart';
 
@@ -100,6 +101,58 @@ class VenueHubClientCache {
       return value is Map
           ? VenueHubBootstrap.fromJson(Map<String, Object?>.from(value))
           : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Saves non-secret venue presentation data required to render the locked
+  /// PIN screen during an internet outage. Operational authority continues to
+  /// come from the device key, pinned TLS hub and staff PIN.
+  Future<void> saveWorkspace(
+    VenueScope scope,
+    TenantProfile profile,
+    Venue venue,
+  ) async {
+    try {
+      await _preferences.setString(
+        _key(scope, 'workspace'),
+        jsonEncode(<String, Object?>{
+          'tenantName': profile.displayName,
+          'tenantLegalName': profile.legalName,
+          'currencyCode': profile.currencyCode,
+          'logoUrl': profile.logoUrl,
+          'tenantAddress': profile.address,
+          'tenantPhoneNumbers': profile.phoneNumbers,
+          'venueName': venue.name,
+          'venueTimeZone': venue.timeZone,
+          'venueCountry': venue.country,
+          'deliveryLocations': venue.deliveryLocations,
+          'venueAddress': venue.address,
+          'venuePhoneNumbers': venue.phoneNumbers,
+          'receiptFooter': venue.receiptFooter,
+          'collectionEnabled': venue.collectionEnabled,
+          'deliveryEnabled': venue.deliveryEnabled,
+          'courseControlEnabled': venue.courseControlEnabled,
+          'notificationRetentionSeconds': venue.notificationRetentionSeconds,
+          'backgroundLockSeconds': venue.backgroundLockSeconds,
+          'orderFlowAmberMinutes': venue.orderFlowAmberMinutes,
+          'orderFlowRedMinutes': venue.orderFlowRedMinutes,
+          'defaultBookingDurationMinutes': venue.defaultBookingDurationMinutes,
+          'businessDayCutoffMinutes': venue.businessDayCutoffMinutes,
+          'defaultThemeMode': venue.defaultThemeMode,
+        }),
+      );
+    } on Object {
+      // The live cloud workspace remains authoritative and usable.
+    }
+  }
+
+  Future<Map<String, Object?>?> readWorkspace(VenueScope scope) async {
+    try {
+      final raw = await _preferences.getString(_key(scope, 'workspace'));
+      final decoded = raw == null ? null : jsonDecode(raw);
+      return decoded is Map ? Map<String, Object?>.from(decoded) : null;
     } catch (_) {
       return null;
     }
