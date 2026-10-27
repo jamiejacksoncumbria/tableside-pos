@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,6 +10,7 @@ import '../core/app_logger.dart';
 import '../core/app_busy_state.dart';
 import '../core/app_environment.dart';
 import '../core/firebase_bootstrap.dart';
+import '../core/firebase_connectivity_probe.dart';
 import '../core/firebase_runtime_config.dart';
 import '../core/shorebird_update_host.dart';
 import '../features/auth/auth_gate.dart';
@@ -448,30 +450,70 @@ class _FirebaseBootstrapGate extends StatefulWidget {
 class _FirebaseBootstrapGateState extends State<_FirebaseBootstrapGate> {
   late Future<_FirebaseStartupResult> _bootstrap = _initialize();
 
+  Future<_FirebaseStartupResult> _openVerifiedLanWorkspace(
+    String onlineFailure,
+  ) async {
+    AppLogger.info(
+      'Firebase is unavailable; checking the verified local hub workspace.',
+    );
+    final loader = VenueHubOfflineWorkspaceLoader();
+    try {
+      // The hub host can start from its encrypted snapshot before its HTTPS
+      // listener exists. A different enrolled terminal is accepted only by
+      // the second path, which certificate-pins and health-checks the live hub.
+      final localHub = await loader.load().timeout(const Duration(seconds: 6));
+      if (localHub != null) {
+        AppLogger.info(
+          'Opening the verified offline hub workspace for '
+          'venue=${localHub.scope.venueId}.',
+        );
+        return _FirebaseStartupResult.offline(localHub);
+      }
+      final lanTerminal = await loader
+          .load(requireHubHost: false)
+          .timeout(const Duration(seconds: 6));
+      if (lanTerminal != null) {
+        AppLogger.info(
+          'Opening the certificate-pinned LAN terminal workspace for '
+          'venue=${lanTerminal.scope.venueId}.',
+        );
+        return _FirebaseStartupResult.offline(lanTerminal);
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Open verified LAN workspace', error, stackTrace);
+    }
+    return _FirebaseStartupResult.failure(
+      '$onlineFailure\n\nNo authorised local venue hub workspace is '
+      'available on this device.',
+    );
+  }
+
   Future<_FirebaseStartupResult> _initialize() async {
     try {
       AppLogger.info('Starting Firebase bootstrap.');
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+        AppLogger.info('Checking Firebase network reachability on Windows.');
+        final reachable = await canReachFirebaseNetwork();
+        if (!reachable) {
+          AppLogger.info(
+            'Firebase network is unreachable; skipping the Windows native '
+            'Firebase bootstrap so LAN operation can start safely.',
+          );
+          return await _openVerifiedLanWorkspace(
+            'This Windows device cannot reach Firebase.',
+          );
+        }
+      }
       await initializeFirebase().timeout(const Duration(seconds: 8));
       return const _FirebaseStartupResult.online();
     } on TimeoutException catch (error, stackTrace) {
       AppLogger.error('Firebase cold-start timeout', error, stackTrace);
-      final offline = await VenueHubOfflineWorkspaceLoader().load();
-      if (offline != null) {
-        AppLogger.info(
-          'Firebase is unavailable; opening the verified encrypted workspace '
-          'for local hub venue=${offline.scope.venueId}.',
-        );
-        return _FirebaseStartupResult.offline(offline);
-      }
-      return _FirebaseStartupResult.failure(
-        'Firebase did not respond and this installation is not the verified '
-        'offline hub for a cached venue.',
+      return await _openVerifiedLanWorkspace(
+        'Firebase did not respond within eight seconds.',
       );
     } on Object catch (error, stackTrace) {
       AppLogger.error('Firebase startup', error, stackTrace);
-      final offline = await VenueHubOfflineWorkspaceLoader().load();
-      if (offline != null) return _FirebaseStartupResult.offline(offline);
-      return _FirebaseStartupResult.failure('$error');
+      return await _openVerifiedLanWorkspace('Firebase startup failed: $error');
     }
   }
 
@@ -486,7 +528,19 @@ class _FirebaseBootstrapGateState extends State<_FirebaseBootstrapGate> {
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
           return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
+            body: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text(
+                    'Connecting to Firebase or the venue hub…',
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
           );
         }
         final result = snapshot.data;
