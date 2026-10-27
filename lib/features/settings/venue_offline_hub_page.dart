@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -72,15 +73,38 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       venueId: widget.scope.venueId,
       deviceId: deviceId,
     );
-    final raw = await _repository.fetchOfflineHubBootstrap(scope: widget.scope);
+    VenueHubBootstrap? bootstrap;
+    if (Firebase.apps.isNotEmpty) {
+      final raw = await _repository.fetchOfflineHubBootstrap(
+        scope: widget.scope,
+      );
+      bootstrap = VenueHubBootstrap.fromJson(raw);
+      await VenueHubPrinterClientRegistry.instance.configure(
+        scope: widget.scope,
+        bootstrap: bootstrap,
+        deviceId: deviceId,
+        credential: credential,
+      );
+    } else {
+      // Windows can intentionally start from the encrypted venue snapshot
+      // without creating Firebase. Reuse the verified bootstrap already held
+      // by the running hub/client rather than producing a core/no-app error.
+      bootstrap =
+          VenueHubRuntime.instance.activeBootstrap ??
+          VenueHubClientRegistry.instance.bootstrapFor(widget.scope);
+    }
     if (!mounted) return;
-    final bootstrap = VenueHubBootstrap.fromJson(raw);
-    await VenueHubPrinterClientRegistry.instance.configure(
-      scope: widget.scope,
-      bootstrap: bootstrap,
-      deviceId: deviceId,
-      credential: credential,
-    );
+    if (bootstrap == null) {
+      setState(() {
+        _deviceId = deviceId;
+        _credential = credential;
+        _hasCertificate = certificate?.isNotEmpty == true;
+        _hasPrivateKey = privateKey?.isNotEmpty == true;
+        _message =
+            'Cloud setup is unavailable while offline. The saved local hub configuration is unchanged.';
+      });
+      return;
+    }
     if (_host.text.trim().isEmpty && bootstrap.endpoint != null) {
       _host.text = bootstrap.endpoint!.host;
       _port.text = '${bootstrap.endpoint!.port}';
@@ -91,6 +115,10 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       _bootstrap = bootstrap;
       _hasCertificate = certificate?.isNotEmpty == true;
       _hasPrivateKey = privateKey?.isNotEmpty == true;
+      if (Firebase.apps.isEmpty) {
+        _message =
+            'Showing the saved local hub configuration. Cloud enrolment changes require internet.';
+      }
     });
   });
 
@@ -413,9 +441,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                         : 'This device is POS-client only. Android or Windows must host the venue hub.',
                   ),
                   const SizedBox(height: 8),
-                  SelectableText(
-                    'This device ID: ${deviceId ?? 'loading'}',
-                  ),
+                  SelectableText('This device ID: ${deviceId ?? 'loading'}'),
                   if (_credential != null)
                     SelectableText(
                       'This device key: ${_credential!.credentialId}',

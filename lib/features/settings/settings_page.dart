@@ -1,4 +1,5 @@
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -408,6 +409,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               (role) => role == 'owner' || role == 'manager',
             ) ??
             false);
+    final cloudAvailable = Firebase.apps.isNotEmpty;
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -536,6 +538,19 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         ),
         const SizedBox(height: 16),
+        if (!cloudAvailable) ...[
+          Card(
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            child: const ListTile(
+              leading: Icon(Icons.cloud_off_rounded),
+              title: Text('Offline hub mode'),
+              subtitle: Text(
+                'Ordering, kitchen flow and local printing remain available. Cloud administration is disabled until internet connectivity returns.',
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
         _SettingsCard(
           title: 'Venues and devices',
           child: Column(
@@ -547,11 +562,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   'Create and safely manage table numbers and names.',
                 ),
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const TableManagementPage(),
-                  ),
-                ),
+                onTap: cloudAvailable
+                    ? () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const TableManagementPage(),
+                        ),
+                      )
+                    : null,
               ),
               const Divider(),
               ListTile(
@@ -561,13 +578,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   'Manage stock, supplier packs and recommended purchase orders.',
                 ),
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => StockManagementPage(
-                      baseCurrencyCode: profile.currencyCode,
-                    ),
-                  ),
-                ),
+                onTap: cloudAvailable
+                    ? () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => StockManagementPage(
+                            baseCurrencyCode: profile.currencyCode,
+                          ),
+                        ),
+                      )
+                    : null,
               ),
               if (!kIsWeb &&
                   defaultTargetPlatform == TargetPlatform.android) ...[
@@ -618,11 +637,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   'See live printer failures and let a manager reprint safely.',
                 ),
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const PrintQueueRecoveryPage(),
-                  ),
-                ),
+                onTap: cloudAvailable
+                    ? () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const PrintQueueRecoveryPage(),
+                        ),
+                      )
+                    : null,
               ),
               const Divider(),
               ListTile(
@@ -632,11 +653,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   'Register this device and route bar, kitchen, and dessert tickets.',
                 ),
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const VenuePrinterRoutingPage(),
-                  ),
-                ),
+                onTap: cloudAvailable
+                    ? () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const VenuePrinterRoutingPage(),
+                        ),
+                      )
+                    : null,
               ),
               if (canManageVenue) ...[
                 if (widget.venueOverride != null) ...[
@@ -648,13 +671,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       'Configure order channels, kitchen courses and telephone customers.',
                     ),
                     trailing: const Icon(Icons.chevron_right_rounded),
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => FulfilmentManagementPage(
-                          venue: widget.venueOverride!,
-                        ),
-                      ),
-                    ),
+                    onTap: cloudAvailable
+                        ? () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => FulfilmentManagementPage(
+                                venue: widget.venueOverride!,
+                              ),
+                            ),
+                          )
+                        : null,
                   ),
                 ],
                 const Divider(),
@@ -665,11 +690,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     'Run isolated practice orders with no live sales, stock or payments.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const TrainingModePage(),
-                    ),
-                  ),
+                  onTap: cloudAvailable
+                      ? () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const TrainingModePage(),
+                          ),
+                        )
+                      : null,
                 ),
                 const Divider(),
                 ListTile(
@@ -679,12 +706,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     'Find closed bills and securely refund full or selected items.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) =>
-                          RefundsPage(currencyCode: profile.currencyCode),
-                    ),
-                  ),
+                  onTap: cloudAvailable
+                      ? () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) =>
+                                RefundsPage(currencyCode: profile.currencyCode),
+                          ),
+                        )
+                      : null,
                 ),
                 const Divider(),
                 ListTile(
@@ -694,13 +723,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     'Issue paid or complimentary vouchers and review balances.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => VoucherManagementPage(
-                        currencyCode: profile.currencyCode,
-                      ),
-                    ),
-                  ),
+                  onTap: cloudAvailable
+                      ? () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => VoucherManagementPage(
+                              currencyCode: profile.currencyCode,
+                            ),
+                          ),
+                        )
+                      : null,
                 ),
                 const Divider(),
                 ListTile(
@@ -710,11 +741,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     'Lock, unlock or securely replace staff PINs.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const StaffPinManagementPage(),
-                    ),
-                  ),
+                  onTap: cloudAvailable
+                      ? () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const StaffPinManagementPage(),
+                          ),
+                        )
+                      : null,
                 ),
                 const Divider(),
                 ListTile(
@@ -724,11 +757,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     'Review the restaurant’s immutable operational history.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const AuditTrailPage(),
-                    ),
-                  ),
+                  onTap: cloudAvailable
+                      ? () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const AuditTrailPage(),
+                          ),
+                        )
+                      : null,
                 ),
                 const Divider(),
                 ListTile(
@@ -829,7 +864,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 Align(
                   alignment: Alignment.centerRight,
                   child: FilledButton.icon(
-                    onPressed: _saving
+                    onPressed: _saving || !cloudAvailable
                         ? null
                         : () => _saveVenueReceiptDetails(venueScope),
                     icon: const Icon(Icons.storefront_outlined),
@@ -967,7 +1002,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 Align(
                   alignment: Alignment.centerRight,
                   child: FilledButton.icon(
-                    onPressed: _savingNotificationRetention
+                    onPressed: _savingNotificationRetention || !cloudAvailable
                         ? null
                         : () => _saveVenueNotificationRetention(venueScope),
                     icon: const Icon(Icons.timer_outlined),
@@ -986,7 +1021,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         Align(
           alignment: Alignment.centerRight,
           child: FilledButton.icon(
-            onPressed: _saving ? null : _save,
+            onPressed:
+                _saving || (widget.persistToFirebase && !cloudAvailable)
+                ? null
+                : _save,
             icon: const Icon(Icons.save_outlined),
             label: const Text('Save company details'),
           ),

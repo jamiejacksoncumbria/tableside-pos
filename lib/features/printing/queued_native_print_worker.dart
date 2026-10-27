@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' show ClientException;
 
@@ -23,7 +24,11 @@ class QueuedNativePrintWorker {
   QueuedNativePrintWorker({
     PrintJobRepository? queue,
     LocalPrinterDeviceIdentity? identity,
-  }) : _queue = queue ?? PrintJobRepository(FirebaseFirestore.instance),
+  }) : _queue =
+           queue ??
+           (Firebase.apps.isEmpty
+               ? PrintJobRepository.localOnly()
+               : PrintJobRepository(FirebaseFirestore.instance)),
        _identity = identity ?? LocalPrinterDeviceIdentity();
 
   final PrintJobRepository _queue;
@@ -75,6 +80,7 @@ class QueuedNativePrintWorker {
   /// heartbeat write, so this is safe to call on the shared app shell timer.
   Future<void> maintainHeartbeat(VenueScope scope) async {
     try {
+      if (Firebase.apps.isEmpty) return;
       final user = FirebaseAuth.instance.currentUser;
       final requiredTransport = _requiredTransport;
       if (user == null || requiredTransport == null) return;
@@ -97,9 +103,7 @@ class QueuedNativePrintWorker {
   }
 
   Future<PrintWorkerResult> processNext(VenueScope scope) async {
-    final user = FirebaseAuth.instance.currentUser;
     final requiredTransport = _requiredTransport;
-    if (user == null) return _notReady('Firebase host account is signed out.');
     if (requiredTransport == null) {
       return _notReady('This platform cannot run a native printer worker.');
     }
@@ -112,6 +116,13 @@ class QueuedNativePrintWorker {
     final hubMode =
         VenueHubRuntime.instance.activeScope == scope ||
         VenueHubPrinterClientRegistry.instance.requiresHub(scope);
+    // A local venue hub is authenticated by its encrypted device enrolment and
+    // can keep printing through an internet outage. Only a cloud-only printer
+    // worker requires a live Firebase host account.
+    if (!hubMode &&
+        (Firebase.apps.isEmpty || FirebaseAuth.instance.currentUser == null)) {
+      return _notReady('Firebase host account is signed out.');
+    }
     if ((deviceCredential == null || deviceCredential.isEmpty) && !hubMode) {
       return _notReady(
         'No venue-scoped printer credential is stored for device $deviceId.',

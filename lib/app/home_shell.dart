@@ -394,32 +394,80 @@ class HomeShell extends ConsumerWidget {
     );
   }
 
-  Widget _buildBody(
-    HomeSection section,
-    TenantProfile profile,
-  ) => switch (section) {
-    HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
-    HomeSection.bookings => BookingCalendarPage(
-      defaultDurationMinutes:
-          venueOverride?.defaultBookingDurationMinutes ?? 120,
+  Widget _buildBody(HomeSection section, TenantProfile profile) =>
+      switch (section) {
+        HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
+        HomeSection.bookings =>
+          Firebase.apps.isEmpty
+              ? const _CloudFeatureUnavailable(feature: 'Bookings')
+              : BookingCalendarPage(
+                  defaultDurationMinutes:
+                      venueOverride?.defaultBookingDurationMinutes ?? 120,
+                ),
+        HomeSection.orderFlow => OrderFlowPage(
+          amberMinutes: venueOverride?.orderFlowAmberMinutes ?? 15,
+          redMinutes: venueOverride?.orderFlowRedMinutes ?? 25,
+        ),
+        HomeSection.fulfilment => const FulfilmentOperationsPage(),
+        HomeSection.menu =>
+          Firebase.apps.isEmpty
+              ? const _CloudFeatureUnavailable(feature: 'Menu management')
+              : MenuManagementPage(currencyCode: profile.currencyCode),
+        HomeSection.reports =>
+          Firebase.apps.isEmpty
+              ? const _CloudFeatureUnavailable(feature: 'Reports')
+              : ReportsPage(
+                  currencyCode: profile.currencyCode,
+                  businessDayCutoffMinutes:
+                      venueOverride?.businessDayCutoffMinutes ?? 240,
+                ),
+        HomeSection.settings => SettingsPage(
+          profileOverride: profileOverride,
+          venueOverride: venueOverride,
+          persistToFirebase: persistCompanyProfile,
+        ),
+        HomeSection.platformAdmin =>
+          Firebase.apps.isEmpty
+              ? const _CloudFeatureUnavailable(
+                  feature: 'Platform administration',
+                )
+              : const PlatformAdminPage(),
+      };
+}
+
+class _CloudFeatureUnavailable extends StatelessWidget {
+  const _CloudFeatureUnavailable({required this.feature});
+
+  final String feature;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 520),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.cloud_off_rounded, size: 42),
+              const SizedBox(height: 12),
+              Text(
+                '$feature requires an internet connection',
+                style: Theme.of(context).textTheme.titleLarge,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'The POS, kitchen flow and local ticket printing continue through the venue hub while offline.',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
     ),
-    HomeSection.orderFlow => OrderFlowPage(
-      amberMinutes: venueOverride?.orderFlowAmberMinutes ?? 15,
-      redMinutes: venueOverride?.orderFlowRedMinutes ?? 25,
-    ),
-    HomeSection.fulfilment => const FulfilmentOperationsPage(),
-    HomeSection.menu => MenuManagementPage(currencyCode: profile.currencyCode),
-    HomeSection.reports => ReportsPage(
-      currencyCode: profile.currencyCode,
-      businessDayCutoffMinutes: venueOverride?.businessDayCutoffMinutes ?? 240,
-    ),
-    HomeSection.settings => SettingsPage(
-      profileOverride: profileOverride,
-      venueOverride: venueOverride,
-      persistToFirebase: persistCompanyProfile,
-    ),
-    HomeSection.platformAdmin => const PlatformAdminPage(),
-  };
+  );
 }
 
 Future<void> _endTrainingFromWorkspace({

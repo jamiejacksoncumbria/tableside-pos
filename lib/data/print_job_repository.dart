@@ -17,11 +17,18 @@ class PrintJobRepository {
   PrintJobRepository(this._firestore, {ProductionCommandRepository? commands})
     : _commands = commands ?? ProductionCommandRepository();
 
-  final FirebaseFirestore _firestore;
+  /// Creates a queue repository for the venue hub while Firebase is
+  /// unavailable. Local encrypted jobs remain fully claimable and completable;
+  /// cloud history simply stays dormant until the app restarts online.
+  PrintJobRepository.localOnly({ProductionCommandRepository? commands})
+    : _firestore = null,
+      _commands = commands ?? ProductionCommandRepository();
+
+  final FirebaseFirestore? _firestore;
   final ProductionCommandRepository _commands;
 
   CollectionReference<Map<String, dynamic>> _jobs(String tenantId) =>
-      _firestore.collection('tenants/$tenantId/printJobs');
+      _firestore!.collection('tenants/$tenantId/printJobs');
 
   /// Emits whenever this venue's queued-print workload changes. Workers use
   /// this to wake immediately for a new ticket instead of waiting for a poll.
@@ -31,12 +38,14 @@ class PrintJobRepository {
     required String tenantId,
     required String venueId,
   }) {
-    final cloud = _jobs(tenantId)
-        .where('venueId', isEqualTo: venueId)
-        .where('status', isEqualTo: 'queued')
-        .snapshots()
-        .map((snapshot) => snapshot.size)
-        .distinct();
+    final cloud = _firestore == null
+        ? null
+        : _jobs(tenantId)
+              .where('venueId', isEqualTo: venueId)
+              .where('status', isEqualTo: 'queued')
+              .snapshots()
+              .map((snapshot) => snapshot.size)
+              .distinct();
     final scope = VenueScope(tenantId: tenantId, venueId: venueId);
     final local =
         VenueHubRuntime.instance.localPrintJobs(scope) ??
@@ -46,7 +55,12 @@ class PrintJobRepository {
                 statuses: const <String>{'queued'},
               )
             : null);
-    if (local == null) return cloud;
+    if (local == null) return cloud ?? Stream<int>.value(0);
+    if (cloud == null) {
+      return local
+          .map((jobs) => jobs.where((job) => job['status'] == 'queued').length)
+          .distinct();
+    }
 
     // Hub-authoritative jobs live in the encrypted venue queue, not in the
     // legacy Firestore collection. Merge both wake-up sources so a new local
@@ -87,15 +101,20 @@ class PrintJobRepository {
     required String tenantId,
     required String venueId,
   }) {
-    final cloud = _jobs(tenantId)
-        .where('venueId', isEqualTo: venueId)
-        .where('status', whereIn: const <String>['queued', 'claimed', 'failed'])
-        .snapshots()
-        .map(
-          (snapshot) => snapshot.docs
-              .map((document) => _fromDocument(tenantId, document))
-              .toList(growable: false),
-        );
+    final cloud = _firestore == null
+        ? null
+        : _jobs(tenantId)
+              .where('venueId', isEqualTo: venueId)
+              .where(
+                'status',
+                whereIn: const <String>['queued', 'claimed', 'failed'],
+              )
+              .snapshots()
+              .map(
+                (snapshot) => snapshot.docs
+                    .map((document) => _fromDocument(tenantId, document))
+                    .toList(growable: false),
+              );
     final scope = VenueScope(tenantId: tenantId, venueId: venueId);
     final local =
         VenueHubRuntime.instance.localPrintJobs(scope) ??
@@ -105,7 +124,23 @@ class PrintJobRepository {
                 statuses: const <String>{'queued', 'claimed', 'failed'},
               )
             : null);
-    if (local == null) return cloud;
+    if (local == null) {
+      return cloud ?? Stream<List<PrintJob>>.value(const <PrintJob>[]);
+    }
+    if (cloud == null) {
+      return local.map(
+        (jobs) => jobs
+            .where(
+              (data) => const <String>{
+                'queued',
+                'claimed',
+                'failed',
+              }.contains(data['status']),
+            )
+            .map((data) => _fromLocalSnapshot(tenantId, venueId, data))
+            .toList(growable: false),
+      );
+    }
 
     // Hub-local operational jobs and the older cloud queue are both valid
     // histories during migration. Merge them by id so recovery, reprinting and
@@ -157,20 +192,22 @@ class PrintJobRepository {
     Duration retention = const Duration(days: 5),
   }) {
     final cutoff = DateTime.now().subtract(retention);
-    final cloud = _jobs(tenantId)
-        .where('venueId', isEqualTo: venueId)
-        .where('status', isEqualTo: 'printed')
-        .where(
-          'completedAt',
-          isGreaterThanOrEqualTo: Timestamp.fromDate(cutoff),
-        )
-        .orderBy('completedAt', descending: true)
-        .snapshots()
-        .map(
-          (snapshot) => snapshot.docs
-              .map((document) => _fromDocument(tenantId, document))
-              .toList(growable: false),
-        );
+    final cloud = _firestore == null
+        ? null
+        : _jobs(tenantId)
+              .where('venueId', isEqualTo: venueId)
+              .where('status', isEqualTo: 'printed')
+              .where(
+                'completedAt',
+                isGreaterThanOrEqualTo: Timestamp.fromDate(cutoff),
+              )
+              .orderBy('completedAt', descending: true)
+              .snapshots()
+              .map(
+                (snapshot) => snapshot.docs
+                    .map((document) => _fromDocument(tenantId, document))
+                    .toList(growable: false),
+              );
     final scope = VenueScope(tenantId: tenantId, venueId: venueId);
     final local =
         VenueHubRuntime.instance.localPrintJobs(scope) ??
@@ -181,7 +218,23 @@ class PrintJobRepository {
                 sinceUtc: cutoff,
               )
             : null);
-    if (local == null) return cloud;
+    if (local == null) {
+      return cloud ?? Stream<List<PrintJob>>.value(const <PrintJob>[]);
+    }
+    if (cloud == null) {
+      return local.map(
+        (jobs) => jobs
+            .where((data) {
+              if (data['status'] != 'printed') return false;
+              final created = DateTime.tryParse(
+                data['createdAtUtc'] as String? ?? '',
+              );
+              return created != null && !created.isBefore(cutoff);
+            })
+            .map((data) => _fromLocalSnapshot(tenantId, venueId, data))
+            .toList(growable: false),
+      );
+    }
 
     return Stream<List<PrintJob>>.multi((controller) {
       var cloudJobs = const <PrintJob>[];
@@ -265,6 +318,12 @@ class PrintJobRepository {
       AppLogger.info(
         'Printer cloud queue skipped: device $deviceId has no enrolled venue credential.',
       );
+      return null;
+    }
+    if (_firestore == null) {
+      // The hub was booted from its durable snapshot with no Firebase app.
+      // There is no cloud queue to claim until connectivity is restored, but
+      // local jobs above must continue printing without throwing core/no-app.
       return null;
     }
     final data = await _commands.claimDevicePrintJob(

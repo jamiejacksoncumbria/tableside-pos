@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -57,7 +56,7 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     _hubStatusSubscription?.cancel();
     _scope = scope;
     _watchingLocalHubQueue = false;
-    if (scope == null || Firebase.apps.isEmpty) return;
+    if (scope == null) return;
     final worker = _worker ??= QueuedNativePrintWorker();
     _subscribeToQueue(worker, scope);
     // The print worker is mounted before the asynchronous venue hub startup

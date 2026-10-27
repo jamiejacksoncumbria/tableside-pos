@@ -68,6 +68,11 @@ class VenueHubClientRegistry {
   int? hubEpochFor(VenueScope scope) =>
       requiresHub(scope) ? _bootstrap?.hubEpoch : null;
 
+  /// Returns the already-verified bootstrap held in memory. Offline settings
+  /// screens use this read-only view instead of attempting a Firebase request.
+  VenueHubBootstrap? bootstrapFor(VenueScope scope) =>
+      _scope == scope ? _bootstrap : null;
+
   Future<void> refreshCatalogue(VenueScope scope) async {
     final client = clientFor(scope);
     if (client == null) return;
