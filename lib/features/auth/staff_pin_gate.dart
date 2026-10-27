@@ -718,6 +718,16 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     });
   }
 
+  void _dismissProtectedRoutesAfterLock() {
+    if (!mounted) return;
+    final navigator = Navigator.maybeOf(context, rootNavigator: true);
+    if (navigator == null || !navigator.canPop()) return;
+    AppLogger.info(
+      'Staff PIN session locked; closing protected dialogs and sheets.',
+    );
+    navigator.popUntil((route) => route.isFirst);
+  }
+
   Future<void> _setOwnPin() async {
     try {
       final firstPin = await showAppDialog<String>(
@@ -847,6 +857,19 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
 
   @override
   Widget build(BuildContext context) {
+    // Dialogs and modal sheets are routes above this gate. Without explicitly
+    // dismissing them, an expired session can correctly rebuild the PIN screen
+    // underneath a checkout sheet while leaving that protected sheet visible.
+    ref.listen<StaffPinVerification?>(activeStaffPinSessionProvider, (
+      previous,
+      next,
+    ) {
+      if (previous != null && next == null) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _dismissProtectedRoutesAfterLock(),
+        );
+      }
+    });
     final session = ref.watch(activeStaffPinSessionProvider);
     if (session != null && isStaffPinSessionCurrent(session.expiresAt)) {
       return widget.child;

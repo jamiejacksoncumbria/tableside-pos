@@ -101,6 +101,23 @@ void main() {
     expect(tester.widget<TextField>(search).controller?.text, 'draft');
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('opening a keyboard does not overflow inactive POS tabs', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 500);
+    tester.view.devicePixelRatio = 1;
+    tester.view.viewInsets = const FakeViewPadding(bottom: 320);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewInsets);
+
+    await tester.pumpWidget(_testApp());
+    await tester.pumpAndSettle();
+
+    expect(find.text('New order'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 Widget _testApp() => ProviderScope(

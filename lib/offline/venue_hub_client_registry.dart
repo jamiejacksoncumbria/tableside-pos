@@ -37,6 +37,7 @@ class VenueHubClientRegistry {
   bool _lanHealthy = false;
   int _streamGeneration = 0;
   final Set<String> _openedOrderIds = <String>{};
+  DateTime? _lastOrderStreamFailureLoggedAt;
 
   bool requiresHub(VenueScope scope) =>
       _scope == scope && _bootstrap?.enabled == true;
@@ -436,7 +437,16 @@ class VenueHubClientRegistry {
     _orderSubscription = client.watchOrders().listen(
       VenueHubOfflineView.instance.installOrders,
       onError: (Object error, StackTrace stackTrace) {
-        AppLogger.error('Watch venue hub orders', error, stackTrace);
+        _recordLanFailureIfTransport(error);
+        final now = DateTime.now();
+        final lastLoggedAt = _lastOrderStreamFailureLoggedAt;
+        if (lastLoggedAt == null ||
+            now.difference(lastLoggedAt) >= const Duration(seconds: 30)) {
+          _lastOrderStreamFailureLoggedAt = now;
+          AppLogger.info(
+            'Venue hub order stream is temporarily unavailable; retrying over LAN. ($error)',
+          );
+        }
         reconnect();
       },
       onDone: reconnect,

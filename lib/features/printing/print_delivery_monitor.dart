@@ -85,7 +85,11 @@ class _PrintDeliveryMonitorHostState
     _staffSessionId = staffSessionId;
     _currentJobs = const [];
     _currentDevices = const [];
-    if (scope == null) return;
+    // The physical queue worker remains mounted and credential-authorised on
+    // the PIN screen. This staff-facing alert monitor does not: it must not
+    // retain cloud subscriptions or reveal operational job details after the
+    // staff session locks.
+    if (scope == null || staffSessionId == null) return;
 
     _jobsSubscription = _jobs
         .watchVenueJobs(tenantId: scope.tenantId, venueId: scope.venueId)

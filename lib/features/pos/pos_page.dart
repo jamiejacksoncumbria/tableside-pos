@@ -321,275 +321,308 @@ class _TablesPanel extends ConsumerWidget {
       clipBehavior: Clip.antiAlias,
       child: Padding(
         padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
-              spacing: 8,
-              runSpacing: 0,
-              alignment: WrapAlignment.spaceBetween,
-              crossAxisAlignment: WrapCrossAlignment.center,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final content = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Tables & tabs',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 0,
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    if (onToggleExpanded != null)
-                      IconButton(
-                        tooltip: expanded
-                            ? 'Return to POS'
-                            : 'Show all tables and tabs',
-                        onPressed: onToggleExpanded,
-                        icon: Icon(
-                          expanded
-                              ? Icons.fullscreen_exit_rounded
-                              : Icons.fullscreen_rounded,
+                    Text(
+                      'Tables & tabs',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (onToggleExpanded != null)
+                          IconButton(
+                            tooltip: expanded
+                                ? 'Return to POS'
+                                : 'Show all tables and tabs',
+                            onPressed: onToggleExpanded,
+                            icon: Icon(
+                              expanded
+                                  ? Icons.fullscreen_exit_rounded
+                                  : Icons.fullscreen_rounded,
+                            ),
+                          ),
+                        TextButton.icon(
+                          onPressed: () => _showNamedTabDialog(context, ref),
+                          icon: const Icon(Icons.person_add_alt_1_rounded),
+                          label: const Text('Named tab'),
                         ),
-                      ),
-                    TextButton.icon(
-                      onPressed: () => _showNamedTabDialog(context, ref),
-                      icon: const Icon(Icons.person_add_alt_1_rounded),
-                      label: const Text('Named tab'),
+                      ],
                     ),
                   ],
                 ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                OutlinedButton.icon(
-                  onPressed: () => _showFulfilmentOrderDialog(
-                    context,
-                    OrderChannel.collection,
-                    onStarted: onSelection,
-                  ),
-                  icon: const Icon(Icons.shopping_bag_outlined),
-                  label: const Text('Collection'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: () => _showFulfilmentOrderDialog(
-                    context,
-                    OrderChannel.delivery,
-                    onStarted: onSelection,
-                  ),
-                  icon: const Icon(Icons.delivery_dining_outlined),
-                  label: const Text('Delivery'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            Expanded(
-              child: Scrollbar(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final table in tables)
-                            _TableButton(
-                              table: table,
-                              scope: scope,
-                              currencyCode: currencyCode,
-                              selected:
-                                  activeOrder.tabName == null &&
-                                  table.id == selectedTableId,
-                              compact: compact || !expanded,
-                              isTraining: isTraining,
-                              trainingOrder: isTraining
-                                  ? trainingOrders
-                                        .where(
-                                          (order) => order.tableId == table.id,
-                                        )
-                                        .firstOrNull
-                                  : null,
-                              onTap: () async {
-                                try {
-                                  await ref
-                                      .read(activeOrderProvider.notifier)
-                                      .openTable(table.id);
-                                  ref
-                                      .read(selectedTableProvider.notifier)
-                                      .select(table.id);
-                                  if (context.mounted) onSelection?.call();
-                                } on Object catch (error, stackTrace) {
-                                  AppLogger.error(
-                                    'Switch selected table',
-                                    error,
-                                    stackTrace,
-                                  );
-                                  if (!context.mounted) return;
-                                  showAppNotification(
-                                    context,
-                                    ref: ref,
-                                    title: 'Could not switch table',
-                                    message: '$error',
-                                    level: AppNotificationLevel.error,
-                                  );
-                                }
-                              },
-                              onDeselect: selectedTableId == table.id
-                                  ? () => ref
-                                        .read(activeOrderProvider.notifier)
-                                        .clearCurrentSelection()
-                                  : null,
-                            ),
-                        ],
-                      ),
-                      if (namedTabGroups.isNotEmpty) ...[
-                        const SizedBox(height: 16),
-                        Text(
-                          'Open named tabs',
-                          style: Theme.of(context).textTheme.labelLarge,
-                        ),
-                        const SizedBox(height: 6),
-                        for (final group in namedTabGroups) ...[
-                          Padding(
-                            padding: const EdgeInsets.only(top: 6, bottom: 6),
-                            child: Text(
-                              _namedTabDateLabel(group.openedDate),
-                              style: Theme.of(context).textTheme.labelMedium,
-                            ),
-                          ),
-                          _CategoryTilePanel(
-                            children: [
-                              for (final tab in group.tabs)
-                                SizedBox(
-                                  width: compact
-                                      ? 118
-                                      : expanded
-                                      ? 180
-                                      : 132,
-                                  child: _NamedTabButton(
-                                    tab: tab,
-                                    scope: scope,
-                                    currencyCode: currencyCode,
-                                    selected: tab.orderId == activeOrder.id,
-                                    onTap: () async {
-                                      try {
-                                        ref
-                                            .read(activeOrderProvider.notifier)
-                                            .openExistingNamedTab(tab);
-                                        ref
-                                            .read(
-                                              selectedTableProvider.notifier,
-                                            )
-                                            .select('');
-                                        if (context.mounted) {
-                                          onSelection?.call();
-                                        }
-                                      } on Object catch (error, stackTrace) {
-                                        AppLogger.error(
-                                          'Open listed named tab',
-                                          error,
-                                          stackTrace,
-                                        );
-                                        if (!context.mounted) return;
-                                        showAppNotification(
-                                          context,
-                                          ref: ref,
-                                          title: 'Could not open named tab',
-                                          message: '$error',
-                                          level: AppNotificationLevel.error,
-                                        );
-                                      }
-                                    },
-                                    onDeselect: tab.orderId == activeOrder.id
-                                        ? () => ref
-                                              .read(
-                                                activeOrderProvider.notifier,
-                                              )
-                                              .clearCurrentSelection()
-                                        : null,
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ],
-                      ],
-                      for (final channel in const [
+                const SizedBox(height: 4),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: () => _showFulfilmentOrderDialog(
+                        context,
                         OrderChannel.collection,
+                        onStarted: onSelection,
+                      ),
+                      icon: const Icon(Icons.shopping_bag_outlined),
+                      label: const Text('Collection'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: () => _showFulfilmentOrderDialog(
+                        context,
                         OrderChannel.delivery,
-                      ])
-                        if (fulfilmentOrders.any(
-                          (order) => order.channel == channel,
-                        )) ...[
-                          const SizedBox(height: 16),
-                          Text(
-                            channel == OrderChannel.collection
-                                ? 'Collections'
-                                : 'Deliveries',
-                            style: Theme.of(context).textTheme.labelLarge,
-                          ),
-                          const SizedBox(height: 8),
+                        onStarted: onSelection,
+                      ),
+                      icon: const Icon(Icons.delivery_dining_outlined),
+                      label: const Text('Delivery'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Expanded(
+                  child: Scrollbar(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
                           Wrap(
                             spacing: 8,
                             runSpacing: 8,
                             children: [
-                              for (final order in fulfilmentOrders.where(
-                                (item) => item.channel == channel,
-                              ))
-                                SizedBox(
-                                  width: compact
-                                      ? 118
-                                      : expanded
-                                      ? 180
-                                      : 132,
-                                  child: _FulfilmentOrderButton(
-                                    order: order,
-                                    scope: scope,
-                                    currencyCode: currencyCode,
-                                    selected: order.id == activeOrder.id,
-                                    onTap: () {
-                                      try {
-                                        ref
+                              for (final table in tables)
+                                _TableButton(
+                                  table: table,
+                                  scope: scope,
+                                  currencyCode: currencyCode,
+                                  selected:
+                                      activeOrder.tabName == null &&
+                                      table.id == selectedTableId,
+                                  compact: compact || !expanded,
+                                  isTraining: isTraining,
+                                  trainingOrder: isTraining
+                                      ? trainingOrders
+                                            .where(
+                                              (order) =>
+                                                  order.tableId == table.id,
+                                            )
+                                            .firstOrNull
+                                      : null,
+                                  onTap: () async {
+                                    try {
+                                      await ref
+                                          .read(activeOrderProvider.notifier)
+                                          .openTable(table.id);
+                                      ref
+                                          .read(selectedTableProvider.notifier)
+                                          .select(table.id);
+                                      if (context.mounted) onSelection?.call();
+                                    } on Object catch (error, stackTrace) {
+                                      AppLogger.error(
+                                        'Switch selected table',
+                                        error,
+                                        stackTrace,
+                                      );
+                                      if (!context.mounted) return;
+                                      showAppNotification(
+                                        context,
+                                        ref: ref,
+                                        title: 'Could not switch table',
+                                        message: '$error',
+                                        level: AppNotificationLevel.error,
+                                      );
+                                    }
+                                  },
+                                  onDeselect: selectedTableId == table.id
+                                      ? () => ref
                                             .read(activeOrderProvider.notifier)
-                                            .openFulfilmentOrder(order);
-                                        if (context.mounted) {
-                                          onSelection?.call();
-                                        }
-                                      } on Object catch (error, stackTrace) {
-                                        AppLogger.error(
-                                          'Open fulfilment order',
-                                          error,
-                                          stackTrace,
-                                        );
-                                        if (!context.mounted) return;
-                                        showAppNotification(
-                                          context,
-                                          ref: ref,
-                                          title: 'Could not open order',
-                                          message: '$error',
-                                          level: AppNotificationLevel.error,
-                                        );
-                                      }
-                                    },
-                                    onDeselect: order.id == activeOrder.id
-                                        ? () => ref
-                                              .read(
-                                                activeOrderProvider.notifier,
-                                              )
-                                              .clearCurrentSelection()
-                                        : null,
-                                  ),
+                                            .clearCurrentSelection()
+                                      : null,
                                 ),
                             ],
                           ),
+                          if (namedTabGroups.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            Text(
+                              'Open named tabs',
+                              style: Theme.of(context).textTheme.labelLarge,
+                            ),
+                            const SizedBox(height: 6),
+                            for (final group in namedTabGroups) ...[
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                  top: 6,
+                                  bottom: 6,
+                                ),
+                                child: Text(
+                                  _namedTabDateLabel(group.openedDate),
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.labelMedium,
+                                ),
+                              ),
+                              _CategoryTilePanel(
+                                children: [
+                                  for (final tab in group.tabs)
+                                    SizedBox(
+                                      width: compact
+                                          ? 118
+                                          : expanded
+                                          ? 180
+                                          : 132,
+                                      child: _NamedTabButton(
+                                        tab: tab,
+                                        scope: scope,
+                                        currencyCode: currencyCode,
+                                        selected: tab.orderId == activeOrder.id,
+                                        onTap: () async {
+                                          try {
+                                            ref
+                                                .read(
+                                                  activeOrderProvider.notifier,
+                                                )
+                                                .openExistingNamedTab(tab);
+                                            ref
+                                                .read(
+                                                  selectedTableProvider
+                                                      .notifier,
+                                                )
+                                                .select('');
+                                            if (context.mounted) {
+                                              onSelection?.call();
+                                            }
+                                          } on Object catch (
+                                            error,
+                                            stackTrace
+                                          ) {
+                                            AppLogger.error(
+                                              'Open listed named tab',
+                                              error,
+                                              stackTrace,
+                                            );
+                                            if (!context.mounted) return;
+                                            showAppNotification(
+                                              context,
+                                              ref: ref,
+                                              title: 'Could not open named tab',
+                                              message: '$error',
+                                              level: AppNotificationLevel.error,
+                                            );
+                                          }
+                                        },
+                                        onDeselect:
+                                            tab.orderId == activeOrder.id
+                                            ? () => ref
+                                                  .read(
+                                                    activeOrderProvider
+                                                        .notifier,
+                                                  )
+                                                  .clearCurrentSelection()
+                                            : null,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ],
+                          for (final channel in const [
+                            OrderChannel.collection,
+                            OrderChannel.delivery,
+                          ])
+                            if (fulfilmentOrders.any(
+                              (order) => order.channel == channel,
+                            )) ...[
+                              const SizedBox(height: 16),
+                              Text(
+                                channel == OrderChannel.collection
+                                    ? 'Collections'
+                                    : 'Deliveries',
+                                style: Theme.of(context).textTheme.labelLarge,
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  for (final order in fulfilmentOrders.where(
+                                    (item) => item.channel == channel,
+                                  ))
+                                    SizedBox(
+                                      width: compact
+                                          ? 118
+                                          : expanded
+                                          ? 180
+                                          : 132,
+                                      child: _FulfilmentOrderButton(
+                                        order: order,
+                                        scope: scope,
+                                        currencyCode: currencyCode,
+                                        selected: order.id == activeOrder.id,
+                                        onTap: () {
+                                          try {
+                                            ref
+                                                .read(
+                                                  activeOrderProvider.notifier,
+                                                )
+                                                .openFulfilmentOrder(order);
+                                            if (context.mounted) {
+                                              onSelection?.call();
+                                            }
+                                          } on Object catch (
+                                            error,
+                                            stackTrace
+                                          ) {
+                                            AppLogger.error(
+                                              'Open fulfilment order',
+                                              error,
+                                              stackTrace,
+                                            );
+                                            if (!context.mounted) return;
+                                            showAppNotification(
+                                              context,
+                                              ref: ref,
+                                              title: 'Could not open order',
+                                              message: '$error',
+                                              level: AppNotificationLevel.error,
+                                            );
+                                          }
+                                        },
+                                        onDeselect: order.id == activeOrder.id
+                                            ? () => ref
+                                                  .read(
+                                                    activeOrderProvider
+                                                        .notifier,
+                                                  )
+                                                  .clearCurrentSelection()
+                                            : null,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ],
                         ],
-                    ],
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
-          ],
+              ],
+            );
+            // TabBarView lays out inactive tabs too. When an amount/name
+            // keyboard opens, the viewport can become shorter than this
+            // panel's fixed header even while the Order tab is visible. Give
+            // the panel a scrollable minimum canvas so it cannot overflow and
+            // trigger repeated InputBorder paint assertions.
+            if (constraints.maxHeight >= 260) return content;
+            return SingleChildScrollView(
+              child: SizedBox(height: 260, child: content),
+            );
+          },
         ),
       ),
     );
@@ -1380,9 +1413,13 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                 // remaining height to the products.
                 ConstrainedBox(
                   constraints: BoxConstraints(
-                    maxHeight: (panelConstraints.maxHeight * .48)
-                        .clamp(110.0, 300.0)
-                        .toDouble(),
+                    maxHeight: panelConstraints.maxHeight < 230
+                        ? (panelConstraints.maxHeight * .48)
+                              .clamp(0.0, 300.0)
+                              .toDouble()
+                        : (panelConstraints.maxHeight * .48)
+                              .clamp(110.0, 300.0)
+                              .toDouble(),
                   ),
                   child: SingleChildScrollView(
                     primary: false,
