@@ -10,7 +10,7 @@ import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_runtime.dart';
 import '../notifications/notification_centre.dart';
 import 'native_print_worker.dart';
-import 'queued_bluetooth_print_worker.dart';
+import 'queued_native_print_worker.dart';
 
 /// Keeps an enrolled native printer device alive for the selected venue even
 /// while the staff workspace is PIN-locked.

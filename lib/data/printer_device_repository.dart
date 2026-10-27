@@ -59,16 +59,6 @@ class PrinterDeviceRepository {
   Future<void> remove({required VenueScope scope, required String deviceId}) =>
       _commands.removePrinterDevice(scope: scope, deviceId: deviceId);
 
-  Future<PrinterDevice?> getDevice({
-    required String tenantId,
-    required String deviceId,
-  }) async {
-    final document = await _firestore
-        .doc('tenants/$tenantId/devices/$deviceId')
-        .get();
-    return document.exists ? _fromDocument(document) : null;
-  }
-
   Stream<List<PrinterDevice>> watchVenueDevices({
     required String tenantId,
     required String venueId,

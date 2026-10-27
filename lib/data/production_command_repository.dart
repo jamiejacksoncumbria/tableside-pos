@@ -1232,22 +1232,6 @@ class ProductionCommandRepository {
     return orderId;
   }
 
-  /// Persists one not-yet-sent order line.  Draft lines are intentionally
-  /// server-owned so another till can open the same table and see changes in
-  /// real time, while printing and stock movements remain deferred until Send.
-  Future<void> addDraftLine({
-    required VenueScope scope,
-    required PosOrder order,
-    required OrderLine line,
-    bool channelAvailabilityOverride = false,
-  }) => addDraftLines(
-    scope: scope,
-    order: order,
-    additions: [
-      (line: line, channelAvailabilityOverride: channelAvailabilityOverride),
-    ],
-  );
-
   /// Saves a burst of basket taps as one atomic hub event. The UI can add the
   /// lines optimistically, while the authoritative hub still validates every
   /// product, variant, modifier and channel price before accepting any line.
