@@ -9,6 +9,8 @@ import '../../core/app_theme_controller.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/tenant_profile_repository.dart';
 import '../../data/production_command_repository.dart';
+import '../../offline/venue_hub_availability.dart';
+import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_platform.dart';
 import '../auth/staff_pin_gate.dart';
 import '../fulfilment/fulfilment_management_page.dart';
@@ -70,6 +72,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   @override
   void initState() {
     super.initState();
+    VenueHubAvailability.status.addListener(_handleHubStatusChanged);
     final TenantProfile profile =
         widget.profileOverride ?? ref.read(tenantProfileProvider);
     _displayName = TextEditingController(text: profile.displayName);
@@ -125,6 +128,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   @override
   void dispose() {
+    VenueHubAvailability.status.removeListener(_handleHubStatusChanged);
     _displayName.dispose();
     _legalName.dispose();
     _address.dispose();
@@ -144,6 +148,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _orderFlowRedMinutes.dispose();
     _defaultBookingDurationMinutes.dispose();
     super.dispose();
+  }
+
+  void _handleHubStatusChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _selectLogo() async {
@@ -409,14 +417,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               (role) => role == 'owner' || role == 'manager',
             ) ??
             false);
-    final cloudAvailable = Firebase.apps.isNotEmpty;
+    final hubRequired =
+        venueScope != null &&
+        VenueHubClientRegistry.instance.requiresHub(venueScope);
+    final cloudAvailable =
+        Firebase.apps.isNotEmpty &&
+        (!hubRequired ||
+            VenueHubAvailability.status.value.connectivity ==
+                VenueHubConnectivity.online);
     void showOnlineOnlyMessage() {
       showAppNotification(
         context,
         ref: ref,
         title: 'Online mode required',
         message:
-            'This setting is only available in online mode. Local ordering, kitchen flow and printing remain available through the venue hub.',
+            'This setting can only be saved while the venue hub and its internet connection are online. Local ordering, kitchen flow and printing remain available over the venue network.',
         level: AppNotificationLevel.warning,
       );
     }
@@ -875,9 +890,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 Align(
                   alignment: Alignment.centerRight,
                   child: FilledButton.icon(
-                    onPressed: _saving || !cloudAvailable
+                    onPressed: _saving
                         ? null
-                        : () => _saveVenueReceiptDetails(venueScope),
+                        : cloudAvailable
+                        ? () => _saveVenueReceiptDetails(venueScope)
+                        : showOnlineOnlyMessage,
                     icon: const Icon(Icons.storefront_outlined),
                     label: const Text('Save venue details'),
                   ),
@@ -1013,9 +1030,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 Align(
                   alignment: Alignment.centerRight,
                   child: FilledButton.icon(
-                    onPressed: _savingNotificationRetention || !cloudAvailable
+                    onPressed: _savingNotificationRetention
                         ? null
-                        : () => _saveVenueNotificationRetention(venueScope),
+                        : cloudAvailable
+                        ? () => _saveVenueNotificationRetention(venueScope)
+                        : showOnlineOnlyMessage,
                     icon: const Icon(Icons.timer_outlined),
                     label: Text(
                       _savingNotificationRetention
@@ -1032,9 +1051,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         Align(
           alignment: Alignment.centerRight,
           child: FilledButton.icon(
-            onPressed:
-                _saving || (widget.persistToFirebase && !cloudAvailable)
+            onPressed: _saving
                 ? null
+                : widget.persistToFirebase && !cloudAvailable
+                ? showOnlineOnlyMessage
                 : _save,
             icon: const Icon(Icons.save_outlined),
             label: const Text('Save company details'),

@@ -5891,99 +5891,103 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                       ),
                       const SizedBox(height: 8),
                     ],
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 300),
-                      child: locationsLoading
-                          ? const Center(child: CircularProgressIndicator())
-                          : ListView(
-                              shrinkWrap: true,
-                              children: [
-                                if (tables.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      16,
-                                      4,
-                                      16,
-                                      4,
-                                    ),
-                                    child: Text(
-                                      'Tables',
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.labelLarge,
-                                    ),
+                    // Keep one scroll owner for the complete location page.
+                    // A nested, height-capped ListView trapped touch drags on
+                    // small tablets, making open named tabs and the controls
+                    // below the table list difficult to reach.
+                    locationsLoading
+                        ? const SizedBox(
+                            height: 120,
+                            child: Center(child: CircularProgressIndicator()),
+                          )
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              if (tables.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    4,
+                                    16,
+                                    4,
                                   ),
-                                for (final table in tables)
-                                  ListTile(
-                                    enabled: !_saving,
-                                    leading: const Icon(
-                                      Icons.table_restaurant_rounded,
-                                    ),
-                                    title: Text(table.label),
-                                    subtitle: Text('${table.seats} seats'),
-                                    trailing: const Icon(
-                                      Icons.chevron_right_rounded,
-                                    ),
-                                    onTap: () => _selectTable(table),
+                                  child: Text(
+                                    'Tables',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.labelLarge,
                                   ),
-                                if (tables.isNotEmpty && namedTabs.isNotEmpty)
-                                  const Divider(height: 16),
-                                if (namedTabs.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(
-                                      16,
-                                      4,
-                                      16,
-                                      4,
-                                    ),
-                                    child: Text(
-                                      'Open named tabs',
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.labelLarge,
-                                    ),
+                                ),
+                              for (final table in tables)
+                                ListTile(
+                                  enabled: !_saving,
+                                  leading: const Icon(
+                                    Icons.table_restaurant_rounded,
                                   ),
-                                if (namedTabs.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 4,
-                                    ),
-                                    child: Wrap(
-                                      spacing: 8,
-                                      runSpacing: 8,
-                                      children: [
-                                        for (final tab in namedTabs)
-                                          SizedBox(
-                                            width: 132,
-                                            child: OutlinedButton.icon(
-                                              onPressed: _saving
-                                                  ? null
-                                                  : () => _selectNamedTab(tab),
-                                              icon: const Icon(
-                                                Icons.person_outline_rounded,
-                                                size: 18,
-                                              ),
-                                              label: Text(
-                                                tab.name,
-                                                maxLines: 2,
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
+                                  title: Text(table.label),
+                                  subtitle: Text('${table.seats} seats'),
+                                  trailing: const Icon(
+                                    Icons.chevron_right_rounded,
+                                  ),
+                                  onTap: () => _selectTable(table),
+                                ),
+                              if (tables.isNotEmpty && namedTabs.isNotEmpty)
+                                const Divider(height: 16),
+                              if (namedTabs.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    4,
+                                    16,
+                                    4,
+                                  ),
+                                  child: Text(
+                                    'Open named tabs',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.labelLarge,
+                                  ),
+                                ),
+                              if (namedTabs.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 4,
+                                  ),
+                                  child: Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      for (final tab in namedTabs)
+                                        SizedBox(
+                                          width: 132,
+                                          child: OutlinedButton.icon(
+                                            onPressed: _saving
+                                                ? null
+                                                : () => _selectNamedTab(tab),
+                                            icon: const Icon(
+                                              Icons.person_outline_rounded,
+                                              size: 18,
+                                            ),
+                                            label: Text(
+                                              tab.name,
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
                                             ),
                                           ),
-                                      ],
-                                    ),
+                                        ),
+                                    ],
                                   ),
-                                if (tables.isEmpty && namedTabs.isEmpty)
-                                  const Padding(
-                                    padding: EdgeInsets.all(16),
-                                    child: Text(
-                                      'No tables or open named tabs are available.',
-                                    ),
+                                ),
+                              if (tables.isEmpty && namedTabs.isEmpty)
+                                const Padding(
+                                  padding: EdgeInsets.all(16),
+                                  child: Text(
+                                    'No tables or open named tabs are available.',
                                   ),
-                              ],
-                            ),
-                    ),
+                                ),
+                            ],
+                          ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: _tabName,
