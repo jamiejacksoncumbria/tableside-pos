@@ -410,6 +410,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             ) ??
             false);
     final cloudAvailable = Firebase.apps.isNotEmpty;
+    void showOnlineOnlyMessage() {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Online mode required',
+        message:
+            'This setting is only available in online mode. Local ordering, kitchen flow and printing remain available through the venue hub.',
+        level: AppNotificationLevel.warning,
+      );
+    }
+
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -568,7 +579,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           builder: (_) => const TableManagementPage(),
                         ),
                       )
-                    : null,
+                    : showOnlineOnlyMessage,
               ),
               const Divider(),
               ListTile(
@@ -586,7 +597,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           ),
                         ),
                       )
-                    : null,
+                    : showOnlineOnlyMessage,
               ),
               if (!kIsWeb &&
                   defaultTargetPlatform == TargetPlatform.android) ...[
@@ -643,7 +654,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           builder: (_) => const PrintQueueRecoveryPage(),
                         ),
                       )
-                    : null,
+                    : showOnlineOnlyMessage,
               ),
               const Divider(),
               ListTile(
@@ -659,7 +670,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                           builder: (_) => const VenuePrinterRoutingPage(),
                         ),
                       )
-                    : null,
+                    : showOnlineOnlyMessage,
               ),
               if (canManageVenue) ...[
                 if (widget.venueOverride != null) ...[
@@ -679,7 +690,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                               ),
                             ),
                           )
-                        : null,
+                        : showOnlineOnlyMessage,
                   ),
                 ],
                 const Divider(),
@@ -696,7 +707,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                             builder: (_) => const TrainingModePage(),
                           ),
                         )
-                      : null,
+                      : showOnlineOnlyMessage,
                 ),
                 const Divider(),
                 ListTile(
@@ -713,7 +724,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                 RefundsPage(currencyCode: profile.currencyCode),
                           ),
                         )
-                      : null,
+                      : showOnlineOnlyMessage,
                 ),
                 const Divider(),
                 ListTile(
@@ -731,7 +742,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                             ),
                           ),
                         )
-                      : null,
+                      : showOnlineOnlyMessage,
                 ),
                 const Divider(),
                 ListTile(
@@ -747,7 +758,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                             builder: (_) => const StaffPinManagementPage(),
                           ),
                         )
-                      : null,
+                      : showOnlineOnlyMessage,
                 ),
                 const Divider(),
                 ListTile(
@@ -763,7 +774,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                             builder: (_) => const AuditTrailPage(),
                           ),
                         )
-                      : null,
+                      : showOnlineOnlyMessage,
                 ),
                 const Divider(),
                 ListTile(
