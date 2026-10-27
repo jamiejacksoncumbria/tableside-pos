@@ -1513,10 +1513,38 @@ class ProductionCommandRepository {
   Future<void> updateProductionTicket({
     required VenueScope scope,
     required String ticketId,
+    String? orderId,
     required String flowStatus,
     required bool isDelayed,
     bool background = false,
   }) {
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      if (orderId == null || orderId.trim().isEmpty) {
+        return Future<void>.error(
+          StateError('The production ticket does not identify its order.'),
+        );
+      }
+      final payload = <String, Object?>{
+        'orderId': orderId,
+        'ticketId': ticketId,
+        'flowStatus': flowStatus,
+        'isDelayed': isDelayed,
+      };
+      final operation = background
+          ? _sendHubEventUnblocked(
+              scope: scope,
+              eventType: 'order.productionTicketUpdated',
+              payload: payload,
+              showBusy: false,
+            )
+          : _sendHubEvent(
+              scope: scope,
+              eventType: 'order.productionTicketUpdated',
+              payload: payload,
+            );
+      return operation.then((_) {});
+    }
     final request = <String, Object?>{
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,

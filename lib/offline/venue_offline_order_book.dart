@@ -438,6 +438,7 @@ class VenueOfflineOrderBook {
     final current = _projectOrderEvents(orderEvents);
     if (current.isClosed &&
         draft.type != 'order.fulfilmentChanged' &&
+        draft.type != 'order.productionTicketUpdated' &&
         draft.type != 'receipt.requested') {
       throw const OfflineProjectionException(
         'A closed offline order cannot be changed.',
@@ -529,6 +530,35 @@ class VenueOfflineOrderBook {
           lineIds.whereType<String>().toList(growable: false),
           printRequired: draft.payload['printRequired'] == true,
         );
+        break;
+      case 'order.productionTicketUpdated':
+        final ticketId = draft.payload['ticketId'];
+        final flowStatus = draft.payload['flowStatus'];
+        final delayed = draft.payload['isDelayed'];
+        if (ticketId is! String ||
+            !current.productionTicketStates.containsKey(ticketId) ||
+            flowStatus is! String ||
+            !const {
+              'held',
+              'newOrder',
+              'preparing',
+              'ready',
+              'collected',
+              'served',
+              'cancelled',
+              'voided',
+            }.contains(flowStatus) ||
+            delayed is! bool) {
+          throw const OfflineProjectionException(
+            'The production ticket update is invalid.',
+          );
+        }
+        final currentStatus = current.productionTicketStates[ticketId]!.status;
+        if (!_validProductionTicketTransition(currentStatus, flowStatus)) {
+          throw const OfflineProjectionException(
+            'The production ticket transition is invalid.',
+          );
+        }
         break;
       case 'order.splitCreated':
         final splitOrderId = draft.payload['splitOrderId'];
@@ -695,6 +725,20 @@ class VenueOfflineOrderBook {
       }
     }
   }
+}
+
+bool _validProductionTicketTransition(String current, String next) {
+  if (current == next) return true;
+  return switch (current) {
+    'initial' =>
+      next == 'held' || next == 'newOrder' || next == 'preparing',
+    'held' => next == 'newOrder',
+    'newOrder' => next == 'preparing',
+    'preparing' => next == 'ready',
+    'ready' => next == 'collected',
+    'collected' => next == 'served',
+    _ => false,
+  };
 }
 
 /// Builds the child bill deterministically from the single atomic split event.

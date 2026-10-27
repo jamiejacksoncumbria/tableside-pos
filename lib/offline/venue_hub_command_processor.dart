@@ -88,6 +88,7 @@ class VenueHubCommandProcessor {
     'order.itemQuantityChanged': 'order',
     'order.lineAdjusted': 'manager',
     'order.sent': 'order',
+    'order.productionTicketUpdated': 'production',
     'order.splitCreated': 'payment',
     'order.fulfilmentChanged': 'delivery',
     'payment.recorded': 'payment',

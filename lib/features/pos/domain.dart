@@ -895,6 +895,7 @@ class OrderLine {
     this.stockComponents = const <ProductStockComponent>[],
     this.addedAt,
     this.sentAt,
+    this.productionBatchId,
     this.addedLocalDate,
     this.addedLocalDateTime,
     this.venueTimeZone,
@@ -925,6 +926,11 @@ class OrderLine {
   final List<ProductStockComponent> stockComponents;
   final DateTime? addedAt;
   final DateTime? sentAt;
+
+  /// Immutable hub event which released this line to production. Local KDS
+  /// tickets use the same ID as the later Firestore projection, so status
+  /// changes never target a guessed/reconstructed document identifier.
+  final String? productionBatchId;
   final String? addedLocalDate;
   final String? addedLocalDateTime;
   final String? venueTimeZone;
@@ -970,6 +976,7 @@ class OrderLine {
     stockComponents: stockComponents,
     addedAt: addedAt,
     sentAt: sentAt,
+    productionBatchId: productionBatchId,
     addedLocalDate: addedLocalDate,
     addedLocalDateTime: addedLocalDateTime,
     venueTimeZone: venueTimeZone,

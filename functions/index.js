@@ -2517,7 +2517,7 @@ const remoteHubClaimLeaseMs = 15 * 1000;
 const remoteHubEventTypes = new Set([
   "order.opened", "order.itemAdded", "order.itemsAdded", "order.itemQuantityChanged", "order.lineAdjusted",
   "order.sent", "order.splitCreated", "order.fulfilmentChanged", "payment.recorded", "payment.batchRecorded",
-  "order.closed", "order.cancelled", "receipt.requested",
+  "order.productionTicketUpdated", "order.closed", "order.cancelled", "receipt.requested",
 ]);
 
 function remoteHubQueue(tenantId, venueId) {
@@ -4299,6 +4299,40 @@ async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
       });
     }
   }
+  for (const event of events.filter(
+    (item) => item.type === "order.productionTicketUpdated",
+  )) {
+    const ticketId = typeof event.payload.ticketId === "string"
+      ? event.payload.ticketId : "";
+    const flowStatus = typeof event.payload.flowStatus === "string"
+      ? event.payload.flowStatus : "";
+    if (!ticketId.startsWith("offline_") ||
+        !["held", "newOrder", "preparing", "ready", "collected", "served",
+          "cancelled", "voided"].includes(flowStatus)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "The offline production update is invalid.",
+      );
+    }
+    const ticketRef = tenantRef.collection("productionTickets").doc(ticketId);
+    const ticket = await ticketRef.get();
+    if (!ticket.exists || ticket.data().venueId !== venueId ||
+        ticket.data().orderId !== event.payload.orderId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The offline production ticket was not found.",
+      );
+    }
+    await ticketRef.update({
+      flowStatus,
+      isDelayed: event.payload.isDelayed === true,
+      ...(flowStatus === "newOrder" && ticket.data().ticketReleasedAt == null
+        ? {ticketReleasedAt: new Date(event.createdAtUtc)} : {}),
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByStaffId: event.staffId,
+      sourceStatusEventId: event.id,
+    });
+  }
 }
 
 function offlineBillFromProjectedOrder(
@@ -4493,6 +4527,7 @@ function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline
   const allowedAfterFinancialClose = new Set([
     "order.cloudBaseline",
     "order.fulfilmentChanged",
+    "order.productionTicketUpdated",
     "receipt.requested",
   ]);
   if (current == null || current.venueId !== venueId ||
@@ -4653,6 +4688,7 @@ function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline
     next.fulfilmentUpdatedByStaffId = event.staffId;
     return next;
   }
+  if (event.type === "order.productionTicketUpdated") return next;
   if (event.type === "payment.recorded") {
     const existingPayment = payments.find((payment) => payment.id === payload.paymentId);
     if (existingPayment != null) {

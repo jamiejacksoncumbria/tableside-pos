@@ -290,6 +290,16 @@ class VenueHubClientRegistry {
       );
       _sessionExpiresAtUtc = login.expiresAtUtc;
       VenueHubOfflineView.instance.install(await _client!.fetchCatalogue());
+      if (_isLocalHubHost) {
+        // Runtime startup reconstructs every order from the encrypted ledger,
+        // but `configure` first clears the preceding PIN session and its
+        // in-memory view. Restore one authoritative snapshot immediately after
+        // login. The host still avoids a redundant long-lived localhost
+        // stream; subsequent durable commits publish directly from runtime.
+        VenueHubOfflineView.instance.installOrders(
+          await _client!.fetchOrders(),
+        );
+      }
       _lanHealthy = true;
       _startLanHealthMonitor();
       // The hub host publishes its authoritative order book directly into the

@@ -203,10 +203,17 @@ void main() {
             'productionArea': 'kitchen',
             'sent': true,
             'sentAtUtc': '2026-10-27T12:05:00.000Z',
+            'sentEventId': 'evt-send-1',
             'details': ['NOTE: No chilli'],
           },
         ],
         'payments': <Object?>[],
+        'productionTicketStates': {
+          'offline_evt-send-1_kitchen': {
+            'status': 'preparing',
+            'isDelayed': false,
+          },
+        },
       },
     ]);
 
@@ -216,7 +223,8 @@ void main() {
     final ticket = view.orderFlowOrders.single;
     expect(ticket.tableLabel, 'Table 7');
     expect(ticket.productionArea, ProductionArea.kitchen);
-    expect(ticket.status, OrderFlowStatus.newOrder);
+    expect(ticket.id, 'offline_evt-send-1_kitchen');
+    expect(ticket.status, OrderFlowStatus.preparing);
     expect(ticket.itemSummary, ['2 x Chicken Curry', '  NOTE: No chilli']);
     view.clear();
   });

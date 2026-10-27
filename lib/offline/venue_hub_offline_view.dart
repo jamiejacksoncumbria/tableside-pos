@@ -15,6 +15,7 @@ class VenueHubOfflineView {
   final StreamController<List<PosOrder>> _orders =
       StreamController<List<PosOrder>>.broadcast();
   List<PosOrder> _currentOrders = const [];
+  Map<String, Map<String, _OfflineTicketState>> _ticketStatesByOrder = const {};
 
   void install(Map<String, Object?> snapshot) {
     _snapshot = Map<String, Object?>.unmodifiable(snapshot);
@@ -27,6 +28,7 @@ class VenueHubOfflineView {
   void clear() {
     _snapshot = null;
     _currentOrders = const [];
+    _ticketStatesByOrder = const {};
     _catalogueChanges.add(null);
     _orders.add(_currentOrders);
   }
@@ -127,7 +129,6 @@ class VenueHubOfflineView {
     };
     final result = <OrderFlowOrder>[];
     for (final order in _currentOrders) {
-      if (order.status == OrderStatus.closed) continue;
       final grouped = <String, List<OrderLine>>{};
       for (final line in order.lines) {
         if (!line.isSentToProduction ||
@@ -135,14 +136,20 @@ class VenueHubOfflineView {
           continue;
         }
         final sentAt = line.sentAt ?? order.openedAt;
-        final key =
-            '${sentAt.toUtc().microsecondsSinceEpoch}:'
-            '${line.productionArea.name}:${line.courseId}';
+        final batchId =
+            line.productionBatchId ??
+            'legacy_${sentAt.toUtc().microsecondsSinceEpoch}';
+        final key = '$batchId:${line.productionArea.name}';
         grouped.putIfAbsent(key, () => <OrderLine>[]).add(line);
       }
       for (final entry in grouped.entries) {
         final lines = entry.value;
         final first = lines.first;
+        final batchId =
+            first.productionBatchId ??
+            'legacy_${(first.sentAt ?? order.openedAt).toUtc().microsecondsSinceEpoch}';
+        final ticketId = 'offline_${batchId}_${first.productionArea.name}';
+        final savedState = _ticketStatesByOrder[order.id]?[ticketId];
         final sentAt = first.sentAt ?? order.openedAt;
         final leadMinutes = order.channel == OrderChannel.delivery
             ? fulfilmentSettings.deliveryLeadMinutes
@@ -151,12 +158,17 @@ class VenueHubOfflineView {
             order.channel == OrderChannel.dineIn || order.scheduledFor == null
             ? sentAt
             : order.scheduledFor!.subtract(Duration(minutes: leadMinutes));
-        final held =
+        final initiallyHeld =
             order.channel != OrderChannel.dineIn &&
             DateTime.now().isBefore(releaseAt);
+        final status =
+            savedState?.status ??
+            (initiallyHeld ? OrderFlowStatus.held : OrderFlowStatus.newOrder);
+        if (order.status == OrderStatus.closed && savedState == null) continue;
+        if (status.isTerminal) continue;
         result.add(
           OrderFlowOrder(
-            id: 'offline-${order.id}-${entry.key}',
+            id: ticketId,
             tenantId: order.tenantId,
             venueId: order.venueId,
             reference:
@@ -165,7 +177,7 @@ class VenueHubOfflineView {
                 tableNames[order.tableId] ??
                 'Order',
             productionArea: first.productionArea,
-            status: held ? OrderFlowStatus.held : OrderFlowStatus.newOrder,
+            status: status,
             ticketReleasedAt: releaseAt,
             itemSummary: <String>[
               for (final line in lines) ...<String>[
@@ -195,6 +207,7 @@ class VenueHubOfflineView {
                     : staffNames[order.assignedDriverId]),
             driverDeclined:
                 order.fulfilmentStatus == FulfilmentStatus.driverDeclined,
+            isDelayed: savedState?.isDelayed ?? false,
           ),
         );
       }
@@ -221,6 +234,13 @@ class VenueHubOfflineView {
   }
 
   void installOrders(List<Map<String, Object?>> values) {
+    _ticketStatesByOrder = <String, Map<String, _OfflineTicketState>>{
+      for (final value in values)
+        if (value['orderId'] is String)
+          value['orderId']! as String: _ticketStates(
+            value['productionTicketStates'],
+          ),
+    };
     _currentOrders = values
         .map(_order)
         .whereType<PosOrder>()
@@ -261,6 +281,7 @@ class VenueHubOfflineView {
             sentAt: DateTime.tryParse(
               line['sentAtUtc'] as String? ?? '',
             )?.toLocal(),
+            productionBatchId: line['sentEventId'] as String?,
             persistedProductionDetails: (line['details'] as List? ?? const [])
                 .whereType<String>()
                 .toList(growable: false),
@@ -347,6 +368,17 @@ class VenueHubOfflineView {
         value['scheduledForUtc'] as String? ?? '',
       )?.toLocal(),
     );
+  }
+
+  Map<String, _OfflineTicketState> _ticketStates(Object? raw) {
+    if (raw is! Map) return const <String, _OfflineTicketState>{};
+    return <String, _OfflineTicketState>{
+      for (final entry in raw.entries)
+        if (entry.key is String && entry.value is Map)
+          entry.key as String: _OfflineTicketState.fromJson(
+            Map<String, Object?>.from(entry.value as Map),
+          ),
+    };
   }
 
   DateTime _businessDate(DateTime utc) {
@@ -713,4 +745,27 @@ class VenueHubOfflineView {
         })
         .toList(growable: false);
   }
+}
+
+class _OfflineTicketState {
+  const _OfflineTicketState({required this.status, required this.isDelayed});
+
+  factory _OfflineTicketState.fromJson(Map<String, Object?> value) =>
+      _OfflineTicketState(
+        status: switch (value['status']) {
+          'held' => OrderFlowStatus.held,
+          'preparing' => OrderFlowStatus.preparing,
+          'ready' => OrderFlowStatus.ready,
+          'collected' => OrderFlowStatus.collected,
+          'served' => OrderFlowStatus.served,
+          'cancelled' => OrderFlowStatus.cancelled,
+          'voided' => OrderFlowStatus.voided,
+          'newOrder' => OrderFlowStatus.newOrder,
+          _ => null,
+        },
+        isDelayed: value['isDelayed'] == true,
+      );
+
+  final OrderFlowStatus? status;
+  final bool isDelayed;
 }

@@ -675,6 +675,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
           .updateProductionTicket(
             scope: scope,
             ticketId: order.id,
+            orderId: order.orderId,
             flowStatus: updated.status.name,
             isDelayed: updated.isDelayed,
             background: true,

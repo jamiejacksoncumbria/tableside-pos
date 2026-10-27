@@ -119,6 +119,55 @@ void main() {
     expect(projection.payments.single.exchangeRateToBase, '1');
   });
 
+  test('production ticket status survives replay and financial close', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 2000,
+        'productionArea': 'kitchen',
+      }),
+      _event(3, 'order.sent', {
+        'orderId': 'order-a',
+        'lineIds': ['line-a'],
+      }),
+      _event(4, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 2000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }),
+      _event(5, 'order.closed', {'orderId': 'order-a'}),
+      _event(6, 'order.productionTicketUpdated', {
+        'orderId': 'order-a',
+        'ticketId': 'offline_evt_3_kitchen',
+        'flowStatus': 'preparing',
+        'isDelayed': false,
+      }),
+      _event(7, 'order.productionTicketUpdated', {
+        'orderId': 'order-a',
+        'ticketId': 'offline_evt_3_kitchen',
+        'flowStatus': 'ready',
+        'isDelayed': true,
+      }),
+    ]);
+
+    expect(projection.lines['line-a']!.sentEventId, 'evt_3');
+    expect(
+      projection.productionTicketStates['offline_evt_3_kitchen']?.status,
+      'ready',
+    );
+    expect(
+      projection.productionTicketStates['offline_evt_3_kitchen']?.isDelayed,
+      isTrue,
+    );
+  });
+
   test('payment batch records split tender and closes atomically', () {
     final projection = projectOfflineOrder([
       _event(1, 'order.opened', {'orderId': 'order-a'}),

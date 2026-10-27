@@ -25,6 +25,7 @@ class OfflineProjectedLine {
     required this.sent,
     this.addedAtUtc,
     this.sentAtUtc,
+    this.sentEventId,
   });
 
   final String id;
@@ -39,6 +40,7 @@ class OfflineProjectedLine {
   final bool sent;
   final DateTime? addedAtUtc;
   final DateTime? sentAtUtc;
+  final String? sentEventId;
 
   int get totalMinor => quantity * unitPriceMinor;
 
@@ -47,6 +49,7 @@ class OfflineProjectedLine {
     int? unitPriceMinor,
     bool? sent,
     DateTime? sentAtUtc,
+    String? sentEventId,
   }) => OfflineProjectedLine(
     id: id,
     productId: productId,
@@ -60,7 +63,20 @@ class OfflineProjectedLine {
     sent: sent ?? this.sent,
     addedAtUtc: addedAtUtc,
     sentAtUtc: sentAtUtc ?? this.sentAtUtc,
+    sentEventId: sentEventId ?? this.sentEventId,
   );
+}
+
+class OfflineProductionTicketState {
+  const OfflineProductionTicketState({
+    required this.status,
+    this.isDelayed = false,
+  });
+
+  final String status;
+  final bool isDelayed;
+
+  Map<String, Object?> toJson() => {'status': status, 'isDelayed': isDelayed};
 }
 
 class OfflineProjectedPayment {
@@ -119,6 +135,8 @@ class OfflineOrderProjection {
     this.splitFromOrderId,
     this.splitSequence = 0,
     this.openSplitOrderIds = const <String>[],
+    this.productionTicketStates =
+        const <String, OfflineProductionTicketState>{},
   });
 
   final String tenantId;
@@ -151,6 +169,7 @@ class OfflineOrderProjection {
   final String? splitFromOrderId;
   final int splitSequence;
   final List<String> openSplitOrderIds;
+  final Map<String, OfflineProductionTicketState> productionTicketStates;
 
   int get totalMinor =>
       lines.values.fold(0, (sum, line) => sum + line.totalMinor) +
@@ -188,6 +207,10 @@ class OfflineOrderProjection {
     'splitFromOrderId': splitFromOrderId,
     'splitSequence': splitSequence,
     'openSplitOrderIds': openSplitOrderIds,
+    'productionTicketStates': {
+      for (final entry in productionTicketStates.entries)
+        entry.key: entry.value.toJson(),
+    },
     'lines': lines.values
         .map(
           (line) => <String, Object?>{
@@ -203,6 +226,7 @@ class OfflineOrderProjection {
             'sent': line.sent,
             'addedAtUtc': line.addedAtUtc?.toIso8601String(),
             'sentAtUtc': line.sentAtUtc?.toIso8601String(),
+            'sentEventId': line.sentEventId,
           },
         )
         .toList(growable: false),
@@ -255,6 +279,7 @@ class OfflineOrderProjection {
         splitFromOrderId: splitFromOrderId,
         splitSequence: splitSequence,
         openSplitOrderIds: List.unmodifiable(value),
+        productionTicketStates: productionTicketStates,
       );
 }
 
@@ -292,6 +317,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
   String? splitFromOrderId;
   var splitSequence = 0;
   final openSplitOrderIds = <String>[];
+  final productionTicketStates = <String, OfflineProductionTicketState>{};
 
   // A replacement hub starts a new immutable epoch, but open orders may have
   // been created by the preceding hub. The cloud signs these baselines into
@@ -393,6 +419,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         sentAtUtc: DateTime.tryParse(
           value['sentAtUtc'] as String? ?? '',
         )?.toUtc(),
+        sentEventId: value['sentEventId'] as String?,
       );
     }
     final rawPayments = payload['payments'];
@@ -510,6 +537,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     }
     if (closed &&
         event.type != 'order.fulfilmentChanged' &&
+        event.type != 'order.productionTicketUpdated' &&
         event.type != 'receipt.requested') {
       throw const OfflineProjectionException(
         'A closed offline order cannot be changed.',
@@ -660,8 +688,54 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           lines[value] = lines[value]!.copyWith(
             sent: true,
             sentAtUtc: event.createdAtUtc,
+            sentEventId: event.id,
           );
         }
+        final sentLines = rawLineIds
+            .whereType<String>()
+            .map((id) => lines[id]!)
+            .toList(growable: false);
+        for (final area
+            in sentLines.map((line) => line.productionArea).toSet()) {
+          final ticketId = 'offline_${event.id}_$area';
+          productionTicketStates.putIfAbsent(
+            ticketId,
+            // The live view applies the venue's collection/delivery lead time
+            // to this initial state. An explicit KDS action replaces it with a
+            // concrete workflow state below.
+            () => const OfflineProductionTicketState(status: 'initial'),
+          );
+        }
+        break;
+      case 'order.productionTicketUpdated':
+        _requireOpened(opened);
+        final ticketId = _requiredString(event.payload, 'ticketId');
+        final status = _requiredString(event.payload, 'flowStatus');
+        if (!const {
+              'held',
+              'newOrder',
+              'preparing',
+              'ready',
+              'collected',
+              'served',
+              'cancelled',
+              'voided',
+            }.contains(status) ||
+            !productionTicketStates.containsKey(ticketId)) {
+          throw const OfflineProjectionException(
+            'The production ticket update is invalid.',
+          );
+        }
+        final currentStatus = productionTicketStates[ticketId]!.status;
+        if (!_validProductionTransition(currentStatus, status)) {
+          throw const OfflineProjectionException(
+            'The production ticket transition is invalid.',
+          );
+        }
+        productionTicketStates[ticketId] = OfflineProductionTicketState(
+          status: status,
+          isDelayed: event.payload['isDelayed'] == true,
+        );
         break;
       case 'order.splitCreated':
         _requireOpened(opened);
@@ -952,7 +1026,22 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     splitFromOrderId: splitFromOrderId,
     splitSequence: splitSequence,
     openSplitOrderIds: List.unmodifiable(openSplitOrderIds),
+    productionTicketStates: UnmodifiableMapView(productionTicketStates),
   );
+}
+
+bool _validProductionTransition(String current, String next) {
+  if (current == next) return true;
+  return switch (current) {
+    'initial' =>
+      next == 'held' || next == 'newOrder' || next == 'preparing',
+    'held' => next == 'newOrder',
+    'newOrder' => next == 'preparing',
+    'preparing' => next == 'ready',
+    'ready' => next == 'collected',
+    'collected' => next == 'served',
+    _ => false,
+  };
 }
 
 List<String> _productionDetails(Map<String, Object?> payload) {
