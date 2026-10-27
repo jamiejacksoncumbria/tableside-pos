@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:firebase_core/firebase_core.dart';
+
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../core/trusted_clock.dart';
@@ -636,6 +638,13 @@ class VenueHubRuntime {
       // connection without restarting the hub or re-opening its local ledger.
       final activeRealtimePresence = _realtimePresence ??=
           VenueHubRealtimePresence(repository: _repository);
+      // The Windows offline bootstrap deliberately does not create a Firebase
+      // app when the executable cannot reach Firebase. Starting the RTDB
+      // presence client in that state can never succeed and previously caused
+      // repeated [core/no-app] errors while the otherwise healthy LAN hub was
+      // running. Cloud presence is restored after the user retries online and
+      // the normal Firebase bootstrap rebuilds this workspace.
+      final cloudRuntimeAvailable = Firebase.apps.isNotEmpty;
       final oldConnectionListener = _realtimeConnectedListener;
       if (oldConnectionListener != null) {
         activeRealtimePresence.connected.removeListener(oldConnectionListener);
@@ -653,18 +662,25 @@ class VenueHubRuntime {
       _realtimeConnectedListener = publishConnectionStatus;
       activeRealtimePresence.connected.addListener(publishConnectionStatus);
       publishConnectionStatus();
-      try {
-        await activeRealtimePresence.start(
-          scope: scope,
-          deviceId: deviceId,
-          hubEpoch: bootstrap.hubEpoch,
-          credential: credential,
-        );
-      } on Object catch (error, stackTrace) {
-        AppLogger.error(
-          'Start venue hub realtime presence; remote commands are unavailable but LAN remains active',
-          error,
-          stackTrace,
+      if (cloudRuntimeAvailable) {
+        try {
+          await activeRealtimePresence.start(
+            scope: scope,
+            deviceId: deviceId,
+            hubEpoch: bootstrap.hubEpoch,
+            credential: credential,
+          );
+        } on Object catch (error, stackTrace) {
+          AppLogger.error(
+            'Start venue hub realtime presence; remote commands are unavailable but LAN remains active',
+            error,
+            stackTrace,
+          );
+        }
+      } else {
+        AppLogger.info(
+          'Firebase was not started; cloud presence and remote commands are '
+          'paused while the certificate-pinned LAN hub remains active.',
         );
       }
       var remoteTickRunning = false;
@@ -922,40 +938,40 @@ class VenueHubRuntime {
       var realtimeRetryDelay = const Duration(seconds: 5);
       var nextRealtimeRetryAt = DateTime.now();
       _realtimeReconnectTimer?.cancel();
-      _realtimeReconnectTimer = Timer.periodic(const Duration(seconds: 5), (
-        _,
-      ) async {
-        if (_activeScope != scope ||
-            activeRealtimePresence.started ||
-            reconnectingRealtime ||
-            DateTime.now().isBefore(nextRealtimeRetryAt)) {
-          return;
-        }
-        reconnectingRealtime = true;
-        try {
-          await activeRealtimePresence.start(
-            scope: scope,
-            deviceId: deviceId,
-            hubEpoch: bootstrap.hubEpoch,
-            credential: credential,
-          );
-          realtimeRetryDelay = const Duration(seconds: 5);
-          AppLogger.info('Venue hub realtime channel restored.');
-          unawaited(remoteTick());
-        } catch (error, stackTrace) {
-          AppLogger.error(
-            'Retry venue hub realtime channel; LAN remains available',
-            error,
-            stackTrace,
-          );
-          nextRealtimeRetryAt = DateTime.now().add(realtimeRetryDelay);
-          realtimeRetryDelay = Duration(
-            seconds: (realtimeRetryDelay.inSeconds * 2).clamp(5, 60),
-          );
-        } finally {
-          reconnectingRealtime = false;
-        }
-      });
+      _realtimeReconnectTimer = cloudRuntimeAvailable
+          ? Timer.periodic(const Duration(seconds: 5), (_) async {
+              if (_activeScope != scope ||
+                  activeRealtimePresence.started ||
+                  reconnectingRealtime ||
+                  DateTime.now().isBefore(nextRealtimeRetryAt)) {
+                return;
+              }
+              reconnectingRealtime = true;
+              try {
+                await activeRealtimePresence.start(
+                  scope: scope,
+                  deviceId: deviceId,
+                  hubEpoch: bootstrap.hubEpoch,
+                  credential: credential,
+                );
+                realtimeRetryDelay = const Duration(seconds: 5);
+                AppLogger.info('Venue hub realtime channel restored.');
+                unawaited(remoteTick());
+              } catch (error, stackTrace) {
+                AppLogger.error(
+                  'Retry venue hub realtime channel; LAN remains available',
+                  error,
+                  stackTrace,
+                );
+                nextRealtimeRetryAt = DateTime.now().add(realtimeRetryDelay);
+                realtimeRetryDelay = Duration(
+                  seconds: (realtimeRetryDelay.inSeconds * 2).clamp(5, 60),
+                );
+              } finally {
+                reconnectingRealtime = false;
+              }
+            })
+          : null;
       if (activeRealtimePresence.connected.value) {
         // Recover commands queued just before the realtime listener connected.
         unawaited(remoteTick());

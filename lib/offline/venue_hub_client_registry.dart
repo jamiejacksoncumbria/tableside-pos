@@ -292,7 +292,11 @@ class VenueHubClientRegistry {
       VenueHubOfflineView.instance.install(await _client!.fetchCatalogue());
       _lanHealthy = true;
       _startLanHealthMonitor();
-      _startOrderStream();
+      // The hub host publishes its authoritative order book directly into the
+      // offline view after every durable commit. Opening a second HTTPS order
+      // stream back to localhost is redundant and can race the listener during
+      // cold startup. Enrolled terminals still use the authenticated stream.
+      if (!_isLocalHubHost) _startOrderStream();
       VenueHubAvailability.markLanOnline();
       return login;
     } catch (error) {
