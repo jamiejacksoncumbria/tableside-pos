@@ -75,17 +75,29 @@ class OfflineHubWorkspace extends ConsumerStatefulWidget {
 }
 
 class _OfflineHubWorkspaceState extends ConsumerState<OfflineHubWorkspace> {
+  bool _workspaceInstalled = false;
+
   @override
   void initState() {
     super.initState();
-    ref.read(activeVenueScopeProvider.notifier).select(widget.workspace.scope);
-    if (widget.workspace.hasVenueTheme) {
-      unawaited(
-        ref
-            .read(appThemeControllerProvider.notifier)
-            .applyVenueDefault(widget.workspace.venue.defaultThemeMode),
-      );
-    }
+    // Riverpod 3 correctly rejects provider mutations while Flutter is
+    // mounting a widget. The cached LAN fallback can appear for a single frame
+    // while the normal online membership check completes, so defer activation
+    // and abandon it if the fallback was already replaced.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref
+          .read(activeVenueScopeProvider.notifier)
+          .select(widget.workspace.scope);
+      if (widget.workspace.hasVenueTheme) {
+        unawaited(
+          ref
+              .read(appThemeControllerProvider.notifier)
+              .applyVenueDefault(widget.workspace.venue.defaultThemeMode),
+        );
+      }
+      setState(() => _workspaceInstalled = true);
+    });
   }
 
   void _retryOnline() {
@@ -97,6 +109,9 @@ class _OfflineHubWorkspaceState extends ConsumerState<OfflineHubWorkspace> {
   @override
   Widget build(BuildContext context) {
     final workspace = widget.workspace;
+    if (!_workspaceInstalled) {
+      return const _LoadingScreen(label: 'Opening saved venue…');
+    }
     return Stack(
       fit: StackFit.expand,
       children: [
