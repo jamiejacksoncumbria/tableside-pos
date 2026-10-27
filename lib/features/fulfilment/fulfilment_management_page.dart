@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/services.dart';
 
 import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
@@ -445,27 +444,6 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
                                         ),
                                         child: Text(_statusLabel(next)),
                                       ),
-                                    if (canManageOrders &&
-                                        order.fulfilmentStatus !=
-                                            FulfilmentStatus.cancelled)
-                                      OutlinedButton.icon(
-                                        onPressed: () => _cancelLegacyOrder(
-                                          context,
-                                          ref,
-                                          order,
-                                        ),
-                                        icon: const Icon(
-                                          Icons.delete_forever_outlined,
-                                        ),
-                                        label: const Text(
-                                          'Cancel legacy order',
-                                        ),
-                                        style: OutlinedButton.styleFrom(
-                                          foregroundColor: Theme.of(
-                                            context,
-                                          ).colorScheme.error,
-                                        ),
-                                      ),
                                   ],
                                 ),
                               ],
@@ -565,51 +543,6 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
         .read(fulfilmentRepositoryProvider)
         .updateFulfilmentOrder(scope: scope, orderId: order.id, status: status),
   );
-
-  /// Presents a deliberately explicit destructive confirmation. The fresh PIN
-  /// is sent only to the protected server operation and is never persisted by
-  /// this page.
-  Future<void> _cancelLegacyOrder(
-    BuildContext context,
-    WidgetRef ref,
-    PosOrder order,
-  ) async {
-    final request = await showAppDialog<_LegacyCancellationRequest>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) => _LegacyCancellationDialog(order: order),
-    );
-    if (request == null || !context.mounted) return;
-    try {
-      await ref
-          .read(fulfilmentRepositoryProvider)
-          .cancelLegacyOrder(
-            scope: scope,
-            orderId: order.id,
-            managerPin: request.managerPin,
-            reason: request.reason,
-          );
-      if (!context.mounted) return;
-      showAppNotification(
-        context,
-        ref: ref,
-        title: 'Legacy order cancelled',
-        message:
-            'The unpaid stale order was removed without recording a payment.',
-        level: AppNotificationLevel.success,
-      );
-    } on Object catch (error, stackTrace) {
-      AppLogger.error('Cancel legacy fulfilment order', error, stackTrace);
-      if (!context.mounted) return;
-      showAppNotification(
-        context,
-        ref: ref,
-        title: 'Legacy order was not cancelled',
-        message: '$error',
-        level: AppNotificationLevel.error,
-      );
-    }
-  }
 
   Future<void> _printDeliveryNote(
     BuildContext context,
@@ -732,121 +665,6 @@ class _FulfilmentOrdersTabState extends ConsumerState<_FulfilmentOrdersTab> {
     FulfilmentStatus.delivered => 'Delivered',
     FulfilmentStatus.cancelled => 'Cancelled',
   };
-}
-
-class _LegacyCancellationRequest {
-  const _LegacyCancellationRequest({
-    required this.reason,
-    required this.managerPin,
-  });
-
-  final String reason;
-  final String managerPin;
-}
-
-/// Confirmation used only for legacy-data cleanup. Current orders are rejected
-/// again by the server even if a modified client attempts this operation.
-class _LegacyCancellationDialog extends StatefulWidget {
-  const _LegacyCancellationDialog({required this.order});
-
-  final PosOrder order;
-
-  @override
-  State<_LegacyCancellationDialog> createState() =>
-      _LegacyCancellationDialogState();
-}
-
-class _LegacyCancellationDialogState extends State<_LegacyCancellationDialog> {
-  final TextEditingController _reasonController = TextEditingController();
-  final TextEditingController _pinController = TextEditingController();
-
-  bool get _canSubmit =>
-      _reasonController.text.trim().length >= 5 &&
-      _pinController.text.length == 6;
-
-  @override
-  void dispose() {
-    _reasonController.dispose();
-    _pinController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Cancel legacy order?'),
-    content: SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(
-            '${widget.order.channel.label} · '
-            '${widget.order.customerName ?? widget.order.id}',
-            style: Theme.of(context).textTheme.titleSmall,
-          ),
-          const SizedBox(height: 12),
-          const Text(
-            'Use this only for an unpaid order left behind by the old system. '
-            'It permanently cancels the stale order and releases its table or '
-            'tab. It does not record a payment and cannot be undone.',
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _reasonController,
-            autofocus: true,
-            minLines: 2,
-            maxLines: 4,
-            maxLength: 500,
-            onChanged: (_) => setState(() {}),
-            decoration: const InputDecoration(
-              labelText: 'Mandatory reason',
-              hintText: 'Why is this old order being removed?',
-            ),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _pinController,
-            obscureText: true,
-            keyboardType: TextInputType.number,
-            maxLength: 6,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            onChanged: (_) => setState(() {}),
-            onSubmitted: (_) => _submit(),
-            decoration: const InputDecoration(
-              labelText: 'Fresh manager PIN',
-              counterText: '',
-            ),
-          ),
-        ],
-      ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('Keep order'),
-      ),
-      FilledButton.icon(
-        onPressed: _canSubmit ? _submit : null,
-        icon: const Icon(Icons.delete_forever_outlined),
-        label: const Text('Cancel legacy order'),
-        style: FilledButton.styleFrom(
-          backgroundColor: Theme.of(context).colorScheme.error,
-          foregroundColor: Theme.of(context).colorScheme.onError,
-        ),
-      ),
-    ],
-  );
-
-  void _submit() {
-    if (!_canSubmit) return;
-    Navigator.pop(
-      context,
-      _LegacyCancellationRequest(
-        reason: _reasonController.text.trim(),
-        managerPin: _pinController.text,
-      ),
-    );
-  }
 }
 
 class FulfilmentOperationsPage extends ConsumerWidget {

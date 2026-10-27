@@ -59,18 +59,6 @@ class PrinterDeviceRepository {
   Future<void> remove({required VenueScope scope, required String deviceId}) =>
       _commands.removePrinterDevice(scope: scope, deviceId: deviceId);
 
-  Future<void> heartbeat({
-    required VenueScope scope,
-    required String deviceId,
-    required String deviceCredential,
-  }) {
-    return _commands.heartbeatPrinterDevice(
-      scope: scope,
-      deviceId: deviceId,
-      deviceCredential: deviceCredential,
-    );
-  }
-
   Future<PrinterDevice?> getDevice({
     required String tenantId,
     required String deviceId,
@@ -108,8 +96,7 @@ class PrinterDeviceRepository {
                   productionAreas: device.productionAreas,
                   transports: device.transports,
                   active: device.active,
-                  lastHeartbeatAt:
-                      currentPresence[device.id] ?? device.lastHeartbeatAt,
+                  lastHeartbeatAt: currentPresence[device.id],
                 ),
               )
               .toList(growable: false),
@@ -146,7 +133,7 @@ class PrinterDeviceRepository {
       ),
       transports: List<String>.from(data['transports'] as List? ?? const []),
       active: data['active'] as bool? ?? true,
-      lastHeartbeatAt: (data['lastHeartbeatAt'] as Timestamp?)?.toDate(),
+      lastHeartbeatAt: null,
     );
   }
 }

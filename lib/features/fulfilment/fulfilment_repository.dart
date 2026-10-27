@@ -442,22 +442,6 @@ class FulfilmentRepository {
     background: background,
   );
 
-  /// Cancels an unpaid collection or delivery left behind by an older hub
-  /// generation. The server revalidates the manager PIN, payment state and hub
-  /// epoch before making the audited cleanup; current EPOS 3 orders are
-  /// deliberately rejected so they cannot bypass the authoritative hub.
-  Future<void> cancelLegacyOrder({
-    required VenueScope scope,
-    required String orderId,
-    required String managerPin,
-    required String reason,
-  }) => _commands.manageFulfilment(
-    scope: scope,
-    operation: 'cancelLegacyOrder',
-    documentId: orderId,
-    values: {'managerPin': managerPin, 'reason': reason.trim()},
-  );
-
   Future<void> saveSettings({
     required VenueScope scope,
     required VenueFulfilmentSettings settings,

@@ -912,7 +912,7 @@ describe("stock and purchasing integrity", () => {
 function approvedBootstrapActions() {
   return [
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
-    "recoverOwnStaffPin", "heartbeatPrinterDevice", "claimDevicePrintJob",
+    "recoverOwnStaffPin", "claimDevicePrintJob",
     "completeDevicePrintJob", "issueRealtimePrinterSession", "getTrustedTime",
     "getOfflineHubBootstrap", "ingestOfflineHubEvents",
     "reconcileOfflineHubClosedOrders", "getOfflineHubSnapshot",

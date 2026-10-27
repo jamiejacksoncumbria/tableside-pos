@@ -861,19 +861,6 @@ class ProductionCommandRepository {
     });
   }
 
-  Future<void> heartbeatPrinterDevice({
-    required VenueScope scope,
-    required String deviceId,
-    required String deviceCredential,
-  }) {
-    return _call('heartbeatPrinterDevice', {
-      'tenantId': scope.tenantId,
-      'venueId': scope.venueId,
-      'deviceId': deviceId,
-      'deviceCredential': deviceCredential,
-    });
-  }
-
   /// Returns an authenticated Firebase time sample without requiring a staff
   /// PIN. It is safe on a locked shared terminal because it exposes no venue
   /// data and performs no mutation.
@@ -2424,7 +2411,6 @@ class ProductionCommandRepository {
     'issueRealtimePrinterSession',
     'claimRemoteHubCommands',
     'completeRemoteHubCommand',
-    'heartbeatPrinterDevice',
     'getTrustedTime',
     'claimDevicePrintJob',
     'completeDevicePrintJob',

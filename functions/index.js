@@ -1572,7 +1572,6 @@ async function manageVenueConfigurationFor(caller, rawData) {
       credentialVersion: FieldValue.increment(1),
       active: values.active !== false,
       registeredAt: FieldValue.serverTimestamp(),
-      lastHeartbeatAt: FieldValue.serverTimestamp(),
       registeredByActor: actor,
     }, {merge: true});
     if (priorNamedDevice) {
@@ -1979,12 +1978,6 @@ async function authenticatedPrinterDevice(caller, rawData) {
   return {data, tenantId, venueId, deviceId, deviceRef, deviceData};
 }
 
-async function heartbeatPrinterDeviceFor(caller, rawData) {
-  const device = await authenticatedPrinterDevice(caller, rawData);
-  await device.deviceRef.update({lastHeartbeatAt: FieldValue.serverTimestamp()});
-  return {online: true};
-}
-
 async function issueRealtimePrinterSessionFor(caller, rawData) {
   const device = await authenticatedPrinterDevice(caller, rawData);
   const configured = configuredRealtimeDatabase();
@@ -2229,139 +2222,6 @@ async function manageFulfilmentFor(caller, rawData) {
       tenantId, venueId, actor, customerClaimStatus: "unclaimed",
     });
     return {documentId: reference.id, saved: true};
-  }
-
-  if (operation === "cancelLegacyOrder") {
-    if (!canManage || documentId == null) {
-      throw new HttpsError(
-        "permission-denied",
-        "Only a manager or owner can cancel a legacy order.",
-      );
-    }
-    const reason = requiredText(values, "reason", 500).trim();
-    if (reason.length < 5) {
-      throw new HttpsError(
-        "invalid-argument",
-        "Enter a clear cancellation reason of at least five characters.",
-      );
-    }
-    await requireFreshManagerPin(
-      caller, tenantId, venueId, values.managerPin, "cancelLegacyOrder",
-    );
-    const orderRef = tenantRef.collection("orders").doc(documentId);
-    const ticketSnapshot = await tenantRef.collection("productionTickets")
-      .where("orderId", "==", documentId).get();
-    const auditRef = tenantRef.collection("auditEvents").doc();
-    const notificationRef = tenantRef.collection("notificationEvents").doc();
-    await db.runTransaction(async (transaction) => {
-      const order = await transaction.get(orderRef);
-      if (!order.exists || order.data().venueId !== venueId) {
-        throw new HttpsError("not-found", "That legacy order was not found.");
-      }
-      const orderData = order.data();
-      if (!["collection", "delivery"].includes(orderData.channel)) {
-        throw new HttpsError(
-          "failed-precondition",
-          "Only a legacy collection or delivery can be cleaned up here.",
-        );
-      }
-      if (["closed", "cancelled"].includes(orderData.status) ||
-          orderData.fulfilmentStatus === "cancelled") {
-        throw new HttpsError("already-exists", "That order is already closed or cancelled.");
-      }
-      const payments = Array.isArray(orderData.payments) ? orderData.payments : [];
-      const paidMinor = payments.reduce((sum, payment) =>
-        sum + Number(payment?.baseAmountMinor ?? 0), 0);
-      if (paidMinor !== 0) {
-        throw new HttpsError(
-          "failed-precondition",
-          "A paid order cannot be removed as legacy data. Use Refunds & corrections.",
-        );
-      }
-      const activeHub = venue.data().offlineHub;
-      const activeHubEpoch = Number(activeHub?.epoch ?? 0);
-      const orderHubEpoch = Number(orderData.offlineHubEpoch ?? 0);
-      // Cleanup is intentionally available only while a hub is active and the
-      // order belongs to an older generation. Pre-hub orders have no epoch and
-      // therefore normalise to generation zero; current/future generations
-      // can never use this administrative cleanup route.
-      if (activeHub?.enabled !== true || activeHubEpoch <= 0 ||
-          orderHubEpoch >= activeHubEpoch) {
-        throw new HttpsError(
-          "failed-precondition",
-          "This is a current EPOS 3 order and must be cancelled through the venue hub.",
-        );
-      }
-
-      let table = null;
-      let tableRef = null;
-      if (typeof orderData.tableId === "string" && orderData.tableId.length > 0) {
-        tableRef = tenantRef.collection("tables").doc(orderData.tableId);
-        table = await transaction.get(tableRef);
-      }
-      let tab = null;
-      let tabRef = null;
-      if (typeof orderData.tabName === "string" && orderData.tabName.trim().length > 0) {
-        tabRef = openTabRegistryRef(tenantId, venueId, orderData.tabName);
-        tab = await transaction.get(tabRef);
-      }
-
-      transaction.update(orderRef, {
-        status: "cancelled",
-        fulfilmentStatus: "cancelled",
-        cancelledAt: FieldValue.serverTimestamp(),
-        cancelledReason: reason,
-        cancelledByActor: actor,
-        legacyCleanup: true,
-        updatedAt: FieldValue.serverTimestamp(),
-      });
-      if (tableRef != null && table?.exists === true &&
-          table.data().currentOrderId === documentId) {
-        transaction.set(tableRef, {
-          currentOrderId: FieldValue.delete(),
-          hasOpenOrder: false,
-          updatedAt: FieldValue.serverTimestamp(),
-        }, {merge: true});
-      }
-      if (tabRef != null && tab?.exists === true &&
-          tab.data().orderId === documentId) {
-        transaction.delete(tabRef);
-      }
-      for (const ticket of ticketSnapshot.docs) {
-        if (ticket.data().venueId !== venueId) continue;
-        transaction.update(ticket.ref, {
-          status: "cancelled",
-          fulfilmentStatus: "cancelled",
-          cancelledAt: FieldValue.serverTimestamp(),
-          cancellationReason: reason,
-          updatedAt: FieldValue.serverTimestamp(),
-        });
-      }
-      transaction.create(auditRef, {
-        action: "cancelLegacyOrder",
-        venueId,
-        orderId: documentId,
-        previousStatus: orderData.status ?? null,
-        previousFulfilmentStatus: orderData.fulfilmentStatus ?? null,
-        previousOfflineHubEpoch: orderHubEpoch,
-        activeHubEpoch,
-        reason,
-        actor,
-        createdAt: FieldValue.serverTimestamp(),
-      });
-      transaction.create(notificationRef, {
-        venueId,
-        type: "order.legacyCancelled",
-        orderId: documentId,
-        recipientRoles: ["manager", "owner"],
-        title: "Legacy order cancelled",
-        body: `${orderData.customerName ?? documentId}: ${reason}`,
-        status: "pending",
-        createdAt: FieldValue.serverTimestamp(),
-        createdByActor: actor,
-      });
-    });
-    return {documentId, cancelled: true};
   }
 
   if (operation === "updateOrderFulfilment") {
@@ -12399,7 +12259,7 @@ async function invokePosAction(action, caller, data) {
   const sessionBootstrapActions = new Set([
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
     "recoverOwnStaffPin",
-    "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
+    "claimDevicePrintJob", "completeDevicePrintJob",
     "issueRealtimePrinterSession",
     "getTrustedTime", "getOfflineHubBootstrap", "ingestOfflineHubEvents",
     "reconcileOfflineHubClosedOrders",
@@ -12427,8 +12287,6 @@ async function invokePosAction(action, caller, data) {
       return verifyStaffPinFor(caller, data);
     case "refreshStaffPinSession":
       return refreshStaffPinSessionFor(actingCaller, data);
-    case "heartbeatPrinterDevice":
-      return heartbeatPrinterDeviceFor(caller, data);
     case "issueRealtimePrinterSession":
       return issueRealtimePrinterSessionFor(caller, data);
     case "claimDevicePrintJob":

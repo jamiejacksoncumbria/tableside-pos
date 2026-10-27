@@ -96,21 +96,6 @@ class LocalPrinterDeviceIdentity {
     return null;
   }
 
-  /// Compatibility for a device configured before venue-scoped enrolment.
-  /// New registrations never write this key. The worker can use it only until
-  /// the manager registers this physical device for the relevant venue.
-  Future<String?> legacyCredential() async {
-    final secured = await _secureStorage.read(key: _credentialPreferenceKey);
-    if (secured?.isNotEmpty == true) return secured;
-    final legacy = await _preferences.getString(_credentialPreferenceKey);
-    if (legacy?.isNotEmpty == true) {
-      await _secureStorage.write(key: _credentialPreferenceKey, value: legacy);
-      await _preferences.remove(_credentialPreferenceKey);
-      return legacy;
-    }
-    return null;
-  }
-
   Future<void> saveCredential(VenueScope scope, String credential) async {
     final key = _credentialKey(scope);
     await _secureStorage.write(key: key, value: credential);

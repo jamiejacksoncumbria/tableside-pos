@@ -78,15 +78,8 @@ class QueuedNativePrintWorker {
       final user = FirebaseAuth.instance.currentUser;
       final requiredTransport = _requiredTransport;
       if (user == null || requiredTransport == null) return;
-      var deviceId = await _identity.deviceIdForScope(scope);
-      var deviceCredential = await _identity.credential(scope);
-      if (deviceCredential == null || deviceCredential.isEmpty) {
-        final legacyCredential = await _identity.legacyCredential();
-        if (legacyCredential != null && legacyCredential.isNotEmpty) {
-          deviceId = await _identity.getOrCreate();
-          deviceCredential = legacyCredential;
-        }
-      }
+      final deviceId = await _identity.deviceIdForScope(scope);
+      final deviceCredential = await _identity.credential(scope);
       if (deviceCredential == null || deviceCredential.isEmpty) return;
       if (_realtime.isConfigured(scope, deviceId)) return;
       // issueRealtimePrinterSession validates the credential, venue,
@@ -110,7 +103,7 @@ class QueuedNativePrintWorker {
     if (requiredTransport == null) {
       return _notReady('This platform cannot run a native printer worker.');
     }
-    var deviceId = await _identity.deviceIdForScope(scope);
+    final deviceId = await _identity.deviceIdForScope(scope);
     var deviceCredential = await _identity.credential(scope);
     // The host itself owns the durable local queue even when its separate
     // printer-only registry has not yet completed a LAN client handshake.
@@ -119,13 +112,6 @@ class QueuedNativePrintWorker {
     final hubMode =
         VenueHubRuntime.instance.activeScope == scope ||
         VenueHubPrinterClientRegistry.instance.requiresHub(scope);
-    if (deviceCredential == null || deviceCredential.isEmpty) {
-      final legacyCredential = await _identity.legacyCredential();
-      if (legacyCredential != null && legacyCredential.isNotEmpty) {
-        deviceId = await _identity.getOrCreate();
-        deviceCredential = legacyCredential;
-      }
-    }
     if ((deviceCredential == null || deviceCredential.isEmpty) && !hubMode) {
       return _notReady(
         'No venue-scoped printer credential is stored for device $deviceId.',
@@ -136,8 +122,7 @@ class QueuedNativePrintWorker {
     }
     if (hubMode && (deviceCredential == null || deviceCredential.isEmpty)) {
       // Local encrypted jobs do not need a bearer credential. Keep a marker
-      // only when no real credential exists; a real credential is required to
-      // drain legacy/server-created cloud jobs after the local queue is empty.
+      // only when no real venue-scoped credential exists.
       deviceCredential = 'venue-hub-device-credential';
     }
 
@@ -188,13 +173,4 @@ class QueuedNativePrintWorker {
     }
     return PrintWorkerResult.noWork;
   }
-}
-
-/// Retained for hot-reload compatibility with older running sessions. New code
-/// uses [QueuedNativePrintWorker], but keeping the previous class name lets a
-/// pre-upgrade State object complete its timer callback until the required
-/// full Windows restart installs the native printer channel.
-@Deprecated('Use QueuedNativePrintWorker instead.')
-class QueuedBluetoothPrintWorker extends QueuedNativePrintWorker {
-  QueuedBluetoothPrintWorker({super.queue, super.identity});
 }
