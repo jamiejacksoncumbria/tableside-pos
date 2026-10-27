@@ -14,6 +14,7 @@ import '../../core/tenant_scope.dart';
 import '../../core/order_flow_display_mode.dart';
 import '../../core/staff_pin_session_store.dart';
 import '../../core/training_mode.dart';
+import '../../core/trusted_clock.dart';
 import '../../data/production_command_repository.dart';
 import '../../features/printing/local_printer_device_identity.dart';
 import '../../offline/venue_hub_bootstrap.dart';
@@ -26,6 +27,16 @@ import '../../offline/venue_hub_realtime_client.dart';
 
 User? get _currentFirebaseUser =>
     Firebase.apps.isEmpty ? null : FirebaseAuth.instance.currentUser;
+
+/// PIN sessions issued by the offline hub use its trusted clock authority.
+/// Comparing them with the raw device clock can immediately expire a valid
+/// session when a till's system clock differs from the last trusted sample.
+@visibleForTesting
+bool isStaffPinSessionCurrent(DateTime expiresAt) =>
+    expiresAt.toUtc().isAfter(TrustedClock.instance.nowUtc());
+
+Duration _staffPinSessionRemaining(DateTime expiresAt) =>
+    expiresAt.toUtc().difference(TrustedClock.instance.nowUtc());
 
 /// Internal control flow used to avoid touching Firebase during a verified
 /// native hub cold start. It is never shown to the operator.
@@ -118,7 +129,7 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
   /// only the still-valid server verification held in state may be restored.
   bool restoreCredentials() {
     final session = state;
-    if (session == null || !session.expiresAt.isAfter(DateTime.now())) {
+    if (session == null || !isStaffPinSessionCurrent(session.expiresAt)) {
       lock();
       return false;
     }
@@ -348,9 +359,14 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   Future<void> _verifyPin(VenuePinStaff staff, String pin) async {
     try {
       setState(() => _submitting = true);
+      AppLogger.info(
+        'Staff PIN unlock started: staff=${staff.userId}, '
+        'offline=${widget.offlineHubOnly}.',
+      );
       VenueHubBootstrap? bootstrap;
       try {
         if (widget.offlineHubOnly) {
+          AppLogger.info('Staff PIN unlock: loading cached hub authority.');
           throw const _UseCachedHubBootstrap();
         }
         final rawBootstrap = await _repository.fetchOfflineHubBootstrap(
@@ -382,9 +398,10 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           'The cloud is unavailable and this device has no saved venue hub configuration.',
         );
       }
-      final deviceId = await LocalPrinterDeviceIdentity().deviceIdForScope(
-        widget.scope,
-      );
+      AppLogger.info('Staff PIN unlock: hub authority is ready.');
+      final deviceId = await LocalPrinterDeviceIdentity()
+          .deviceIdForScope(widget.scope)
+          .timeout(const Duration(seconds: 5));
       if (kIsWeb) {
         // Browsers do not retain the hub's native device key. Their
         // PIN-authenticated mutations use the short-lived Firebase queue and
@@ -429,17 +446,22 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         _scheduleExpiryCheck();
         return;
       }
-      final credential = await VenueHubDeviceCredentialStore().getOrCreate(
-        tenantId: widget.scope.tenantId,
-        venueId: widget.scope.venueId,
-        deviceId: deviceId,
-      );
-      await VenueHubPrinterClientRegistry.instance.configure(
-        scope: widget.scope,
-        bootstrap: bootstrap,
-        deviceId: deviceId,
-        credential: credential,
-      );
+      final credential = await VenueHubDeviceCredentialStore()
+          .getOrCreate(
+            tenantId: widget.scope.tenantId,
+            venueId: widget.scope.venueId,
+            deviceId: deviceId,
+          )
+          .timeout(const Duration(seconds: 5));
+      AppLogger.info('Staff PIN unlock: device identity is ready.');
+      await VenueHubPrinterClientRegistry.instance
+          .configure(
+            scope: widget.scope,
+            bootstrap: bootstrap,
+            deviceId: deviceId,
+            credential: credential,
+          )
+          .timeout(const Duration(seconds: 5));
       VenueHubLoginResult? hubLogin;
       StaffPinVerification? migratedCloudSession;
       var hubConnectionUnavailable = false;
@@ -451,17 +473,24 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           final localHubEndpoint = isLocalHubHost
               ? await VenueHubRuntime.instance.waitForLocalEndpoint(
                   widget.scope,
+                  timeout: const Duration(seconds: 8),
                 )
               : null;
-          hubLogin = await VenueHubClientRegistry.instance.configure(
-            scope: widget.scope,
-            bootstrap: bootstrap,
-            deviceId: deviceId,
-            staffId: staff.userId,
-            pin: pin,
-            credential: credential,
-            endpointOverride: localHubEndpoint,
+          AppLogger.info(
+            'Staff PIN unlock: verifying with the certificate-pinned hub.',
           );
+          hubLogin = await VenueHubClientRegistry.instance
+              .configure(
+                scope: widget.scope,
+                bootstrap: bootstrap,
+                deviceId: deviceId,
+                staffId: staff.userId,
+                pin: pin,
+                credential: credential,
+                endpointOverride: localHubEndpoint,
+              )
+              .timeout(const Duration(seconds: 20));
+          AppLogger.info('Staff PIN unlock: hub verification succeeded.');
         } on VenueHubClientException catch (error) {
           final verifierMissing = error.code == 'offline_verifier_unavailable';
           final verifierRejected = error.code == 'invalid_pin';
@@ -534,10 +563,12 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           bootstrap,
         );
       }
-      final cachedPreferences = await _hubCache.readStaffPreferences(
-        widget.scope,
-        staff.userId,
-      );
+      final cachedPreferences = await _hubCache
+          .readStaffPreferences(widget.scope, staff.userId)
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => const <String, String>{},
+          );
       StaffPinVerification session;
       if (widget.offlineHubOnly) {
         if (hubLogin == null) {
@@ -605,13 +636,16 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           hubLogin.expiresAtUtc.isBefore(session.expiresAt)) {
         session = session.copyWith(expiresAt: hubLogin.expiresAtUtc);
       }
-      await _hubCache.saveStaffPreferences(
-        widget.scope,
-        userId: session.userId,
-        themeModePreference: session.themeModePreference,
-        posCategoryViewPreference: session.posCategoryViewPreference,
-        posProductSortPreference: session.posProductSortPreference,
-      );
+      await _hubCache
+          .saveStaffPreferences(
+            widget.scope,
+            userId: session.userId,
+            themeModePreference: session.themeModePreference,
+            posCategoryViewPreference: session.posCategoryViewPreference,
+            posProductSortPreference: session.posProductSortPreference,
+          )
+          .timeout(const Duration(seconds: 5), onTimeout: () {});
+      AppLogger.info('Staff PIN unlock: activating the verified session.');
       ref
           .read(activeStaffPinSessionProvider.notifier)
           .unlock(session, widget.scope);
@@ -662,11 +696,11 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     _expiryTimer?.cancel();
     final session = ref.read(activeStaffPinSessionProvider);
     if (session == null) return;
-    final remaining = session.expiresAt.difference(DateTime.now());
+    final remaining = _staffPinSessionRemaining(session.expiresAt);
     _expiryTimer = Timer(remaining.isNegative ? Duration.zero : remaining, () {
       final current = ref.read(activeStaffPinSessionProvider);
       if (current == null) return;
-      if (current.expiresAt.isAfter(DateTime.now())) {
+      if (isStaffPinSessionCurrent(current.expiresAt)) {
         _scheduleExpiryCheck();
       } else if (ref.read(orderFlowDisplayActiveProvider)) {
         _expiryTimer = Timer(const Duration(seconds: 30), _scheduleExpiryCheck);
@@ -806,7 +840,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(activeStaffPinSessionProvider);
-    if (session != null && session.expiresAt.isAfter(DateTime.now())) {
+    if (session != null && isStaffPinSessionCurrent(session.expiresAt)) {
       return widget.child;
     }
     final staff = _staff ?? const <VenuePinStaff>[];
