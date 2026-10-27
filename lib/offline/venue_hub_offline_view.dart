@@ -80,12 +80,130 @@ class VenueHubOfflineView {
     }
   }
 
+  Stream<List<MenuCourse>> get courseStream async* {
+    yield courses;
+    await for (final _ in _catalogueChanges.stream) {
+      yield courses;
+    }
+  }
+
+  Stream<List<FulfilmentStaffMember>> get staffStream async* {
+    yield staff;
+    await for (final _ in _catalogueChanges.stream) {
+      yield staff;
+    }
+  }
+
   Stream<List<PosOrder>> get orderStream async* {
     yield _currentOrders;
     yield* _orders.stream;
   }
 
+  /// Production tickets reconstructed from the hub's durable order ledger.
+  /// Lines sent in the same operation share an exact `sentAt` timestamp and
+  /// are grouped by production area/course, matching the cloud ticket model.
+  Stream<List<OrderFlowOrder>> get orderFlowStream async* {
+    yield orderFlowOrders;
+    await for (final _ in _orders.stream) {
+      yield orderFlowOrders;
+    }
+  }
+
+  /// Forces time-sensitive held tickets to be recalculated without mutating
+  /// any order data. Used by the KDS clock when running without Firebase.
+  void refreshOrderFlow() => _orders.add(_currentOrders);
+
   List<PosOrder> get currentOrders => _currentOrders;
+
+  List<OrderFlowOrder> get orderFlowOrders {
+    final productVisibility = <String, bool>{
+      for (final product in products) product.id: product.showOnOrderFlow,
+    };
+    final tableNames = <String, String>{
+      for (final table in tables) table.id: table.label,
+    };
+    final staffNames = <String, String>{
+      for (final member in staff) member.id: member.name,
+    };
+    final result = <OrderFlowOrder>[];
+    for (final order in _currentOrders) {
+      if (order.status == OrderStatus.closed) continue;
+      final grouped = <String, List<OrderLine>>{};
+      for (final line in order.lines) {
+        if (!line.isSentToProduction ||
+            productVisibility[line.productId] == false) {
+          continue;
+        }
+        final sentAt = line.sentAt ?? order.openedAt;
+        final key =
+            '${sentAt.toUtc().microsecondsSinceEpoch}:'
+            '${line.productionArea.name}:${line.courseId}';
+        grouped.putIfAbsent(key, () => <OrderLine>[]).add(line);
+      }
+      for (final entry in grouped.entries) {
+        final lines = entry.value;
+        final first = lines.first;
+        final sentAt = first.sentAt ?? order.openedAt;
+        final leadMinutes = order.channel == OrderChannel.delivery
+            ? fulfilmentSettings.deliveryLeadMinutes
+            : fulfilmentSettings.collectionLeadMinutes;
+        final releaseAt =
+            order.channel == OrderChannel.dineIn || order.scheduledFor == null
+            ? sentAt
+            : order.scheduledFor!.subtract(Duration(minutes: leadMinutes));
+        final held =
+            order.channel != OrderChannel.dineIn &&
+            DateTime.now().isBefore(releaseAt);
+        result.add(
+          OrderFlowOrder(
+            id: 'offline-${order.id}-${entry.key}',
+            tenantId: order.tenantId,
+            venueId: order.venueId,
+            reference:
+                order.tabName ??
+                order.customerName ??
+                tableNames[order.tableId] ??
+                'Order',
+            productionArea: first.productionArea,
+            status: held ? OrderFlowStatus.held : OrderFlowStatus.newOrder,
+            ticketReleasedAt: releaseAt,
+            itemSummary: <String>[
+              for (final line in lines) ...<String>[
+                '${line.quantity} x ${line.productName}',
+                ...line.productionDetails.map((detail) => '  $detail'),
+              ],
+            ],
+            tableLabel: order.tableId == null
+                ? null
+                : tableNames[order.tableId] ?? order.tableId,
+            tabName: order.tabName,
+            createdByName: order.primaryWaiterName ?? 'Staff member',
+            hasAllergyAlert: lines.any(
+              (line) => line.productionDetails.any(
+                (detail) => detail.toLowerCase().contains('allerg'),
+              ),
+            ),
+            channel: order.channel,
+            customerName: order.customerName,
+            scheduledFor: order.scheduledFor,
+            courseName: first.courseName,
+            orderId: order.id,
+            assignedDriverName:
+                order.assignedDriverName ??
+                (order.assignedDriverId == null
+                    ? null
+                    : staffNames[order.assignedDriverId]),
+            driverDeclined:
+                order.fulfilmentStatus == FulfilmentStatus.driverDeclined,
+          ),
+        );
+      }
+    }
+    result.sort(
+      (left, right) => left.ticketReleasedAt.compareTo(right.ticketReleasedAt),
+    );
+    return result;
+  }
 
   String get venueCountry =>
       _snapshot?['venueCountry'] as String? ?? 'Kuzey Kıbrıs Türk Cumhuriyeti';
@@ -323,6 +441,62 @@ class VenueHubOfflineView {
       (left, right) => left.displayName.toLowerCase().compareTo(
         right.displayName.toLowerCase(),
       ),
+    );
+    return result;
+  }
+
+  List<MenuCourse> get courses {
+    final raw = _snapshot?['courses'];
+    if (raw is! List) return const <MenuCourse>[];
+    final result = raw.whereType<Map>().map((item) {
+      return MenuCourse(
+        id: item['id'] as String,
+        name: item['name'] as String? ?? 'Course',
+        sequence: (item['sequence'] as num?)?.toInt() ?? 0,
+        releasePolicy: switch (item['releasePolicy']) {
+          'manual' => CourseReleasePolicy.manual,
+          'afterPreviousCollected' =>
+            CourseReleasePolicy.afterPreviousCollected,
+          'afterPreviousServed' => CourseReleasePolicy.afterPreviousServed,
+          _ => CourseReleasePolicy.immediate,
+        },
+        amberMinutes: (item['amberMinutes'] as num?)?.toInt() ?? 15,
+        redMinutes: (item['redMinutes'] as num?)?.toInt() ?? 25,
+        productionAreas: (item['productionAreas'] as List? ?? const [])
+            .whereType<String>()
+            .map(
+              (area) => switch (area) {
+                'bar' => ProductionArea.bar,
+                'dessert' => ProductionArea.dessert,
+                _ => ProductionArea.kitchen,
+              },
+            )
+            .toList(growable: false),
+      );
+    }).toList();
+    result.sort((left, right) => left.sequence.compareTo(right.sequence));
+    return result;
+  }
+
+  List<FulfilmentStaffMember> get staff {
+    final raw = _snapshot?['staff'];
+    if (raw is! List) return const <FulfilmentStaffMember>[];
+    final result = raw
+        .whereType<Map>()
+        .map(
+          (item) => FulfilmentStaffMember(
+            id: item['staffId'] as String? ?? '',
+            name: item['displayName'] as String? ?? 'Staff member',
+            roles: (item['roles'] as List? ?? const [])
+                .whereType<String>()
+                .toList(growable: false),
+          ),
+        )
+        .where((item) => item.id.isNotEmpty)
+        .toList();
+    result.sort(
+      (left, right) =>
+          left.name.toLowerCase().compareTo(right.name.toLowerCase()),
     );
     return result;
   }

@@ -20,6 +20,9 @@ final fulfilmentRepositoryProvider = Provider<FulfilmentRepository>(
 final venueCoursesProvider = StreamProvider<List<MenuCourse>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <MenuCourse>[]);
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+    return VenueHubOfflineView.instance.courseStream;
+  }
   return ref.watch(fulfilmentRepositoryProvider).watchCourses(scope);
 });
 
@@ -115,6 +118,9 @@ final fulfilmentStaffProvider = StreamProvider<List<FulfilmentStaffMember>>((
 ) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <FulfilmentStaffMember>[]);
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+    return VenueHubOfflineView.instance.staffStream;
+  }
   return ref.watch(fulfilmentRepositoryProvider).watchStaff(scope);
 });
 

@@ -13,6 +13,8 @@ import '../../core/safe_dialog.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
 import '../../data/printer_device_repository.dart';
+import '../../offline/venue_hub_client_registry.dart';
+import '../../offline/venue_hub_offline_view.dart';
 import '../notifications/notification_centre.dart';
 import '../auth/staff_pin_gate.dart';
 import '../fulfilment/fulfilment_domain.dart';
@@ -24,6 +26,12 @@ import 'order_flow_sound.dart';
 final orderFlowProvider = StreamProvider<List<OrderFlowOrder>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoOrderFlow);
+  // A venue hub remains the authoritative order source when the internet is
+  // unavailable. Never construct a Firestore listener in that state: doing so
+  // fails before the KDS can render and used to trigger a PIN-session lock.
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+    return VenueHubOfflineView.instance.orderFlowStream;
+  }
   return ref.watch(firestorePosRepositoryProvider).watchOrderFlow(scope);
 });
 
@@ -555,6 +563,13 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     if (!mounted || scope == null || session == null || _refreshingPinSession) {
       return;
     }
+    // The local hub PIN session is verified from the signed encrypted venue
+    // snapshot and uses the trusted hub clock. It cannot be refreshed through
+    // Firebase while the venue is offline, and a cloud failure must never lock
+    // an otherwise valid kitchen display session.
+    if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+      return;
+    }
     _refreshingPinSession = true;
     try {
       final expiresAt = await ProductionCommandRepository()
@@ -576,6 +591,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     if (!mounted || _releasingScheduledTickets) return;
     final scope = ref.read(activeVenueScopeProvider);
     if (scope == null || ref.read(activeStaffPinSessionProvider) == null) {
+      return;
+    }
+    if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+      // Recalculate held-ticket lead-time boundaries from the trusted local
+      // order projection. The periodic KDS timer calls this every 30 seconds.
+      VenueHubOfflineView.instance.refreshOrderFlow();
       return;
     }
     _releasingScheduledTickets = true;

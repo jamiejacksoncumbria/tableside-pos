@@ -248,6 +248,13 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.inactive:
+        // Windows reports `inactive` for ordinary focus changes (including a
+        // printer/system dialog). Treating that as backgrounding repeatedly
+        // returned an attended hub to the PIN screen. Mobile still records it
+        // because an incoming system surface can genuinely obscure the POS.
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) break;
+        _backgroundedAt ??= DateTime.now();
+        break;
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
         _backgroundedAt ??= DateTime.now();
@@ -256,7 +263,8 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         final backgroundedAt = _backgroundedAt;
         _backgroundedAt = null;
         if (backgroundedAt != null &&
-            DateTime.now().difference(backgroundedAt) >= _backgroundLockAfter) {
+            DateTime.now().difference(backgroundedAt) >= _backgroundLockAfter &&
+            !ref.read(orderFlowDisplayActiveProvider)) {
           AppLogger.info(
             'Shared device locked after its configured background timeout.',
           );

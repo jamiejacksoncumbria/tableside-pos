@@ -152,4 +152,72 @@ void main() {
     await expectation;
     view.clear();
   });
+
+  test('sent local lines appear immediately on the offline order flow', () {
+    final view = VenueHubOfflineView.instance..clear();
+    view.install({
+      'products': [
+        {
+          'id': 'curry',
+          'name': 'Chicken Curry',
+          'priceMinor': 1200,
+          'sectionIds': <String>[],
+          'productionArea': 'kitchen',
+          'isAvailable': true,
+          'isArchived': false,
+          'showOnOrderFlow': true,
+          'variants': <Object?>[],
+          'modifierGroupIds': <String>[],
+          'stockComponents': <Object?>[],
+        },
+      ],
+      'tables': [
+        {'id': 'table-7', 'label': 'Table 7', 'active': true},
+      ],
+      'staff': [
+        {
+          'staffId': 'staff-1',
+          'displayName': 'Jamie',
+          'roles': ['manager'],
+        },
+      ],
+      'courses': [
+        {'id': 'main', 'name': 'Main', 'sequence': 2},
+      ],
+    });
+    view.installOrders([
+      {
+        'orderId': 'order-1',
+        'tenantId': 'tenant-1',
+        'venueId': 'venue-1',
+        'tableId': 'table-7',
+        'openedAtUtc': '2026-10-27T12:00:00.000Z',
+        'isClosed': false,
+        'lines': <Object?>[
+          {
+            'id': 'line-1',
+            'productId': 'curry',
+            'name': 'Chicken Curry',
+            'quantity': 2,
+            'unitPriceMinor': 1200,
+            'productionArea': 'kitchen',
+            'sent': true,
+            'sentAtUtc': '2026-10-27T12:05:00.000Z',
+            'details': ['NOTE: No chilli'],
+          },
+        ],
+        'payments': <Object?>[],
+      },
+    ]);
+
+    expect(view.courses.single.name, 'Main');
+    expect(view.staff.single.name, 'Jamie');
+    expect(view.orderFlowOrders, hasLength(1));
+    final ticket = view.orderFlowOrders.single;
+    expect(ticket.tableLabel, 'Table 7');
+    expect(ticket.productionArea, ProductionArea.kitchen);
+    expect(ticket.status, OrderFlowStatus.newOrder);
+    expect(ticket.itemSummary, ['2 x Chicken Curry', '  NOTE: No chilli']);
+    view.clear();
+  });
 }

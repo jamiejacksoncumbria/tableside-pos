@@ -1010,6 +1010,12 @@ class VenueHubRuntime {
       unawaited(reconcileClosedCloudOrders());
       var refreshingAuthority = false;
       Future<void> refreshAuthority() async {
+        // A LAN-only hub deliberately starts without a Firebase app. Its last
+        // verified encrypted snapshot remains authoritative until connectivity
+        // returns and the application performs a normal cloud bootstrap.
+        // Calling a Firebase repository here only produces `core/no-app` and
+        // must not interfere with local order or KDS processing.
+        if (!cloudRuntimeAvailable) return;
         if (refreshingAuthority) return;
         refreshingAuthority = true;
         try {
