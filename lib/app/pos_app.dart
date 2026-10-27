@@ -72,6 +72,8 @@ class TableSideCYApp extends ConsumerWidget {
                         FirebaseRuntimeConfig.enabled &&
                         AppEnvironment.isStaging;
                     final topInset = MediaQuery.paddingOf(context).top;
+                    final compactStatus =
+                        MediaQuery.sizeOf(context).width < 600;
                     final overlayOffsets = appStatusOverlayOffsets(
                       topInset: topInset,
                       showStaging: showStaging,
@@ -92,14 +94,16 @@ class TableSideCYApp extends ConsumerWidget {
                                   elevation: 12,
                                   color: const Color(0xffff9800),
                                   borderRadius: BorderRadius.circular(7),
-                                  child: const Padding(
-                                    padding: EdgeInsets.symmetric(
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
                                       horizontal: 10,
                                       vertical: 5,
                                     ),
                                     child: Text(
-                                      'STAGING · TEST DATA ONLY',
-                                      style: TextStyle(
+                                      compactStatus
+                                          ? 'STAGING'
+                                          : 'STAGING · TEST DATA ONLY',
+                                      style: const TextStyle(
                                         color: Colors.black,
                                         fontSize: 11,
                                         fontWeight: FontWeight.w900,
@@ -114,8 +118,15 @@ class TableSideCYApp extends ConsumerWidget {
                               VenueHubConnectivity.unknown)
                             Positioned(
                               top: topInset + 4,
-                              right: 12,
-                              child: _HubStatusBadge(status: hubStatus),
+                              left: 0,
+                              right: 0,
+                              child: Align(
+                                alignment: Alignment.topCenter,
+                                child: _HubStatusBadge(
+                                  status: hubStatus,
+                                  compact: compactStatus,
+                                ),
+                              ),
                             ),
                           if (pending > 0)
                             Positioned(
@@ -245,9 +256,10 @@ class TableSideCYApp extends ConsumerWidget {
 }
 
 class _HubStatusBadge extends StatelessWidget {
-  const _HubStatusBadge({required this.status});
+  const _HubStatusBadge({required this.status, required this.compact});
 
   final VenueHubConnectionStatus status;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -278,6 +290,15 @@ class _HubStatusBadge extends StatelessWidget {
         Icons.help_outline_rounded,
       ),
     };
+    final label = compact
+        ? switch (status.connectivity) {
+            VenueHubConnectivity.online => 'Online',
+            VenueHubConnectivity.lanOnly => 'LAN only',
+            VenueHubConnectivity.unavailable => 'Offline',
+            VenueHubConnectivity.checking => 'Checking',
+            VenueHubConnectivity.unknown => '',
+          }
+        : status.shortLabel;
     return IgnorePointer(
       child: Material(
         elevation: 10,
@@ -294,7 +315,7 @@ class _HubStatusBadge extends StatelessWidget {
                 const SizedBox(width: 6),
                 Flexible(
                   child: Text(
-                    status.shortLabel,
+                    label,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(

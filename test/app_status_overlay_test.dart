@@ -66,6 +66,37 @@ void main() {
     expect(find.text('Venue hub is unavailable'), findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('compact hub status is centred away from app bar actions', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(VenueHubAvailability.reset);
+    VenueHubAvailability.markOnline();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appThemeControllerProvider.overrideWith(_TestThemeController.new),
+        ],
+        child: const TableSideCYApp(),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Online'), findsOneWidget);
+    final positioned = tester.widget<Positioned>(
+      find
+          .ancestor(of: find.text('Online'), matching: find.byType(Positioned))
+          .first,
+    );
+    expect(positioned.left, 0);
+    expect(positioned.right, 0);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 class _TestThemeController extends AppThemeController {
