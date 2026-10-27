@@ -17,7 +17,10 @@ $legacyWindowsRule = 'TableSide Emulator Block Internet'
 
 function Invoke-Adb([string[]]$CommandArguments, [switch]$IgnoreFailure) {
     if ($IgnoreFailure) {
+        $previousErrorPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         & $AdbPath @CommandArguments 2>$null
+        $ErrorActionPreference = $previousErrorPreference
     } else {
         & $AdbPath @CommandArguments
     }
@@ -30,17 +33,29 @@ function Invoke-Adb([string[]]$CommandArguments, [switch]$IgnoreFailure) {
 
 function Remove-OutputJump([string]$Tool, [string]$Chain) {
     # Remove every stale jump, including duplicates left by interrupted tests.
-    for ($attempt = 0; $attempt -lt 20; $attempt++) {
-        & $AdbPath shell $Tool -C OUTPUT -j $Chain 2>$null
-        if ($LASTEXITCODE -ne 0) { break }
-        & $AdbPath shell $Tool -D OUTPUT -j $Chain 2>$null
-        if ($LASTEXITCODE -ne 0) { break }
+    $previousErrorPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            & $AdbPath shell $Tool -C OUTPUT -j $Chain 2>$null
+            if ($LASTEXITCODE -ne 0) { break }
+            & $AdbPath shell $Tool -D OUTPUT -j $Chain 2>$null
+            if ($LASTEXITCODE -ne 0) { break }
+        }
+    } finally {
+        $ErrorActionPreference = $previousErrorPreference
     }
 }
 
 function Test-Address([string]$Address) {
-    & $AdbPath shell ping -c 1 -W 3 $Address *> $null
-    return $LASTEXITCODE -eq 0
+    # Android's virtual router can take a moment to reopen NAT after a reject
+    # chain is removed, so avoid reporting a false offline result immediately.
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        & $AdbPath shell ping -c 1 -W 3 $Address *> $null
+        if ($LASTEXITCODE -eq 0) { return $true }
+        if ($attempt -lt 2) { Start-Sleep -Seconds 1 }
+    }
+    return $false
 }
 
 # An earlier test used Windows' broad "Internet" address keyword. Remove it

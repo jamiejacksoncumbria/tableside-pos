@@ -7,7 +7,9 @@ param(
         'DeployStorage', 'DeployWeb', 'DeployBackend', 'GitStatus',
         'GitPull', 'GitCommit', 'GitPush', 'ShorebirdDoctor',
         'ShorebirdReleaseAndroid', 'ShorebirdPatchAndroid',
-        'ShorebirdReleaseWindows', 'ShorebirdPatchWindows', 'Clean'
+        'ShorebirdReleaseWindows', 'ShorebirdPatchWindows',
+        'BlockHubInternet', 'AllowHubInternet',
+        'BlockEmulatorInternet', 'AllowEmulatorInternet', 'Clean'
     )]
     [string]$Action = 'Menu',
     [ValidateSet('Staging', 'Production')]
@@ -512,6 +514,67 @@ function Clean-Build {
     Flutter clean
 }
 
+function Invoke-NetworkControlScript {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ScriptName,
+        [Parameter(Mandatory)]
+        [ValidateSet('Block', 'Allow')]
+        [string]$Mode,
+        [switch]$AsAdministrator
+    )
+
+    $scriptPath = Join-Path $script:RepoRoot $ScriptName
+    if (-not (Test-Path -LiteralPath $scriptPath)) {
+        throw "Network control script is missing: $scriptPath"
+    }
+
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Mode $Mode"
+    if ($AsAdministrator) {
+        Write-Host 'Windows will request administrator permission for the hub firewall change.' -ForegroundColor Yellow
+        $process = Start-Process powershell.exe `
+            -Verb RunAs `
+            -Wait `
+            -PassThru `
+            -ArgumentList $arguments
+        if ($process.ExitCode -ne 0) {
+            throw "$ScriptName failed with exit code $($process.ExitCode)."
+        }
+        return
+    }
+
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode $Mode
+    if ($LASTEXITCODE -ne 0) {
+        throw "$ScriptName failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Block-HubInternet {
+    Invoke-NetworkControlScript `
+        -ScriptName 'tableside-hub-internet.ps1' `
+        -Mode Block `
+        -AsAdministrator
+}
+
+function Allow-HubInternet {
+    Invoke-NetworkControlScript `
+        -ScriptName 'tableside-hub-internet.ps1' `
+        -Mode Allow `
+        -AsAdministrator
+}
+
+function Block-EmulatorInternet {
+    Invoke-NetworkControlScript `
+        -ScriptName 'tableside-emulator-internet.ps1' `
+        -Mode Block
+}
+
+function Allow-EmulatorInternet {
+    Invoke-NetworkControlScript `
+        -ScriptName 'tableside-emulator-internet.ps1' `
+        -Mode Allow
+}
+
 function Show-Menu {
     while ($true) {
         Write-Host "`nEnvironment: $($script:EnvironmentName.ToUpperInvariant()) | Firebase: $ProjectId" -ForegroundColor Yellow
@@ -543,6 +606,10 @@ TableSideCY developer menu
  23  Shorebird Windows release baseline
  24  Shorebird Windows patch
  25  Flutter clean (troubleshooting only)
+ 26  Block Windows hub internet (keep private LAN)
+ 27  Restore Windows hub internet
+ 28  Block Android emulator internet (keep venue LAN)
+ 29  Restore Android emulator internet
   0  Exit
 '@
         $choice = Read-Host 'Choose an option'
@@ -574,6 +641,10 @@ TableSideCY developer menu
                 '23' { Shorebird-ReleaseWindows }
                 '24' { Shorebird-PatchWindows }
                 '25' { Clean-Build }
+                '26' { Block-HubInternet }
+                '27' { Allow-HubInternet }
+                '28' { Block-EmulatorInternet }
+                '29' { Allow-EmulatorInternet }
                 '0'  { return }
                 default { Write-Host 'Choose a number shown in the menu.' -ForegroundColor Yellow }
             }
@@ -610,5 +681,9 @@ switch ($Action) {
     'ShorebirdPatchAndroid' { Shorebird-PatchAndroid }
     'ShorebirdReleaseWindows' { Shorebird-ReleaseWindows }
     'ShorebirdPatchWindows' { Shorebird-PatchWindows }
+    'BlockHubInternet' { Block-HubInternet }
+    'AllowHubInternet' { Allow-HubInternet }
+    'BlockEmulatorInternet' { Block-EmulatorInternet }
+    'AllowEmulatorInternet' { Allow-EmulatorInternet }
     'Clean'           { Clean-Build }
 }
