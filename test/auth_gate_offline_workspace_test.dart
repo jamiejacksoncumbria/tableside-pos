@@ -26,7 +26,11 @@ void main() {
           appThemeControllerProvider.overrideWith(_TestThemeController.new),
         ],
         child: MaterialApp(
-          home: OfflineHubWorkspace(workspace: workspace, onRetryOnline: () {}),
+          home: OfflineHubWorkspace(
+            workspace: workspace,
+            onRetryOnline: () {},
+            autoRecoverOnline: false,
+          ),
         ),
       ),
     );

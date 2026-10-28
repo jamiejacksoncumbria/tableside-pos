@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app/home_shell.dart';
 import '../../core/app_logger.dart';
 import '../../core/app_theme_controller.dart';
+import '../../core/firebase_connectivity_probe.dart';
 import '../../core/platform_admin_pin_session_store.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/trusted_clock_host.dart';
@@ -64,10 +65,12 @@ class OfflineHubWorkspace extends ConsumerStatefulWidget {
     super.key,
     required this.workspace,
     required this.onRetryOnline,
+    this.autoRecoverOnline = true,
   });
 
   final VenueHubOfflineWorkspace workspace;
   final VoidCallback onRetryOnline;
+  final bool autoRecoverOnline;
 
   @override
   ConsumerState<OfflineHubWorkspace> createState() =>
@@ -76,6 +79,8 @@ class OfflineHubWorkspace extends ConsumerStatefulWidget {
 
 class _OfflineHubWorkspaceState extends ConsumerState<OfflineHubWorkspace> {
   bool _workspaceInstalled = false;
+  bool _checkingOnline = false;
+  Timer? _onlineRecoveryTimer;
 
   @override
   void initState() {
@@ -98,12 +103,48 @@ class _OfflineHubWorkspaceState extends ConsumerState<OfflineHubWorkspace> {
       }
       setState(() => _workspaceInstalled = true);
     });
+    // A hub which cold-started without internet intentionally skipped native
+    // Firebase initialisation. Probe a Firebase endpoint independently so the
+    // app can leave the verified LAN-only workspace as soon as connectivity
+    // returns instead of requiring a restart or manual venue switch.
+    if (widget.autoRecoverOnline) {
+      _onlineRecoveryTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => unawaited(_recoverOnlineIfAvailable()),
+      );
+      unawaited(_recoverOnlineIfAvailable());
+    }
+  }
+
+  Future<void> _recoverOnlineIfAvailable() async {
+    if (!mounted || _checkingOnline) return;
+    _checkingOnline = true;
+    try {
+      if (!await canReachFirebaseNetwork()) return;
+      if (!mounted) return;
+      _onlineRecoveryTimer?.cancel();
+      AppLogger.info(
+        'Firebase network connectivity returned; reopening the online workspace.',
+      );
+      _retryOnline();
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Check Firebase connectivity recovery', error, stackTrace);
+    } finally {
+      _checkingOnline = false;
+    }
   }
 
   void _retryOnline() {
+    _onlineRecoveryTimer?.cancel();
     ref.read(activeStaffPinSessionProvider.notifier).lock();
     ref.read(activeVenueScopeProvider.notifier).clear();
     widget.onRetryOnline();
+  }
+
+  @override
+  void dispose() {
+    _onlineRecoveryTimer?.cancel();
+    super.dispose();
   }
 
   @override

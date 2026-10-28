@@ -671,6 +671,11 @@ class VenueHubRuntime {
             credential: credential,
           );
         } on Object catch (error, stackTrace) {
+          // start() may have created a Windows REST session before the first
+          // authentication/write failed. Clear that partial session so the
+          // five-second reconnect loop is allowed to request a fresh scoped
+          // token as soon as internet connectivity returns.
+          await activeRealtimePresence.stop();
           AppLogger.error(
             'Start venue hub realtime presence; remote commands are unavailable but LAN remains active',
             error,
@@ -958,6 +963,7 @@ class VenueHubRuntime {
                 AppLogger.info('Venue hub realtime channel restored.');
                 unawaited(remoteTick());
               } catch (error, stackTrace) {
+                await activeRealtimePresence.stop();
                 AppLogger.error(
                   'Retry venue hub realtime channel; LAN remains available',
                   error,
@@ -1047,6 +1053,7 @@ class VenueHubRuntime {
               AppLogger.info('Venue hub realtime presence session restored.');
               unawaited(remoteTick());
             } catch (error, stackTrace) {
+              await activeRealtimePresence.stop();
               AppLogger.error(
                 'Retry venue hub realtime presence; LAN remains available',
                 error,

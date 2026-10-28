@@ -137,21 +137,34 @@ class VenueHubRealtimePresence {
       });
       connected.value = true;
       AppLogger.info('Venue hub realtime presence connected over Windows SSE.');
+      var leaseFailureReported = false;
       _leaseTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
-        if (!connected.value || _windowsPresencePath != presencePath) return;
+        if (_windowsPresencePath != presencePath) return;
         try {
           await windowsSession.update(presencePath, <String, Object?>{
             'online': true,
             'hubEpoch': hubEpoch,
             'lastReadyAt': WindowsRealtimeRestSession.serverTimestamp,
           });
+          final restored = !connected.value;
+          connected.value = true;
+          leaseFailureReported = false;
+          if (restored) {
+            AppLogger.info(
+              'Venue hub internet connection restored; realtime presence republished.',
+            );
+          }
         } on Object catch (error, stackTrace) {
+          final firstFailure = !leaseFailureReported;
           connected.value = false;
-          AppLogger.error(
-            'Refresh venue hub realtime lease',
-            error,
-            stackTrace,
-          );
+          if (firstFailure) {
+            leaseFailureReported = true;
+            AppLogger.error(
+              'Refresh venue hub realtime lease',
+              error,
+              stackTrace,
+            );
+          }
         }
       });
       return;
@@ -254,17 +267,34 @@ class VenueHubRealtimePresence {
         );
     // Refresh often enough to detect a suspended hub within seconds even if
     // the RTDB socket's onDisconnect signal is delayed by the network.
+    var leaseFailureReported = false;
     _leaseTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
-      if (!connected.value || _presence != presence) return;
+      if (_presence != presence) return;
       try {
         await presence.update(<String, Object?>{
           'online': true,
           'hubEpoch': hubEpoch,
           'lastReadyAt': ServerValue.timestamp,
         });
+        final restored = !connected.value;
+        connected.value = true;
+        leaseFailureReported = false;
+        if (restored) {
+          AppLogger.info(
+            'Venue hub internet connection restored; realtime presence republished.',
+          );
+        }
       } on Object catch (error, stackTrace) {
+        final firstFailure = !leaseFailureReported;
         connected.value = false;
-        AppLogger.error('Refresh venue hub realtime lease', error, stackTrace);
+        if (firstFailure) {
+          leaseFailureReported = true;
+          AppLogger.error(
+            'Refresh venue hub realtime lease',
+            error,
+            stackTrace,
+          );
+        }
       }
     });
   }
