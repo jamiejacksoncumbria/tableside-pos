@@ -523,6 +523,9 @@ class VenueHubOfflineView {
             roles: (item['roles'] as List? ?? const [])
                 .whereType<String>()
                 .toList(growable: false),
+            venueIds: (item['venueIds'] as List? ?? const [])
+                .whereType<String>()
+                .toList(growable: false),
           ),
         )
         .where((item) => item.id.isNotEmpty)

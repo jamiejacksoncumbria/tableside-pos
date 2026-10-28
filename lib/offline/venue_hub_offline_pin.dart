@@ -113,12 +113,21 @@ class VenueHubOfflinePinAuthority {
       final json = Map<String, Object?>.from(raw);
       final staffId = json['staffId'];
       final displayName = json['displayName'];
-      final permissions = json['permissions'];
-      final iterations = json['offlinePinIterations'];
       if (staffId is! String ||
           staffId.isEmpty ||
           displayName is! String ||
-          permissions is! List ||
+          displayName.trim().isEmpty) {
+        throw const VenueHubOfflinePinException(
+          'An offline staff record is invalid.',
+        );
+      }
+      // The snapshot also carries assignable drivers and other venue staff
+      // who have not enrolled an offline PIN. They are safe to display in
+      // operational pickers but must never become login-capable here.
+      if (json['offlinePinReady'] == false) continue;
+      final permissions = json['permissions'];
+      final iterations = json['offlinePinIterations'];
+      if (permissions is! List ||
           json['offlinePinAlgorithm'] != 'PBKDF2-HMAC-SHA256' ||
           json['offlinePinSaltEncoding'] != 'base64url-bytes-v1' ||
           json['offlinePinProfile'] != 'interactive-v2' ||

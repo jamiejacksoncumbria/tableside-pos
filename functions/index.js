@@ -2969,7 +2969,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   // Schema 4 adds independently versioned snapshot sections. A catalogue
   // edit no longer forces the hub to redownload customers, staff, printers,
   // tables and open orders.
-  const snapshotSchemaVersion = 4;
+  const snapshotSchemaVersion = 5;
   await db.runTransaction(async (transaction) => {
     const current = await transaction.get(snapshotVersionRef);
     if (!current.exists) {
@@ -3065,12 +3065,25 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   ]));
   const staff = (members?.docs ?? []).map((member) => {
     const roles = Array.isArray(member.data().roles) ? member.data().roles : [];
+    const venueIds = Array.isArray(member.data().venueIds)
+      ? member.data().venueIds.filter((value) => typeof value === "string") : [];
+    if (venueIds.length > 0 && !venueIds.includes(upload.venueId)) return null;
     const pin = pinByUser.get(member.id);
-    if (pin == null || pin.locked === true || !offlinePinVerifierReady(pin)) return null;
-    return {
+    const base = {
       staffId: member.id,
       displayName: member.data().displayName ?? memberNameById.get(member.id) ?? member.id,
       roles,
+      venueIds,
+    };
+    if (pin == null || pin.locked === true || !offlinePinVerifierReady(pin)) {
+      // Drivers and other assignable staff remain in the operational roster
+      // even when they cannot authenticate offline. The native PIN authority
+      // deliberately ignores these roster-only records.
+      return {...base, offlinePinReady: false};
+    }
+    return {
+      ...base,
+      offlinePinReady: true,
       permissions: offlinePermissionsForRoles(roles),
       pinVersion: Number(pin.pinVersion ?? 0),
       membershipVersion: Number(member.data().membershipVersion ?? 1),

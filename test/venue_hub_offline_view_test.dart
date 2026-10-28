@@ -116,6 +116,26 @@ void main() {
     view.clear();
   });
 
+  test('hub roster exposes a driver who has no offline PIN verifier', () {
+    final view = VenueHubOfflineView.instance..clear();
+    view.install({
+      'staff': [
+        {
+          'staffId': 'driver-a',
+          'displayName': 'Driver A',
+          'roles': ['driver'],
+          'venueIds': ['venue-a'],
+          'offlinePinReady': false,
+        },
+      ],
+    });
+
+    expect(view.staff, hasLength(1));
+    expect(view.staff.single.id, 'driver-a');
+    expect(view.staff.single.roles, contains('driver'));
+    view.clear();
+  });
+
   test('hub order stream publishes accepted and closed projections', () async {
     final view = VenueHubOfflineView.instance..clear();
     final expectation = expectLater(
