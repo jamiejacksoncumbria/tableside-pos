@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/tenant_scope.dart';
@@ -10,19 +11,46 @@ import 'venue_hub_bootstrap.dart';
 /// Non-secret discovery cache needed after a till restarts without internet.
 /// PIN hashes, signing seeds and session tokens are never stored here.
 class VenueHubClientCache {
+  VenueHubClientCache({FlutterSecureStorage? secureStorage})
+    : _secureStorage = secureStorage ?? const FlutterSecureStorage();
+
   final SharedPreferencesAsync _preferences = SharedPreferencesAsync();
+  final FlutterSecureStorage _secureStorage;
 
   static const _lastScopeKey = 'tableside.hubCache.lastScope';
+  static const _durableBootstrapPrefix =
+      'tableside.hubCache.durableBootstrap.v1.';
 
   String _key(VenueScope scope, String kind) =>
       'tableside.hubCache.${scope.tenantId}.${scope.venueId}.$kind';
 
-  Future<void> saveBootstrap(VenueScope scope, VenueHubBootstrap value) async {
+  String _durableBootstrapKey(VenueScope scope) =>
+      '$_durableBootstrapPrefix'
+      '${base64UrlEncode(utf8.encode(scope.tenantId)).replaceAll('=', '')}.'
+      '${base64UrlEncode(utf8.encode(scope.venueId)).replaceAll('=', '')}';
+
+  VenueScope? _scopeFromDurableBootstrapKey(String key) {
+    if (!key.startsWith(_durableBootstrapPrefix)) return null;
+    final encoded = key.substring(_durableBootstrapPrefix.length).split('.');
+    if (encoded.length != 2) return null;
     try {
-      await _preferences.setString(
-        _key(scope, 'bootstrap'),
-        jsonEncode(value.toJson()),
+      final tenantId = utf8.decode(
+        base64Url.decode(base64Url.normalize(encoded[0])),
       );
+      final venueId = utf8.decode(
+        base64Url.decode(base64Url.normalize(encoded[1])),
+      );
+      if (tenantId.isEmpty || venueId.isEmpty) return null;
+      return VenueScope(tenantId: tenantId, venueId: venueId);
+    } on Object {
+      return null;
+    }
+  }
+
+  Future<void> saveBootstrap(VenueScope scope, VenueHubBootstrap value) async {
+    final encoded = jsonEncode(value.toJson());
+    try {
+      await _preferences.setString(_key(scope, 'bootstrap'), encoded);
       // This is discovery data, not authority. Cold-start recovery validates
       // the installation-bound device ID, Ed25519 credential, hub epoch and
       // encrypted snapshot again before it opens the offline workspace.
@@ -36,6 +64,20 @@ class VenueHubClientCache {
     } on Object {
       // Discovery caching is best-effort. A local storage fault must never
       // turn a successful cloud response into a failed venue load.
+    }
+    try {
+      // Windows SharedPreferences is one JSON file. A power cut can truncate
+      // it and erase the scope index during repair, even while the encrypted
+      // SQLite venue snapshot and installation-bound credentials remain
+      // intact. Keep a redundant OS-protected copy of the cloud bootstrap so
+      // an enrolled hub can rediscover and fully revalidate that durable data.
+      await _secureStorage.write(
+        key: _durableBootstrapKey(scope),
+        value: encoded,
+      );
+    } on Object {
+      // Secure backup failure does not invalidate the live cloud response or
+      // the ordinary preferences cache. Offline startup still fails closed.
     }
   }
 
@@ -90,17 +132,39 @@ class VenueHubClientCache {
     } catch (_) {
       // Missing/corrupt preferences correctly produce no offline workspace.
     }
+    try {
+      final secured = await _secureStorage.readAll();
+      for (final key in secured.keys) {
+        final scope = _scopeFromDurableBootstrapKey(key);
+        if (scope != null) add(scope);
+      }
+    } catch (_) {
+      // The encrypted SQLite snapshot cannot be safely located without a
+      // scope. If both discovery stores are unavailable, fail closed.
+    }
     return result;
   }
 
   Future<VenueHubBootstrap?> readBootstrap(VenueScope scope) async {
-    try {
-      final raw = await _preferences.getString(_key(scope, 'bootstrap'));
+    VenueHubBootstrap? decode(String? raw) {
       if (raw == null) return null;
       final value = jsonDecode(raw);
       return value is Map
           ? VenueHubBootstrap.fromJson(Map<String, Object?>.from(value))
           : null;
+    }
+
+    try {
+      final raw = await _preferences.getString(_key(scope, 'bootstrap'));
+      final cached = decode(raw);
+      if (cached != null) return cached;
+    } catch (_) {
+      // Fall through to the redundant OS-protected bootstrap.
+    }
+    try {
+      return decode(
+        await _secureStorage.read(key: _durableBootstrapKey(scope)),
+      );
     } catch (_) {
       return null;
     }
