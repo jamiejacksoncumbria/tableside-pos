@@ -518,7 +518,13 @@ class _FirebaseBootstrapGateState extends State<_FirebaseBootstrapGate> {
   }
 
   void _retry() {
-    setState(() => _bootstrap = _initialize());
+    // Start the asynchronous bootstrap outside the state callback. Returning
+    // the assigned Future from an expression-bodied callback violates
+    // Flutter's synchronous setState contract and crashes the Retry button.
+    final nextBootstrap = _initialize();
+    setState(() {
+      _bootstrap = nextBootstrap;
+    });
   }
 
   @override
