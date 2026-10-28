@@ -148,6 +148,59 @@ void main() {
     );
   });
 
+  test('preserves the hub staff-session rejection code', () async {
+    final credential =
+        await VenueHubDeviceCredentialStore(
+          secrets: _MemorySecrets(),
+        ).getOrCreate(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'device-a',
+        );
+    final client = VenueHubClient(
+      configuration: VenueHubClientConfiguration(
+        endpoint: Uri.parse('https://hub.example.test:8443'),
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'device-a',
+        staffId: 'staff-a',
+        staffSessionId: 'expired-session',
+        staffSessionToken: '01234567890123456789012345678901',
+        hubEpoch: 2,
+        credential: credential,
+      ),
+      httpClient: MockClient(
+        (_) async => http.Response(
+          jsonEncode({
+            'error': 'staff_session_invalid',
+            'message': 'The staff session is unavailable, expired, or revoked.',
+          }),
+          403,
+        ),
+      ),
+    );
+
+    await expectLater(
+      client.sendEvent(
+        eventType: 'order.opened',
+        payload: const {'orderId': 'order-a'},
+      ),
+      throwsA(
+        isA<VenueHubClientException>()
+            .having(
+              (error) => error.code,
+              'code',
+              'staff_session_invalid',
+            )
+            .having(
+              (error) => error.message,
+              'message',
+              contains('expired'),
+            ),
+      ),
+    );
+  });
+
   test(
     'requests only the bounded print-job view required by a screen',
     () async {

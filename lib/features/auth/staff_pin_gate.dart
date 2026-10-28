@@ -241,7 +241,25 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    VenueHubClientRegistry.instance.staffSessionInvalidations.addListener(
+      _handleHubStaffSessionInvalidation,
+    );
     _loadStaff();
+  }
+
+  void _handleHubStaffSessionInvalidation() {
+    if (!mounted || ref.read(activeStaffPinSessionProvider) == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || ref.read(activeStaffPinSessionProvider) == null) return;
+      ref.read(activeStaffPinSessionProvider.notifier).lock();
+      if (mounted) {
+        setState(() {
+          _error = 'Your staff session ended. Enter your PIN again.';
+          _pinEntryUserId = null;
+          _submitting = false;
+        });
+      }
+    });
   }
 
   @override
@@ -289,6 +307,9 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    VenueHubClientRegistry.instance.staffSessionInvalidations.removeListener(
+      _handleHubStaffSessionInvalidation,
+    );
     _expiryTimer?.cancel();
     super.dispose();
   }

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../core/app_logger.dart';
@@ -38,6 +39,7 @@ class VenueHubClientRegistry {
   int _streamGeneration = 0;
   final Set<String> _openedOrderIds = <String>{};
   DateTime? _lastOrderStreamFailureLoggedAt;
+  final ValueNotifier<int> staffSessionInvalidations = ValueNotifier<int>(0);
 
   bool requiresHub(VenueScope scope) =>
       _scope == scope && _bootstrap?.enabled == true;
@@ -97,11 +99,19 @@ class VenueHubClientRegistry {
     while (hasUsableSession(scope)) {
       final client = clientFor(scope);
       if (client == null) return;
-      yield await client.fetchPrintJobs(
-        statuses: statuses,
-        sinceUtc: sinceUtc,
-        limit: limit,
-      );
+      try {
+        yield await client.fetchPrintJobs(
+          statuses: statuses,
+          sinceUtc: sinceUtc,
+          limit: limit,
+        );
+      } on Object catch (error) {
+        if (_isInvalidStaffSession(error)) {
+          _invalidateStaffSession();
+          return;
+        }
+        rethrow;
+      }
       await Future<void>.delayed(const Duration(seconds: 3));
     }
   }
@@ -169,7 +179,11 @@ class VenueHubClientRegistry {
         },
       );
     } on Object catch (error) {
-      _recordLanFailureIfTransport(error);
+      if (_isInvalidStaffSession(error)) {
+        _invalidateStaffSession();
+      } else {
+        _recordLanFailureIfTransport(error);
+      }
       rethrow;
     }
     _openedOrderIds.add(orderId);
@@ -196,7 +210,11 @@ class VenueHubClientRegistry {
         businessTimestampUtc: businessTimestampUtc,
       );
     } on Object catch (error) {
-      _recordLanFailureIfTransport(error);
+      if (_isInvalidStaffSession(error)) {
+        _invalidateStaffSession();
+      } else {
+        _recordLanFailureIfTransport(error);
+      }
       rethrow;
     }
   }
@@ -415,6 +433,23 @@ class VenueHubClientRegistry {
     }
   }
 
+  bool _isInvalidStaffSession(Object error) =>
+      error is VenueHubClientException &&
+      (error.code == 'staff_session_invalid' ||
+          error.code == 'staff_session_required');
+
+  void _invalidateStaffSession() {
+    if (_client == null) return;
+    AppLogger.info(
+      'Venue hub rejected the expired or revoked staff session; locking this terminal for a fresh PIN.',
+    );
+    _clearSession(preserveAuthority: true);
+    VenueHubAvailability.markOffline(
+      'Your staff session ended. Enter your PIN again to continue.',
+    );
+    staffSessionInvalidations.value++;
+  }
+
   void _startOrderStream() {
     final client = _client;
     if (client == null) return;
@@ -437,6 +472,10 @@ class VenueHubClientRegistry {
     _orderSubscription = client.watchOrders().listen(
       VenueHubOfflineView.instance.installOrders,
       onError: (Object error, StackTrace stackTrace) {
+        if (_isInvalidStaffSession(error)) {
+          _invalidateStaffSession();
+          return;
+        }
         _recordLanFailureIfTransport(error);
         final now = DateTime.now();
         final lastLoggedAt = _lastOrderStreamFailureLoggedAt;

@@ -194,11 +194,16 @@ class VenueHubClient {
         .timeout(timeout);
     if (response.statusCode != 201) {
       String? safeMessage;
+      String? errorCode;
       try {
         final errorBody = jsonDecode(response.body);
         final message = errorBody is Map ? errorBody['message'] : null;
+        final code = errorBody is Map ? errorBody['error'] : null;
         if (message is String && message.trim().isNotEmpty) {
           safeMessage = message.trim();
+        }
+        if (code is String && code.trim().isNotEmpty) {
+          errorCode = code.trim();
         }
       } on Object {
         // Use the status-based message below for malformed error responses.
@@ -208,6 +213,7 @@ class VenueHubClient {
             (response.statusCode == 401 || response.statusCode == 403
                 ? 'The venue hub rejected this device or staff session.'
                 : 'The venue hub could not safely save this operation.'),
+        code: errorCode,
       );
     }
     final decoded = jsonDecode(response.body);
@@ -398,8 +404,9 @@ class VenueHubClient {
     };
     final response = await _signedPost('/v1/print/jobs', body);
     if (response.statusCode != 200) {
-      throw const VenueHubClientException(
-        'The venue hub print queue is unavailable.',
+      throw _exceptionFromResponse(
+        response,
+        fallback: 'The venue hub print queue is unavailable.',
       );
     }
     final decoded = jsonDecode(response.body);
@@ -483,7 +490,10 @@ class VenueHubClient {
     };
     final response = await _signedPost('/v1/orders', body);
     if (response.statusCode != 200) {
-      throw const VenueHubClientException('The hub orders are unavailable.');
+      throw _exceptionFromResponse(
+        response,
+        fallback: 'The hub orders are unavailable.',
+      );
     }
     final decoded = jsonDecode(response.body);
     final orders = decoded is Map ? decoded['orders'] : null;
@@ -592,6 +602,28 @@ class VenueHubClient {
           body: jsonEncode({'envelope': envelope.toJson(), 'body': body}),
         )
         .timeout(timeout);
+  }
+
+  VenueHubClientException _exceptionFromResponse(
+    http.Response response, {
+    required String fallback,
+  }) {
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map) {
+        final code = decoded['error'];
+        final message = decoded['message'];
+        return VenueHubClientException(
+          message is String && message.trim().isNotEmpty
+              ? message.trim()
+              : fallback,
+          code: code is String && code.trim().isNotEmpty ? code.trim() : null,
+        );
+      }
+    } on Object {
+      // Preserve the endpoint-specific safe fallback for malformed responses.
+    }
+    return VenueHubClientException(fallback);
   }
 
   void close() => _http.close();

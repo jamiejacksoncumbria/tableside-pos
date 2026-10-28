@@ -337,7 +337,10 @@ class NativeVenueHubServer implements VenueHubServer {
       _json(response, HttpStatus.unauthorized, {'error': 'unauthorized'});
     } on VenueHubCommandException catch (error, stackTrace) {
       AppLogger.error('Reject venue hub command', error, stackTrace);
-      _json(response, HttpStatus.forbidden, {'error': 'forbidden'});
+      _json(response, HttpStatus.forbidden, {
+        'error': error.code,
+        'message': error.message,
+      });
     } on VenueOfflineCatalogueException catch (error, stackTrace) {
       AppLogger.error(
         'Reject venue hub catalogue operation',

@@ -275,6 +275,7 @@ class VenueHubCommandProcessor {
         sessionToken.length > 256) {
       throw const VenueHubCommandException(
         'A valid local staff session is required.',
+        code: 'staff_session_required',
       );
     }
     final grant = await _authorizeStaff(
@@ -290,6 +291,7 @@ class VenueHubCommandProcessor {
         grant.membershipVersion < 1) {
       throw const VenueHubCommandException(
         'The staff session is unavailable, expired, or revoked.',
+        code: 'staff_session_invalid',
       );
     }
     if (!grant.permissions.contains(requiredPermission)) {
@@ -324,9 +326,10 @@ class VenueHubCommandProcessor {
 }
 
 class VenueHubCommandException implements Exception {
-  const VenueHubCommandException(this.message);
+  const VenueHubCommandException(this.message, {this.code = 'forbidden'});
 
   final String message;
+  final String code;
 
   @override
   String toString() => 'VenueHubCommandException: $message';
