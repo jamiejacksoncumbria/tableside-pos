@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../core/trusted_clock.dart';
 import '../features/fulfilment/fulfilment_domain.dart';
 import '../features/pos/domain.dart';
 
@@ -160,7 +161,7 @@ class VenueHubOfflineView {
             : order.scheduledFor!.subtract(Duration(minutes: leadMinutes));
         final initiallyHeld =
             order.channel != OrderChannel.dineIn &&
-            DateTime.now().isBefore(releaseAt);
+            TrustedClock.instance.nowUtc().isBefore(releaseAt.toUtc());
         final status =
             savedState?.status ??
             (initiallyHeld ? OrderFlowStatus.held : OrderFlowStatus.newOrder);

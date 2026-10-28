@@ -336,8 +336,10 @@ class _TablesPanel extends ConsumerWidget {
                       'Tables & tabs',
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
                         if (onToggleExpanded != null)
                           IconButton(
@@ -356,32 +358,25 @@ class _TablesPanel extends ConsumerWidget {
                           icon: const Icon(Icons.person_add_alt_1_rounded),
                           label: const Text('Named tab'),
                         ),
+                        OutlinedButton.icon(
+                          onPressed: () => _showFulfilmentOrderDialog(
+                            context,
+                            OrderChannel.collection,
+                            onStarted: onSelection,
+                          ),
+                          icon: const Icon(Icons.shopping_bag_outlined),
+                          label: const Text('Collection'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () => _showFulfilmentOrderDialog(
+                            context,
+                            OrderChannel.delivery,
+                            onStarted: onSelection,
+                          ),
+                          icon: const Icon(Icons.delivery_dining_outlined),
+                          label: const Text('Delivery'),
+                        ),
                       ],
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    OutlinedButton.icon(
-                      onPressed: () => _showFulfilmentOrderDialog(
-                        context,
-                        OrderChannel.collection,
-                        onStarted: onSelection,
-                      ),
-                      icon: const Icon(Icons.shopping_bag_outlined),
-                      label: const Text('Collection'),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: () => _showFulfilmentOrderDialog(
-                        context,
-                        OrderChannel.delivery,
-                        onStarted: onSelection,
-                      ),
-                      icon: const Icon(Icons.delivery_dining_outlined),
-                      label: const Text('Delivery'),
                     ),
                   ],
                 ),
@@ -531,81 +526,50 @@ class _TablesPanel extends ConsumerWidget {
                               ),
                             ],
                           ],
-                          for (final channel in const [
-                            OrderChannel.collection,
-                            OrderChannel.delivery,
-                          ])
-                            if (fulfilmentOrders.any(
-                              (order) => order.channel == channel,
-                            )) ...[
-                              const SizedBox(height: 16),
-                              Text(
-                                channel == OrderChannel.collection
-                                    ? 'Collections'
-                                    : 'Deliveries',
-                                style: Theme.of(context).textTheme.labelLarge,
-                              ),
-                              const SizedBox(height: 8),
-                              Wrap(
-                                spacing: 8,
-                                runSpacing: 8,
+                          if (fulfilmentOrders.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            if (compact)
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  for (final order in fulfilmentOrders.where(
-                                    (item) => item.channel == channel,
-                                  ))
-                                    SizedBox(
-                                      width: compact
-                                          ? 118
-                                          : expanded
-                                          ? 180
-                                          : 132,
-                                      child: _FulfilmentOrderButton(
-                                        order: order,
+                                  for (final channel in const [
+                                    OrderChannel.collection,
+                                    OrderChannel.delivery,
+                                  ]) ...[
+                                    if (channel != OrderChannel.collection)
+                                      const SizedBox(width: 8),
+                                    Expanded(
+                                      child: _FulfilmentOrderGroup(
+                                        channel: channel,
+                                        orders: fulfilmentOrders,
                                         scope: scope,
                                         currencyCode: currencyCode,
-                                        selected: order.id == activeOrder.id,
-                                        onTap: () {
-                                          try {
-                                            ref
-                                                .read(
-                                                  activeOrderProvider.notifier,
-                                                )
-                                                .openFulfilmentOrder(order);
-                                            if (context.mounted) {
-                                              onSelection?.call();
-                                            }
-                                          } on Object catch (
-                                            error,
-                                            stackTrace
-                                          ) {
-                                            AppLogger.error(
-                                              'Open fulfilment order',
-                                              error,
-                                              stackTrace,
-                                            );
-                                            if (!context.mounted) return;
-                                            showAppNotification(
-                                              context,
-                                              ref: ref,
-                                              title: 'Could not open order',
-                                              message: '$error',
-                                              level: AppNotificationLevel.error,
-                                            );
-                                          }
-                                        },
-                                        onDeselect: order.id == activeOrder.id
-                                            ? () => ref
-                                                  .read(
-                                                    activeOrderProvider
-                                                        .notifier,
-                                                  )
-                                                  .clearCurrentSelection()
-                                            : null,
+                                        activeOrderId: activeOrder.id,
+                                        tileWidth: 118,
+                                        onSelection: onSelection,
                                       ),
                                     ),
+                                  ],
                                 ],
-                              ),
-                            ],
+                              )
+                            else
+                              for (final channel in const [
+                                OrderChannel.collection,
+                                OrderChannel.delivery,
+                              ]) ...[
+                                if (channel != OrderChannel.collection)
+                                  const SizedBox(height: 16),
+                                _FulfilmentOrderGroup(
+                                  channel: channel,
+                                  orders: fulfilmentOrders,
+                                  scope: scope,
+                                  currencyCode: currencyCode,
+                                  activeOrderId: activeOrder.id,
+                                  tileWidth: expanded ? 180 : 132,
+                                  onSelection: onSelection,
+                                ),
+                              ],
+                          ],
                         ],
                       ),
                     ),
@@ -625,6 +589,95 @@ class _TablesPanel extends ConsumerWidget {
           },
         ),
       ),
+    );
+  }
+}
+
+/// Keeps collection and delivery work visible as two predictable columns on
+/// compact/tablet layouts. Each column owns its own wrapping tile grid, so a
+/// busy collection list cannot push deliveries below the visible viewport.
+class _FulfilmentOrderGroup extends ConsumerWidget {
+  const _FulfilmentOrderGroup({
+    required this.channel,
+    required this.orders,
+    required this.scope,
+    required this.currencyCode,
+    required this.activeOrderId,
+    required this.tileWidth,
+    this.onSelection,
+  });
+
+  final OrderChannel channel;
+  final List<PosOrder> orders;
+  final VenueScope? scope;
+  final String currencyCode;
+  final String activeOrderId;
+  final double tileWidth;
+  final VoidCallback? onSelection;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final matching = orders
+        .where((order) => order.channel == channel)
+        .toList(growable: false);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          channel == OrderChannel.collection ? 'Collections' : 'Deliveries',
+          style: Theme.of(context).textTheme.labelLarge,
+        ),
+        const SizedBox(height: 8),
+        if (matching.isEmpty)
+          Text(
+            'None open',
+            style: Theme.of(context).textTheme.bodySmall,
+          )
+        else
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final order in matching)
+                SizedBox(
+                  width: tileWidth,
+                  child: _FulfilmentOrderButton(
+                    order: order,
+                    scope: scope,
+                    currencyCode: currencyCode,
+                    selected: order.id == activeOrderId,
+                    onTap: () {
+                      try {
+                        ref
+                            .read(activeOrderProvider.notifier)
+                            .openFulfilmentOrder(order);
+                        if (context.mounted) onSelection?.call();
+                      } on Object catch (error, stackTrace) {
+                        AppLogger.error(
+                          'Open fulfilment order',
+                          error,
+                          stackTrace,
+                        );
+                        if (!context.mounted) return;
+                        showAppNotification(
+                          context,
+                          ref: ref,
+                          title: 'Could not open order',
+                          message: '$error',
+                          level: AppNotificationLevel.error,
+                        );
+                      }
+                    },
+                    onDeselect: order.id == activeOrderId
+                        ? () => ref
+                              .read(activeOrderProvider.notifier)
+                              .clearCurrentSelection()
+                        : null,
+                  ),
+                ),
+            ],
+          ),
+      ],
     );
   }
 }
@@ -5630,6 +5683,17 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
           var query = '';
           return StatefulBuilder(
             builder: (context, setPickerState) {
+              final media = MediaQuery.of(context);
+              // AlertDialog already moves above the software keyboard, but a
+              // percentage of the original screen height does not shrink with
+              // it. Size from the unobscured height so medium tablets cannot
+              // overflow while the customer search field has focus.
+              final unobscuredHeight =
+                  media.size.height - media.viewInsets.bottom;
+              final pickerHeight = (unobscuredHeight - 220).clamp(
+                120.0,
+                520.0,
+              );
               final terms = query
                   .trim()
                   .toLowerCase()
@@ -5648,7 +5712,7 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                 title: Text('Choose ${channel.label.toLowerCase()} customer'),
                 content: SizedBox(
                   width: 560,
-                  height: MediaQuery.sizeOf(context).height * 0.62,
+                  height: pickerHeight,
                   child: Column(
                     children: [
                       TextField(

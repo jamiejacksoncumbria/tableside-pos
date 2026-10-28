@@ -2228,11 +2228,14 @@ async function manageFulfilmentFor(caller, rawData) {
     if (documentId == null) throw new HttpsError("invalid-argument", "An order is required.");
     const status = requiredText(values, "status", 40);
     const transitions = {
-      awaitingPreparation: ["awaitingPreparation", "readyForCollection", "awaitingDriver", "cancelled"],
+      // Production flow and fulfilment flow are intentionally separate. A
+      // manager may assign a driver while the kitchen ticket is preparing,
+      // before the fulfilment state has moved to awaitingDriver.
+      awaitingPreparation: ["awaitingPreparation", "readyForCollection", "awaitingDriver", "assigned", "cancelled"],
       awaitingDriver: ["awaitingDriver", "assigned", "readyForCollection", "cancelled"],
       assigned: ["assigned", "driverDeclined", "readyForCollection", "outForDelivery", "cancelled"],
       driverDeclined: ["driverDeclined", "assigned", "cancelled"],
-      readyForCollection: ["readyForCollection", "collected", "outForDelivery", "cancelled"],
+      readyForCollection: ["readyForCollection", "assigned", "collected", "outForDelivery", "cancelled"],
       outForDelivery: ["outForDelivery", "delivered", "cancelled"],
       collected: ["collected"], delivered: ["delivered"], cancelled: ["cancelled"],
     };

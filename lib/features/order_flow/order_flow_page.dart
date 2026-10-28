@@ -10,6 +10,7 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/order_flow_display_mode.dart';
 import '../../core/safe_dialog.dart';
+import '../../core/trusted_clock.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
 import '../../data/printer_device_repository.dart';
@@ -21,6 +22,7 @@ import '../fulfilment/fulfilment_domain.dart';
 import '../fulfilment/fulfilment_repository.dart';
 import '../pos/domain.dart';
 import '../pos/pos_controller.dart';
+import 'order_flow_timing.dart';
 import 'order_flow_sound.dart';
 
 final orderFlowProvider = StreamProvider<List<OrderFlowOrder>>((ref) {
@@ -219,6 +221,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                 allOrders: allOrders,
                 amberMinutes: widget.amberMinutes,
                 redMinutes: widget.redMinutes,
+                now: TrustedClock.instance.nowUtc(),
               );
 
               if (compact) {
@@ -366,7 +369,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                   _OrderFlowCard(
                     order: order,
                     location: _resolvedOrderLocation(order, tables),
-                    now: DateTime.now(),
+                    now: TrustedClock.instance.nowUtc(),
                     amberMinutes: widget.amberMinutes,
                     redMinutes: widget.redMinutes,
                     onAction: (action) => _applyAction(order, action),
@@ -379,7 +382,6 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                         : null,
                     onAssignDriver:
                         canAssignDrivers &&
-                            drivers.isNotEmpty &&
                             order.channel == OrderChannel.delivery &&
                             order.orderId != null &&
                             !order.status.isTerminal
@@ -439,7 +441,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
               order.driverDeclined ||
               _lateState(
                     order,
-                    DateTime.now(),
+                  TrustedClock.instance.nowUtc(),
                     widget.amberMinutes,
                     widget.redMinutes,
                   ) ==
@@ -625,7 +627,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       _FlowFilter.late =>
         _lateState(
               order,
-              DateTime.now(),
+              TrustedClock.instance.nowUtc(),
               widget.amberMinutes,
               widget.redMinutes,
             ) !=
@@ -789,6 +791,17 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   ) async {
     final scope = ref.read(activeVenueScopeProvider);
     if (scope == null || order.orderId == null) return;
+    if (drivers.isEmpty) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'No delivery drivers available',
+        message:
+            'Add an active staff member with the Driver role for this venue, then retry.',
+        level: AppNotificationLevel.warning,
+      );
+      return;
+    }
     final selected = await showAppDialog<FulfilmentStaffMember>(
       context: context,
       builder: (dialogContext) => SimpleDialog(
@@ -938,7 +951,7 @@ _LateState _lateState(
   if (order.status == OrderFlowStatus.held) return _LateState.normal;
   if (order.isDelayed) return _LateState.red;
   if (order.status.isTerminal) return _LateState.normal;
-  final elapsed = now.difference(order.ticketReleasedAt);
+  final elapsed = orderFlowElapsed(now, order.ticketReleasedAt);
   if (elapsed >= Duration(minutes: redMinutes)) return _LateState.red;
   if (elapsed >= Duration(minutes: amberMinutes)) return _LateState.amber;
   return _LateState.normal;
@@ -949,15 +962,16 @@ class _BoardHealth extends StatelessWidget {
     required this.allOrders,
     required this.amberMinutes,
     required this.redMinutes,
+    required this.now,
   });
 
   final List<OrderFlowOrder> allOrders;
   final int amberMinutes;
   final int redMinutes;
+  final DateTime now;
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now();
     final late = allOrders
         .where(
           (order) =>
@@ -1126,7 +1140,7 @@ class _OrderFlowCard extends StatelessWidget {
             _LateState.amber => Colors.orange.shade800,
             _LateState.normal => Colors.green.shade700,
           };
-    final elapsed = now.difference(order.ticketReleasedAt);
+    final elapsed = orderFlowElapsed(now, order.ticketReleasedAt);
     return Card(
       color: background,
       clipBehavior: Clip.antiAlias,
