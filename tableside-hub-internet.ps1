@@ -9,6 +9,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $ipv4Rule = 'TableSideCY TEST - Hub public IPv4 blocked'
 $ipv6Rule = 'TableSideCY TEST - Hub public IPv6 blocked'
+$legacyRuleNames = @(
+    'TableSideCY TEST - Block Internet'
+)
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -49,6 +52,14 @@ Get-NetFirewallRule -DisplayName $ipv4Rule -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule
 Get-NetFirewallRule -DisplayName $ipv6Rule -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule
+
+# Earlier versions of the network test used a single broadly named rule.
+# Remove it in both modes so restoring internet cannot leave an obsolete block
+# attached to the current TableSideCY executable.
+foreach ($legacyRuleName in $legacyRuleNames) {
+    Get-NetFirewallRule -DisplayName $legacyRuleName -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule
+}
 
 if ($Mode -eq 'Allow') {
     Write-Host 'TableSideCY hub internet access is enabled.' -ForegroundColor Green
