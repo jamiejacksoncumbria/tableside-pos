@@ -14,6 +14,7 @@ import {initializeTestEnvironment} from "@firebase/rules-unit-testing";
 import {
   Timestamp,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -286,6 +287,91 @@ describe("POS role and replay protection", () => {
 });
 
 describe("venue hub cloud reconciliation", () => {
+  test("rebuilds a missing order projection across immutable upload batches", async () => {
+    const createdAt = new Date().toISOString();
+    const events = [];
+    let previousHash = "";
+    for (let sequence = 1; sequence <= 27; sequence += 1) {
+      const eventHash = `batch-hash-${sequence}`;
+      let type;
+      let payload;
+      if (sequence === 1) {
+        type = "order.opened";
+        payload = {
+          orderId: "order-batch-recovery",
+          channel: "dineIn",
+          tableId: "table-a",
+        };
+      } else if (sequence === 2) {
+        type = "order.itemAdded";
+        payload = {
+          orderId: "order-batch-recovery",
+          lineId: "line-batch",
+          productId: "menu-curry",
+          productName: "House Curry",
+          quantity: 1,
+          unitPriceMinor: 1500,
+          taxRateBasisPoints: 2000,
+          currencyCode: "GBP",
+          productionArea: "kitchen",
+          showOnOrderFlow: true,
+        };
+      } else {
+        type = "order.itemQuantityChanged";
+        payload = {
+          orderId: "order-batch-recovery",
+          lineId: "line-batch",
+          quantity: sequence - 1,
+        };
+      }
+      events.push(hubEvent(
+        sequence,
+        `batch-event-${sequence}`,
+        previousHash,
+        eventHash,
+        type,
+        payload,
+        createdAt,
+      ));
+      previousHash = eventHash;
+    }
+
+    for (let offset = 0; offset < events.length; offset += 25) {
+      const batch = events.slice(offset, offset + 25);
+      const upload = await callPos(
+        "ingestOfflineHubEvents",
+        signedHubUpload(batch, `batch-original-${offset}`),
+      );
+      assert.equal(upload.status, 200, JSON.stringify(upload.body));
+    }
+    await environment.withSecurityRulesDisabled(async (context) => {
+      await deleteDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/orders/order-batch-recovery",
+      ));
+    });
+
+    for (let offset = 0; offset < events.length; offset += 25) {
+      const batch = events.slice(offset, offset + 25);
+      const body = {events: batch, projectionRecovery: true};
+      const recovery = await callPos(
+        "ingestOfflineHubEvents",
+        signedHubRequest(body, `batch-recovery-${offset}`, "/v1/cloud-sync"),
+      );
+      assert.equal(recovery.status, 200, JSON.stringify(recovery.body));
+    }
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const order = await getDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/orders/order-batch-recovery",
+      ));
+      assert.equal(order.exists(), true);
+      assert.equal(order.data().lines.length, 1);
+      assert.equal(order.data().lines[0].quantity, 26);
+      assert.equal(order.data().offlineProjectionRecoveredThroughSequence, 27);
+    });
+  });
+
   test("projects a signed sale exactly once into orders, bills, stock and production", async () => {
     const createdAt = new Date().toISOString();
     const events = [
@@ -386,6 +472,36 @@ describe("venue hub cloud reconciliation", () => {
     assert.equal(cursor.body.data.lastSequence, 5);
     assert.equal(cursor.body.data.lastEventHash, "hash-close");
 
+    await assertCloudSaleProjection();
+
+    // Reproduce the production failure where the immutable event ledger and
+    // cursor survived but the materialized order document did not. Recovery
+    // must rebuild the order from order.opened onward while leaving stock,
+    // tickets, bills and audit side effects exactly-once.
+    await environment.withSecurityRulesDisabled(async (context) => {
+      await deleteDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/orders/order-cloud-a",
+      ));
+    });
+    const projectionRecoveryBody = {events, projectionRecovery: true};
+    const projectionRecovery = await callPos(
+      "ingestOfflineHubEvents",
+      signedHubRequest(
+        projectionRecoveryBody,
+        "nonce-projection-recovery",
+        "/v1/cloud-sync",
+      ),
+    );
+    assert.equal(
+      projectionRecovery.status,
+      200,
+      JSON.stringify(projectionRecovery.body),
+    );
+    assert.deepEqual(
+      projectionRecovery.body.data.acknowledgedEventIds,
+      events.map((event) => event.id),
+    );
     await assertCloudSaleProjection();
   });
 });

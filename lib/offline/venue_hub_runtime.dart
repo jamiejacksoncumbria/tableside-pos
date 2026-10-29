@@ -546,14 +546,17 @@ class VenueHubRuntime {
           allowedOrigins: allowedOrigins,
         ),
       );
-      Future<Set<String>> uploadEvents(List<OfflineEvent> events) =>
-          _repository.uploadOfflineHubEvents(
-            scope: scope,
-            deviceId: deviceId,
-            hubEpoch: bootstrap.hubEpoch,
-            credential: credential,
-            events: events,
-          );
+      Future<Set<String>> uploadEvents(
+        List<OfflineEvent> events, {
+        bool projectionRecovery = false,
+      }) => _repository.uploadOfflineHubEvents(
+        scope: scope,
+        deviceId: deviceId,
+        hubEpoch: bootstrap.hubEpoch,
+        credential: credential,
+        events: events,
+        projectionRecovery: projectionRecovery,
+      );
 
       Future<Set<String>> repairCloudCursorAndUpload(
         List<OfflineEvent> pending,
@@ -607,14 +610,21 @@ class VenueHubRuntime {
           );
         }
 
-        final replay = local
-            .where((event) => event.sequence > cursor.lastSequence)
-            .toList(growable: false);
+        // Re-send the complete verified chain in explicit projection-recovery
+        // mode. A cursor suffix is insufficient when immutable event records
+        // survived but a materialized order document did not: the server must
+        // see that order's signed order.opened event before later item events.
+        // Existing healthy projections are skipped server-side, and recovery
+        // events never repeat stock, printing, audit or notification effects.
+        final replay = local;
         var replayedThrough = cursor.lastSequence;
         for (var offset = 0; offset < replay.length; offset += 25) {
           final end = (offset + 25).clamp(0, replay.length).toInt();
           final batch = replay.sublist(offset, end);
-          final acknowledged = await uploadEvents(batch);
+          final acknowledged = await uploadEvents(
+            batch,
+            projectionRecovery: true,
+          );
           if (acknowledged.length != batch.length ||
               batch.any((event) => !acknowledged.contains(event.id))) {
             throw StateError(
@@ -643,9 +653,14 @@ class VenueHubRuntime {
           try {
             acknowledged = await uploadEvents(events);
           } on StateError catch (error) {
-            if (!error.toString().contains(
+            final message = error.toString();
+            final cursorConflict = message.contains(
               'The hub event chain has a gap or conflict.',
-            )) {
+            );
+            final missingProjection = message.contains(
+              'The offline order is unavailable in cloud data.',
+            );
+            if (!cursorConflict && !missingProjection) {
               rethrow;
             }
             AppLogger.info(

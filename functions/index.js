@@ -3341,6 +3341,11 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
 
 async function ingestOfflineHubEventsFor(caller, rawData) {
   const upload = await verifiedOfflineHubUpload(caller, rawData);
+  const projectionRecovery = upload.body.projectionRecovery === true;
+  if (upload.body.projectionRecovery != null &&
+      typeof upload.body.projectionRecovery !== "boolean") {
+    throw new HttpsError("invalid-argument", "Projection recovery mode is invalid.");
+  }
   const rawEvents = upload.body.events;
   if (!Array.isArray(rawEvents) || rawEvents.length < 1 || rawEvents.length > 25) {
     throw new HttpsError("invalid-argument", "Upload between 1 and 25 hub events.");
@@ -3432,6 +3437,7 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
       .filter((event) => event.type === "order.cloudBaseline")
       .map((event) => [event.payload.orderId, event]));
     const dirtyOrderIds = new Set();
+    const newEventIds = [];
     for (let index = 0; index < events.length; index += 1) {
       const event = events[index];
       const current = existing[index];
@@ -3458,6 +3464,70 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
           lastSequence = event.sequence;
           lastEventHash = event.eventHash;
         }
+        // Immutable events can outlive their materialized order projection
+        // (for example after a staging restore or an interrupted legacy
+        // migration). Explicit recovery replays only a missing projection from
+        // its signed order.opened event. Healthy orders are never replayed,
+        // because quantity/payment events are authoritative state changes and
+        // blindly applying them twice would be unsafe.
+        if (projectionRecovery && !securityEventTypes.has(event.type)) {
+          const orderId = event.payload.orderId;
+          const currentCloudOrder = orderState.get(orderId);
+          const recoveryActive = currentCloudOrder != null &&
+            currentCloudOrder.offlineProjectionRecoveryEpoch === upload.hubEpoch;
+          const recoveredThrough = recoveryActive
+            ? Number(currentCloudOrder.offlineProjectionRecoveredThroughSequence ?? 0)
+            : 0;
+          const beginRecovery = currentCloudOrder == null && event.type === "order.opened";
+          const continueRecovery = recoveryActive && event.sequence > recoveredThrough;
+          if (beginRecovery || continueRecovery) {
+            try {
+              if (event.type === "order.splitCreated") {
+                const splitOrderId = event.payload.splitOrderId;
+                const split = applyOfflineSplitEvent(
+                  currentCloudOrder, event, upload.venueId,
+                  orderState.get(splitOrderId),
+                );
+                orderState.set(orderId, {
+                  ...split.parent,
+                  offlineProjectionRecoveryEpoch: upload.hubEpoch,
+                  offlineProjectionRecoveredThroughSequence: event.sequence,
+                });
+                orderState.set(splitOrderId, {
+                  ...split.child,
+                  offlineProjectionRecoveryEpoch: upload.hubEpoch,
+                  offlineProjectionRecoveredThroughSequence: event.sequence,
+                });
+                dirtyOrderIds.add(splitOrderId);
+              } else {
+                const projected = applyOfflineEventToCloudOrder(
+                  currentCloudOrder, event, upload.venueId,
+                  recoveryBaselines.get(orderId),
+                );
+                orderState.set(orderId, {
+                  ...projected,
+                  offlineProjectionRecoveryEpoch: upload.hubEpoch,
+                  offlineProjectionRecoveredThroughSequence: event.sequence,
+                });
+              }
+              dirtyOrderIds.add(orderId);
+            } catch (error) {
+              if (error instanceof HttpsError) {
+                throw new HttpsError(
+                  error.code,
+                  `Offline projection recovery failed at event ${event.sequence} ` +
+                    `(${event.type}): ${error.message}`,
+                );
+              }
+              throw error;
+            }
+          } else if (currentCloudOrder == null && event.type !== "order.opened") {
+            throw new HttpsError(
+              "failed-precondition",
+              "Projection recovery requires the complete immutable order history.",
+            );
+          }
+        }
         accepted.push(event.id);
         continue;
       }
@@ -3469,6 +3539,7 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
         ...event,
         receivedAt: FieldValue.serverTimestamp(), source: "venueHub",
       });
+      newEventIds.push(event.id);
       if (event.type === "security.pinAttempt") {
         if (typeof event.payload.successful !== "boolean" ||
             (event.payload.locked != null && typeof event.payload.locked !== "boolean")) {
@@ -3779,11 +3850,23 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
       createdAt: FieldValue.serverTimestamp(),
     });
-    return accepted;
+    return {acknowledgedEventIds: accepted, newEventIds};
   });
-  await applyOfflineStockForEvents(tenantRef, upload.venueId, events);
-  await materializeOfflineProductionTickets(tenantRef, upload.venueId, events);
-  await materializeOfflineFulfilmentChanges(tenantRef, upload.venueId, events);
+  // Projection recovery deliberately excludes historic events from all
+  // external side effects. Their deterministic IDs make most paths
+  // idempotent, but keeping recovery projection-only is the stronger safety
+  // boundary: it cannot deduct stock, print, alert, or audit a sale twice.
+  const newEvents = events.filter((event) =>
+    acknowledgedEventIds.newEventIds.includes(event.id));
+  // Ordinary retries retain their established idempotent side-effect repair:
+  // a process can fail after committing the event transaction but before
+  // creating its deterministic stock/ticket document. Projection recovery is
+  // different and deliberately limits side effects to events first accepted
+  // during that recovery upload.
+  const sideEffectEvents = projectionRecovery ? newEvents : events;
+  await applyOfflineStockForEvents(tenantRef, upload.venueId, sideEffectEvents);
+  await materializeOfflineProductionTickets(tenantRef, upload.venueId, sideEffectEvents);
+  await materializeOfflineFulfilmentChanges(tenantRef, upload.venueId, sideEffectEvents);
   // Mirror only acknowledgement metadata to RTDB after the Firestore
   // projection transaction commits. Remote POS clients can then finish on a
   // persistent socket without repeatedly invoking a long-poll Function.
@@ -3804,7 +3887,10 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
       },
     );
   }
-  return {acknowledgedEventIds, serverTimeMillis: Date.now()};
+  return {
+    acknowledgedEventIds: acknowledgedEventIds.acknowledgedEventIds,
+    serverTimeMillis: Date.now(),
+  };
 }
 
 /// Reads the server-owned cursor for the currently enrolled hub generation.

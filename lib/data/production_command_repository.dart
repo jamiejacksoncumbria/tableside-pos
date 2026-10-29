@@ -649,6 +649,7 @@ class ProductionCommandRepository {
     required int hubEpoch,
     required VenueHubDeviceCredential credential,
     required List<OfflineEvent> events,
+    bool projectionRecovery = false,
   }) async {
     if (events.isEmpty || events.length > 25) {
       throw ArgumentError.value(
@@ -661,6 +662,10 @@ class ProductionCommandRepository {
       'events': events
           .map((event) => event.toCloudJson())
           .toList(growable: false),
+      // Recovery never weakens event verification. It tells the server that
+      // already-stored, hash-matching events may be used to reconstruct a
+      // missing materialized order document, without repeating side effects.
+      if (projectionRecovery) 'projectionRecovery': true,
     };
     final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
       credentialId: credential.credentialId,
