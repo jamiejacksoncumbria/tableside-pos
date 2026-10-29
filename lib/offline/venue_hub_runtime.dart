@@ -549,6 +549,7 @@ class VenueHubRuntime {
       Future<Set<String>> uploadEvents(
         List<OfflineEvent> events, {
         bool projectionRecovery = false,
+        List<OfflineEvent> recoveryBaselines = const <OfflineEvent>[],
       }) => _repository.uploadOfflineHubEvents(
         scope: scope,
         deviceId: deviceId,
@@ -556,6 +557,7 @@ class VenueHubRuntime {
         credential: credential,
         events: events,
         projectionRecovery: projectionRecovery,
+        recoveryBaselines: recoveryBaselines,
       );
 
       Future<Set<String>> repairCloudCursorAndUpload(
@@ -617,13 +619,30 @@ class VenueHubRuntime {
         // Existing healthy projections are skipped server-side, and recovery
         // events never repeat stock, printing, audit or notification effects.
         final replay = local;
+        final baselinesByOrder = <String, OfflineEvent>{};
+        for (final event in local) {
+          if (event.type != 'order.cloudBaseline') continue;
+          final orderId = event.payload['orderId'];
+          if (orderId is String && orderId.isNotEmpty) {
+            baselinesByOrder[orderId] = event;
+          }
+        }
         var replayedThrough = cursor.lastSequence;
         for (var offset = 0; offset < replay.length; offset += 25) {
           final end = (offset + 25).clamp(0, replay.length).toInt();
           final batch = replay.sublist(offset, end);
+          final batchOrderIds = batch
+              .map((event) => event.payload['orderId'])
+              .whereType<String>()
+              .toSet();
+          final recoveryBaselines = batchOrderIds
+              .map((orderId) => baselinesByOrder[orderId])
+              .whereType<OfflineEvent>()
+              .toList(growable: false);
           final acknowledged = await uploadEvents(
             batch,
             projectionRecovery: true,
+            recoveryBaselines: recoveryBaselines,
           );
           if (acknowledged.length != batch.length ||
               batch.any((event) => !acknowledged.contains(event.id))) {

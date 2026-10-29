@@ -287,6 +287,138 @@ describe("POS role and replay protection", () => {
 });
 
 describe("venue hub cloud reconciliation", () => {
+  test("uses a later signed cloud baseline to recover an earlier order batch", async () => {
+    const createdAt = new Date().toISOString();
+    const events = [];
+    let previousHash = "";
+    for (let sequence = 1; sequence <= 25; sequence += 1) {
+      const eventHash = `legacy-prefix-hash-${sequence}`;
+      events.push(hubEvent(
+        sequence,
+        `legacy-prefix-event-${sequence}`,
+        previousHash,
+        eventHash,
+        "security.pinAttempt",
+        {successful: true},
+        createdAt,
+      ));
+      previousHash = eventHash;
+    }
+    const itemHash = "legacy-item-hash";
+    events.push(hubEvent(
+      26,
+      "legacy-item-event",
+      previousHash,
+      itemHash,
+      "order.itemsAdded",
+      {
+        orderId: "order-late-baseline",
+        items: [{
+          lineId: "line-late-baseline",
+          productId: "menu-curry",
+          productName: "House Curry",
+          quantity: 1,
+          unitPriceMinor: 1500,
+          taxRateBasisPoints: 2000,
+          currencyCode: "GBP",
+          productionArea: "kitchen",
+          showOnOrderFlow: true,
+        }],
+      },
+      createdAt,
+    ));
+    const baseline = hubEvent(
+      27,
+      "legacy-baseline-event",
+      itemHash,
+      "legacy-baseline-hash",
+      "order.cloudBaseline",
+      {
+        orderId: "order-late-baseline",
+        sourceOfflineHubEpoch: 6,
+        openedAtUtc: createdAt,
+        tableId: "table-a",
+        tabName: null,
+        channel: "dineIn",
+        deliveryFeeMinor: 0,
+        lines: [{
+          id: "line-late-baseline",
+          productId: "menu-curry",
+          name: "House Curry",
+          quantity: 1,
+          unitPriceMinor: 1500,
+          sent: false,
+        }],
+        payments: [],
+      },
+      createdAt,
+    );
+    events.push(baseline);
+
+    await environment.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/orders/order-late-baseline",
+      ), {
+        venueId: "venue-a",
+        tableId: "table-a",
+        tabName: null,
+        channel: "dineIn",
+        status: "open",
+        lines: [],
+        payments: [],
+        deliveryFeeMinor: 0,
+        openedAt: new Date(createdAt),
+        offlineHubEpoch: 6,
+      });
+    });
+    for (let offset = 0; offset < events.length; offset += 25) {
+      const batch = events.slice(offset, offset + 25);
+      const upload = await callPos(
+        "ingestOfflineHubEvents",
+        signedHubUpload(batch, `legacy-original-${offset}`),
+      );
+      assert.equal(upload.status, 200, JSON.stringify(upload.body));
+    }
+    await environment.withSecurityRulesDisabled(async (context) => {
+      await deleteDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/orders/order-late-baseline",
+      ));
+    });
+
+    for (let offset = 0; offset < events.length; offset += 25) {
+      const batch = events.slice(offset, offset + 25);
+      const relevant = batch.some((event) =>
+        event.payload.orderId === "order-late-baseline");
+      const body = {
+        events: batch,
+        projectionRecovery: true,
+        ...(relevant ? {recoveryBaselines: [baseline]} : {}),
+      };
+      const recovery = await callPos(
+        "ingestOfflineHubEvents",
+        signedHubRequest(
+          body,
+          `legacy-recovery-${offset}`,
+          "/v1/cloud-sync",
+        ),
+      );
+      assert.equal(recovery.status, 200, JSON.stringify(recovery.body));
+    }
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const order = await getDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/orders/order-late-baseline",
+      ));
+      assert.equal(order.exists(), true);
+      assert.equal(order.data().tableId, "table-a");
+      assert.equal(order.data().lines.length, 1);
+      assert.equal(order.data().lines[0].id, "line-late-baseline");
+      assert.equal(order.data().offlineProjectionRecoveredThroughSequence, 27);
+    });
+  });
+
   test("rebuilds a missing order projection across immutable upload batches", async () => {
     const createdAt = new Date().toISOString();
     const events = [];

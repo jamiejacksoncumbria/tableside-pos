@@ -3364,6 +3364,30 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
     }
     return {...event, id, sequence};
   }).sort((a, b) => a.sequence - b.sequence);
+  const rawRecoveryBaselines = upload.body.recoveryBaselines ?? [];
+  if (!Array.isArray(rawRecoveryBaselines) || rawRecoveryBaselines.length > 25) {
+    throw new HttpsError("invalid-argument", "Recovery baseline context is invalid.");
+  }
+  if (!projectionRecovery && rawRecoveryBaselines.length > 0) {
+    throw new HttpsError(
+      "invalid-argument", "Recovery baselines require projection recovery mode.",
+    );
+  }
+  const recoveryBaselineContext = rawRecoveryBaselines.map((raw) => {
+    const event = requireObject(raw);
+    const id = requiredDocumentId(event, "id");
+    const sequence = Number(event.sequence);
+    if (event.type !== "order.cloudBaseline" ||
+        event.tenantId !== upload.tenantId || event.venueId !== upload.venueId ||
+        event.hubEpoch !== upload.hubEpoch || !Number.isSafeInteger(sequence) || sequence < 1 ||
+        typeof event.previousHash !== "string" || event.previousHash.length > 256 ||
+        typeof event.eventHash !== "string" || event.eventHash.length > 256 ||
+        event.payload == null || typeof event.payload !== "object" ||
+        Array.isArray(event.payload) || typeof event.payload.orderId !== "string") {
+      throw new HttpsError("invalid-argument", "A recovery baseline is invalid or out of scope.");
+    }
+    return {...event, id, sequence};
+  });
   const tenantRef = db.doc(`tenants/${upload.tenantId}`);
   const stateRef = tenantRef.collection("offlineHubSyncState").doc(upload.venueId);
   const venueRef = tenantRef.collection("venues").doc(upload.venueId);
@@ -3433,9 +3457,26 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
     const orderState = new Map(orderSnapshots.map((snapshot) => [
       snapshot.id, snapshot.exists ? {...snapshot.data()} : null,
     ]));
-    const recoveryBaselines = new Map(events
-      .filter((event) => event.type === "order.cloudBaseline")
-      .map((event) => [event.payload.orderId, event]));
+    const recoveryBaselines = new Map();
+    for (const baseline of [
+      ...recoveryBaselineContext,
+      ...events.filter((event) => event.type === "order.cloudBaseline"),
+    ]) {
+      const prior = recoveryBaselines.get(baseline.payload.orderId);
+      if (prior != null &&
+          (prior.id !== baseline.id || prior.eventHash !== baseline.eventHash)) {
+        throw new HttpsError(
+          "data-loss", "Conflicting recovery baselines were supplied for an order.",
+        );
+      }
+      recoveryBaselines.set(baseline.payload.orderId, baseline);
+    }
+    const batchOrderIds = new Set(orderIds);
+    if ([...recoveryBaselines.keys()].some((orderId) => !batchOrderIds.has(orderId))) {
+      throw new HttpsError(
+        "invalid-argument", "Recovery baseline context contains an unrelated order.",
+      );
+    }
     const dirtyOrderIds = new Set();
     const newEventIds = [];
     for (let index = 0; index < events.length; index += 1) {
@@ -3478,14 +3519,24 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
           const recoveredThrough = recoveryActive
             ? Number(currentCloudOrder.offlineProjectionRecoveredThroughSequence ?? 0)
             : 0;
-          const beginRecovery = currentCloudOrder == null && event.type === "order.opened";
+          const recoveryBaseline = recoveryBaselines.get(orderId) ?? null;
+          const beginRecovery = currentCloudOrder == null &&
+            (event.type === "order.opened" || recoveryBaseline != null);
           const continueRecovery = recoveryActive && event.sequence > recoveredThrough;
           if (beginRecovery || continueRecovery) {
             try {
+              // A replacement hub's signed baseline can be later in the global
+              // ledger than the first event for this order. Seed only a
+              // missing projection from that request-signed context, then
+              // replay immutable events in sequence. Duplicate line/payment
+              // IDs are handled idempotently by the normal projector.
+              const recoveryCurrent = currentCloudOrder == null && recoveryBaseline != null
+                ? cloudOrderFromRecoveryBaseline(recoveryBaseline, upload.venueId)
+                : currentCloudOrder;
               if (event.type === "order.splitCreated") {
                 const splitOrderId = event.payload.splitOrderId;
                 const split = applyOfflineSplitEvent(
-                  currentCloudOrder, event, upload.venueId,
+                  recoveryCurrent, event, upload.venueId,
                   orderState.get(splitOrderId),
                 );
                 orderState.set(orderId, {
@@ -3501,8 +3552,8 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
                 dirtyOrderIds.add(splitOrderId);
               } else {
                 const projected = applyOfflineEventToCloudOrder(
-                  currentCloudOrder, event, upload.venueId,
-                  recoveryBaselines.get(orderId),
+                  recoveryCurrent, event, upload.venueId,
+                  recoveryBaseline,
                 );
                 orderState.set(orderId, {
                   ...projected,
@@ -4456,6 +4507,100 @@ function applyOfflineSplitEvent(current, event, venueId, existingChild) {
     isSplitPaymentOrder: true,
   };
   return {parent, child, alreadySplit: false};
+}
+
+function cloudOrderFromRecoveryBaseline(baseline, venueId) {
+  const payload = baseline.payload;
+  const sourceEpoch = Number(payload.sourceOfflineHubEpoch);
+  const openedAt = new Date(payload.openedAtUtc ?? baseline.createdAtUtc);
+  const channel = typeof payload.channel === "string" ? payload.channel : "dineIn";
+  const tableId = typeof payload.tableId === "string" ? payload.tableId : null;
+  const tabName = typeof payload.tabName === "string" ? payload.tabName : null;
+  const rawLines = Array.isArray(payload.lines) ? payload.lines : null;
+  const rawPayments = Array.isArray(payload.payments) ? payload.payments : null;
+  if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch > baseline.hubEpoch ||
+      !Number.isFinite(openedAt.getTime()) ||
+      !["dineIn", "collection", "delivery"].includes(channel) ||
+      (channel === "dineIn" && (tableId == null) === (tabName == null)) ||
+      (channel !== "dineIn" && (tableId != null || tabName != null)) ||
+      rawLines == null || rawPayments == null) {
+    throw new HttpsError("failed-precondition", "The recovery baseline identity is invalid.");
+  }
+  const lines = rawLines.map((raw) => {
+    const line = requireObject(raw);
+    if (typeof line.id !== "string" || typeof line.productId !== "string" ||
+        typeof line.name !== "string" || !Number.isSafeInteger(Number(line.quantity)) ||
+        Number(line.quantity) < 1 || !Number.isSafeInteger(Number(line.unitPriceMinor)) ||
+        Number(line.unitPriceMinor) < 0) {
+      throw new HttpsError("failed-precondition", "A recovery baseline line is invalid.");
+    }
+    return {
+      ...line,
+      productName: line.name,
+      quantity: Number(line.quantity),
+      unitPriceMinor: Number(line.unitPriceMinor),
+      isSentToProduction: line.sent === true,
+      addedAt: typeof line.addedAtUtc === "string" ? new Date(line.addedAtUtc) : openedAt,
+      sentAt: typeof line.sentAtUtc === "string" ? new Date(line.sentAtUtc) : null,
+    };
+  });
+  if (new Set(lines.map((line) => line.id)).size !== lines.length) {
+    throw new HttpsError("failed-precondition", "A recovery baseline line ID is duplicated.");
+  }
+  const payments = rawPayments.map((raw) => {
+    const payment = requireObject(raw);
+    if (typeof payment.id !== "string" ||
+        !Number.isSafeInteger(Number(payment.baseAmountMinor)) ||
+        Number(payment.baseAmountMinor) < 1 || typeof payment.method !== "string" ||
+        typeof payment.currencyCode !== "string") {
+      throw new HttpsError("failed-precondition", "A recovery baseline payment is invalid.");
+    }
+    return {
+      ...payment,
+      baseAmountMinor: Number(payment.baseAmountMinor),
+      tenderedAmountMinor: Number(
+        payment.tenderedAmountMinor ?? payment.baseAmountMinor,
+      ),
+      tenderedCurrencyCode: payment.currencyCode,
+      recordedAt: typeof payment.recordedAtUtc === "string"
+        ? new Date(payment.recordedAtUtc) : openedAt,
+    };
+  });
+  if (new Set(payments.map((payment) => payment.id)).size !== payments.length) {
+    throw new HttpsError("failed-precondition", "A recovery baseline payment ID is duplicated.");
+  }
+  const deliveryFeeMinor = channel === "delivery"
+    ? Number(payload.deliveryFeeMinor ?? 0) : 0;
+  const total = lines.reduce((sum, line) =>
+    sum + line.quantity * line.unitPriceMinor, 0) + deliveryFeeMinor;
+  const paid = payments.reduce((sum, payment) => sum + payment.baseAmountMinor, 0);
+  if (!Number.isSafeInteger(deliveryFeeMinor) || deliveryFeeMinor < 0 || paid > total) {
+    throw new HttpsError("failed-precondition", "The recovery baseline balance is invalid.");
+  }
+  const status = lines.some((line) => line.isSentToProduction) ? "sent" : "open";
+  return {
+    venueId, tableId, tabName, channel, status, lines, payments,
+    customerId: channel === "dineIn" ? null : payload.customerId ?? null,
+    customerName: channel === "dineIn" ? null : payload.customerName ?? null,
+    customerPhone: channel === "dineIn" ? null : payload.customerPhone ?? null,
+    deliveryAddress: channel === "delivery" ? payload.deliveryAddress ?? null : null,
+    deliveryAddressLabel: channel === "delivery"
+      ? payload.deliveryAddressLabel ?? null : null,
+    deliveryLatitude: channel === "delivery" ? payload.deliveryLatitude ?? null : null,
+    deliveryLongitude: channel === "delivery" ? payload.deliveryLongitude ?? null : null,
+    serviceAreaId: channel === "delivery" ? payload.serviceAreaId ?? null : null,
+    serviceAreaName: channel === "delivery" ? payload.serviceAreaName ?? null : null,
+    deliveryFeeMinor,
+    scheduledForUtc: payload.scheduledForUtc ?? null,
+    fulfilmentStatus: payload.fulfilmentStatus ??
+      (channel === "delivery" ? "awaitingDriver" : "awaitingPreparation"),
+    assignedDriverId: channel === "delivery" ? payload.assignedDriverId ?? null : null,
+    splitFromOrderId: payload.splitFromOrderId ?? null,
+    splitSequence: Number(payload.splitSequence ?? 0),
+    openSplitOrderIds: Array.isArray(payload.openSplitOrderIds)
+      ? payload.openSplitOrderIds : [],
+    openedAt, openedOffline: true, createdByStaffId: baseline.staffId,
+  };
 }
 
 function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline = null) {

@@ -650,6 +650,7 @@ class ProductionCommandRepository {
     required VenueHubDeviceCredential credential,
     required List<OfflineEvent> events,
     bool projectionRecovery = false,
+    List<OfflineEvent> recoveryBaselines = const <OfflineEvent>[],
   }) async {
     if (events.isEmpty || events.length > 25) {
       throw ArgumentError.value(
@@ -666,6 +667,15 @@ class ProductionCommandRepository {
       // already-stored, hash-matching events may be used to reconstruct a
       // missing materialized order document, without repeating side effects.
       if (projectionRecovery) 'projectionRecovery': true,
+      // A replacement hub can append its cloud-signed baseline after earlier
+      // order events. Recovery is uploaded in global 25-event batches, so the
+      // batch containing an early item event would otherwise be unable to see
+      // the later baseline. These anchors are signed with the whole request
+      // and are context only: they do not advance the immutable event cursor.
+      if (projectionRecovery && recoveryBaselines.isNotEmpty)
+        'recoveryBaselines': recoveryBaselines
+            .map((event) => event.toCloudJson())
+            .toList(growable: false),
     };
     final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
       credentialId: credential.credentialId,
