@@ -351,6 +351,38 @@ describe("venue hub cloud reconciliation", () => {
     assert.deepEqual(replay.body.data.acknowledgedEventIds, events.map((event) => event.id));
 
     await assertCloudSaleProjection();
+
+    // Simulate a legacy/staging migration retaining immutable event documents
+    // while its small cursor document was reset. An authenticated replay must
+    // walk the exact stored hash chain and restore the cursor without
+    // duplicating financial, stock or production side effects.
+    await environment.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/offlineHubSyncState/venue-a",
+      ), {
+        venueId: "venue-a", hubEpoch, lastSequence: 0, lastEventHash: "",
+      });
+    });
+    const repaired = await callPos(
+      "ingestOfflineHubEvents",
+      signedHubUpload(events, "nonce-c"),
+    );
+    assert.equal(repaired.status, 200, JSON.stringify(repaired.body));
+    assert.deepEqual(
+      repaired.body.data.acknowledgedEventIds,
+      events.map((event) => event.id),
+    );
+    const cursor = await callPos(
+      "getOfflineHubSyncCursor",
+      signedHubRequest({}, "nonce-cursor", "/v1/cloud-sync-cursor"),
+    );
+    assert.equal(cursor.status, 200, JSON.stringify(cursor.body));
+    assert.equal(cursor.body.data.hubEpoch, hubEpoch);
+    assert.equal(cursor.body.data.lastSequence, 5);
+    assert.equal(cursor.body.data.lastEventHash, "hash-close");
+
+    await assertCloudSaleProjection();
   });
 });
 
@@ -915,6 +947,7 @@ function approvedBootstrapActions() {
     "recoverOwnStaffPin", "claimDevicePrintJob",
     "completeDevicePrintJob", "issueRealtimePrinterSession", "getTrustedTime",
     "getOfflineHubBootstrap", "ingestOfflineHubEvents",
+    "getOfflineHubSyncCursor",
     "reconcileOfflineHubClosedOrders", "getOfflineHubSnapshot",
     "claimRemoteHubCommands", "issueRealtimeHubSession",
     "completeRemoteHubCommand",
@@ -1084,7 +1117,10 @@ function hubEvent(sequence, id, previousHash, eventHash, type, payload, createdA
 }
 
 function signedHubUpload(events, nonce) {
-  const body = {events};
+  return signedHubRequest({events}, nonce, "/v1/cloud-sync");
+}
+
+function signedHubRequest(body, nonce, path) {
   const bodyHash = createHash("sha256")
     .update(JSON.stringify(canonicalJsonValue(body)))
     .digest("base64url");
@@ -1095,7 +1131,7 @@ function signedHubUpload(events, nonce) {
     deviceId: hubDeviceId,
     staffId: identities.manager.localId,
     method: "POST",
-    path: "/v1/cloud-sync",
+    path,
     hubEpoch,
     sentAtUtcMillis: Date.now(),
     nonce,

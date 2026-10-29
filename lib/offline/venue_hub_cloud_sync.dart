@@ -64,16 +64,27 @@ class VenueHubCloudSync {
         VenueHubCloudUploadResult result;
         try {
           result = await _upload(pending);
-        } catch (_) {
+        } catch (error, stackTrace) {
           for (final event in pending) {
             await _ledger.markPending(event.id);
           }
           _consecutiveFailures++;
           if (_consecutiveFailures == 1) {
-            AppLogger.info(
-              'Venue hub is offline; cloud synchronisation is paused and '
-              'pending events remain safely stored on this device.',
-            );
+            if (error.toString().contains('synchronization conflict')) {
+              AppLogger.error(
+                'Venue hub cloud synchronization conflict; pending events '
+                'remain safely stored and were not discarded',
+                error,
+                stackTrace,
+              );
+            } else {
+              AppLogger.error(
+                'Synchronize venue hub events; cloud may be temporarily '
+                'unavailable and pending events remain safely stored',
+                error,
+                stackTrace,
+              );
+            }
           }
           _scheduleRetry();
           break;

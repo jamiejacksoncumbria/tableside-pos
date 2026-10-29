@@ -36,6 +36,23 @@ class ProductionDispatchResult {
   final List<String> unroutedProductionAreas;
 }
 
+/// Server-owned position in one venue hub's immutable event chain.
+///
+/// The hub uses this only to select a replay suffix after a cursor conflict.
+/// It never renumbers or deletes local events, and the server independently
+/// verifies every event ID, sequence, previous hash and event hash on replay.
+class OfflineHubSyncCursor {
+  const OfflineHubSyncCursor({
+    required this.hubEpoch,
+    required this.lastSequence,
+    required this.lastEventHash,
+  });
+
+  final int hubEpoch;
+  final int lastSequence;
+  final String lastEventHash;
+}
+
 class VenuePinStaff {
   const VenuePinStaff({
     required this.userId,
@@ -666,6 +683,47 @@ class ProductionCommandRepository {
       throw StateError('The server returned an invalid hub acknowledgement.');
     }
     return rawIds.whereType<String>().toSet();
+  }
+
+  Future<OfflineHubSyncCursor> fetchOfflineHubSyncCursor({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+  }) async {
+    const body = <String, Object?>{};
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: '/v1/cloud-sync-cursor',
+      hubEpoch: hubEpoch,
+      sentAtUtc: DateTime.now().toUtc(),
+      body: body,
+    );
+    final response = await _call('getOfflineHubSyncCursor', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+    final returnedEpoch = response['hubEpoch'];
+    final lastSequence = response['lastSequence'];
+    final lastEventHash = response['lastEventHash'];
+    if (returnedEpoch is! int ||
+        returnedEpoch != hubEpoch ||
+        lastSequence is! int ||
+        lastSequence < 0 ||
+        lastEventHash is! String ||
+        (lastSequence > 0 && lastEventHash.isEmpty)) {
+      throw StateError('The server returned an invalid hub sync cursor.');
+    }
+    return OfflineHubSyncCursor(
+      hubEpoch: returnedEpoch,
+      lastSequence: lastSequence,
+      lastEventHash: lastEventHash,
+    );
   }
 
   /// Publishes the hub's durable closed-order projections so a cloud document
@@ -2389,6 +2447,7 @@ class ProductionCommandRepository {
     'getOfflineHubBootstrap',
     'getOfflineHubSnapshot',
     'ingestOfflineHubEvents',
+    'getOfflineHubSyncCursor',
     'reconcileOfflineHubClosedOrders',
     'issueRealtimeHubSession',
     'issueRealtimePosSession',

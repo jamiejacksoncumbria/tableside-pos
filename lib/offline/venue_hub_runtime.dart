@@ -544,16 +544,114 @@ class VenueHubRuntime {
           allowedOrigins: allowedOrigins,
         ),
       );
-      _sync = VenueHubCloudSync(
-        ledger: _ledger,
-        upload: (events) async {
-          final acknowledged = await _repository.uploadOfflineHubEvents(
+      Future<Set<String>> uploadEvents(List<OfflineEvent> events) =>
+          _repository.uploadOfflineHubEvents(
             scope: scope,
             deviceId: deviceId,
             hubEpoch: bootstrap.hubEpoch,
             credential: credential,
             events: events,
           );
+
+      Future<Set<String>> repairCloudCursorAndUpload(
+        List<OfflineEvent> pending,
+      ) async {
+        final cursor = await _repository.fetchOfflineHubSyncCursor(
+          scope: scope,
+          deviceId: deviceId,
+          hubEpoch: bootstrap.hubEpoch,
+          credential: credential,
+        );
+        final local =
+            await _ledger.eventsForVenue(
+                tenantId: scope.tenantId,
+                venueId: scope.venueId,
+                hubEpoch: bootstrap.hubEpoch,
+                limit: 100000,
+              )
+              ..sort((left, right) => left.sequence.compareTo(right.sequence));
+        if (local.isEmpty) {
+          throw StateError(
+            'Hub synchronization conflict: the cloud cursor cannot be '
+            'reconciled because the local event chain is empty.',
+          );
+        }
+        for (var index = 1; index < local.length; index++) {
+          final previous = local[index - 1];
+          final current = local[index];
+          if (current.sequence != previous.sequence + 1 ||
+              current.previousHash != previous.eventHash) {
+            throw StateError(
+              'Hub synchronization conflict: the durable local event chain '
+              'contains a gap and was not uploaded.',
+            );
+          }
+        }
+        if (cursor.lastSequence > 0) {
+          final anchors = local.where(
+            (event) => event.sequence == cursor.lastSequence,
+          );
+          if (anchors.length != 1 ||
+              anchors.single.eventHash != cursor.lastEventHash) {
+            throw StateError(
+              'Hub synchronization conflict: the cloud and local histories '
+              'do not share the same verified cursor.',
+            );
+          }
+        } else if (local.first.sequence != 1) {
+          throw StateError(
+            'Hub synchronization conflict: cloud history is empty but the '
+            'durable local chain does not begin at sequence 1.',
+          );
+        }
+
+        final replay = local
+            .where((event) => event.sequence > cursor.lastSequence)
+            .toList(growable: false);
+        var replayedThrough = cursor.lastSequence;
+        for (var offset = 0; offset < replay.length; offset += 25) {
+          final end = (offset + 25).clamp(0, replay.length).toInt();
+          final batch = replay.sublist(offset, end);
+          final acknowledged = await uploadEvents(batch);
+          if (acknowledged.length != batch.length ||
+              batch.any((event) => !acknowledged.contains(event.id))) {
+            throw StateError(
+              'Hub synchronization conflict: the server did not acknowledge '
+              'the complete immutable replay batch.',
+            );
+          }
+          replayedThrough = batch.last.sequence;
+        }
+        if (pending.any((event) => event.sequence > replayedThrough)) {
+          throw StateError(
+            'Hub synchronization conflict: pending events remain beyond the '
+            'reconciled cloud cursor.',
+          );
+        }
+        AppLogger.info(
+          'Venue hub cloud cursor reconciled through event $replayedThrough.',
+        );
+        return pending.map((event) => event.id).toSet();
+      }
+
+      _sync = VenueHubCloudSync(
+        ledger: _ledger,
+        upload: (events) async {
+          late Set<String> acknowledged;
+          try {
+            acknowledged = await uploadEvents(events);
+          } on StateError catch (error) {
+            if (!error.toString().contains(
+              'The hub event chain has a gap or conflict.',
+            )) {
+              rethrow;
+            }
+            AppLogger.info(
+              'Venue hub cloud cursor is behind or conflicted; validating '
+              'and replaying the immutable local suffix.',
+            );
+            acknowledged = await repairCloudCursorAndUpload(events);
+          }
           return VenueHubCloudUploadResult(acknowledgedEventIds: acknowledged);
         },
       );

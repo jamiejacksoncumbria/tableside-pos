@@ -3441,6 +3441,23 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
             current.data().sequence !== event.sequence) {
           throw new HttpsError("data-loss", "An event ID conflicts with cloud history.");
         }
+        // Repair a lagging cursor only by walking the exact next immutable
+        // event in its verified hash chain. This can occur after an older
+        // deployment or staging reset retained event documents but lost the
+        // small cursor document. Older replays stay idempotent and cannot move
+        // the cursor backwards.
+        if (event.sequence > lastSequence) {
+          const expectedPrevious = lastSequence === 0
+            ? event.previousHash : lastEventHash;
+          if (event.sequence !== lastSequence + 1 ||
+              event.previousHash !== expectedPrevious) {
+            throw new HttpsError(
+              "failed-precondition", "The hub event chain has a gap or conflict.",
+            );
+          }
+          lastSequence = event.sequence;
+          lastEventHash = event.eventHash;
+        }
         accepted.push(event.id);
         continue;
       }
@@ -3788,6 +3805,29 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
     );
   }
   return {acknowledgedEventIds, serverTimeMillis: Date.now()};
+}
+
+/// Reads the server-owned cursor for the currently enrolled hub generation.
+/// The signed request exposes no business data and cannot mutate the chain.
+/// It is used only to choose the immutable local suffix that needs replaying.
+async function getOfflineHubSyncCursorFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(
+    caller, rawData, "/v1/cloud-sync-cursor",
+  );
+  const state = await db.doc(
+    `tenants/${upload.tenantId}/offlineHubSyncState/${upload.venueId}`,
+  ).get();
+  const value = state.data() ?? {};
+  if (value.hubEpoch !== upload.hubEpoch) {
+    return {hubEpoch: upload.hubEpoch, lastSequence: 0, lastEventHash: ""};
+  }
+  const lastSequence = Number(value.lastSequence ?? 0);
+  const lastEventHash = String(value.lastEventHash ?? "");
+  if (!Number.isSafeInteger(lastSequence) || lastSequence < 0 ||
+      (lastSequence > 0 && lastEventHash.length === 0)) {
+    throw new HttpsError("data-loss", "The cloud hub event cursor is invalid.");
+  }
+  return {hubEpoch: upload.hubEpoch, lastSequence, lastEventHash};
 }
 
 function verifiedClosedHubProjection(raw, upload, currencyCode) {
@@ -12278,6 +12318,7 @@ async function invokePosAction(action, caller, data) {
     "claimDevicePrintJob", "completeDevicePrintJob",
     "issueRealtimePrinterSession",
     "getTrustedTime", "getOfflineHubBootstrap", "ingestOfflineHubEvents",
+    "getOfflineHubSyncCursor",
     "reconcileOfflineHubClosedOrders",
     "getOfflineHubSnapshot", "claimRemoteHubCommands",
     "issueRealtimeHubSession",
@@ -12315,6 +12356,8 @@ async function invokePosAction(action, caller, data) {
       return getOfflineHubBootstrapFor(caller, data);
     case "ingestOfflineHubEvents":
       return ingestOfflineHubEventsFor(caller, data);
+    case "getOfflineHubSyncCursor":
+      return getOfflineHubSyncCursorFor(caller, data);
     case "reconcileOfflineHubClosedOrders":
       return reconcileOfflineHubClosedOrdersFor(caller, data);
     case "getOfflineHubSnapshot":
