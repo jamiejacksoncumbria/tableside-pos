@@ -26,6 +26,7 @@ import '../features/reports/reports_page.dart';
 import '../features/settings/settings_page.dart';
 import '../features/training/training_mode_page.dart';
 import '../offline/venue_hub_client_cache.dart';
+import '../offline/venue_hub_runtime.dart';
 
 enum HomeSection {
   pos,
@@ -357,6 +358,7 @@ class HomeShell extends ConsumerWidget {
                 if (Firebase.apps.isNotEmpty)
                   const OperationalNotificationHost(),
                 if (Firebase.apps.isNotEmpty) const PushNotificationHost(),
+                const _VenueHubSynchronizationNotificationHost(),
               ],
             ),
           ),
@@ -433,6 +435,63 @@ class HomeShell extends ConsumerWidget {
                 )
               : const PlatformAdminPage(),
       };
+}
+
+/// Promotes a durable hub/cloud conflict into the manager-visible notification
+/// tray. The warning remains until synchronization recovers or a staff member
+/// deliberately dismisses it; routine temporary connectivity failures do not
+/// create a permanent alarm.
+class _VenueHubSynchronizationNotificationHost
+    extends ConsumerStatefulWidget {
+  const _VenueHubSynchronizationNotificationHost();
+
+  @override
+  ConsumerState<_VenueHubSynchronizationNotificationHost> createState() =>
+      _VenueHubSynchronizationNotificationHostState();
+}
+
+class _VenueHubSynchronizationNotificationHostState
+    extends ConsumerState<_VenueHubSynchronizationNotificationHost> {
+  static const _notificationKey = 'venue-hub-cloud-sync-conflict';
+  StreamSubscription<VenueHubRuntimeStatus>? _subscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _handle(VenueHubRuntime.instance.status);
+    _subscription = VenueHubRuntime.instance.statuses.listen(_handle);
+  }
+
+  void _handle(VenueHubRuntimeStatus status) {
+    if (!mounted) return;
+    final message = status.message ?? '';
+    final requiresAdministrator = message.contains(
+      'Contact the system administrator',
+    );
+    final controller = ref.read(appNotificationsProvider.notifier);
+    if (!requiresAdministrator) {
+      controller.resolve(_notificationKey);
+      return;
+    }
+    controller.add(
+      title: 'Venue hub data needs administrator attention',
+      message:
+          '${status.pendingEvents} cloud event(s) are pending. $message',
+      level: AppNotificationLevel.error,
+      retentionSeconds: 60,
+      deduplicationKey: _notificationKey,
+      requiresAttention: true,
+    );
+  }
+
+  @override
+  void dispose() {
+    _subscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
 }
 
 class _CloudFeatureUnavailable extends StatelessWidget {

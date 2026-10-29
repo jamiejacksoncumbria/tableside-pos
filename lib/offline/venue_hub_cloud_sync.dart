@@ -16,6 +16,9 @@ class VenueHubCloudUploadResult {
 
 typedef VenueHubCloudUploader =
     Future<VenueHubCloudUploadResult> Function(List<OfflineEvent> events);
+typedef VenueHubCloudSyncFailureCallback =
+    void Function(Object error, int consecutiveFailures);
+typedef VenueHubCloudSyncRecoveredCallback = void Function();
 
 /// Uploads the durable outbox in sequence order. Network and server outages
 /// leave events pending. Only an explicit permanent rejection quarantines an
@@ -27,6 +30,8 @@ class VenueHubCloudSync {
     this.batchSize = 25,
     this.retryDelay = const Duration(seconds: 10),
     this.maximumRetryDelay = const Duration(minutes: 5),
+    this.onFailure,
+    this.onRecovered,
   }) : _upload = upload,
        _ledger = ledger ?? OfflineEventLedger.instance;
 
@@ -35,6 +40,8 @@ class VenueHubCloudSync {
   final int batchSize;
   final Duration retryDelay;
   final Duration maximumRetryDelay;
+  final VenueHubCloudSyncFailureCallback? onFailure;
+  final VenueHubCloudSyncRecoveredCallback? onRecovered;
   Timer? _retryTimer;
   bool _flushing = false;
   bool _flushRequested = false;
@@ -69,6 +76,7 @@ class VenueHubCloudSync {
             await _ledger.markPending(event.id);
           }
           _consecutiveFailures++;
+          onFailure?.call(error, _consecutiveFailures);
           if (_consecutiveFailures == 1) {
             if (error.toString().contains('synchronization conflict')) {
               AppLogger.error(
@@ -94,6 +102,7 @@ class VenueHubCloudSync {
             'Venue hub cloud connection restored; synchronising pending events.',
           );
           _consecutiveFailures = 0;
+          onRecovered?.call();
         }
         final now = DateTime.now().toUtc();
         for (final event in pending) {

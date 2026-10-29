@@ -78,6 +78,7 @@ class VenueHubRuntime {
   );
   VenueScope? _activeScope;
   VenueHubBootstrap? _activeBootstrap;
+  String? _cloudSynchronizationIssue;
 
   VenueHubRuntimeStatus get status => _status;
   Stream<VenueHubRuntimeStatus> get statuses => _statuses.stream;
@@ -153,6 +154,7 @@ class VenueHubRuntime {
         _status.state != VenueHubRuntimeState.failed) {
       throw StateError('The venue hub is already starting or running.');
     }
+    _cloudSynchronizationIssue = null;
     _emit(
       const VenueHubRuntimeStatus(
         state: VenueHubRuntimeState.starting,
@@ -650,9 +652,49 @@ class VenueHubRuntime {
               'Venue hub cloud cursor is behind or conflicted; validating '
               'and replaying the immutable local suffix.',
             );
-            acknowledged = await repairCloudCursorAndUpload(events);
+            try {
+              acknowledged = await repairCloudCursorAndUpload(events);
+            } on Object catch (repairError) {
+              throw StateError(
+                'Hub synchronization conflict: automatic repair could not '
+                'complete. Contact the system administrator. Pending events '
+                'remain stored on this hub and must not be cleared. '
+                'Cause: $repairError',
+              );
+            }
           }
           return VenueHubCloudUploadResult(acknowledgedEventIds: acknowledged);
+        },
+        onFailure: (error, _) {
+          final requiresAdministrator = error.toString().contains(
+            'Hub synchronization conflict',
+          );
+          _cloudSynchronizationIssue = requiresAdministrator
+              ? 'Cloud synchronization conflict. Contact the system '
+                    'administrator now. Pending sales and operational events '
+                    'remain safely stored on this hub but are not yet backed '
+                    'up to the cloud. Do not clear app data, replace this hub, '
+                    'or disable offline routing until the issue is resolved.'
+              : 'Cloud synchronization is temporarily unavailable. Pending '
+                    'events remain safely stored on this hub.';
+          _emit(
+            VenueHubRuntimeStatus(
+              state: VenueHubRuntimeState.degraded,
+              pendingEvents: _status.pendingEvents,
+              endpoint: endpoint,
+              message: _cloudSynchronizationIssue,
+            ),
+          );
+        },
+        onRecovered: () {
+          _cloudSynchronizationIssue = null;
+          _emit(
+            VenueHubRuntimeStatus(
+              state: VenueHubRuntimeState.ready,
+              pendingEvents: _status.pendingEvents,
+              endpoint: endpoint,
+            ),
+          );
         },
       );
       var reconcilingClosedOrders = false;
@@ -1084,9 +1126,12 @@ class VenueHubRuntime {
         (events) {
           _emit(
             VenueHubRuntimeStatus(
-              state: VenueHubRuntimeState.ready,
+              state: _cloudSynchronizationIssue == null
+                  ? VenueHubRuntimeState.ready
+                  : VenueHubRuntimeState.degraded,
               pendingEvents: events.length,
               endpoint: endpoint,
+              message: _cloudSynchronizationIssue,
             ),
           );
           if (events.isNotEmpty) unawaited(_sync!.flush());
@@ -1315,6 +1360,7 @@ class VenueHubRuntime {
     _pendingSubscription = null;
     _sync?.dispose();
     _sync = null;
+    _cloudSynchronizationIssue = null;
     await _printQueue?.dispose();
     _printQueue = null;
     _installFreshSnapshot = null;

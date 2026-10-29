@@ -78,14 +78,20 @@ void main() {
         _draft('line-power-loss'),
         hubEpoch: 1,
       );
+      Object? reportedFailure;
       final offlineSync = VenueHubCloudSync(
         ledger: ledger,
         retryDelay: const Duration(hours: 1),
         maximumRetryDelay: const Duration(hours: 1),
         upload: (_) async => throw StateError('Cloud connection unavailable.'),
+        onFailure: (error, consecutiveFailures) {
+          reportedFailure = error;
+          expect(consecutiveFailures, 1);
+        },
       );
       await offlineSync.flush();
       offlineSync.dispose();
+      expect(reportedFailure, isA<StateError>());
 
       final pendingAfterFailure = await ledger.pending();
       expect(pendingAfterFailure, hasLength(1));
@@ -96,6 +102,7 @@ void main() {
       );
 
       var recoveredUploads = 0;
+      var recoveryReported = false;
       final restartedSync = VenueHubCloudSync(
         ledger: ledger,
         upload: (events) async {
@@ -105,12 +112,16 @@ void main() {
             acknowledgedEventIds: <String>{committed.id},
           );
         },
+        onRecovered: () => recoveryReported = true,
       );
       addTearDown(restartedSync.dispose);
 
       expect(await restartedSync.flush(), 1);
       expect(recoveredUploads, 1);
       expect(await ledger.pending(), isEmpty);
+      // A new sync instance starts healthy, so there is no prior failure for
+      // it to report as recovered.
+      expect(recoveryReported, isFalse);
     },
   );
 

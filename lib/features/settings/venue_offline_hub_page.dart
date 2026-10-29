@@ -634,6 +634,41 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                   const SizedBox(height: 12),
                   Text('State: ${runtime.state.name}'),
                   Text('Pending cloud events: ${runtime.pendingEvents}'),
+                  if (runtime.message != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.errorContainer,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.report_problem_rounded,
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              runtime.message!,
+                              style: TextStyle(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onErrorContainer,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   if (runtime.endpoint != null)
                     SelectableText('Local endpoint: ${runtime.endpoint}'),
                 ],
