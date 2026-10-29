@@ -3479,6 +3479,20 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
     }
     const dirtyOrderIds = new Set();
     const newEventIds = [];
+    if (projectionRecovery) {
+      console.info("Offline projection recovery batch", {
+        hubEpoch: upload.hubEpoch,
+        cloudCursorBefore: lastSequence,
+        firstSequence: events[0]?.sequence ?? null,
+        lastSequence: events.at(-1)?.sequence ?? null,
+        eventTypes: events.map((event) => `${event.sequence}:${event.type}`),
+        baselineContext: [...recoveryBaselines.values()].map((baseline) => ({
+          orderId: baseline.payload.orderId,
+          sequence: baseline.sequence,
+          eventId: baseline.id,
+        })),
+      });
+    }
     for (let index = 0; index < events.length; index += 1) {
       const event = events[index];
       const current = existing[index];
@@ -3523,6 +3537,18 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
           const beginRecovery = currentCloudOrder == null &&
             (event.type === "order.opened" || recoveryBaseline != null);
           const continueRecovery = recoveryActive && event.sequence > recoveredThrough;
+          console.info("Offline projection recovery event decision", {
+            sequence: event.sequence,
+            eventType: event.type,
+            orderId,
+            immutableEventAlreadyStored: true,
+            cloudOrderExists: currentCloudOrder != null,
+            recoveryActive,
+            recoveredThrough,
+            recoveryBaselineSequence: recoveryBaseline?.sequence ?? null,
+            beginRecovery,
+            continueRecovery,
+          });
           if (beginRecovery || continueRecovery) {
             try {
               // A replacement hub's signed baseline can be later in the global
@@ -3636,22 +3662,52 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
       } else {
         const orderId = event.payload.orderId;
         const currentCloudOrder = orderState.get(orderId);
+        const recoveryBaseline = projectionRecovery
+          ? recoveryBaselines.get(orderId) ?? null : null;
+        const recoveryWasActive = currentCloudOrder != null &&
+          currentCloudOrder.offlineProjectionRecoveryEpoch === upload.hubEpoch;
+        const seededFromBaseline = currentCloudOrder == null && recoveryBaseline != null;
+        const projectionCurrent = seededFromBaseline
+          ? cloudOrderFromRecoveryBaseline(recoveryBaseline, upload.venueId)
+          : currentCloudOrder;
+        if (projectionRecovery) {
+          console.info("Offline projection recovery event decision", {
+            sequence: event.sequence,
+            eventType: event.type,
+            orderId,
+            immutableEventAlreadyStored: false,
+            cloudOrderExists: currentCloudOrder != null,
+            recoveryWasActive,
+            recoveryBaselineSequence: recoveryBaseline?.sequence ?? null,
+            seededFromBaseline,
+          });
+        }
         try {
           if (event.type === "order.splitCreated") {
             const splitOrderId = event.payload.splitOrderId;
             const split = applyOfflineSplitEvent(
-              currentCloudOrder, event, upload.venueId,
+              projectionCurrent, event, upload.venueId,
               orderState.get(splitOrderId),
             );
-            orderState.set(orderId, split.parent);
+            orderState.set(orderId,
+              seededFromBaseline || recoveryWasActive ? {
+                ...split.parent,
+                offlineProjectionRecoveryEpoch: upload.hubEpoch,
+                offlineProjectionRecoveredThroughSequence: event.sequence,
+              } : split.parent);
             orderState.set(splitOrderId, split.child);
             dirtyOrderIds.add(splitOrderId);
           } else {
             const projected = applyOfflineEventToCloudOrder(
-              currentCloudOrder, event, upload.venueId,
-              recoveryBaselines.get(orderId),
+              projectionCurrent, event, upload.venueId,
+              recoveryBaseline,
             );
-            orderState.set(orderId, projected);
+            orderState.set(orderId,
+              seededFromBaseline || recoveryWasActive ? {
+                ...projected,
+                offlineProjectionRecoveryEpoch: upload.hubEpoch,
+                offlineProjectionRecoveredThroughSequence: event.sequence,
+              } : projected);
             if (projected.status === "closed" &&
                 typeof event.payload.splitFromOrderId === "string") {
               const parentId = event.payload.splitFromOrderId;
@@ -3741,9 +3797,15 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
             }
           }
           if (error instanceof HttpsError) {
+            const recoveryDiagnostic = projectionRecovery
+              ? ` [recovery cloudOrder=${currentCloudOrder == null ? "missing" : "present"}, ` +
+                `baselineSequence=${recoveryBaseline?.sequence ?? "none"}, ` +
+                `seeded=${seededFromBaseline}]`
+              : "";
             throw new HttpsError(
               error.code,
-              `Offline event ${event.sequence} (${event.type}) was rejected: ${error.message}`,
+              `Offline event ${event.sequence} (${event.type}) was rejected: ` +
+                `${error.message}${recoveryDiagnostic}`,
             );
           }
           throw error;

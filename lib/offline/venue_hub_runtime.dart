@@ -612,6 +612,13 @@ class VenueHubRuntime {
           );
         }
 
+        AppLogger.info(
+          'Hub sync diagnostic: epoch=${bootstrap.hubEpoch}, '
+          'cloudCursor=${cursor.lastSequence}, localEvents=${local.length}, '
+          'localRange=${local.first.sequence}-${local.last.sequence}, '
+          'pendingEvents=${pending.length}.',
+        );
+
         // Re-send the complete verified chain in explicit projection-recovery
         // mode. A cursor suffix is insufficient when immutable event records
         // survived but a materialized order document did not: the server must
@@ -627,6 +634,10 @@ class VenueHubRuntime {
             baselinesByOrder[orderId] = event;
           }
         }
+        AppLogger.info(
+          'Hub sync diagnostic: recovery baselines=${baselinesByOrder.length} '
+          '${baselinesByOrder.entries.map((entry) => '${entry.value.sequence}:${entry.key}').join(', ')}.',
+        );
         var replayedThrough = cursor.lastSequence;
         for (var offset = 0; offset < replay.length; offset += 25) {
           final end = (offset + 25).clamp(0, replay.length).toInt();
@@ -639,11 +650,41 @@ class VenueHubRuntime {
               .map((orderId) => baselinesByOrder[orderId])
               .whereType<OfflineEvent>()
               .toList(growable: false);
-          final acknowledged = await uploadEvents(
-            batch,
-            projectionRecovery: true,
-            recoveryBaselines: recoveryBaselines,
+          final batchSummary = batch
+              .map(
+                (event) =>
+                    '${event.sequence}:${event.type}:'
+                    '${event.payload['orderId'] ?? '-'}',
+              )
+              .join(', ');
+          final baselineSummary = recoveryBaselines
+              .map(
+                (event) =>
+                    '${event.sequence}:${event.payload['orderId'] ?? '-'}',
+              )
+              .join(', ');
+          AppLogger.info(
+            'Hub sync diagnostic: uploading recovery batch '
+            '${batch.first.sequence}-${batch.last.sequence}; '
+            'events=[$batchSummary]; baselines=[$baselineSummary].',
           );
+          late Set<String> acknowledged;
+          try {
+            acknowledged = await uploadEvents(
+              batch,
+              projectionRecovery: true,
+              recoveryBaselines: recoveryBaselines,
+            );
+          } catch (error, stackTrace) {
+            AppLogger.error(
+              'Hub sync diagnostic: recovery batch '
+              '${batch.first.sequence}-${batch.last.sequence} failed; '
+              'events=[$batchSummary]; baselines=[$baselineSummary].',
+              error,
+              stackTrace,
+            );
+            rethrow;
+          }
           if (acknowledged.length != batch.length ||
               batch.any((event) => !acknowledged.contains(event.id))) {
             throw StateError(
@@ -652,6 +693,10 @@ class VenueHubRuntime {
             );
           }
           replayedThrough = batch.last.sequence;
+          AppLogger.info(
+            'Hub sync diagnostic: recovery batch acknowledged through '
+            '$replayedThrough (${acknowledged.length}/${batch.length}).',
+          );
         }
         if (pending.any((event) => event.sequence > replayedThrough)) {
           throw StateError(

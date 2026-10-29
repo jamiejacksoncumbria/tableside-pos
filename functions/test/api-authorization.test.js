@@ -355,37 +355,14 @@ describe("venue hub cloud reconciliation", () => {
     );
     events.push(baseline);
 
-    await environment.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(
-        context.firestore(),
-        "tenants/tenant-a/orders/order-late-baseline",
-      ), {
-        venueId: "venue-a",
-        tableId: "table-a",
-        tabName: null,
-        channel: "dineIn",
-        status: "open",
-        lines: [],
-        payments: [],
-        deliveryFeeMinor: 0,
-        openedAt: new Date(createdAt),
-        offlineHubEpoch: 6,
-      });
-    });
-    for (let offset = 0; offset < events.length; offset += 25) {
-      const batch = events.slice(offset, offset + 25);
-      const upload = await callPos(
-        "ingestOfflineHubEvents",
-        signedHubUpload(batch, `legacy-original-${offset}`),
-      );
-      assert.equal(upload.status, 200, JSON.stringify(upload.body));
-    }
-    await environment.withSecurityRulesDisabled(async (context) => {
-      await deleteDoc(doc(
-        context.firestore(),
-        "tenants/tenant-a/orders/order-late-baseline",
-      ));
-    });
+    // Match the field failure exactly: cloud history/cursor ends at 25 while
+    // the durable hub has pending order events 26-27. Event 26 therefore has
+    // neither an existing immutable event document nor an order projection.
+    const prefixUpload = await callPos(
+      "ingestOfflineHubEvents",
+      signedHubUpload(events.slice(0, 25), "legacy-original-prefix"),
+    );
+    assert.equal(prefixUpload.status, 200, JSON.stringify(prefixUpload.body));
 
     for (let offset = 0; offset < events.length; offset += 25) {
       const batch = events.slice(offset, offset + 25);
