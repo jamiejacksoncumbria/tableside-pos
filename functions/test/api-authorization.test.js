@@ -481,6 +481,93 @@ describe("venue hub cloud reconciliation", () => {
     });
   });
 
+  test("rebuilds a stale closed projection from its immutable open event", async () => {
+    const createdAt = new Date().toISOString();
+    const events = [];
+    let previousHash = "";
+    for (let sequence = 1; sequence <= 27; sequence += 1) {
+      const eventHash = `closed-recovery-hash-${sequence}`;
+      let type = "security.pinAttempt";
+      let payload = {successful: true};
+      if (sequence === 20) {
+        type = "order.opened";
+        payload = {
+          orderId: "order-closed-recovery",
+          channel: "dineIn",
+          tableId: "table-a",
+        };
+      } else if (sequence === 21 || sequence === 26) {
+        type = "order.itemsAdded";
+        payload = {
+          orderId: "order-closed-recovery",
+          items: [{
+            lineId: `line-closed-${sequence}`,
+            productId: "menu-curry",
+            productName: "House Curry",
+            quantity: 1,
+            unitPriceMinor: 1500,
+            taxRateBasisPoints: 2000,
+            currencyCode: "GBP",
+            productionArea: "kitchen",
+            showOnOrderFlow: true,
+          }],
+        };
+      } else if (sequence === 22 || sequence === 27) {
+        type = "order.sent";
+        payload = {
+          orderId: "order-closed-recovery",
+          lineIds: [sequence === 22 ? "line-closed-21" : "line-closed-26"],
+        };
+      }
+      events.push(hubEvent(
+        sequence,
+        `closed-recovery-event-${sequence}`,
+        previousHash,
+        eventHash,
+        type,
+        payload,
+        createdAt,
+      ));
+      previousHash = eventHash;
+    }
+
+    const prefixUpload = await callPos(
+      "ingestOfflineHubEvents",
+      signedHubUpload(events.slice(0, 25), "closed-recovery-prefix"),
+    );
+    assert.equal(prefixUpload.status, 200, JSON.stringify(prefixUpload.body));
+    await environment.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/orders/order-closed-recovery",
+      ), {
+        status: "closed",
+        offlineHubEpoch: hubEpoch,
+      }, {merge: true});
+    });
+
+    for (let offset = 0; offset < events.length; offset += 25) {
+      const recovery = await callPos(
+        "ingestOfflineHubEvents",
+        signedHubRequest(
+          {events: events.slice(offset, offset + 25), projectionRecovery: true},
+          `closed-recovery-${offset}`,
+          "/v1/cloud-sync",
+        ),
+      );
+      assert.equal(recovery.status, 200, JSON.stringify(recovery.body));
+    }
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const order = await getDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/orders/order-closed-recovery",
+      ));
+      assert.equal(order.data().status, "sent");
+      assert.equal(order.data().lines.length, 2);
+      assert.equal(order.data().offlineProjectionRecoveredThroughSequence, 27);
+    });
+  });
+
   test("projects a signed sale exactly once into orders, bills, stock and production", async () => {
     const createdAt = new Date().toISOString();
     const events = [

@@ -3534,8 +3534,19 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
             ? Number(currentCloudOrder.offlineProjectionRecoveredThroughSequence ?? 0)
             : 0;
           const recoveryBaseline = recoveryBaselines.get(orderId) ?? null;
-          const beginRecovery = currentCloudOrder == null &&
-            (event.type === "order.opened" || recoveryBaseline != null);
+          // A legacy/interrupted upload can leave a fully materialised closed
+          // order while its immutable ledger cursor still stops before later
+          // events from the same hub epoch. In explicit, signed recovery mode
+          // the immutable order.opened event is the only safe place to restart
+          // that projection. Never restart a different venue or an order from
+          // a newer hub epoch.
+          const restartClosedProjection = event.type === "order.opened" &&
+            currentCloudOrder != null && currentCloudOrder.status === "closed" &&
+            currentCloudOrder.venueId === upload.venueId &&
+            Number(currentCloudOrder.offlineHubEpoch ?? 0) <= upload.hubEpoch;
+          const beginRecovery = (currentCloudOrder == null &&
+            (event.type === "order.opened" || recoveryBaseline != null)) ||
+            restartClosedProjection;
           const continueRecovery = recoveryActive && event.sequence > recoveredThrough;
           console.info("Offline projection recovery event decision", {
             sequence: event.sequence,
@@ -3546,6 +3557,12 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
             recoveryActive,
             recoveredThrough,
             recoveryBaselineSequence: recoveryBaseline?.sequence ?? null,
+            currentOrderStatus: currentCloudOrder?.status ?? null,
+            currentOrderVenueMatches:
+              currentCloudOrder?.venueId === upload.venueId,
+            currentOrderHubEpoch:
+              Number(currentCloudOrder?.offlineHubEpoch ?? 0),
+            restartClosedProjection,
             beginRecovery,
             continueRecovery,
           });
@@ -3556,9 +3573,11 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
               // missing projection from that request-signed context, then
               // replay immutable events in sequence. Duplicate line/payment
               // IDs are handled idempotently by the normal projector.
-              const recoveryCurrent = currentCloudOrder == null && recoveryBaseline != null
-                ? cloudOrderFromRecoveryBaseline(recoveryBaseline, upload.venueId)
-                : currentCloudOrder;
+              const recoveryCurrent = restartClosedProjection
+                ? null
+                : currentCloudOrder == null && recoveryBaseline != null
+                  ? cloudOrderFromRecoveryBaseline(recoveryBaseline, upload.venueId)
+                  : currentCloudOrder;
               if (event.type === "order.splitCreated") {
                 const splitOrderId = event.payload.splitOrderId;
                 const split = applyOfflineSplitEvent(
@@ -3679,6 +3698,11 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
             cloudOrderExists: currentCloudOrder != null,
             recoveryWasActive,
             recoveryBaselineSequence: recoveryBaseline?.sequence ?? null,
+            currentOrderStatus: currentCloudOrder?.status ?? null,
+            currentOrderVenueMatches:
+              currentCloudOrder?.venueId === upload.venueId,
+            currentOrderHubEpoch:
+              Number(currentCloudOrder?.offlineHubEpoch ?? 0),
             seededFromBaseline,
           });
         }
@@ -3799,6 +3823,9 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
           if (error instanceof HttpsError) {
             const recoveryDiagnostic = projectionRecovery
               ? ` [recovery cloudOrder=${currentCloudOrder == null ? "missing" : "present"}, ` +
+                `status=${currentCloudOrder?.status ?? "missing"}, ` +
+                `venueMatch=${currentCloudOrder?.venueId === upload.venueId}, ` +
+                `orderEpoch=${Number(currentCloudOrder?.offlineHubEpoch ?? 0)}, ` +
                 `baselineSequence=${recoveryBaseline?.sequence ?? "none"}, ` +
                 `seeded=${seededFromBaseline}]`
               : "";
