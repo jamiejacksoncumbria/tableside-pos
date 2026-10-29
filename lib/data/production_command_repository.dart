@@ -705,6 +705,15 @@ class ProductionCommandRepository {
       body: body,
     );
     final response = await _call('getOfflineHubSyncCursor', {
+      // Keep the ordinary venue scope alongside the signed envelope. Current
+      // servers authorize this bootstrap action directly from the hub
+      // credential; an older instance during a rolling Functions deployment
+      // may still classify it through the PIN-session boundary and therefore
+      // needs these fields to resolve the same venue after staff unlock.
+      // The server never trusts these values for the cursor itself: the
+      // Ed25519-signed envelope below remains authoritative.
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
       'envelope': envelope.toJson(),
       'body': body,
     });

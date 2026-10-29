@@ -375,7 +375,11 @@ describe("venue hub cloud reconciliation", () => {
     );
     const cursor = await callPos(
       "getOfflineHubSyncCursor",
-      signedHubRequest({}, "nonce-cursor", "/v1/cloud-sync-cursor"),
+      {
+        tenantId: "tenant-a",
+        venueId: "venue-a",
+        ...signedHubRequest({}, "nonce-cursor", "/v1/cloud-sync-cursor"),
+      },
     );
     assert.equal(cursor.status, 200, JSON.stringify(cursor.body));
     assert.equal(cursor.body.data.hubEpoch, hubEpoch);

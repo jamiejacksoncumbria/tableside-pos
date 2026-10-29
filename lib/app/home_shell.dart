@@ -441,8 +441,7 @@ class HomeShell extends ConsumerWidget {
 /// tray. The warning remains until synchronization recovers or a staff member
 /// deliberately dismisses it; routine temporary connectivity failures do not
 /// create a permanent alarm.
-class _VenueHubSynchronizationNotificationHost
-    extends ConsumerStatefulWidget {
+class _VenueHubSynchronizationNotificationHost extends ConsumerStatefulWidget {
   const _VenueHubSynchronizationNotificationHost();
 
   @override
@@ -458,8 +457,18 @@ class _VenueHubSynchronizationNotificationHostState
   @override
   void initState() {
     super.initState();
-    _handle(VenueHubRuntime.instance.status);
-    _subscription = VenueHubRuntime.instance.statuses.listen(_handle);
+    _scheduleHandle(VenueHubRuntime.instance.status);
+    _subscription = VenueHubRuntime.instance.statuses.listen(_scheduleHandle);
+  }
+
+  /// Riverpod deliberately rejects provider mutations while Flutter is
+  /// mounting or rebuilding the tree. Runtime status may already be degraded
+  /// when this host first appears after PIN entry, so always promote it after
+  /// the current frame rather than writing from [initState].
+  void _scheduleHandle(VenueHubRuntimeStatus status) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _handle(status);
+    });
   }
 
   void _handle(VenueHubRuntimeStatus status) {
@@ -475,8 +484,7 @@ class _VenueHubSynchronizationNotificationHostState
     }
     controller.add(
       title: 'Venue hub data needs administrator attention',
-      message:
-          '${status.pendingEvents} cloud event(s) are pending. $message',
+      message: '${status.pendingEvents} cloud event(s) are pending. $message',
       level: AppNotificationLevel.error,
       retentionSeconds: 60,
       deduplicationKey: _notificationKey,
