@@ -167,6 +167,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
         ) ??
         false;
     final canAssignDrivers = canReprint;
+    final venueUtcOffsetMinutes =
+        scope != null &&
+            !kIsWeb &&
+            VenueHubClientRegistry.instance.hasUsableSession(scope)
+        ? VenueHubOfflineView.instance.venueUtcOffsetMinutes
+        : DateTime.now().timeZoneOffset.inMinutes;
     final drivers = canAssignDrivers
         ? (ref.watch(fulfilmentStaffProvider).value ??
                   const <FulfilmentStaffMember>[])
@@ -372,6 +378,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                     now: TrustedClock.instance.nowUtc(),
                     amberMinutes: widget.amberMinutes,
                     redMinutes: widget.redMinutes,
+                    venueUtcOffsetMinutes: venueUtcOffsetMinutes,
                     onAction: (action) => _applyAction(order, action),
                     onReprint: canReprint ? () => _reprintOrder(order) : null,
                     onPrintDriverTicket:
@@ -424,6 +431,20 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
         ..addAll(activeIds);
     }
     final alertCandidates = initialObservation ? orders : newOrders;
+    if (alertCandidates.isNotEmpty) {
+      final now = TrustedClock.instance.nowUtc();
+      final clock = TrustedClock.instance.snapshot;
+      for (final order in alertCandidates) {
+        AppLogger.info(
+          'Order-flow clock: ticket=${order.id}, '
+          'nowUtc=${now.toIso8601String()}, '
+          'releasedUtc=${order.ticketReleasedAt.toUtc().toIso8601String()}, '
+          'elapsedSeconds=${orderFlowElapsed(now, order.ticketReleasedAt).inSeconds}, '
+          'authority=${clock.authority.name}, '
+          'clockSkewMs=${clock.offset.inMilliseconds}.',
+        );
+      }
+    }
     final newAllergyIds = alertCandidates
         .where((order) => order.hasAllergyAlert)
         .map((order) => order.id)
@@ -1105,6 +1126,7 @@ class _OrderFlowCard extends StatelessWidget {
     required this.now,
     required this.amberMinutes,
     required this.redMinutes,
+    required this.venueUtcOffsetMinutes,
     required this.onAction,
     this.onReprint,
     this.onPrintDriverTicket,
@@ -1120,6 +1142,7 @@ class _OrderFlowCard extends StatelessWidget {
   final DateTime now;
   final int amberMinutes;
   final int redMinutes;
+  final int venueUtcOffsetMinutes;
   final ValueChanged<_OrderFlowAction> onAction;
   final VoidCallback? onReprint;
   final VoidCallback? onPrintDriverTicket;
@@ -1251,7 +1274,7 @@ class _OrderFlowCard extends StatelessWidget {
                             ? Icons.delivery_dining_rounded
                             : Icons.shopping_bag_outlined,
                         text:
-                            '${order.channel.label} ${order.scheduledFor!.hour.toString().padLeft(2, '0')}:${order.scheduledFor!.minute.toString().padLeft(2, '0')}',
+                            '${order.channel.label} ${_formatVenueClock(order.scheduledFor!, venueUtcOffsetMinutes)}',
                         color: Colors.white,
                       ),
                     if (order.status == OrderFlowStatus.held)
@@ -1259,7 +1282,7 @@ class _OrderFlowCard extends StatelessWidget {
                         icon: Icons.schedule_rounded,
                         text: order.scheduledFor == null
                             ? 'Held — release when preparation should start'
-                            : 'Due ${order.scheduledFor!.hour.toString().padLeft(2, '0')}:${order.scheduledFor!.minute.toString().padLeft(2, '0')} · timer starts at the venue lead time',
+                            : 'Due ${_formatVenueClock(order.scheduledFor!, venueUtcOffsetMinutes)} · timer starts at the venue lead time',
                         color: Colors.white,
                       )
                     else
@@ -1473,8 +1496,14 @@ class _OrderFlowNotificationHostState
       if (previous != null &&
           previous != OrderFlowStatus.ready &&
           order.status == OrderFlowStatus.ready) {
+        // Fulfilment orders intentionally have no table. Use the customer or
+        // channel reference so a collection-ready alert is never described as
+        // an unassigned delivery.
         final location =
-            order.tableLabel ?? order.tabName ?? 'Unassigned order';
+            order.tableLabel ??
+            order.tabName ??
+            order.customerName ??
+            order.reference;
         showAppNotification(
           context,
           ref: ref,
@@ -1683,4 +1712,10 @@ String _formatElapsed(Duration value) {
   final minutes = value.inMinutes;
   if (minutes < 60) return '${minutes}m';
   return '${minutes ~/ 60}h ${minutes % 60}m';
+}
+
+String _formatVenueClock(DateTime value, int utcOffsetMinutes) {
+  final venueTime = value.toUtc().add(Duration(minutes: utcOffsetMinutes));
+  return '${venueTime.hour.toString().padLeft(2, '0')}:'
+      '${venueTime.minute.toString().padLeft(2, '0')}';
 }

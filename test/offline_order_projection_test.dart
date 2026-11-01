@@ -716,6 +716,44 @@ void main() {
     expect(projection.fulfilmentStatus, 'assigned');
   });
 
+  test('paying a collection marks its handover collected automatically', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {
+        'orderId': 'order-a',
+        'channel': 'collection',
+        'customerId': 'customer-a',
+        'customerName': 'Collection Customer',
+        'customerPhone': '+905551234567',
+      }),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 1000,
+      }),
+      _event(3, 'payment.batchRecorded', {
+        'orderId': 'order-a',
+        'batchId': 'batch-a',
+        'closeIfSettled': true,
+        'receiptNumber': 'R-1',
+        'payments': [
+          {
+            'paymentId': 'payment-a',
+            'baseAmountMinor': 1000,
+            'tenderedAmountMinor': 1000,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+          },
+        ],
+      }),
+    ]);
+
+    expect(projection.isClosed, isTrue);
+    expect(projection.fulfilmentStatus, 'collected');
+  });
+
   test(
     'legacy delivery orders remain replayable after service-area upgrade',
     () {

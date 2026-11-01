@@ -5005,6 +5005,12 @@ function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline
       next.closedOffline = true;
       next.receiptNumber = typeof payload.receiptNumber === "string"
         ? payload.receiptNumber : null;
+      // A paid collection has physically left the collection queue in the
+      // normal till workflow. Keep it visible in history but do not require a
+      // second screen/action merely to mark the same handover again.
+      if ((next.channel ?? "dineIn") === "collection") {
+        next.fulfilmentStatus = "collected";
+      }
     }
     return next;
   }
@@ -5023,6 +5029,9 @@ function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline
     next.closedOffline = true;
     next.receiptNumber = typeof payload.receiptNumber === "string"
       ? payload.receiptNumber : null;
+    if ((next.channel ?? "dineIn") === "collection") {
+      next.fulfilmentStatus = "collected";
+    }
     return next;
   }
   if (event.type === "order.cancelled") {
@@ -9455,6 +9464,13 @@ async function closeOrderFor(caller, rawData) {
     if (orderClosed) {
       transaction.update(orderRef, {
         status: "closed",
+        ...(orderData.channel === "collection"
+          ? {
+            fulfilmentStatus: "collected",
+            fulfilmentUpdatedAt: FieldValue.serverTimestamp(),
+            fulfilmentUpdatedByActor: actor,
+          }
+          : {}),
         payments: allPayments,
         paidMinor: paidTotalMinor,
         balanceDueMinor: 0,

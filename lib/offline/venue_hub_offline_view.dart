@@ -222,6 +222,13 @@ class VenueHubOfflineView {
   String get venueCountry =>
       _snapshot?['venueCountry'] as String? ?? 'Kuzey Kıbrıs Türk Cumhuriyeti';
 
+  /// Current venue wall-clock offset captured by the signed hub snapshot.
+  /// This is used only for display; event ordering and elapsed timers always
+  /// compare UTC instants and therefore remain independent of time zones.
+  int get venueUtcOffsetMinutes =>
+      (_snapshot?['venueUtcOffsetMinutes'] as num?)?.toInt() ??
+      DateTime.now().timeZoneOffset.inMinutes;
+
   Map<String, List<String>> get deliveryLocations {
     final raw = _snapshot?['deliveryLocations'];
     if (raw is! Map) return const <String, List<String>>{};

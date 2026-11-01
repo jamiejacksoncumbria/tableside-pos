@@ -857,6 +857,7 @@ class VenueHubRuntime {
       // connection without restarting the hub or re-opening its local ledger.
       final activeRealtimePresence = _realtimePresence ??=
           VenueHubRealtimePresence(repository: _repository);
+      late Future<void> Function() remoteTick;
       // The Windows offline bootstrap deliberately does not create a Firebase
       // app when the executable cannot reach Firebase. Starting the RTDB
       // presence client in that state can never succeed and previously caused
@@ -868,14 +869,29 @@ class VenueHubRuntime {
       if (oldConnectionListener != null) {
         activeRealtimePresence.connected.removeListener(oldConnectionListener);
       }
+      var wasRealtimeConnected = activeRealtimePresence.connected.value;
       void publishConnectionStatus() {
         if (_activeScope != scope) return;
+        final isConnected = activeRealtimePresence.connected.value;
         // The native HTTPS listener is authoritative and remains usable over
         // LAN without internet. RTDB connectivity determines only whether
         // remote/mobile-data terminals can reach this hub.
         VenueHubAvailability.markLanOnline(
-          internetAvailable: activeRealtimePresence.connected.value,
+          internetAvailable: isConnected,
         );
+        if (isConnected && !wasRealtimeConnected) {
+          // Realtime presence recovering is the earliest reliable indication
+          // that Firebase is reachable again. Wake the durable outbox here;
+          // waiting for a new local event or a process restart can otherwise
+          // leave already-saved sales pending indefinitely.
+          AppLogger.info(
+            'Venue hub internet restored; waking durable cloud synchronization.',
+          );
+          unawaited(_sync?.flush());
+          unawaited(reconcileClosedCloudOrders());
+          unawaited(remoteTick());
+        }
+        wasRealtimeConnected = isConnected;
       }
 
       _realtimeConnectedListener = publishConnectionStatus;
@@ -998,7 +1014,7 @@ class VenueHubRuntime {
         );
       }
 
-      Future<void> remoteTick() async {
+      remoteTick = () async {
         if (_activeScope != scope) return;
         if (remoteTickRunning) {
           // Coalesce wake signals without losing one that arrives while a
@@ -1131,7 +1147,7 @@ class VenueHubRuntime {
             unawaited(remoteTick());
           }
         }
-      }
+      };
 
       await _realtimeSignalSubscription?.cancel();
       // The stream controller survives a failed initial connection. Attaching

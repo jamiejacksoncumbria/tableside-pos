@@ -133,7 +133,7 @@ class HomeShell extends ConsumerWidget {
         const _Destination(
           HomeSection.fulfilment,
           Icons.delivery_dining_outlined,
-          'Delivery',
+          'Collect / deliver',
         ),
       if (canManageVenue && !trainingModeActive)
         const _Destination(

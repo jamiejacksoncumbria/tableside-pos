@@ -950,6 +950,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           closed = true;
           receiptNumber = event.payload['receiptNumber'] as String?;
           closedAtUtc = event.createdAtUtc;
+          if (channel == 'collection') fulfilmentStatus = 'collected';
         }
         break;
       case 'order.closed':
@@ -969,6 +970,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         closed = true;
         receiptNumber = event.payload['receiptNumber'] as String?;
         closedAtUtc = event.createdAtUtc;
+        if (channel == 'collection') fulfilmentStatus = 'collected';
         break;
       case 'order.cancelled':
         _requireOpened(opened);

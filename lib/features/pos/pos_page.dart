@@ -5684,16 +5684,12 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
           return StatefulBuilder(
             builder: (context, setPickerState) {
               final media = MediaQuery.of(context);
-              // AlertDialog already moves above the software keyboard, but a
-              // percentage of the original screen height does not shrink with
-              // it. Size from the unobscured height so medium tablets cannot
-              // overflow while the customer search field has focus.
+              // Use the actual unobscured viewport. AlertDialog's separately
+              // measured title/content/actions can still overflow on a short
+              // landscape tablet once the software keyboard is visible.
               final unobscuredHeight =
                   media.size.height - media.viewInsets.bottom;
-              final pickerHeight = (unobscuredHeight - 220).clamp(
-                120.0,
-                520.0,
-              );
+              final pickerHeight = (unobscuredHeight - 24).clamp(120.0, 620.0);
               final terms = query
                   .trim()
                   .toLowerCase()
@@ -5708,91 +5704,113 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                     return terms.every(searchable.contains);
                   })
                   .toList(growable: false);
-              return AlertDialog(
-                title: Text('Choose ${channel.label.toLowerCase()} customer'),
-                content: SizedBox(
+              return Dialog(
+                insetPadding: const EdgeInsets.all(12),
+                child: SizedBox(
                   width: 560,
                   height: pickerHeight,
-                  child: Column(
-                    children: [
-                      TextField(
-                        controller: search,
-                        autofocus: customers.isNotEmpty,
-                        decoration: InputDecoration(
-                          prefixIcon: const Icon(Icons.search),
-                          labelText: 'Search name, phone, email or address',
-                          suffixIcon: query.isEmpty
-                              ? null
-                              : IconButton(
-                                  tooltip: 'Clear search',
-                                  onPressed: () {
-                                    search.clear();
-                                    setPickerState(() => query = '');
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          'Choose ${channel.label.toLowerCase()} customer',
+                          style: Theme.of(context).textTheme.headlineSmall,
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: search,
+                          autofocus: customers.isNotEmpty,
+                          textInputAction: TextInputAction.search,
+                          decoration: InputDecoration(
+                            prefixIcon: const Icon(Icons.search),
+                            hintText: 'Name, phone, email or address',
+                            suffixIcon: query.isEmpty
+                                ? null
+                                : IconButton(
+                                    tooltip: 'Clear search',
+                                    onPressed: () {
+                                      search.clear();
+                                      setPickerState(() => query = '');
+                                    },
+                                    icon: const Icon(Icons.clear),
+                                  ),
+                          ),
+                          onChanged: (value) =>
+                              setPickerState(() => query = value),
+                        ),
+                        const SizedBox(height: 8),
+                        Expanded(
+                          child: filtered.isEmpty
+                              ? Center(
+                                  child: Text(
+                                    customers.isEmpty
+                                        ? 'No customers yet. Add the first customer below.'
+                                        : 'No customers match this search.',
+                                    textAlign: TextAlign.center,
+                                  ),
+                                )
+                              : ListView.builder(
+                                  keyboardDismissBehavior:
+                                      ScrollViewKeyboardDismissBehavior.onDrag,
+                                  itemCount: filtered.length,
+                                  itemBuilder: (context, index) {
+                                    final customer = filtered[index];
+                                    final address =
+                                        customer.addresses.firstOrNull;
+                                    return ListTile(
+                                      dense: true,
+                                      leading: const Icon(Icons.person_outline),
+                                      title: Text(customer.displayName),
+                                      subtitle: Text(
+                                        '${customer.phoneNumbers.join(' · ')}${address == null ? '' : '\n${address.area}, ${address.town}'}',
+                                      ),
+                                      isThreeLine: address != null,
+                                      trailing: IconButton(
+                                        tooltip:
+                                            'Edit customer or add address',
+                                        onPressed: () => Navigator.pop(
+                                          pickerContext,
+                                          _EditFulfilmentCustomer(customer),
+                                        ),
+                                        icon: const Icon(Icons.edit_outlined),
+                                      ),
+                                      onTap: () => Navigator.pop(
+                                        pickerContext,
+                                        customer,
+                                      ),
+                                    );
                                   },
-                                  icon: const Icon(Icons.clear),
                                 ),
                         ),
-                        onChanged: (value) =>
-                            setPickerState(() => query = value),
-                      ),
-                      const SizedBox(height: 8),
-                      Expanded(
-                        child: filtered.isEmpty
-                            ? Center(
-                                child: Text(
-                                  customers.isEmpty
-                                      ? 'No customers yet. Add the first customer below.'
-                                      : 'No customers match this search.',
-                                  textAlign: TextAlign.center,
-                                ),
-                              )
-                            : ListView.builder(
-                                itemCount: filtered.length,
-                                itemBuilder: (context, index) {
-                                  final customer = filtered[index];
-                                  final address =
-                                      customer.addresses.firstOrNull;
-                                  return ListTile(
-                                    leading: const Icon(Icons.person_outline),
-                                    title: Text(customer.displayName),
-                                    subtitle: Text(
-                                      '${customer.phoneNumbers.join(' · ')}${address == null ? '' : '\n${address.area}, ${address.town}'}',
-                                    ),
-                                    isThreeLine: address != null,
-                                    trailing: IconButton(
-                                      tooltip: 'Edit customer or add address',
-                                      onPressed: () => Navigator.pop(
-                                        pickerContext,
-                                        _EditFulfilmentCustomer(customer),
-                                      ),
-                                      icon: const Icon(Icons.edit_outlined),
-                                    ),
-                                    onTap: () =>
-                                        Navigator.pop(pickerContext, customer),
-                                  );
-                                },
+                        const SizedBox(height: 8),
+                        Wrap(
+                          alignment: WrapAlignment.end,
+                          spacing: 8,
+                          runSpacing: 6,
+                          children: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(pickerContext),
+                              child: const Text('Cancel'),
+                            ),
+                            FilledButton.icon(
+                              // Close this picker completely before opening
+                              // the editor; stacked routes caused semantics
+                              // races when a customer stream refreshed.
+                              onPressed: () => Navigator.pop(
+                                pickerContext,
+                                const _CreateFulfilmentCustomer(),
                               ),
-                      ),
-                    ],
+                              icon: const Icon(Icons.person_add_alt_1),
+                              label: const Text('New customer'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(pickerContext),
-                    child: const Text('Cancel'),
-                  ),
-                  FilledButton.icon(
-                    // Close this picker completely before opening the editor.
-                    // Stacking two dialogs was another route/semantics race on
-                    // touch devices when the customer stream refreshed.
-                    onPressed: () => Navigator.pop(
-                      pickerContext,
-                      const _CreateFulfilmentCustomer(),
-                    ),
-                    icon: const Icon(Icons.person_add_alt_1),
-                    label: const Text('New customer'),
-                  ),
-                ],
               );
             },
           );
