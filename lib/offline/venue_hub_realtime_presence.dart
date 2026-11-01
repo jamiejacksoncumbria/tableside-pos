@@ -87,6 +87,24 @@ class VenueHubRealtimePresence {
         databaseUrl: databaseUrl,
         apiKey: primary.options.apiKey,
         customToken: token,
+        renewCustomToken: () async {
+          final renewed = await _repository.issueRealtimeHubSession(
+            scope: scope,
+            deviceId: deviceId,
+            hubEpoch: hubEpoch,
+            credential: credential,
+          );
+          final renewedToken = renewed['customToken'];
+          final renewedUrl = renewed['databaseUrl'];
+          if (renewedToken is! String ||
+              renewedToken.isEmpty ||
+              renewedUrl != databaseUrl) {
+            throw StateError(
+              'The server returned an invalid renewed realtime hub session.',
+            );
+          }
+          return renewedToken;
+        },
       );
       _windowsSession = windowsSession;
       await windowsSession.authenticate();

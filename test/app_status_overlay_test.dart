@@ -11,21 +11,19 @@ void main() {
     () {
       final offsets = appStatusOverlayOffsets(
         topInset: 24,
-        showStaging: true,
         showHubIssue: true,
         showPending: true,
       );
 
-      expect(offsets.hubTop, 66);
-      expect(offsets.pendingTop, 124);
-      expect(offsets.updatesTop, 182);
+      expect(offsets.hubTop, 32);
+      expect(offsets.pendingTop, 90);
+      expect(offsets.updatesTop, 148);
     },
   );
 
   test('unused status rows do not reserve screen space', () {
     final offsets = appStatusOverlayOffsets(
       topInset: 0,
-      showStaging: false,
       showHubIssue: false,
       showPending: false,
     );
@@ -67,36 +65,43 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('compact hub status is centred away from app bar actions', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(360, 640);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    addTearDown(VenueHubAvailability.reset);
-    VenueHubAvailability.markOnline();
+  testWidgets(
+    'compact hub status uses a reserved strip below app bar actions',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(VenueHubAvailability.reset);
+      VenueHubAvailability.markOnline();
 
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          appThemeControllerProvider.overrideWith(_TestThemeController.new),
-        ],
-        child: const TableSideCYApp(),
-      ),
-    );
-    await tester.pump();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            appThemeControllerProvider.overrideWith(_TestThemeController.new),
+          ],
+          child: const TableSideCYApp(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      // The compact menu intentionally hides the complete shell. Selecting the
+      // Tables tab restores the app bar and its reserved connection strip.
+      await tester.tap(find.byType(Tab).first);
+      await tester.pumpAndSettle();
 
-    expect(find.text('Online'), findsOneWidget);
-    final positioned = tester.widget<Positioned>(
-      find
-          .ancestor(of: find.text('Online'), matching: find.byType(Positioned))
-          .first,
-    );
-    expect(positioned.left, 0);
-    expect(positioned.right, 0);
-    expect(tester.takeException(), isNull);
-  });
+      final statusLabel = find.text('Hub + internet online');
+      expect(statusLabel, findsOneWidget);
+      expect(
+        find.ancestor(of: statusLabel, matching: find.byType(Positioned)),
+        findsNothing,
+      );
+      final strip = tester.widget<SizedBox>(
+        find.ancestor(of: statusLabel, matching: find.byType(SizedBox)).first,
+      );
+      expect(strip.height, 18);
+      expect(tester.takeException(), isNull);
+    },
+  );
 }
 
 class _TestThemeController extends AppThemeController {

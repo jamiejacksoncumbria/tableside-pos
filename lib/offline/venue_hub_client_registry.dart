@@ -348,6 +348,28 @@ class VenueHubClientRegistry {
     _bootstrap = bootstrap;
   }
 
+  /// Applies a freshly completed device enrolment without requiring an app
+  /// restart. This deliberately installs no staff LAN session—the employee's
+  /// PIN is never retained—but it immediately authorises the protected remote
+  /// command path while the next PIN entry can establish a LAN session.
+  void rememberEnrolledDevice({
+    required VenueScope scope,
+    required VenueHubBootstrap bootstrap,
+    required String deviceId,
+    required String credentialId,
+  }) {
+    if (_scope != null && _scope != scope) clear();
+    _scope = scope;
+    _bootstrap = bootstrap;
+    _deviceEnrolled =
+        bootstrap.credentials[credentialId]?.deviceId == deviceId;
+    _isLocalHubHost =
+        bootstrap.hubDeviceId == deviceId &&
+        bootstrap.hubCredentialId == credentialId;
+    _connectionFailure = null;
+    VenueHubAvailability.reset();
+  }
+
   void clear() {
     _clearSession(preserveAuthority: false);
   }

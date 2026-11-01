@@ -254,6 +254,25 @@ class PosCompactTabController extends Notifier<int> {
   void select(int index) => state = index.clamp(0, 2);
 }
 
+/// Device-local quick search shared by the POS shell and menu panel.
+///
+/// The field is rendered in the current-order header, but filtering remains
+/// inside the menu. Keeping only the text in Riverpod lets those two widgets
+/// stay synchronized without persisting a transient search to Firebase.
+final posMenuSearchQueryProvider =
+    NotifierProvider<PosMenuSearchQueryController, String>(
+      PosMenuSearchQueryController.new,
+    );
+
+class PosMenuSearchQueryController extends Notifier<String> {
+  @override
+  String build() => '';
+
+  void update(String value) => state = value;
+
+  void clear() => state = '';
+}
+
 final activeOrderProvider = NotifierProvider<ActiveOrderController, PosOrder>(
   ActiveOrderController.new,
 );

@@ -130,6 +130,22 @@ class VenueHubRealtimeClient {
           databaseUrl: databaseUrl,
           apiKey: primary.options.apiKey,
           customToken: token,
+          renewCustomToken: () async {
+            final renewed = await repository.issueRealtimePosSession(
+              scope: scope,
+            );
+            final renewedToken = renewed['customToken'];
+            if (renewedToken is! String ||
+                renewedToken.isEmpty ||
+                renewed['databaseUrl'] != databaseUrl ||
+                renewed['hubDeviceId'] != deviceId ||
+                renewed['hubEpoch'] != hubEpoch) {
+              throw StateError(
+                'The server returned an invalid renewed realtime POS session.',
+              );
+            }
+            return renewedToken;
+          },
         );
         _windowsSession = windowsSession;
         await windowsSession.authenticate();

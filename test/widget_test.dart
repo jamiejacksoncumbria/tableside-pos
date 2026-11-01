@@ -63,6 +63,26 @@ void main() {
     expect(find.text('Tables & tabs'), findsOneWidget);
   });
 
+  testWidgets('phone table actions stack collection above delivery', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(_testApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(Tab).first);
+    await tester.pumpAndSettle();
+
+    final collection = tester.getCenter(find.text('Collection').first);
+    final delivery = tester.getCenter(find.text('Delivery').first);
+    expect(collection.dx, closeTo(delivery.dx, 1));
+    expect(collection.dy, lessThan(delivery.dy));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('POS menu remains bounded in a short web-style viewport', (
     tester,
   ) async {

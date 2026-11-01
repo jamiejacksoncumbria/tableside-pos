@@ -70,4 +70,94 @@ void main() {
     expect(selection?.itemNote, 'No onions');
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('configured item closes only after a successful add', (
+    tester,
+  ) async {
+    ProductConfigurationSelection? selection;
+    var addCalls = 0;
+    const product = MenuProduct(
+      id: 'product-success',
+      name: 'Configured Product',
+      priceMinor: 1200,
+      sectionIds: <String>['section-a'],
+      productionArea: ProductionArea.kitchen,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () async {
+                selection = await showProductConfigurationSheet(
+                  context: context,
+                  product: product,
+                  availableGroups: const <MenuModifierGroup>[],
+                  availableProducts: const <MenuProduct>[product],
+                  currencyCode: 'GBP',
+                  onAdd: (_) async {
+                    addCalls += 1;
+                  },
+                );
+              },
+              child: const Text('Configure'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Configure'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add to order'));
+    await tester.pumpAndSettle();
+
+    expect(addCalls, 1);
+    expect(selection, isNotNull);
+    expect(find.text('Configured Product'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('configured item remains open when the add fails', (
+    tester,
+  ) async {
+    const product = MenuProduct(
+      id: 'product-failure',
+      name: 'Configured Product',
+      priceMinor: 1200,
+      sectionIds: <String>['section-a'],
+      productionArea: ProductionArea.kitchen,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () => showProductConfigurationSheet(
+                context: context,
+                product: product,
+                availableGroups: const <MenuModifierGroup>[],
+                availableProducts: const <MenuProduct>[product],
+                currencyCode: 'GBP',
+                onAdd: (_) async => throw StateError('network unavailable'),
+              ),
+              child: const Text('Configure'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Configure'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add to order'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Configured Product'), findsOneWidget);
+    expect(find.textContaining('network unavailable'), findsOneWidget);
+    expect(find.text('Add to order'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }

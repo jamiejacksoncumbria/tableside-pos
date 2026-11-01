@@ -23,11 +23,10 @@ import 'home_shell.dart';
 ({double hubTop, double pendingTop, double updatesTop})
 appStatusOverlayOffsets({
   required double topInset,
-  required bool showStaging,
   required bool showHubIssue,
   required bool showPending,
 }) {
-  final firstTop = topInset + (showStaging ? 42 : 8);
+  final firstTop = topInset + 8;
   final hubHeight = showHubIssue ? 58.0 : 0.0;
   final pendingHeight = showPending ? 58.0 : 0.0;
   return (
@@ -64,274 +63,138 @@ class TableSideCYApp extends ConsumerWidget {
         valueListenable: RemoteHubWaitState.pending,
         builder: (context, pending, _) => ValueListenableBuilder<String?>(
           valueListenable: VenueHubAvailability.issue,
-          builder: (context, hubIssue, _) =>
-              ValueListenableBuilder<VenueHubConnectionStatus>(
-                valueListenable: VenueHubAvailability.status,
-                builder: (context, hubStatus, _) => ValueListenableBuilder<int>(
-                  valueListenable: AppBusyState.pending,
-                  builder: (context, busy, _) {
-                    final showStaging =
-                        FirebaseRuntimeConfig.enabled &&
-                        AppEnvironment.isStaging;
-                    final topInset = MediaQuery.paddingOf(context).top;
-                    final compactStatus =
-                        MediaQuery.sizeOf(context).width < 600;
-                    final overlayOffsets = appStatusOverlayOffsets(
-                      topInset: topInset,
-                      showStaging: showStaging,
-                      showHubIssue: hubIssue != null,
-                      showPending: pending > 0,
-                    );
-                    return _HubOfflineDialogHost(
-                      issue: hubIssue,
-                      child: Stack(
-                        children: [
-                          ?child,
-                          if (showStaging)
-                            Positioned(
-                              top: topInset + 4,
-                              left: 12,
-                              child: IgnorePointer(
-                                child: Material(
-                                  elevation: 12,
-                                  color: const Color(0xffff9800),
-                                  borderRadius: BorderRadius.circular(7),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 10,
-                                      vertical: 5,
-                                    ),
-                                    child: Text(
-                                      compactStatus
-                                          ? 'STAGING'
-                                          : 'STAGING · TEST DATA ONLY',
-                                      style: const TextStyle(
-                                        color: Colors.black,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w900,
-                                        letterSpacing: 0.6,
-                                      ),
-                                    ),
+          builder: (context, hubIssue, _) => ValueListenableBuilder<int>(
+            valueListenable: AppBusyState.pending,
+            builder: (context, busy, _) {
+              final topInset = MediaQuery.paddingOf(context).top;
+              final overlayOffsets = appStatusOverlayOffsets(
+                topInset: topInset,
+                showHubIssue: hubIssue != null,
+                showPending: pending > 0,
+              );
+              return _HubOfflineDialogHost(
+                issue: hubIssue,
+                child: Stack(
+                  children: [
+                    ?child,
+                    if (pending > 0)
+                      Positioned(
+                        top: overlayOffsets.pendingTop,
+                        left: 16,
+                        right: 16,
+                        child: Material(
+                          elevation: 8,
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.tertiaryContainer,
+                          borderRadius: BorderRadius.circular(12),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 12,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const SizedBox.square(
+                                  dimension: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.5,
                                   ),
                                 ),
-                              ),
-                            ),
-                          if (hubStatus.connectivity !=
-                              VenueHubConnectivity.unknown)
-                            Positioned(
-                              top: topInset + 4,
-                              left: 0,
-                              right: 0,
-                              child: Align(
-                                alignment: Alignment.topCenter,
-                                child: _HubStatusBadge(
-                                  status: hubStatus,
-                                  compact: compactStatus,
-                                ),
-                              ),
-                            ),
-                          if (pending > 0)
-                            Positioned(
-                              top: overlayOffsets.pendingTop,
-                              left: 16,
-                              right: 16,
-                              child: Material(
-                                elevation: 8,
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.tertiaryContainer,
-                                borderRadius: BorderRadius.circular(12),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 16,
-                                    vertical: 12,
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const SizedBox.square(
-                                        dimension: 20,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2.5,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Expanded(
-                                        child: Text(
-                                          pending == 1
-                                              ? 'Waiting for venue hub…'
-                                              : 'Waiting for venue hub… ($pending commands)',
-                                          style: Theme.of(
-                                            context,
-                                          ).textTheme.titleSmall,
-                                        ),
-                                      ),
-                                    ],
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Text(
+                                    pending == 1
+                                        ? 'Waiting for venue hub…'
+                                        : 'Waiting for venue hub… ($pending commands)',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleSmall,
                                   ),
                                 ),
-                              ),
+                              ],
                             ),
-                          if (hubIssue != null)
-                            Positioned(
-                              top: overlayOffsets.hubTop,
-                              left: 16,
-                              right: 16,
-                              child: Material(
-                                elevation: 10,
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.errorContainer,
-                                borderRadius: BorderRadius.circular(12),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 14,
-                                    vertical: 10,
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      const Icon(Icons.hub_outlined),
-                                      const SizedBox(width: 10),
-                                      Expanded(
-                                        child: Text(
-                                          'HUB UNAVAILABLE · LAN devices should join the venue Wi-Fi; remote devices need the hub internet heartbeat.',
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .labelLarge
-                                              ?.copyWith(
-                                                fontWeight: FontWeight.w900,
-                                              ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ShorebirdUpdateHost(top: overlayOffsets.updatesTop),
-                          if (busy > 0) ...[
-                            const Positioned.fill(
-                              child: ModalBarrier(
-                                dismissible: false,
-                                color: Color(0x66000000),
-                              ),
-                            ),
-                            Positioned.fill(
-                              child: Center(
-                                child: Card(
-                                  elevation: 12,
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 24,
-                                      vertical: 20,
-                                    ),
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const CircularProgressIndicator(),
-                                        const SizedBox(height: 14),
-                                        Text(
-                                          'Please wait…',
-                                          style: Theme.of(
-                                            context,
-                                          ).textTheme.titleSmall,
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ],
+                          ),
+                        ),
                       ),
-                    );
-                  },
+                    if (hubIssue != null)
+                      Positioned(
+                        top: overlayOffsets.hubTop,
+                        left: 16,
+                        right: 16,
+                        child: Material(
+                          elevation: 10,
+                          color: Theme.of(context).colorScheme.errorContainer,
+                          borderRadius: BorderRadius.circular(12),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                              vertical: 10,
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.hub_outlined),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'HUB UNAVAILABLE · LAN devices should join the venue Wi-Fi; remote devices need the hub internet heartbeat.',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelLarge
+                                        ?.copyWith(fontWeight: FontWeight.w900),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ShorebirdUpdateHost(top: overlayOffsets.updatesTop),
+                    if (busy > 0) ...[
+                      const Positioned.fill(
+                        child: ModalBarrier(
+                          dismissible: false,
+                          color: Color(0x66000000),
+                        ),
+                      ),
+                      Positioned.fill(
+                        child: Center(
+                          child: Card(
+                            elevation: 12,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 24,
+                                vertical: 20,
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const CircularProgressIndicator(),
+                                  const SizedBox(height: 14),
+                                  Text(
+                                    'Please wait…',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleSmall,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-              ),
+              );
+            },
+          ),
         ),
       ),
       home: FirebaseRuntimeConfig.enabled
           ? const _FirebaseBootstrapGate()
           : const HomeShell(),
-    );
-  }
-}
-
-class _HubStatusBadge extends StatelessWidget {
-  const _HubStatusBadge({required this.status, required this.compact});
-
-  final VenueHubConnectionStatus status;
-  final bool compact;
-
-  @override
-  Widget build(BuildContext context) {
-    final (color, foreground, icon) = switch (status.connectivity) {
-      VenueHubConnectivity.online => (
-        const Color(0xff2e7d32),
-        Colors.white,
-        Icons.cloud_done_rounded,
-      ),
-      VenueHubConnectivity.lanOnly => (
-        const Color(0xfff9a825),
-        Colors.black,
-        Icons.wifi_rounded,
-      ),
-      VenueHubConnectivity.unavailable => (
-        Theme.of(context).colorScheme.error,
-        Theme.of(context).colorScheme.onError,
-        Icons.cloud_off_rounded,
-      ),
-      VenueHubConnectivity.checking => (
-        Theme.of(context).colorScheme.surfaceContainerHighest,
-        Theme.of(context).colorScheme.onSurfaceVariant,
-        Icons.sync_rounded,
-      ),
-      VenueHubConnectivity.unknown => (
-        Colors.transparent,
-        Colors.transparent,
-        Icons.help_outline_rounded,
-      ),
-    };
-    final label = compact
-        ? switch (status.connectivity) {
-            VenueHubConnectivity.online => 'Online',
-            VenueHubConnectivity.lanOnly => 'LAN only',
-            VenueHubConnectivity.unavailable => 'Offline',
-            VenueHubConnectivity.checking => 'Checking',
-            VenueHubConnectivity.unknown => '',
-          }
-        : status.shortLabel;
-    return IgnorePointer(
-      child: Material(
-        elevation: 10,
-        color: color,
-        borderRadius: BorderRadius.circular(20),
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 230),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 16, color: foreground),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: foreground,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

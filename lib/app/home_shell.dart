@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/safe_dialog.dart';
+import '../core/app_environment.dart';
 import '../core/app_logger.dart';
 import '../core/app_theme_controller.dart';
+import '../core/firebase_runtime_config.dart';
 import '../core/tenant_scope.dart';
 import '../core/training_mode.dart';
 import '../data/production_command_repository.dart';
@@ -20,12 +22,14 @@ import '../features/notifications/push_notification_host.dart';
 import '../features/pos/domain.dart';
 import '../features/pos/pos_controller.dart';
 import '../features/pos/pos_page.dart';
+import '../features/pos/pos_quick_search_field.dart';
 import '../features/platform_admin/platform_admin_page.dart';
 import '../features/printing/print_delivery_monitor.dart';
 import '../features/reports/reports_page.dart';
 import '../features/settings/settings_page.dart';
 import '../features/training/training_mode_page.dart';
 import '../offline/venue_hub_client_cache.dart';
+import '../offline/venue_hub_availability.dart';
 import '../offline/venue_hub_runtime.dart';
 
 enum HomeSection {
@@ -287,10 +291,7 @@ class HomeShell extends ConsumerWidget {
                   ),
                 const SizedBox(width: 8),
               ],
-              bottom: const PreferredSize(
-                preferredSize: Size.fromHeight(42),
-                child: _CurrentOrderLocationIndicator(),
-              ),
+              bottom: const _HomeAppBarBottom(),
             ),
       body: Row(
         children: [
@@ -375,6 +376,9 @@ class HomeShell extends ConsumerWidget {
                 const _BottomNotificationTray(),
                 if (!wide)
                   NavigationBar(
+                    height: 60,
+                    labelBehavior:
+                        NavigationDestinationLabelBehavior.alwaysHide,
                     selectedIndex: compactIndex < 0 ? 0 : compactIndex,
                     onDestinationSelected: (selected) => ref
                         .read(homeSectionProvider.notifier)
@@ -673,12 +677,151 @@ class _VenueLogo extends StatelessWidget {
 /// Keeps the currently selected service location unmistakable on every screen.
 /// A venue deliberately starts with no table selected to prevent accidental
 /// orders being attached to the first table in the list.
+class _HomeAppBarBottom extends StatelessWidget implements PreferredSizeWidget {
+  const _HomeAppBarBottom();
+
+  @override
+  Size get preferredSize => const Size.fromHeight(64);
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: const [
+      _VenueHubStatusStrip(),
+      SizedBox(height: 46, child: _CurrentOrderLocationIndicator()),
+    ],
+  );
+}
+
+/// A reserved, full-width connection line beneath the app-bar actions. Unlike
+/// the former floating badge, this strip participates in layout and therefore
+/// can never cover venue, notification or POS controls.
+class _VenueHubStatusStrip extends StatelessWidget {
+  const _VenueHubStatusStrip();
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: VenueHubAvailability.status,
+    builder: (context, status, _) {
+      final (background, foreground, icon) = switch (status.connectivity) {
+        VenueHubConnectivity.online => (
+          const Color(0xff2e7d32),
+          Colors.white,
+          Icons.cloud_done_rounded,
+        ),
+        VenueHubConnectivity.lanOnly => (
+          const Color(0xfff9a825),
+          Colors.black,
+          Icons.wifi_rounded,
+        ),
+        VenueHubConnectivity.unavailable => (
+          Theme.of(context).colorScheme.error,
+          Theme.of(context).colorScheme.onError,
+          Icons.cloud_off_rounded,
+        ),
+        VenueHubConnectivity.checking => (
+          Theme.of(context).colorScheme.surfaceContainerHighest,
+          Theme.of(context).colorScheme.onSurfaceVariant,
+          Icons.sync_rounded,
+        ),
+        VenueHubConnectivity.unknown => (
+          Theme.of(context).colorScheme.surfaceContainerLow,
+          Theme.of(context).colorScheme.onSurfaceVariant,
+          Icons.hub_outlined,
+        ),
+      };
+      final label = status.connectivity == VenueHubConnectivity.unknown
+          ? 'Hub status unavailable'
+          : status.shortLabel;
+      final showStaging =
+          FirebaseRuntimeConfig.enabled && AppEnvironment.isStaging;
+      return Semantics(
+        liveRegion: true,
+        label: label,
+        child: SizedBox(
+          height: 18,
+          child: Row(
+            children: [
+              if (showStaging)
+                const Expanded(
+                  child: _StatusStripSegment(
+                    background: Color(0xffff9800),
+                    foreground: Colors.black,
+                    icon: Icons.science_outlined,
+                    label: 'STAGING · TEST DATA ONLY',
+                  ),
+                ),
+              Expanded(
+                child: _StatusStripSegment(
+                  background: background,
+                  foreground: foreground,
+                  icon: icon,
+                  label: label,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+class _StatusStripSegment extends StatelessWidget {
+  const _StatusStripSegment({
+    required this.background,
+    required this.foreground,
+    required this.icon,
+    required this.label,
+  });
+
+  final Color background;
+  final Color foreground;
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => ColoredBox(
+    color: background,
+    child: Center(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: foreground),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: foreground,
+                fontSize: 10,
+                height: 1,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 class _CurrentOrderLocationIndicator extends ConsumerWidget {
   const _CurrentOrderLocationIndicator();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final order = ref.watch(activeOrderProvider);
+    final homeSection = ref.watch(homeSectionProvider);
+    final compactPosTab = ref.watch(posCompactTabProvider);
+    final mediaSize = MediaQuery.sizeOf(context);
+    final posUsesThreePanels =
+        mediaSize.width >= 1200 && mediaSize.height >= 780;
+    final showMenuSearch =
+        homeSection == HomeSection.pos &&
+        (posUsesThreePanels || compactPosTab == 1);
     final tabName = order.tabName?.trim();
     final tableId = order.tableId;
     final scheme = Theme.of(context).colorScheme;
@@ -707,22 +850,39 @@ class _CurrentOrderLocationIndicator extends ConsumerWidget {
       child: Container(
         width: double.infinity,
         color: scheme.surfaceContainerLow,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Row(
-          children: [
-            Icon(icon, size: 18, color: scheme.primary),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(
-                  context,
-                ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+        child: LayoutBuilder(
+          builder: (context, constraints) => Row(
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    Icon(icon, size: 18, color: scheme.primary),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+              if (showMenuSearch)
+                SizedBox(
+                  width: (constraints.maxWidth * .42)
+                      .clamp(260.0, 480.0)
+                      .toDouble(),
+                  height: 36,
+                  child: const PosQuickSearchField(),
+                ),
+              if (showMenuSearch) const Spacer(),
+            ],
+          ),
         ),
       ),
     );

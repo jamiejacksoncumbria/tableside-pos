@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../core/app_logger.dart';
+
 /// Windows-only transport for TableSide's ephemeral Firebase Realtime Database
 /// control plane.
 ///
@@ -19,17 +21,22 @@ class WindowsRealtimeRestSession {
     required this.databaseUrl,
     required this.apiKey,
     required this.customToken,
+    this.renewCustomToken,
     http.Client? client,
-  }) : _client = client ?? http.Client();
+  }) : _customToken = customToken,
+       _client = client ?? http.Client();
 
   final String databaseUrl;
   final String apiKey;
   final String customToken;
+  final Future<String> Function()? renewCustomToken;
   final http.Client _client;
 
+  String _customToken;
   String? _idToken;
   String? _refreshToken;
   DateTime _expiresAt = DateTime.fromMillisecondsSinceEpoch(0);
+  Future<void>? _credentialRenewal;
   bool _closed = false;
 
   static const serverTimestamp = <String, String>{'.sv': 'timestamp'};
@@ -44,7 +51,7 @@ class WindowsRealtimeRestSession {
     final response = await _client.post(
       uri,
       headers: const {'Content-Type': 'application/json'},
-      body: jsonEncode({'token': customToken, 'returnSecureToken': true}),
+      body: jsonEncode({'token': _customToken, 'returnSecureToken': true}),
     );
     final body = _decodedObject(response.body);
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -94,6 +101,19 @@ class WindowsRealtimeRestSession {
             if (cancelled || _closed) return;
             if (line.isEmpty) {
               if (data.isNotEmpty) {
+                // Firebase sends auth_revoked/cancel reasons as plain text,
+                // not JSON. Detect them before decoding the normal put/patch
+                // envelope so an expired scoped session can be renewed.
+                if (eventName == 'auth_revoked') {
+                  throw RealtimeCredentialRevokedException(
+                    data.toString().trim(),
+                  );
+                }
+                if (eventName == 'cancel') {
+                  throw StateError(
+                    'Realtime listener was cancelled: ${data.toString().trim()}',
+                  );
+                }
                 final envelope = jsonDecode(data.toString());
                 if (envelope is Map &&
                     (eventName == 'put' || eventName == 'patch')) {
@@ -105,9 +125,6 @@ class WindowsRealtimeRestSession {
                   if (!controller.isClosed) {
                     controller.add(state is _UnsetRealtimeValue ? null : state);
                   }
-                } else if (eventName == 'cancel' ||
-                    eventName == 'auth_revoked') {
-                  throw StateError('Realtime session was revoked by Firebase.');
                 }
               }
               eventName = null;
@@ -123,12 +140,26 @@ class WindowsRealtimeRestSession {
           }
         } on Object catch (error, stackTrace) {
           if (cancelled || _closed) return;
+          var reportedError = error;
+          var reportedStackTrace = stackTrace;
+          if (error is RealtimeCredentialRevokedException &&
+              renewCustomToken != null) {
+            try {
+              await _renewCredential();
+              errorReported = false;
+              retry = const Duration(milliseconds: 250);
+              continue;
+            } on Object catch (renewalError, renewalStackTrace) {
+              reportedError = renewalError;
+              reportedStackTrace = renewalStackTrace;
+            }
+          }
           // One notification per outage is enough for diagnostics. The SSE
           // loop continues reconnecting with backoff, but repeating the same
           // socket exception every few seconds hid useful operational logs.
           if (!errorReported && !controller.isClosed) {
             errorReported = true;
-            controller.addError(error, stackTrace);
+            controller.addError(reportedError, reportedStackTrace);
           }
         }
         if (cancelled || _closed) return;
@@ -151,15 +182,31 @@ class WindowsRealtimeRestSession {
   }
 
   Future<void> _write(String method, String path, Object? value) async {
-    final token = await _validIdToken();
-    final request = http.Request(method, _databaseUri(path, token))
-      ..headers['Content-Type'] = 'application/json'
-      ..body = jsonEncode(value);
-    final response = await _client.send(request);
+    var token = await _validIdToken();
+    var response = await _sendWrite(method, path, value, token);
+    if ((response.statusCode == 401 || response.statusCode == 403) &&
+        renewCustomToken != null) {
+      await response.stream.drain<void>();
+      await _renewCredential();
+      token = await _validIdToken();
+      response = await _sendWrite(method, path, value, token);
+    }
     final body = await response.stream.bytesToString();
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError('Realtime write failed (${response.statusCode}): $body');
     }
+  }
+
+  Future<http.StreamedResponse> _sendWrite(
+    String method,
+    String path,
+    Object? value,
+    String token,
+  ) {
+    final request = http.Request(method, _databaseUri(path, token))
+      ..headers['Content-Type'] = 'application/json'
+      ..body = jsonEncode(value);
+    return _client.send(request);
   }
 
   Future<String> _validIdToken() async {
@@ -183,12 +230,45 @@ class WindowsRealtimeRestSession {
     );
     final body = _decodedObject(response.body);
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (renewCustomToken != null) {
+        await _renewCredential();
+        return _idToken!;
+      }
       throw StateError(
         _firebaseError(body, 'Could not refresh realtime session.'),
       );
     }
     _acceptTokenResponse(body);
     return _idToken!;
+  }
+
+  Future<void> _renewCredential() async {
+    final existing = _credentialRenewal;
+    if (existing != null) return existing;
+    final provider = renewCustomToken;
+    if (provider == null) {
+      throw StateError('The realtime credential cannot be renewed.');
+    }
+    final renewal = () async {
+      final token = await provider();
+      if (token.trim().isEmpty) {
+        throw StateError('The server returned an empty realtime credential.');
+      }
+      _customToken = token;
+      _idToken = null;
+      _refreshToken = null;
+      _expiresAt = DateTime.fromMillisecondsSinceEpoch(0);
+      await authenticate();
+      AppLogger.info(
+        'Windows realtime scoped credential renewed successfully.',
+      );
+    }();
+    _credentialRenewal = renewal;
+    try {
+      await renewal;
+    } finally {
+      if (identical(_credentialRenewal, renewal)) _credentialRenewal = null;
+    }
   }
 
   void _acceptTokenResponse(Map<String, Object?> body) {
@@ -236,6 +316,18 @@ class WindowsRealtimeRestSession {
     }
     return fallback;
   }
+}
+
+/// Firebase SSE uses this event when an otherwise valid socket credential has
+/// expired or been revoked. Callers with a scoped token provider can recover
+/// without weakening RTDB rules or falling back to an unrestricted identity.
+class RealtimeCredentialRevokedException implements Exception {
+  const RealtimeCredentialRevokedException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'Realtime credential revoked: $message';
 }
 
 class _UnsetRealtimeValue {

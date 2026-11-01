@@ -142,6 +142,12 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       deviceId: deviceId,
       credential: credential,
     );
+    VenueHubClientRegistry.instance.rememberEnrolledDevice(
+      scope: widget.scope,
+      bootstrap: bootstrap,
+      deviceId: deviceId,
+      credentialId: credential.credentialId,
+    );
     if (mounted) {
       setState(() {
         _bootstrap = bootstrap;

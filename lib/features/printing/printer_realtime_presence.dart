@@ -62,6 +62,22 @@ class PrinterRealtimePresence {
         databaseUrl: databaseUrl,
         apiKey: primary.options.apiKey,
         customToken: token,
+        renewCustomToken: () async {
+          final renewed = await _repository.issueRealtimePrinterSession(
+            scope: scope,
+            deviceId: deviceId,
+            deviceCredential: deviceCredential,
+          );
+          final renewedToken = renewed['customToken'];
+          if (renewedToken is! String ||
+              renewedToken.isEmpty ||
+              renewed['databaseUrl'] != databaseUrl) {
+            throw StateError(
+              'The server returned an invalid renewed printer session.',
+            );
+          }
+          return renewedToken;
+        },
       );
       _windowsSession = windowsSession;
       await windowsSession.authenticate();
