@@ -85,10 +85,27 @@ function Find-CommandPath([string]$Name, [string[]]$Fallbacks = @()) {
 }
 
 function Flutter {
+    param(
+        [Parameter(ValueFromRemainingArguments)]
+        [string[]]$Arguments
+    )
     $flutter = Find-CommandPath 'flutter' @(
         'C:\Users\User\Tools\flutter\bin\flutter.bat'
     )
-    & $flutter @args
+    # Calling flutter.bat from an already-running PowerShell script can enter
+    # a high-CPU cmd.exe loop with newer Flutter launchers. Invoke the cached
+    # Flutter tool snapshot directly; this is the same final command used by
+    # flutter.bat after its environment/bootstrap checks.
+    $flutterRoot = Split-Path -Parent (Split-Path -Parent $flutter)
+    $dart = Join-Path $flutterRoot 'bin\cache\dart-sdk\bin\dart.exe'
+    $toolPackages = Join-Path $flutterRoot 'packages\flutter_tools\.dart_tool\package_config.json'
+    $toolSnapshot = Join-Path $flutterRoot 'bin\cache\flutter_tools.snapshot'
+    if (-not (Test-Path -LiteralPath $dart -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $toolPackages -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $toolSnapshot -PathType Leaf)) {
+        throw 'The Flutter SDK cache is incomplete. Run flutter doctor once from a terminal.'
+    }
+    & $dart "--packages=$toolPackages" $toolSnapshot @Arguments
     if ($LASTEXITCODE -ne 0) { throw "Flutter command failed ($LASTEXITCODE)." }
 }
 
@@ -184,7 +201,17 @@ function Invoke-Tests {
 
 function Prepare-Build {
     Write-Host "Environment: $($script:EnvironmentName.ToUpperInvariant()) | Firebase project: $ProjectId" -ForegroundColor Yellow
-    Flutter pub get
+    $packageConfig = Join-Path $script:RepoRoot '.dart_tool\package_config.json'
+    if (-not (Test-Path -LiteralPath $packageConfig -PathType Leaf)) {
+        Write-Host 'Flutter package metadata is missing; resolving dependencies once.' -ForegroundColor Yellow
+        Flutter pub get
+    } else {
+        # Build commands below use --no-pub. Re-running pub get on every menu
+        # build can block on a package/network check even when pubspec files
+        # have not changed, making a healthy Gradle build appear frozen. Use
+        # the explicit Dependencies menu action after changing pubspec.yaml.
+        Write-Host 'Using resolved Flutter dependencies (run Dependencies after pubspec changes).' -ForegroundColor DarkGray
+    }
     if (-not $SkipTests) { Invoke-Tests }
 }
 
@@ -267,19 +294,33 @@ function Assert-AndroidReleaseSigning {
     }
 }
 
-function Invoke-AndroidBuild([string]$Target) {
-    Assert-AndroidReleaseSigning
+function Invoke-AndroidBuild(
+    [string]$Target,
+    [ValidateSet('debug', 'release')]
+    [string]$BuildMode = 'release'
+) {
+    if ($BuildMode -eq 'release') {
+        Assert-AndroidReleaseSigning
+    }
     Invoke-WithAndroidNativeFirebaseConfig {
-        Flutter build $Target --release $script:FirebaseBuildArgument
+        Write-Host 'Compiling Flutter and Android native assets; the first build can take several minutes.' -ForegroundColor DarkGray
+        # Prepare-Build already ran pub get. Avoid resolving packages twice and
+        # keep this phase focused on producing the requested Android artifact.
+        Flutter build $Target "--$BuildMode" --no-pub $script:FirebaseBuildArgument
     }
 }
 
 function Build-Apk {
-    Write-Heading 'Android APK (release)'
-    Assert-AndroidReleaseSigning
+    # Staging APKs are local test artifacts and must not require the protected
+    # production upload-key passwords. Production APKs remain release-signed;
+    # App Bundles and Shorebird baselines are unchanged and always require the
+    # configured private upload key.
+    $buildMode = if ($script:EnvironmentName -eq 'staging') { 'debug' } else { 'release' }
+    Write-Heading "Android APK ($buildMode)"
+    if ($buildMode -eq 'release') { Assert-AndroidReleaseSigning }
     Prepare-Build
-    Invoke-AndroidBuild 'apk'
-    Write-Host "APK: $script:RepoRoot\build\app\outputs\flutter-apk\app-release.apk" -ForegroundColor Green
+    Invoke-AndroidBuild -Target 'apk' -BuildMode $buildMode
+    Write-Host "APK: $script:RepoRoot\build\app\outputs\flutter-apk\app-$buildMode.apk" -ForegroundColor Green
 }
 
 function Build-AppBundle {
@@ -293,14 +334,14 @@ function Build-AppBundle {
 function Build-Windows {
     Write-Heading 'Windows application (release)'
     Prepare-Build
-    Flutter build windows --release $script:FirebaseBuildArgument
+    Flutter build windows --release --no-pub $script:FirebaseBuildArgument
     Write-Host "Windows build: $script:RepoRoot\build\windows\x64\runner\Release" -ForegroundColor Green
 }
 
 function Build-Web {
     Write-Heading 'Web application (release)'
     Prepare-Build
-    Flutter build web --release $script:FirebaseBuildArgument
+    Flutter build web --release --no-pub $script:FirebaseBuildArgument
     Write-Host "Web build: $script:RepoRoot\build\web" -ForegroundColor Green
 }
 
@@ -311,9 +352,9 @@ function Build-All {
     Write-Heading 'Android APK (release)'
     Invoke-AndroidBuild 'apk'
     Write-Heading 'Windows application (release)'
-    Flutter build windows --release $script:FirebaseBuildArgument
+    Flutter build windows --release --no-pub $script:FirebaseBuildArgument
     Write-Heading 'Web application (release)'
-    Flutter build web --release $script:FirebaseBuildArgument
+    Flutter build web --release --no-pub $script:FirebaseBuildArgument
     Write-Host 'APK, Windows, and web release builds completed.' -ForegroundColor Green
 }
 
