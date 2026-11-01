@@ -3583,6 +3583,7 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
                 const split = applyOfflineSplitEvent(
                   recoveryCurrent, event, upload.venueId,
                   orderState.get(splitOrderId),
+                  recoveryActive || restartClosedProjection,
                 );
                 orderState.set(orderId, {
                   ...split.parent,
@@ -3605,6 +3606,23 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
                   offlineProjectionRecoveryEpoch: upload.hubEpoch,
                   offlineProjectionRecoveredThroughSequence: event.sequence,
                 });
+                if (projected.status === "closed" &&
+                    typeof event.payload.splitFromOrderId === "string") {
+                  const parentId = event.payload.splitFromOrderId;
+                  const parent = orderState.get(parentId);
+                  if (parent == null || parent.venueId !== upload.venueId) {
+                    throw new HttpsError(
+                      "failed-precondition", "The split bill parent is unavailable.",
+                    );
+                  }
+                  orderState.set(parentId, {
+                    ...parent,
+                    openSplitOrderIds: (Array.isArray(parent.openSplitOrderIds)
+                      ? parent.openSplitOrderIds : [])
+                      .filter((id) => id !== orderId),
+                  });
+                  dirtyOrderIds.add(parentId);
+                }
               }
               dirtyOrderIds.add(orderId);
             } catch (error) {
@@ -3712,6 +3730,7 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
             const split = applyOfflineSplitEvent(
               projectionCurrent, event, upload.venueId,
               orderState.get(splitOrderId),
+              projectionRecovery && (recoveryWasActive || seededFromBaseline),
             );
             orderState.set(orderId,
               seededFromBaseline || recoveryWasActive ? {
@@ -4518,7 +4537,9 @@ function offlineBillFromProjectedOrder(
   };
 }
 
-function applyOfflineSplitEvent(current, event, venueId, existingChild) {
+function applyOfflineSplitEvent(
+  current, event, venueId, existingChild, rebuildExistingChild = false,
+) {
   const payload = event.payload;
   const splitOrderId = typeof payload.splitOrderId === "string"
     ? payload.splitOrderId : "";
@@ -4533,9 +4554,19 @@ function applyOfflineSplitEvent(current, event, venueId, existingChild) {
   }
   if (existingChild != null) {
     if (existingChild.splitFromOrderId === payload.orderId) {
-      return {parent: current, child: existingChild, alreadySplit: true};
+      // During explicit projection recovery the existing child may be a stale
+      // closed materialisation while its signed parent history is being rebuilt
+      // from order.opened. Reusing that closed child makes the following signed
+      // payment event fail as "order unavailable" and permanently strands the
+      // durable suffix. The caller may request a rebuild only after validating
+      // the immutable chain and putting the parent into recovery mode. Identity
+      // still has to match, so an unrelated child remains fail-closed.
+      if (!rebuildExistingChild) {
+        return {parent: current, child: existingChild, alreadySplit: true};
+      }
+    } else {
+      throw new HttpsError("already-exists", "The split bill identity is already in use.");
     }
-    throw new HttpsError("already-exists", "The split bill identity is already in use.");
   }
   const sourceLines = Array.isArray(current.lines)
     ? current.lines.map((line) => ({...line})) : [];

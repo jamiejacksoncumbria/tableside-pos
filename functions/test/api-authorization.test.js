@@ -568,6 +568,125 @@ describe("venue hub cloud reconciliation", () => {
     });
   });
 
+  test("rebuilds a stale closed split child before replaying its payment", async () => {
+    const createdAt = new Date().toISOString();
+    const definitions = [
+      ["order.opened", {
+        orderId: "order-split-recovery",
+        channel: "dineIn",
+        tableId: "table-a",
+      }],
+      ["order.itemAdded", {
+        orderId: "order-split-recovery",
+        lineId: "line-split-a",
+        productId: "menu-curry",
+        productName: "House Curry",
+        quantity: 1,
+        unitPriceMinor: 1000,
+        taxRateBasisPoints: 2000,
+        currencyCode: "GBP",
+        productionArea: "kitchen",
+        showOnOrderFlow: true,
+      }],
+      ["order.itemAdded", {
+        orderId: "order-split-recovery",
+        lineId: "line-split-b",
+        productId: "menu-curry",
+        productName: "House Curry",
+        quantity: 1,
+        unitPriceMinor: 500,
+        taxRateBasisPoints: 2000,
+        currencyCode: "GBP",
+        productionArea: "kitchen",
+        showOnOrderFlow: true,
+      }],
+      ["order.sent", {
+        orderId: "order-split-recovery",
+        lineIds: ["line-split-a", "line-split-b"],
+        printRequired: false,
+      }],
+      ["order.splitCreated", {
+        orderId: "order-split-recovery",
+        splitOrderId: "order-split-recovery-child",
+        splitLines: [{lineId: "line-split-a", quantity: 1}],
+      }],
+      ["payment.batchRecorded", {
+        orderId: "order-split-recovery-child",
+        splitFromOrderId: "order-split-recovery",
+        batchId: "batch-split-recovery",
+        closeIfSettled: true,
+        receiptNumber: "R-SPLIT-RECOVERY",
+        payments: [{
+          paymentId: "payment-split-recovery",
+          baseAmountMinor: 1000,
+          tenderedAmountMinor: 1000,
+          method: "cash",
+          currencyCode: "GBP",
+          exchangeRateToBase: "1",
+        }],
+      }],
+    ];
+    const events = [];
+    let previousHash = "";
+    for (let index = 0; index < definitions.length; index += 1) {
+      const sequence = index + 1;
+      const eventHash = `split-recovery-hash-${sequence}`;
+      events.push(hubEvent(
+        sequence,
+        `split-recovery-event-${sequence}`,
+        previousHash,
+        eventHash,
+        definitions[index][0],
+        definitions[index][1],
+        createdAt,
+      ));
+      previousHash = eventHash;
+    }
+
+    const original = await callPos(
+      "ingestOfflineHubEvents",
+      signedHubUpload(events, "split-recovery-original"),
+    );
+    assert.equal(original.status, 200, JSON.stringify(original.body));
+    await environment.withSecurityRulesDisabled(async (context) => {
+      // Simulate the field state from the regression: immutable history is
+      // intact, the split child is already closed, and the parent projection
+      // is stale/closed so recovery must reconstruct both documents.
+      await setDoc(doc(
+        context.firestore(),
+        "tenants/tenant-a/orders/order-split-recovery",
+      ), {status: "closed"}, {merge: true});
+    });
+
+    const recovery = await callPos(
+      "ingestOfflineHubEvents",
+      signedHubRequest(
+        {events, projectionRecovery: true},
+        "split-recovery-replay",
+        "/v1/cloud-sync",
+      ),
+    );
+    assert.equal(recovery.status, 200, JSON.stringify(recovery.body));
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const [parent, child] = await Promise.all([
+        getDoc(doc(
+          context.firestore(),
+          "tenants/tenant-a/orders/order-split-recovery",
+        )),
+        getDoc(doc(
+          context.firestore(),
+          "tenants/tenant-a/orders/order-split-recovery-child",
+        )),
+      ]);
+      assert.equal(parent.data().status, "sent");
+      assert.deepEqual(parent.data().openSplitOrderIds, []);
+      assert.equal(child.data().status, "closed");
+      assert.equal(child.data().payments.length, 1);
+      assert.equal(child.data().payments[0].id, "payment-split-recovery");
+      assert.equal(child.data().offlineProjectionRecoveredThroughSequence, 6);
+    });
+  });
+
   test("projects a signed sale exactly once into orders, bills, stock and production", async () => {
     const createdAt = new Date().toISOString();
     const events = [

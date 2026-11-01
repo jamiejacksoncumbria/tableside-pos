@@ -857,7 +857,12 @@ class VenueHubRuntime {
       // connection without restarting the hub or re-opening its local ledger.
       final activeRealtimePresence = _realtimePresence ??=
           VenueHubRealtimePresence(repository: _repository);
-      late Future<void> Function() remoteTick;
+      // RTDB can report a successful connection synchronously from start().
+      // The command processor is installed later because it depends on the
+      // local runtime state below, so keep this nullable during bootstrap. A
+      // connection transition must still wake the durable outbox immediately,
+      // but it must not call an uninitialised local callback.
+      Future<void> Function()? remoteTick;
       // The Windows offline bootstrap deliberately does not create a Firebase
       // app when the executable cannot reach Firebase. Starting the RTDB
       // presence client in that state can never succeed and previously caused
@@ -889,7 +894,8 @@ class VenueHubRuntime {
           );
           unawaited(_sync?.flush());
           unawaited(reconcileClosedCloudOrders());
-          unawaited(remoteTick());
+          final tick = remoteTick;
+          if (tick != null) unawaited(tick());
         }
         wasRealtimeConnected = isConnected;
       }
@@ -1144,7 +1150,8 @@ class VenueHubRuntime {
           remoteTickRunning = false;
           if (remoteTickRequested && _activeScope == scope) {
             remoteTickRequested = false;
-            unawaited(remoteTick());
+            final tick = remoteTick;
+            if (tick != null) unawaited(tick());
           }
         }
       };
@@ -1155,7 +1162,10 @@ class VenueHubRuntime {
       // command processor without rebuilding the venue runtime.
       _realtimeSignalSubscription = activeRealtimePresence.commandSignals
           .listen(
-            (_) => unawaited(remoteTick()),
+            (_) {
+              final tick = remoteTick;
+              if (tick != null) unawaited(tick());
+            },
             onError: (Object error, StackTrace stackTrace) {
               AppLogger.error(
                 'Receive realtime hub wake signal',
@@ -1196,7 +1206,8 @@ class VenueHubRuntime {
                 );
                 realtimeRetryDelay = const Duration(seconds: 5);
                 AppLogger.info('Venue hub realtime channel restored.');
-                unawaited(remoteTick());
+                final tick = remoteTick;
+                if (tick != null) unawaited(tick());
               } catch (error, stackTrace) {
                 await activeRealtimePresence.stop();
                 AppLogger.error(
@@ -1215,6 +1226,7 @@ class VenueHubRuntime {
           : null;
       if (activeRealtimePresence.connected.value) {
         // Recover commands queued just before the realtime listener connected.
+        // Assignment above is complete before execution reaches this point.
         unawaited(remoteTick());
       }
       _pendingSubscription = _ledger.watchPending().listen(
@@ -1289,7 +1301,8 @@ class VenueHubRuntime {
                 credential: credential,
               );
               AppLogger.info('Venue hub realtime presence session restored.');
-              unawaited(remoteTick());
+              final tick = remoteTick;
+              if (tick != null) unawaited(tick());
             } catch (error, stackTrace) {
               await activeRealtimePresence.stop();
               AppLogger.error(
