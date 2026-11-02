@@ -10,5 +10,6 @@ app_id: 16a0b8d1-cf1e-4eae-aa8e-e1348532db96
 # auto_update controls if Shorebird should automatically update in the background on launch.
 # If auto_update: false, you will need to use package:shorebird_code_push to trigger updates.
 # https://pub.dev/packages/shorebird_code_push
-# Uncomment the following line to disable automatic updates.
-# auto_update: false
+# TableSideCY owns update timing so an active sale or unsynchronised hub is
+# never interrupted by an independent updater.
+auto_update: false

@@ -196,6 +196,67 @@ describe("Realtime Database scoped control-plane identities", () => {
     await assertFails(get(ref(pos, "hubPresence/tenant-a/venue-b/hub-b")));
   });
 
+  test("backup hub is read-only until server-side promotion", async () => {
+    await seedRealtimeAuthorities();
+    const backup = environment.authenticatedContext("backup", {
+      tablesideHubStandby: true,
+      tenantId: "tenant-a",
+      venueId: "venue-a",
+      deviceId: "hub-backup",
+      hubEpoch: 7,
+    }).database();
+
+    await assertSucceeds(get(ref(
+      backup, "hubAuthorities/tenant-a/venue-a",
+    )));
+    await assertSucceeds(get(ref(
+      backup, "hubPresence/tenant-a/venue-a/hub-a",
+    )));
+    await assertFails(set(
+      ref(backup, "hubPresence/tenant-a/venue-a/hub-backup"),
+      {online: true, hubEpoch: 7, lastReadyAt: Date.now()},
+    ));
+    await assertFails(set(
+      ref(backup, "hubAuthorities/tenant-a/venue-a"),
+      {
+        enabled: true,
+        deviceId: "hub-backup",
+        hubEpoch: 8,
+        lastReadyAt: Date.now(),
+      },
+    ));
+  });
+
+  test("active hub may renew lease but cannot change its authority", async () => {
+    await seedRealtimeAuthorities();
+    const hub = environment.authenticatedContext("hub-lease", {
+      tablesideHub: true,
+      tenantId: "tenant-a",
+      venueId: "venue-a",
+      deviceId: "hub-a",
+      hubEpoch: 7,
+    }).database();
+
+    await assertSucceeds(set(
+      ref(hub, "hubAuthorities/tenant-a/venue-a"),
+      {
+        enabled: true,
+        deviceId: "hub-a",
+        hubEpoch: 7,
+        lastReadyAt: Date.now(),
+      },
+    ));
+    await assertFails(set(
+      ref(hub, "hubAuthorities/tenant-a/venue-a"),
+      {
+        enabled: true,
+        deviceId: "hub-other",
+        hubEpoch: 8,
+        lastReadyAt: Date.now(),
+      },
+    ));
+  });
+
   test("printer may publish only its own presence", async () => {
     await seedRealtimeAuthorities();
     const printer = environment.authenticatedContext("printer", {

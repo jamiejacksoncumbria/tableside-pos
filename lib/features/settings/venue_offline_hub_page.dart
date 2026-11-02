@@ -249,6 +249,56 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     });
   }
 
+  Future<void> _configureBackup() => _run('Configure backup hub', () async {
+    final deviceId = _deviceId;
+    final credential = _credential;
+    if (deviceId == null || credential == null) {
+      throw StateError('The device identity is not ready.');
+    }
+    if (_bootstrap?.enabled != true || _bootstrap?.hubDeviceId == deviceId) {
+      throw StateError(
+        'Configure the primary hub first, then use a different Android or Windows device as its backup.',
+      );
+    }
+    if (!_hasCertificate || !_hasPrivateKey) {
+      throw StateError(
+        'Import the venue certificate and private key on this backup device first.',
+      );
+    }
+    await _repository.enrollOfflineHubDeviceCredential(
+      scope: widget.scope,
+      deviceId: deviceId,
+      credentialId: credential.credentialId,
+      publicKeyBase64: credential.publicKeyBase64,
+    );
+    await _repository.configureOfflineVenueBackupHub(
+      scope: widget.scope,
+      deviceId: deviceId,
+      credentialId: credential.credentialId,
+      endpointHost: _host.text.trim(),
+      endpointPort: int.tryParse(_port.text.trim()) ?? 8443,
+    );
+    final raw = await _repository.fetchOfflineHubBootstrap(scope: widget.scope);
+    if (mounted) {
+      setState(() {
+        _bootstrap = VenueHubBootstrap.fromJson(raw);
+        _message =
+            'This device is armed as the passive backup hub. It cannot accept orders until secure failover completes.';
+      });
+    }
+  });
+
+  Future<void> _removeBackup() => _run('Remove backup hub', () async {
+    await _repository.removeOfflineVenueBackupHub(scope: widget.scope);
+    final raw = await _repository.fetchOfflineHubBootstrap(scope: widget.scope);
+    if (mounted) {
+      setState(() {
+        _bootstrap = VenueHubBootstrap.fromJson(raw);
+        _message = 'The backup hub assignment was removed.';
+      });
+    }
+  });
+
   Future<String?> _requestReason({
     required String title,
     required String message,
@@ -412,6 +462,10 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
         bootstrap?.enabled == true &&
         bootstrap?.hubDeviceId == deviceId &&
         bootstrap?.hubCredentialId == _credential?.credentialId;
+    final isThisBackup =
+        bootstrap?.enabled == true &&
+        bootstrap?.backupDeviceId == deviceId &&
+        bootstrap?.backupCredentialId == _credential?.credentialId;
     final runtime = VenueHubRuntime.instance.status;
     return Scaffold(
       appBar: AppBar(title: const Text('Venue offline hub')),
@@ -460,6 +514,17 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                     SelectableText(
                       'Active hub key: ${bootstrap.hubCredentialId ?? 'missing'}',
                     ),
+                    if (bootstrap.backupDeviceId != null) ...[
+                      const SizedBox(height: 4),
+                      SelectableText(
+                        'Backup hub ID: ${bootstrap.backupDeviceId}',
+                      ),
+                      Text(
+                        isThisBackup
+                            ? 'This device is the passive backup hub.'
+                            : 'A separate passive backup hub is configured.',
+                      ),
+                    ],
                   ],
                   if (canHostVenueHub) ...[
                     const SizedBox(height: 12),
@@ -504,6 +569,24 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                                 ? 'Restart this hub'
                                 : 'Make this the hub',
                           ),
+                        ),
+                      if (canHostVenueHub &&
+                          bootstrap?.enabled == true &&
+                          !isThisHub)
+                        FilledButton.tonalIcon(
+                          onPressed: _busy ? null : _configureBackup,
+                          icon: const Icon(Icons.backup_outlined),
+                          label: Text(
+                            isThisBackup
+                                ? 'Refresh backup setup'
+                                : 'Make this the backup hub',
+                          ),
+                        ),
+                      if (bootstrap?.backupDeviceId != null)
+                        OutlinedButton.icon(
+                          onPressed: _busy ? null : _removeBackup,
+                          icon: const Icon(Icons.remove_circle_outline),
+                          label: const Text('Remove backup hub'),
                         ),
                       if (canJoinVenueHubAsNativeClient)
                         OutlinedButton.icon(

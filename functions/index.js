@@ -1890,6 +1890,17 @@ async function manageVenueConfigurationFor(caller, rawData) {
           credentialId,
           endpoint: hubEndpoint,
           epoch,
+          ...(current.data()?.offlineHub?.backupDeviceId !== deviceId &&
+              current.data()?.offlineHub?.backupCredentialId
+            ? {
+              backupDeviceId: current.data().offlineHub.backupDeviceId,
+              backupCredentialId: current.data().offlineHub.backupCredentialId,
+              backupEndpoint: current.data().offlineHub.backupEndpoint,
+              backupConfiguredAt: current.data().offlineHub.backupConfiguredAt,
+              backupConfiguredByActor:
+                current.data().offlineHub.backupConfiguredByActor,
+            }
+            : {}),
           activatedAt: FieldValue.serverTimestamp(),
           activatedByActor: actor,
         },
@@ -1911,6 +1922,63 @@ async function manageVenueConfigurationFor(caller, rawData) {
     });
     result = {saved: true, enabled: true, hubEpoch: activation.epoch};
     }
+  } else if (resource === "offlineHubBackup") {
+    const deviceId = requireCurrentVenueDeviceId(
+      requiredDocumentId(values, "deviceId"),
+    );
+    const credentialId = requiredDocumentId(values, "credentialId");
+    const endpointHost = requiredText(values, "endpointHost", 253).toLowerCase();
+    const endpointPort = Number(values.endpointPort ?? 8443);
+    if (!/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|(?:\d{1,3}\.){3}\d{1,3})$/u
+      .test(endpointHost) || !Number.isInteger(endpointPort) ||
+      endpointPort < 1024 || endpointPort > 65535) {
+      throw new HttpsError("invalid-argument", "Enter a valid backup hub host and port.");
+    }
+    const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
+    const [venue, credential] = await Promise.all([
+      venueRef.get(),
+      db.doc(`tenants/${tenantId}/offlineDeviceCredentials/${credentialId}`).get(),
+    ]);
+    const hub = venue.data()?.offlineHub;
+    if (!venue.exists || hub?.enabled !== true || hub.deviceId === deviceId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "An active primary hub on another device is required before configuring a backup.",
+      );
+    }
+    if (!credential.exists || credential.data().active !== true ||
+        credential.data().venueId !== venueId ||
+        credential.data().deviceId !== deviceId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The backup device does not have an active offline credential.",
+      );
+    }
+    const backupEndpoint = `https://${endpointHost}:${endpointPort}`;
+    await venueRef.update({
+      "offlineHub.backupDeviceId": deviceId,
+      "offlineHub.backupCredentialId": credentialId,
+      "offlineHub.backupEndpoint": backupEndpoint,
+      "offlineHub.backupConfiguredAt": FieldValue.serverTimestamp(),
+      "offlineHub.backupConfiguredByActor": actor,
+    });
+    await writeAudit(caller.uid, "configureOfflineVenueBackupHub", venueId, {
+      tenantId, venueId, deviceId, credentialId, actor,
+    });
+    result = {saved: true, backupDeviceId: deviceId};
+  } else if (resource === "offlineHubBackupRemoval") {
+    const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
+    await venueRef.update({
+      "offlineHub.backupDeviceId": FieldValue.delete(),
+      "offlineHub.backupCredentialId": FieldValue.delete(),
+      "offlineHub.backupEndpoint": FieldValue.delete(),
+      "offlineHub.backupConfiguredAt": FieldValue.delete(),
+      "offlineHub.backupConfiguredByActor": FieldValue.delete(),
+    });
+    await writeAudit(caller.uid, "removeOfflineVenueBackupHub", venueId, {
+      tenantId, venueId, actor,
+    });
+    result = {saved: true, removed: true};
   } else if (resource === "offlineHubDeactivation") {
     const reason = requiredText(values, "reason", 200);
     const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
@@ -2356,6 +2424,10 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
     hubDeviceId: typeof hub.deviceId === "string" ? hub.deviceId : null,
     hubCredentialId: typeof hub.credentialId === "string" ? hub.credentialId : null,
     hubEndpoint: typeof hub.endpoint === "string" ? hub.endpoint : null,
+    backupDeviceId: typeof hub.backupDeviceId === "string" ? hub.backupDeviceId : null,
+    backupCredentialId: typeof hub.backupCredentialId === "string" ?
+      hub.backupCredentialId : null,
+    backupEndpoint: typeof hub.backupEndpoint === "string" ? hub.backupEndpoint : null,
     hubEpoch: Number.isSafeInteger(Number(hub.epoch)) ? Number(hub.epoch) : 0,
     credentials: credentialSnapshot.docs
       .filter((credential) => currentVenueDeviceIdPattern.test(
@@ -2369,6 +2441,75 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
       })),
     serverTimeMillis: Date.now(),
   };
+}
+
+async function uploadDeviceDiagnosticsFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const deviceId = requireCurrentVenueDeviceId(requiredDocumentId(data, "deviceId"));
+  if (data.environment !== "staging") {
+    throw new HttpsError("failed-precondition", "Cloud diagnostics are disabled outside staging.");
+  }
+  await requireTenantHostMember(caller, tenantId);
+  const membership = await db.doc(`tenants/${tenantId}/members/${caller.uid}`).get();
+  const venueIds = Array.isArray(membership.data()?.venueIds)
+    ? membership.data().venueIds : [];
+  if (!membership.exists || membership.data()?.status === "retired" ||
+      (venueIds.length > 0 && !venueIds.includes(venueId))) {
+    throw new HttpsError("permission-denied", "This account cannot upload diagnostics for that venue.");
+  }
+  if (!Array.isArray(data.entries) || data.entries.length < 1 ||
+      data.entries.length > 50) {
+    throw new HttpsError("invalid-argument", "Upload between 1 and 50 diagnostic entries.");
+  }
+  const entries = data.entries.map((raw) => {
+    const entry = requireObject(raw);
+    const level = requiredText(entry, "level", 8);
+    const timestamp = requiredText(entry, "timestamp", 40);
+    if (!["ERROR", "STACK"].includes(level) ||
+        !/^\d{4}-\d{2}-\d{2}T[0-9:.+-]+$/u.test(timestamp)) {
+      throw new HttpsError("invalid-argument", "A diagnostic entry is invalid.");
+    }
+    if (level === "ERROR") {
+      const action = requiredText(entry, "action", 100);
+      const errorType = requiredText(entry, "errorType", 100);
+      if (!/^[ A-Za-z0-9_.()/-]+$/u.test(action) ||
+          !/^[A-Za-z0-9_.]+$/u.test(errorType)) {
+        throw new HttpsError("invalid-argument", "An error diagnostic is invalid.");
+      }
+      return {timestamp, level, action, errorType};
+    }
+    const location = requiredText(entry, "location", 240);
+    if (!/^package:tableside_pos\/[A-Za-z0-9_./-]+\.dart:\d+:\d+$/u.test(location)) {
+      throw new HttpsError("invalid-argument", "A stack diagnostic is invalid.");
+    }
+    return {timestamp, level, location};
+  });
+  const throttleRef = db.doc(
+    `tenants/${tenantId}/deviceDiagnosticUploadLimits/${createHash("sha256")
+      .update(`${caller.hostUid}:${deviceId}`).digest("hex")}`,
+  );
+  await db.runTransaction(async (transaction) => {
+    const current = await transaction.get(throttleRef);
+    const lastAcceptedAt = current.data()?.lastAcceptedAt?.toMillis?.() ?? 0;
+    if (Date.now() - lastAcceptedAt < 30000) {
+      throw new HttpsError("resource-exhausted", "Diagnostics were uploaded recently.");
+    }
+    transaction.set(throttleRef, {
+      lastAcceptedAt: FieldValue.serverTimestamp(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    });
+  });
+  console.log("TABLESIDE_DEVICE_DIAGNOSTICS", JSON.stringify({
+    tenantId,
+    venueId,
+    deviceId,
+    platform: optionalText(data, "platform", 32) || "unknown",
+    hostUidHash: createHash("sha256").update(caller.hostUid).digest("hex").slice(0, 16),
+    entries,
+  }));
+  return {accepted: true, entryCount: entries.length};
 }
 
 // Remote commands remain recoverable long enough for a hub restart or a short
@@ -2719,6 +2860,122 @@ async function issueRealtimeHubSessionFor(caller, rawData) {
   return {customToken, databaseUrl: configured.url, hubEpoch: upload.hubEpoch};
 }
 
+// A standby token can observe authority/presence only. RTDB rules grant it no
+// write access, so a backup cannot impersonate the active hub before the
+// server completes an audited, atomic authority transfer.
+async function issueRealtimeBackupHubSessionFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(
+    caller, rawData, "/v1/backup-realtime-session", {allowBackup: true},
+  );
+  if (upload.role !== "backup") {
+    throw new HttpsError("failed-precondition", "This device is not the configured backup hub.");
+  }
+  const configured = configuredRealtimeDatabase();
+  const scopedUid = `backup_${createHash("sha256")
+    .update(`${upload.tenantId}:${upload.venueId}:${upload.deviceId}`)
+    .digest("hex").slice(0, 48)}`;
+  const customToken = await auth.createCustomToken(scopedUid, {
+    tablesideHubStandby: true,
+    tenantId: upload.tenantId,
+    venueId: upload.venueId,
+    deviceId: upload.deviceId,
+    hubEpoch: upload.hubEpoch,
+  });
+  return {customToken, databaseUrl: configured.url, hubEpoch: upload.hubEpoch};
+}
+
+// RTDB is the live authority source. This transaction both checks the primary
+// lease and revokes the old hub atomically. Firestore is updated afterwards;
+// signed hub APIs also verify RTDB, so the old hub cannot mutate cloud state in
+// the short propagation interval.
+async function promoteOfflineBackupHubFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(
+    caller, rawData, "/v1/backup-promote", {allowBackup: true},
+  );
+  if (upload.role !== "backup") {
+    throw new HttpsError("failed-precondition", "Only the configured backup hub can fail over.");
+  }
+  const venueRef = db.doc(`tenants/${upload.tenantId}/venues/${upload.venueId}`);
+  const venue = await venueRef.get();
+  const hub = venue.data()?.offlineHub;
+  if (hub?.enabled !== true || hub.epoch !== upload.hubEpoch ||
+      hub.backupDeviceId !== upload.deviceId ||
+      hub.backupCredentialId !== upload.credentialId) {
+    throw new HttpsError("aborted", "The backup hub assignment changed.");
+  }
+  const authorityRef = configuredRealtimeDatabase().database
+    .ref(`hubAuthorities/${upload.tenantId}/${upload.venueId}`);
+  const nextEpoch = upload.hubEpoch + 1;
+  let primaryWasFresh = false;
+  const authorityResult = await authorityRef.transaction((current) => {
+    if (current?.enabled !== true || current.deviceId !== hub.deviceId ||
+        Number(current.hubEpoch) !== upload.hubEpoch) return;
+    const lastReadyAt = Number(current.lastReadyAt ?? 0);
+    if (Number.isSafeInteger(lastReadyAt) && Date.now() - lastReadyAt < 30000) {
+      primaryWasFresh = true;
+      return;
+    }
+    return {
+      enabled: true,
+      deviceId: upload.deviceId,
+      hubEpoch: nextEpoch,
+      lastReadyAt: ServerValue.TIMESTAMP,
+      promotedFromDeviceId: hub.deviceId,
+      promotedAutomatically: true,
+    };
+  }, {applyLocally: false});
+  if (!authorityResult.committed) {
+    throw new HttpsError(
+      "failed-precondition",
+      primaryWasFresh ? "The primary venue hub is still online." :
+        "The live hub authority changed; refresh before retrying.",
+    );
+  }
+  try {
+    await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(venueRef);
+      const currentHub = current.data()?.offlineHub;
+      if (currentHub?.enabled !== true || currentHub.epoch !== upload.hubEpoch ||
+          currentHub.backupDeviceId !== upload.deviceId ||
+          currentHub.backupCredentialId !== upload.credentialId) {
+        throw new HttpsError("aborted", "The backup hub assignment changed.");
+      }
+      transaction.update(venueRef, {
+        offlineHub: {
+          enabled: true,
+          deviceId: currentHub.backupDeviceId,
+          credentialId: currentHub.backupCredentialId,
+          endpoint: currentHub.backupEndpoint,
+          epoch: nextEpoch,
+          activatedAt: FieldValue.serverTimestamp(),
+          activatedByActor: "automaticBackupFailover",
+          previousDeviceId: currentHub.deviceId,
+        },
+      });
+      transaction.create(
+        db.collection(`tenants/${upload.tenantId}/auditEvents`).doc(),
+        {
+          action: "promoteOfflineVenueBackupHub",
+          venueId: upload.venueId,
+          previousDeviceId: currentHub.deviceId,
+          deviceId: upload.deviceId,
+          credentialId: upload.credentialId,
+          previousHubEpoch: upload.hubEpoch,
+          hubEpoch: nextEpoch,
+          actor: "automaticBackupFailover",
+          createdAt: FieldValue.serverTimestamp(),
+        },
+      );
+    });
+  } catch (error) {
+    // Fail closed if the durable authority update cannot complete. The old hub
+    // stays revoked and the backup will retry recovery; two hubs never run.
+    await authorityRef.set({enabled: false, hubEpoch: nextEpoch});
+    throw error;
+  }
+  return {promoted: true, hubEpoch: nextEpoch};
+}
+
 async function claimRemoteHubCommandsFor(caller, rawData) {
   const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/remote-claim");
   const maximum = Math.min(Math.max(Number(upload.body.maximum ?? 10), 1), 25);
@@ -2850,7 +3107,7 @@ function verifyEd25519RawPublicKey(publicKeyBase64, message, signatureBase64) {
 }
 
 async function verifiedOfflineHubUpload(
-  caller, rawData, expectedPath = "/v1/cloud-sync",
+  caller, rawData, expectedPath = "/v1/cloud-sync", options = {},
 ) {
   const data = requireObject(rawData);
   const envelope = requireObject(data.envelope);
@@ -2882,12 +3139,23 @@ async function verifiedOfflineHubUpload(
   ]);
   const hub = venue.data()?.offlineHub;
   const credentialData = credential.data();
+  const activeMatch = hub?.deviceId === deviceId && hub?.credentialId === credentialId;
+  const backupMatch = options.allowBackup === true &&
+    hub?.backupDeviceId === deviceId && hub?.backupCredentialId === credentialId;
   if (!venue.exists || hub?.enabled !== true || hub?.epoch !== hubEpoch ||
-      hub?.deviceId !== deviceId || hub?.credentialId !== credentialId ||
+      (!activeMatch && !backupMatch) ||
       !credential.exists || credentialData.active !== true ||
       credentialData.venueId !== venueId || credentialData.deviceId !== deviceId ||
       credentialData.algorithm !== "Ed25519") {
     throw new HttpsError("permission-denied", "This device is not the active venue hub.");
+  }
+  if (activeMatch) {
+    const authority = (await configuredRealtimeDatabase().database
+      .ref(`hubAuthorities/${tenantId}/${venueId}`).get()).val();
+    if (authority?.enabled !== true || authority.deviceId !== deviceId ||
+        Number(authority.hubEpoch) !== hubEpoch) {
+      throw new HttpsError("permission-denied", "This device no longer owns live hub authority.");
+    }
   }
   const encodedBody = JSON.stringify(canonicalJsonValue(body));
   const expectedHash = createHash("sha256").update(encodedBody).digest("base64url");
@@ -2906,7 +3174,10 @@ async function verifiedOfflineHubUpload(
   )) {
     throw new HttpsError("unauthenticated", "The hub upload signature is invalid.");
   }
-  return {body, tenantId, venueId, deviceId, hubEpoch, credentialId, nonce};
+  return {
+    body, tenantId, venueId, deviceId, hubEpoch, credentialId, nonce,
+    role: activeMatch ? "active" : "backup",
+  };
 }
 
 function offlinePermissionsForRoles(roles) {
@@ -2952,7 +3223,9 @@ function timeZoneOffsetMinutes(timeZone, now = new Date()) {
 }
 
 async function getOfflineHubSnapshotFor(caller, rawData) {
-  const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/snapshot");
+  const upload = await verifiedOfflineHubUpload(
+    caller, rawData, "/v1/snapshot", {allowBackup: true},
+  );
   const knownSnapshotDigest = upload.body.knownSnapshotDigest;
   if (knownSnapshotDigest != null &&
       (typeof knownSnapshotDigest !== "string" ||
@@ -12689,6 +12962,8 @@ async function invokePosAction(action, caller, data) {
     "reconcileOfflineHubClosedOrders",
     "getOfflineHubSnapshot", "claimRemoteHubCommands",
     "issueRealtimeHubSession",
+    "issueRealtimeBackupHubSession", "promoteOfflineBackupHub",
+    "uploadDeviceDiagnostics",
     "completeRemoteHubCommand",
   ]);
   const actingCaller = sessionBootstrapActions.has(action)
@@ -12735,6 +13010,12 @@ async function invokePosAction(action, caller, data) {
       return waitForRemoteHubCommandFor(actingCaller, data);
     case "issueRealtimeHubSession":
       return issueRealtimeHubSessionFor(caller, data);
+    case "issueRealtimeBackupHubSession":
+      return issueRealtimeBackupHubSessionFor(caller, data);
+    case "promoteOfflineBackupHub":
+      return promoteOfflineBackupHubFor(caller, data);
+    case "uploadDeviceDiagnostics":
+      return uploadDeviceDiagnosticsFor(caller, data);
     case "issueRealtimePosSession":
       return issueRealtimePosSessionFor(actingCaller, data);
     case "claimRemoteHubCommands":

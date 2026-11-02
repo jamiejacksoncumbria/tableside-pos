@@ -4,7 +4,7 @@ param(
         'Menu', 'Doctor', 'Dependencies', 'Check', 'Test', 'BuildApk',
         'BuildAppBundle', 'BuildWindows', 'BuildWeb', 'BuildAll',
         'PackageWindows', 'DeployFunctions', 'DeployFirestore',
-        'DeployStorage', 'DeployWeb', 'DeployBackend', 'GitStatus',
+        'DeployStorage', 'DeployDatabase', 'DeployWeb', 'DeployBackend', 'GitStatus',
         'GitPull', 'GitCommit', 'GitPush', 'ShorebirdDoctor',
         'ShorebirdReleaseAndroid', 'ShorebirdPatchAndroid',
         'ShorebirdReleaseWindows', 'ShorebirdPatchWindows',
@@ -413,7 +413,7 @@ function Invoke-ShorebirdRelease([string]$Platform, [bool]$Patch) {
     if (-not $Patch) {
         $artifact = switch ($Platform) {
             'android' { Join-Path $script:RepoRoot 'build\app\outputs\bundle\release\app-release.aab' }
-            'windows' { Join-Path $script:RepoRoot 'build\windows\x64\runner\Release\tableside_pos.exe' }
+            'windows' { Join-Path $script:RepoRoot 'build\windows\x64\runner\Release\TableSideCY.exe' }
             default { $null }
         }
         if ($null -ne $artifact) {
@@ -491,6 +491,19 @@ function Deploy-Storage {
     }
 }
 
+function Deploy-Database {
+    if (-not (Confirm-RemoteAction "Deploy Realtime Database rules to '$ProjectId'?")) { return }
+    Write-Heading "Deploy Realtime Database rules to $ProjectId"
+    $logPath = Start-OperationLog 'deploy-database'
+    $succeeded = $false
+    try {
+        Firebase deploy --only database --project $ProjectId
+        $succeeded = $true
+    } finally {
+        Stop-OperationLog $logPath $succeeded
+    }
+}
+
 function Deploy-Web {
     if (-not (Confirm-RemoteAction "Build and deploy Firebase Hosting to '$ProjectId'?")) { return }
     Write-Heading "Build and deploy Firebase Hosting to $ProjectId"
@@ -506,13 +519,13 @@ function Deploy-Web {
 }
 
 function Deploy-Backend {
-    if (-not (Confirm-RemoteAction "Deploy Functions, Firestore, and Storage to '$ProjectId'?")) { return }
+    if (-not (Confirm-RemoteAction "Deploy Functions, Firestore, Realtime Database, and Storage to '$ProjectId'?")) { return }
     Write-Heading "Deploy backend to $ProjectId"
     $logPath = Start-OperationLog 'deploy-backend'
     $succeeded = $false
     try {
         Check-Functions
-        Firebase deploy --only 'functions,firestore:rules,firestore:indexes,storage' --project $ProjectId
+        Firebase deploy --only 'functions,firestore:rules,firestore:indexes,database,storage' --project $ProjectId
         $succeeded = $true
     } finally {
         Stop-OperationLog $logPath $succeeded
@@ -651,6 +664,7 @@ TableSideCY developer menu
  27  Restore Windows hub internet
  28  Block Android emulator internet (keep venue LAN)
  29  Restore Android emulator internet
+ 30  Deploy Realtime Database rules
   0  Exit
 '@
         $choice = Read-Host 'Choose an option'
@@ -686,6 +700,7 @@ TableSideCY developer menu
                 '27' { Allow-HubInternet }
                 '28' { Block-EmulatorInternet }
                 '29' { Allow-EmulatorInternet }
+                '30' { Deploy-Database }
                 '0'  { return }
                 default { Write-Host 'Choose a number shown in the menu.' -ForegroundColor Yellow }
             }
@@ -711,6 +726,7 @@ switch ($Action) {
     'DeployFunctions' { Deploy-Functions }
     'DeployFirestore' { Deploy-Firestore }
     'DeployStorage'   { Deploy-Storage }
+    'DeployDatabase'  { Deploy-Database }
     'DeployWeb'       { Deploy-Web }
     'DeployBackend'   { Deploy-Backend }
     'GitStatus'       { Show-GitStatus }

@@ -8,6 +8,7 @@ import '../core/tenant_scope.dart';
 import '../data/production_command_repository.dart';
 import '../features/printing/local_printer_device_identity.dart';
 import 'venue_hub_bootstrap.dart';
+import 'venue_hub_backup_monitor.dart';
 import 'venue_hub_client_cache.dart';
 import 'venue_hub_client_registry.dart';
 import 'venue_hub_device_credential.dart';
@@ -35,6 +36,7 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
   static const _secrets = FlutterSecureStorage();
   bool _started = false;
   Timer? _retryTimer;
+  final VenueHubBackupMonitor _backupMonitor = VenueHubBackupMonitor();
 
   @override
   void initState() {
@@ -47,6 +49,7 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.scope != widget.scope) {
       _retryTimer?.cancel();
+      unawaited(_backupMonitor.stop());
       _started = false;
       unawaited(_start());
     }
@@ -95,12 +98,60 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
         credential: credential,
       );
       if (bootstrap.hubDeviceId != deviceId) {
+        if (canHostVenueHub &&
+            bootstrap.backupDeviceId == deviceId &&
+            bootstrap.backupCredentialId == credential.credentialId) {
+          await _backupMonitor.start(
+            scope: widget.scope,
+            deviceId: deviceId,
+            credential: credential,
+            bootstrap: bootstrap,
+            onPromoted: () {
+              _started = false;
+              unawaited(_start());
+            },
+          );
+          // Keep a current encrypted snapshot on the standby so promotion can
+          // start promptly. Snapshot verification accepts this configured
+          // credential but all mutation endpoints remain active-hub-only.
+          if (widget.cloudRefreshEnabled) {
+            try {
+              final snapshot = await repository.fetchOfflineHubSnapshot(
+                scope: widget.scope,
+                deviceId: deviceId,
+                hubEpoch: bootstrap.hubEpoch,
+                credential: credential,
+              );
+              if (snapshot['unchanged'] != true &&
+                  snapshot['hubEpoch'] == bootstrap.hubEpoch &&
+                  snapshot['version'] is int) {
+                final ledger = OfflineEventLedger.instance;
+                await ledger.initialize();
+                await ledger.saveSnapshot(
+                  tenantId: widget.scope.tenantId,
+                  venueId: widget.scope.venueId,
+                  kind: VenueHubRuntime.bootstrapSnapshotKind,
+                  version: snapshot['version'] as int,
+                  value: snapshot,
+                );
+              }
+            } on Object catch (error, stackTrace) {
+              AppLogger.error(
+                'Preload backup venue hub snapshot',
+                error,
+                stackTrace,
+              );
+            }
+          }
+          return;
+        }
         AppLogger.info(
           'Venue offline hub auto-start skipped: another device owns this venue. '
           'A manager can replace it in Settings > Venue offline hub.',
         );
         return;
       }
+      await _backupMonitor.stop();
       if (!canHostVenueHub) {
         AppLogger.info(
           'This platform can join the venue hub but cannot host it.',
@@ -225,6 +276,7 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
   @override
   void dispose() {
     _retryTimer?.cancel();
+    unawaited(_backupMonitor.stop());
     super.dispose();
   }
 

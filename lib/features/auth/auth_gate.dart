@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/home_shell.dart';
 import '../../core/app_logger.dart';
+import '../../core/cloud_diagnostic_upload_host.dart';
 import '../../core/app_theme_controller.dart';
 import '../../core/firebase_connectivity_probe.dart';
 import '../../core/platform_admin_pin_session_store.dart';
@@ -161,6 +162,7 @@ class _OfflineHubWorkspaceState extends ConsumerState<OfflineHubWorkspace> {
           scope: workspace.scope,
           cloudRefreshEnabled: false,
         ),
+        CloudDiagnosticUploadHost(scope: workspace.scope),
         StaffPinGate(
           scope: workspace.scope,
           backgroundLockSeconds: workspace.venue.backgroundLockSeconds,
@@ -658,6 +660,7 @@ class _TenantWorkspace extends ConsumerWidget {
         // staff session, so unattended kitchen/bar delivery keeps running.
         if (!kIsWeb) const QueuedPrintWorkerHost(),
         if (!kIsWeb) VenueHubAutoStartHost(scope: scope),
+        CloudDiagnosticUploadHost(scope: scope),
         const TrustedClockHost(),
         StaffPinGate(
           scope: scope,

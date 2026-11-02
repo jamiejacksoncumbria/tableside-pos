@@ -21,4 +21,30 @@ void main() {
     expect(store.copyText, contains('<redacted-email>'));
     expect(store.copyText, contains('<redacted>'));
   });
+
+  test('cloud diagnostics exclude raw messages and external stack frames', () async {
+    final store = DiagnosticLogStore.instance;
+    await store.clear();
+    store.append(
+      'ERROR',
+      '[Close bill] StateError: customer Jamie paid 10.00',
+    );
+    store.append(
+      'STACK',
+      '#0 ProductionCommandRepository.closeOrder '
+          '(package:tableside_pos/data/production_command_repository.dart:1513:7)',
+    );
+    store.append(
+      'STACK',
+      '#1 External.call (package:third_party/client.dart:10:2)',
+    );
+
+    final entries = store.cloudDiagnosticEntries;
+    expect(entries, hasLength(2));
+    expect(entries.first, containsPair('action', 'Close bill'));
+    expect(entries.first, containsPair('errorType', 'StateError'));
+    expect(entries.toString(), isNot(contains('Jamie')));
+    expect(entries.toString(), isNot(contains('10.00')));
+    expect(entries.toString(), isNot(contains('third_party')));
+  });
 }

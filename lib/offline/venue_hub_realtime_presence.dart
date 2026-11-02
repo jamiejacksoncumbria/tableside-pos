@@ -153,6 +153,12 @@ class VenueHubRealtimePresence {
         'connectedAt': WindowsRealtimeRestSession.serverTimestamp,
         'lastReadyAt': WindowsRealtimeRestSession.serverTimestamp,
       });
+      await windowsSession.update(
+        'hubAuthorities/${scope.tenantId}/${scope.venueId}',
+        <String, Object?>{
+          'lastReadyAt': WindowsRealtimeRestSession.serverTimestamp,
+        },
+      );
       connected.value = true;
       AppLogger.info('Venue hub realtime presence connected over Windows SSE.');
       var leaseFailureReported = false;
@@ -164,6 +170,12 @@ class VenueHubRealtimePresence {
             'hubEpoch': hubEpoch,
             'lastReadyAt': WindowsRealtimeRestSession.serverTimestamp,
           });
+          await windowsSession.update(
+            'hubAuthorities/${scope.tenantId}/${scope.venueId}',
+            <String, Object?>{
+              'lastReadyAt': WindowsRealtimeRestSession.serverTimestamp,
+            },
+          );
           final restored = !connected.value;
           connected.value = true;
           leaseFailureReported = false;
@@ -206,6 +218,9 @@ class VenueHubRealtimePresence {
       'hubPresence/${scope.tenantId}/${scope.venueId}/$deviceId',
     );
     _presence = presence;
+    final authorityLease = database.ref(
+      'hubAuthorities/${scope.tenantId}/${scope.venueId}',
+    );
     _signalSubscription = database
         .ref('hubSignals/${scope.tenantId}/${scope.venueId}')
         .onValue
@@ -267,6 +282,9 @@ class VenueHubRealtimePresence {
                 'connectedAt': ServerValue.timestamp,
                 'lastReadyAt': ServerValue.timestamp,
               });
+              await authorityLease.update(<String, Object?>{
+                'lastReadyAt': ServerValue.timestamp,
+              });
               connected.value = true;
               AppLogger.info('Venue hub realtime presence connected.');
             } on Object catch (error, stackTrace) {
@@ -292,6 +310,9 @@ class VenueHubRealtimePresence {
         await presence.update(<String, Object?>{
           'online': true,
           'hubEpoch': hubEpoch,
+          'lastReadyAt': ServerValue.timestamp,
+        });
+        await authorityLease.update(<String, Object?>{
           'lastReadyAt': ServerValue.timestamp,
         });
         final restored = !connected.value;

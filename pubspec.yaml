@@ -3,7 +3,7 @@ description: "A multi-tenant, responsive restaurant POS foundation."
 
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
-version: 1.0.0+2
+version: 1.0.0+3
 
 environment:
   sdk: ^3.12.2
@@ -27,6 +27,9 @@ dependencies:
   # Shorebird patches installed Android, iOS, and Windows releases. Web uses
   # Firebase Hosting deployment because browsers load the hosted build.
   shorebird_code_push: ^2.0.7
+  # Performs a real process restart after a signed staging patch is downloaded.
+  # Hot restart is unsafe for native plugins and long-running hub services.
+  restart_app: ^1.10.2
   file_picker: ^12.0.0-beta.7
   flutter_riverpod: ^3.4.2
   intl: ^0.20.2

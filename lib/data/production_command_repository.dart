@@ -636,12 +636,55 @@ class ProductionCommandRepository {
     return epoch;
   }
 
+  Future<void> configureOfflineVenueBackupHub({
+    required VenueScope scope,
+    required String deviceId,
+    required String credentialId,
+    required String endpointHost,
+    int endpointPort = 8443,
+  }) => _call('manageVenueConfiguration', {
+    'tenantId': scope.tenantId,
+    'venueId': scope.venueId,
+    'resource': 'offlineHubBackup',
+    'values': {
+      'deviceId': deviceId,
+      'credentialId': credentialId,
+      'endpointHost': endpointHost,
+      'endpointPort': endpointPort,
+    },
+  });
+
+  Future<void> removeOfflineVenueBackupHub({required VenueScope scope}) =>
+      _call('manageVenueConfiguration', {
+        'tenantId': scope.tenantId,
+        'venueId': scope.venueId,
+        'resource': 'offlineHubBackupRemoval',
+        'values': const <String, Object?>{},
+      });
+
   Future<Map<String, Object?>> fetchOfflineHubBootstrap({
     required VenueScope scope,
   }) => _call('getOfflineHubBootstrap', {
     'tenantId': scope.tenantId,
     'venueId': scope.venueId,
   });
+
+  Future<void> uploadDeviceDiagnostics({
+    required VenueScope scope,
+    required String deviceId,
+    required String platform,
+    required List<Map<String, Object?>> entries,
+  }) async {
+    if (entries.isEmpty) return;
+    await _call('uploadDeviceDiagnostics', <String, Object?>{
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'deviceId': deviceId,
+      'environment': 'staging',
+      'platform': platform,
+      'entries': entries,
+    });
+  }
 
   Future<Set<String>> uploadOfflineHubEvents({
     required VenueScope scope,
@@ -848,6 +891,63 @@ class ProductionCommandRepository {
       body: body,
     );
     return _call('issueRealtimeHubSession', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+  }
+
+  Future<Map<String, Object?>> issueRealtimeBackupHubSession({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+  }) => _signedHubCall(
+    action: 'issueRealtimeBackupHubSession',
+    path: '/v1/backup-realtime-session',
+    scope: scope,
+    deviceId: deviceId,
+    hubEpoch: hubEpoch,
+    credential: credential,
+    body: <String, Object?>{'deviceId': deviceId},
+  );
+
+  Future<Map<String, Object?>> promoteOfflineBackupHub({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+  }) => _signedHubCall(
+    action: 'promoteOfflineBackupHub',
+    path: '/v1/backup-promote',
+    scope: scope,
+    deviceId: deviceId,
+    hubEpoch: hubEpoch,
+    credential: credential,
+    body: <String, Object?>{'deviceId': deviceId},
+  );
+
+  Future<Map<String, Object?>> _signedHubCall({
+    required String action,
+    required String path,
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+    required Map<String, Object?> body,
+  }) async {
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: path,
+      hubEpoch: hubEpoch,
+      sentAtUtc: DateTime.now().toUtc(),
+      body: body,
+    );
+    return _call(action, <String, Object?>{
       'envelope': envelope.toJson(),
       'body': body,
     });
@@ -2423,7 +2523,8 @@ class ProductionCommandRepository {
       'europe-west2-$projectId.cloudfunctions.net',
       'posApi',
     );
-    AppLogger.info('POS API $action: sending request.');
+    final recordRequest = action != 'uploadDeviceDiagnostics';
+    if (recordRequest) AppLogger.info('POS API $action: sending request.');
     final staffSession = StaffPinSessionStore.current;
     final requestData = <String, Object?>{
       ...data,
@@ -2442,7 +2543,9 @@ class ProductionCommandRepository {
       },
       body: jsonEncode({'action': action, 'data': requestData}),
     );
-    AppLogger.info('POS API $action: HTTP ${response.statusCode}.');
+    if (recordRequest) {
+      AppLogger.info('POS API $action: HTTP ${response.statusCode}.');
+    }
 
     final decoded = jsonDecode(response.body);
     if (decoded is! Map) {
@@ -2469,11 +2572,14 @@ class ProductionCommandRepository {
 
   static const Set<String> _backgroundActions = {
     'getOfflineHubBootstrap',
+    'uploadDeviceDiagnostics',
     'getOfflineHubSnapshot',
     'ingestOfflineHubEvents',
     'getOfflineHubSyncCursor',
     'reconcileOfflineHubClosedOrders',
     'issueRealtimeHubSession',
+    'issueRealtimeBackupHubSession',
+    'promoteOfflineBackupHub',
     'issueRealtimePosSession',
     'issueRealtimePrinterSession',
     'claimRemoteHubCommands',

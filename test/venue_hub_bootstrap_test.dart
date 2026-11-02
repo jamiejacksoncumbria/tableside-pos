@@ -64,4 +64,49 @@ void main() {
       throwsFormatException,
     );
   });
+
+  test('parses a distinct passive backup authority', () {
+    final credentials = [
+      for (final entry in [('primary', 3), ('backup', 9)])
+        {
+          'credentialId': '${entry.$1}-credential',
+          'deviceId': '${entry.$1}-device',
+          'algorithm': 'Ed25519',
+          'publicKeyBase64': base64UrlEncode(
+            List<int>.filled(32, entry.$2),
+          ),
+        },
+    ];
+    final bootstrap = VenueHubBootstrap.fromJson({
+      'enabled': true,
+      'hubEpoch': 7,
+      'hubDeviceId': 'primary-device',
+      'hubCredentialId': 'primary-credential',
+      'hubEndpoint': 'https://192.168.1.20:8443',
+      'backupDeviceId': 'backup-device',
+      'backupCredentialId': 'backup-credential',
+      'backupEndpoint': 'https://192.168.1.21:8443',
+      'serverTimeMillis': 1789214400000,
+      'credentials': credentials,
+    });
+
+    expect(bootstrap.backupDeviceId, 'backup-device');
+    expect(bootstrap.backupCredentialId, 'backup-credential');
+    expect(bootstrap.backupEndpoint?.host, '192.168.1.21');
+  });
+
+  test('fails closed when a backup credential is absent', () {
+    expect(
+      () => VenueHubBootstrap.fromJson({
+        'enabled': false,
+        'hubEpoch': 2,
+        'backupDeviceId': 'backup-device',
+        'backupCredentialId': 'missing-credential',
+        'backupEndpoint': 'https://192.168.1.21:8443',
+        'serverTimeMillis': 1789214400000,
+        'credentials': const [],
+      }),
+      throwsFormatException,
+    );
+  });
 }

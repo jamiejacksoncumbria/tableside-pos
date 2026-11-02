@@ -1385,7 +1385,8 @@ function approvedBootstrapActions() {
     "getOfflineHubSyncCursor",
     "reconcileOfflineHubClosedOrders", "getOfflineHubSnapshot",
     "claimRemoteHubCommands", "issueRealtimeHubSession",
-    "completeRemoteHubCommand",
+    "issueRealtimeBackupHubSession", "promoteOfflineBackupHub",
+    "completeRemoteHubCommand", "uploadDeviceDiagnostics",
   ];
 }
 
@@ -1493,6 +1494,12 @@ async function seedAuthorisationFixture() {
     await set(ref(context.database(), `hubPresence/tenant-a/venue-a/${hubDeviceId}`), {
       online: true,
       hubEpoch: 7,
+      lastReadyAt: Date.now(),
+    });
+    await set(ref(context.database(), "hubAuthorities/tenant-a/venue-a"), {
+      enabled: true,
+      deviceId: hubDeviceId,
+      hubEpoch,
       lastReadyAt: Date.now(),
     });
   });

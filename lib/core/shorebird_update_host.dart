@@ -2,9 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:shorebird_code_push/shorebird_code_push.dart';
+import 'package:restart_app/restart_app.dart';
 
 import 'app_logger.dart';
 import 'app_environment.dart';
+import 'app_busy_state.dart';
+import '../offline/venue_hub_remote_command_client.dart';
+import '../offline/venue_hub_runtime.dart';
 
 /// Downloads Shorebird patches without delaying POS startup.
 ///
@@ -28,6 +32,7 @@ class _ShorebirdUpdateHostState extends State<ShorebirdUpdateHost> {
   Timer? _periodicCheck;
   bool _checking = false;
   bool _restartRequired = false;
+  bool _startupRestartWindow = true;
 
   UpdateTrack get _track => AppEnvironment.isStaging
       ? const UpdateTrack('staging')
@@ -43,8 +48,9 @@ class _ShorebirdUpdateHostState extends State<ShorebirdUpdateHost> {
       );
       _startupCheck = Timer(
         const Duration(seconds: 3),
-        () => unawaited(_checkForUpdate()),
+        () => unawaited(_checkForUpdate(allowAutomaticRestart: true)),
       );
+      Timer(const Duration(seconds: 45), () => _startupRestartWindow = false);
     }
   }
 
@@ -55,7 +61,7 @@ class _ShorebirdUpdateHostState extends State<ShorebirdUpdateHost> {
     super.dispose();
   }
 
-  Future<void> _checkForUpdate() async {
+  Future<void> _checkForUpdate({bool allowAutomaticRestart = false}) async {
     if (!_updater.isAvailable || _checking) return;
     _checking = true;
     try {
@@ -71,6 +77,18 @@ class _ShorebirdUpdateHostState extends State<ShorebirdUpdateHost> {
           );
         }
         setState(() => _restartRequired = true);
+        if (allowAutomaticRestart &&
+            _startupRestartWindow &&
+            AppEnvironment.isStaging &&
+            AppBusyState.pending.value == 0 &&
+            RemoteHubWaitState.pending.value == 0 &&
+            VenueHubRuntime.instance.status.pendingEvents == 0) {
+          AppLogger.info(
+            'Applying the signed staging patch with a safe process restart.',
+          );
+          await VenueHubRuntime.instance.stop();
+          await Restart.restartApp(mode: RestartMode.process);
+        }
       }
     } on Object catch (error, stackTrace) {
       // Updates must never block ordering, offline mode, payment, or printing.
