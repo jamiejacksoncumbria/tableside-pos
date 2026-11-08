@@ -8,9 +8,47 @@ import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../data/production_command_repository.dart';
 import 'transient_realtime_database.dart';
+import 'venue_hub_availability.dart';
 import 'venue_hub_bootstrap.dart';
 import 'venue_hub_device_credential.dart';
+import 'venue_hub_platform.dart';
 import 'windows_realtime_rest_session.dart';
+
+/// Measures how long the server-owned authority lease has stopped advancing
+/// with a monotonic clock. Wall-clock comparisons are unsafe here because an
+/// Android terminal can be minutes or hours away from Firebase server time.
+@visibleForTesting
+class VenueHubLeaseSilenceTracker {
+  VenueHubLeaseSilenceTracker({this.monotonicMicroseconds}) {
+    _stopwatch.start();
+  }
+
+  final int Function()? monotonicMicroseconds;
+  final Stopwatch _stopwatch = Stopwatch();
+  int? _lastReadyAtMillis;
+  int? _observedAtMicroseconds;
+
+  int get _nowMicroseconds =>
+      monotonicMicroseconds?.call() ?? _stopwatch.elapsedMicroseconds;
+
+  void observe(Object? lastReadyAt) {
+    if (lastReadyAt is! int || lastReadyAt <= 0) return;
+    if (_lastReadyAtMillis == lastReadyAt) return;
+    _lastReadyAtMillis = lastReadyAt;
+    _observedAtMicroseconds = _nowMicroseconds;
+  }
+
+  bool isSilentFor(Duration duration) {
+    final observedAt = _observedAtMicroseconds;
+    if (observedAt == null) return false;
+    return _nowMicroseconds - observedAt >= duration.inMicroseconds;
+  }
+
+  void reset() {
+    _lastReadyAtMillis = null;
+    _observedAtMicroseconds = null;
+  }
+}
 
 /// Keeps a configured backup passive until the primary's server-owned RTDB
 /// lease is stale. The backend repeats the lease test in an atomic authority
@@ -27,12 +65,15 @@ class VenueHubBackupMonitor {
   FirebaseApp? _app;
   Timer? _timer;
   Map<Object?, Object?>? _latestAuthority;
+  final VenueHubLeaseSilenceTracker _leaseSilence =
+      VenueHubLeaseSilenceTracker();
   bool _promoting = false;
   VoidCallback? _onPromoted;
   VenueScope? _scope;
   String? _deviceId;
   VenueHubDeviceCredential? _credential;
   VenueHubBootstrap? _bootstrap;
+  bool _holdsAndroidService = false;
 
   Future<void> start({
     required VenueScope scope,
@@ -85,14 +126,16 @@ class VenueHubBackupMonitor {
       );
       _windowsSession = windowsSession;
       await windowsSession.authenticate();
-      _authoritySubscription = windowsSession.watch(path).listen(
-        _receiveAuthority,
-        onError: (Object error, StackTrace stackTrace) => AppLogger.error(
-          'Watch primary hub authority from backup',
-          error,
-          stackTrace,
-        ),
-      );
+      _authoritySubscription = windowsSession
+          .watch(path)
+          .listen(
+            _receiveAuthority,
+            onError: (Object error, StackTrace stackTrace) => AppLogger.error(
+              'Watch primary hub authority from backup',
+              error,
+              stackTrace,
+            ),
+          );
     } else {
       FirebaseApp app;
       try {
@@ -109,25 +152,31 @@ class VenueHubBackupMonitor {
         app: app,
         databaseUrl: databaseUrl,
       );
-      _authoritySubscription = database.ref(path).onValue.listen(
-        (event) => _receiveAuthority(event.snapshot.value),
-        onError: (Object error, StackTrace stackTrace) => AppLogger.error(
-          'Watch primary hub authority from backup',
-          error,
-          stackTrace,
-        ),
-      );
+      _authoritySubscription = database
+          .ref(path)
+          .onValue
+          .listen(
+            (event) => _receiveAuthority(event.snapshot.value),
+            onError: (Object error, StackTrace stackTrace) => AppLogger.error(
+              'Watch primary hub authority from backup',
+              error,
+              stackTrace,
+            ),
+          );
     }
     _timer = Timer.periodic(
       const Duration(seconds: 5),
       (_) => unawaited(_checkFailover()),
     );
+    await AndroidVenueHubService.start(standby: true);
+    _holdsAndroidService = true;
     AppLogger.info('Backup venue hub is armed in passive standby mode.');
   }
 
   void _receiveAuthority(Object? raw) {
     if (raw is Map) {
       _latestAuthority = Map<Object?, Object?>.from(raw);
+      _leaseSilence.observe(raw['lastReadyAt']);
       unawaited(_checkFailover());
     }
   }
@@ -150,13 +199,19 @@ class VenueHubBackupMonitor {
       return;
     }
     final lastReadyAt = authority['lastReadyAt'];
-    if (lastReadyAt is! int ||
-        DateTime.now().millisecondsSinceEpoch - lastReadyAt <
-            _staleAfter.inMilliseconds) {
+    if (lastReadyAt is! int || !_leaseSilence.isSilentFor(_staleAfter)) {
       return;
     }
     _promoting = true;
     try {
+      VenueHubAvailability.markOffline(
+        'The primary venue hub is unavailable. Secure backup promotion is in '
+        'progress; orders remain blocked until the backup is ready.',
+      );
+      AppLogger.info(
+        'Primary hub authority lease stopped advancing; requesting secure '
+        'backup promotion.',
+      );
       await _repository.promoteOfflineBackupHub(
         scope: scope,
         deviceId: deviceId,
@@ -170,7 +225,15 @@ class VenueHubBackupMonitor {
     } on Object catch (error, stackTrace) {
       // A healthy primary or concurrent authority refresh is expected to
       // reject the request. The backend remains the final decision maker.
-      AppLogger.error('Attempt automatic backup hub promotion', error, stackTrace);
+      AppLogger.error(
+        'Attempt automatic backup hub promotion',
+        error,
+        stackTrace,
+      );
+      VenueHubAvailability.markOffline(
+        'Automatic backup hub promotion failed. Check internet access and the '
+        'backup certificate, then contact an administrator if it does not recover.',
+      );
     } finally {
       _promoting = false;
     }
@@ -193,10 +256,15 @@ class VenueHubBackupMonitor {
       }
     }
     _latestAuthority = null;
+    _leaseSilence.reset();
     _scope = null;
     _deviceId = null;
     _credential = null;
     _bootstrap = null;
     _onPromoted = null;
+    if (_holdsAndroidService) {
+      _holdsAndroidService = false;
+      await AndroidVenueHubService.stop();
+    }
   }
 }

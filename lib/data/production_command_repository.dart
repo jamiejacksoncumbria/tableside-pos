@@ -13,6 +13,7 @@ import '../core/app_busy_state.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/staff_pin_session_store.dart';
 import '../core/firebase_environment_options.dart';
+import '../core/trusted_clock.dart';
 import '../features/pos/domain.dart';
 import '../offline/offline_event.dart';
 import '../offline/venue_hub_device_credential.dart';
@@ -729,7 +730,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/cloud-sync',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     final response = await _call('ingestOfflineHubEvents', {
@@ -759,7 +760,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/cloud-sync-cursor',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     final response = await _call('getOfflineHubSyncCursor', {
@@ -821,7 +822,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/reconcile-closed-orders',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     final response = await _call('reconcileOfflineHubClosedOrders', {
@@ -862,7 +863,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/snapshot',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     return _call('getOfflineHubSnapshot', {
@@ -887,7 +888,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/realtime-session',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     return _call('issueRealtimeHubSession', {
@@ -944,7 +945,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: path,
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     return _call(action, <String, Object?>{
@@ -990,7 +991,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/remote-claim',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     final response = await _call('claimRemoteHubCommands', {
@@ -1034,7 +1035,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/remote-complete',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     await _call('completeRemoteHubCommand', {
@@ -1056,6 +1057,24 @@ class ProductionCommandRepository {
       throw StateError('The server returned an invalid trusted time sample.');
     }
     return serverTimeMillis;
+  }
+
+  /// Signed hub requests have a narrow replay window. Obtain one authenticated
+  /// server sample before the first such request so an incorrect Android or
+  /// Windows wall clock cannot prevent backup promotion or cloud recovery.
+  Future<DateTime> _trustedHubSigningTime(VenueScope scope) async {
+    if (!TrustedClock.instance.snapshot.isSynchronised) {
+      try {
+        await TrustedClock.instance.synchroniseFirebase(
+          () => fetchTrustedTime(scope: scope),
+        );
+      } on Object catch (error, stackTrace) {
+        // The signed request will still be verified by the server and fail
+        // closed if the fallback device clock is outside its replay window.
+        AppLogger.error('Synchronise hub signing clock', error, stackTrace);
+      }
+    }
+    return TrustedClock.instance.nowUtc();
   }
 
   Future<Map<String, Object?>?> claimDevicePrintJob({

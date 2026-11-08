@@ -18,6 +18,18 @@ void main() {
     expect(VenueHubAvailability.canProcessOrders, isTrue);
   });
 
+  test('LAN failure does not hide a fresh cloud hub route', () {
+    VenueHubAvailability.markOnline();
+    VenueHubAvailability.markLanOffline('LAN endpoint timed out.');
+
+    expect(VenueHubAvailability.issue.value, isNull);
+    expect(
+      VenueHubAvailability.status.value.connectivity,
+      VenueHubConnectivity.online,
+    );
+    expect(VenueHubAvailability.canProcessOrders, isTrue);
+  });
+
   test('remote-only terminal still reports a cloud outage', () {
     VenueHubAvailability.markRemoteOffline(
       lanSessionAvailable: false,

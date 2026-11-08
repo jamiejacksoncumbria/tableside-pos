@@ -341,7 +341,7 @@ class VenueHubClientRegistry {
       loginClient.close();
       _connectionFailure = error.toString();
       _clearSession(preserveAuthority: true);
-      VenueHubAvailability.markOffline(error.toString());
+      VenueHubAvailability.markLanOffline(error.toString());
       rethrow;
     }
   }
@@ -432,7 +432,7 @@ class VenueHubClientRegistry {
 
   void _recordLanFailure(Object error) {
     _lanHealthy = false;
-    VenueHubAvailability.markOffline(error.toString());
+    VenueHubAvailability.markLanOffline(error.toString());
   }
 
   /// Business validation errors (for example an invalid modifier) prove that

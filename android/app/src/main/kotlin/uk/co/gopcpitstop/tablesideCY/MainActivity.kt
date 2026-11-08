@@ -15,7 +15,11 @@ class MainActivity : FlutterActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "start" -> {
-                    VenueHubForegroundService.start(this, runtimeReady = true)
+                    VenueHubForegroundService.start(
+                        this,
+                        runtimeReady = true,
+                        standby = call.argument<Boolean>("standby") == true,
+                    )
                     result.success(null)
                 }
                 "stop" -> {

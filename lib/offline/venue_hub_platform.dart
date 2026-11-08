@@ -24,9 +24,11 @@ class AndroidVenueHubService {
 
   static const _channel = MethodChannel('tableside/android_hub_service');
 
-  static Future<void> start() async {
+  static Future<void> start({bool standby = false}) async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
-    await _channel.invokeMethod<void>('start');
+    await _channel.invokeMethod<void>('start', <String, Object?>{
+      'standby': standby,
+    });
   }
 
   static Future<void> stop() async {

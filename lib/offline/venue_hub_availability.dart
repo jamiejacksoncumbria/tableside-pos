@@ -132,6 +132,8 @@ class VenueHubAvailability {
       ValueNotifier<VenueHubConnectionStatus>(
         const VenueHubConnectionStatus.unknown(),
       );
+  static bool _lanOnline = false;
+  static bool _remoteOnline = false;
 
   static bool get canProcessOrders => status.value.canProcessOrders;
 
@@ -141,6 +143,8 @@ class VenueHubAvailability {
   }
 
   static void reset() {
+    _lanOnline = false;
+    _remoteOnline = false;
     issue.value = null;
     status.value = const VenueHubConnectionStatus.unknown();
   }
@@ -158,6 +162,7 @@ class VenueHubAvailability {
   /// hub is running and that its internet route is operational.
   static void markOnline() {
     if (hasDeviceAuthorizationIssue) return;
+    _remoteOnline = true;
     issue.value = null;
     status.value = const VenueHubConnectionStatus(
       connectivity: VenueHubConnectivity.online,
@@ -168,9 +173,8 @@ class VenueHubAvailability {
   /// but says nothing about the venue's internet connection.
   static void markLanOnline({bool? internetAvailable}) {
     if (hasDeviceAuthorizationIssue) return;
-    final internet =
-        internetAvailable ??
-        status.value.connectivity == VenueHubConnectivity.online;
+    _lanOnline = true;
+    final internet = internetAvailable ?? _remoteOnline;
     issue.value = null;
     status.value = VenueHubConnectionStatus(
       connectivity: internet
@@ -180,6 +184,28 @@ class VenueHubAvailability {
   }
 
   static void markOffline([String? detail]) {
+    _lanOnline = false;
+    _remoteOnline = false;
+    _setOffline(detail);
+  }
+
+  /// Records only a failed pinned-LAN route. A fresh cloud acknowledgement or
+  /// realtime lease still proves that remote commands can reach the hub, so
+  /// the UI must not oscillate between online and offline every health tick.
+  static void markLanOffline([String? detail]) {
+    if (hasDeviceAuthorizationIssue) return;
+    _lanOnline = false;
+    if (_remoteOnline && !hasDeviceAuthorizationIssue) {
+      issue.value = null;
+      status.value = const VenueHubConnectionStatus(
+        connectivity: VenueHubConnectivity.online,
+      );
+      return;
+    }
+    _setOffline(detail);
+  }
+
+  static void _setOffline([String? detail]) {
     final message = detail?.trim().isNotEmpty == true
         ? detail!.trim()
         : 'The venue hub is offline. Join the same Wi-Fi as the hub and check that it is running.';
@@ -210,10 +236,12 @@ class VenueHubAvailability {
     required bool lanSessionAvailable,
     String? detail,
   }) {
-    if (lanSessionAvailable) {
+    if (hasDeviceAuthorizationIssue) return;
+    _remoteOnline = false;
+    if (lanSessionAvailable || _lanOnline) {
       markLanOnline(internetAvailable: false);
       return;
     }
-    markOffline(detail);
+    _setOffline(detail);
   }
 }

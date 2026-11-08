@@ -7,11 +7,25 @@ import 'package:flutter/foundation.dart';
 
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
+import '../core/trusted_clock.dart';
 import '../data/production_command_repository.dart';
 import 'transient_realtime_database.dart';
 import 'venue_hub_availability.dart';
 import 'venue_hub_client_registry.dart';
 import 'windows_realtime_rest_session.dart';
+
+@visibleForTesting
+bool venueHubPresenceIsFresh({
+  required DateTime trustedNowUtc,
+  required DateTime lastReadyAtUtc,
+  Duration staleAfter = const Duration(seconds: 15),
+}) {
+  final age = trustedNowUtc.toUtc().difference(lastReadyAtUtc.toUtc());
+  // Allow only tiny network/rounding skew into the future. A timestamp hours
+  // ahead of the trusted clock must fail closed instead of making a dead hub
+  // appear online indefinitely.
+  return age >= const Duration(seconds: -5) && age <= staleAfter;
+}
 
 /// A staff-scoped realtime control channel for remote POS terminals.
 ///
@@ -48,10 +62,16 @@ class VenueHubRealtimeClient {
       _hubEpoch == hubEpoch &&
       (_database != null || _windowsSession != null);
 
-  bool get hubOnline =>
-      _serverOnline &&
-      _lastReadyAt != null &&
-      DateTime.now().difference(_lastReadyAt!) <= _staleAfter;
+  bool get hubOnline {
+    final lastReadyAt = _lastReadyAt;
+    return _serverOnline &&
+        lastReadyAt != null &&
+        venueHubPresenceIsFresh(
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+          lastReadyAtUtc: lastReadyAt,
+          staleAfter: _staleAfter,
+        );
+  }
 
   Stream<Map<String, DateTime>> get printerPresence => _printerPresence.stream;
 
@@ -284,7 +304,9 @@ class VenueHubRealtimeClient {
     if (online) {
       final wasOffline = VenueHubAvailability.issue.value != null;
       VenueHubAvailability.markOnline();
-      if (wasOffline) AppLogger.info('Venue hub is back online and ready.');
+      if (wasOffline && VenueHubAvailability.issue.value == null) {
+        AppLogger.info('Venue hub is back online and ready.');
+      }
       return;
     }
     final scope = _scope;
