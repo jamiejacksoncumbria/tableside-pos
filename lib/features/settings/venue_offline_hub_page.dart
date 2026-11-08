@@ -164,6 +164,11 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       });
       return;
     }
+    if (!await _ensureHubSecurityFiles(
+      purpose: 'make this device the venue hub',
+    )) {
+      return;
+    }
     String? takeoverReason;
     if (_bootstrap?.enabled == true &&
         (_bootstrap?.hubDeviceId != _deviceId ||
@@ -249,44 +254,105 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     });
   }
 
-  Future<void> _configureBackup() => _run('Configure backup hub', () async {
-    final deviceId = _deviceId;
-    final credential = _credential;
-    if (deviceId == null || credential == null) {
-      throw StateError('The device identity is not ready.');
+  Future<void> _configureBackup() async {
+    if (!await _ensureHubSecurityFiles(
+      purpose: 'make this device the backup hub',
+    )) {
+      return;
     }
-    if (_bootstrap?.enabled != true || _bootstrap?.hubDeviceId == deviceId) {
-      throw StateError(
-        'Configure the primary hub first, then use a different Android or Windows device as its backup.',
+    await _run('Configure backup hub', () async {
+      final deviceId = _deviceId;
+      final credential = _credential;
+      if (deviceId == null || credential == null) {
+        throw StateError('The device identity is not ready.');
+      }
+      if (_bootstrap?.enabled != true || _bootstrap?.hubDeviceId == deviceId) {
+        throw StateError(
+          'Configure the primary hub first, then use a different Android or Windows device as its backup.',
+        );
+      }
+      await _repository.enrollOfflineHubDeviceCredential(
+        scope: widget.scope,
+        deviceId: deviceId,
+        credentialId: credential.credentialId,
+        publicKeyBase64: credential.publicKeyBase64,
       );
-    }
-    if (!_hasCertificate || !_hasPrivateKey) {
-      throw StateError(
-        'Import the venue certificate and private key on this backup device first.',
+      await _repository.configureOfflineVenueBackupHub(
+        scope: widget.scope,
+        deviceId: deviceId,
+        credentialId: credential.credentialId,
+        endpointHost: _host.text.trim(),
+        endpointPort: int.tryParse(_port.text.trim()) ?? 8443,
       );
-    }
-    await _repository.enrollOfflineHubDeviceCredential(
-      scope: widget.scope,
-      deviceId: deviceId,
-      credentialId: credential.credentialId,
-      publicKeyBase64: credential.publicKeyBase64,
+      final raw = await _repository.fetchOfflineHubBootstrap(
+        scope: widget.scope,
+      );
+      if (mounted) {
+        setState(() {
+          _bootstrap = VenueHubBootstrap.fromJson(raw);
+          _message =
+              'This device is armed as the passive backup hub. It cannot accept orders until secure failover completes.';
+        });
+      }
+    });
+  }
+
+  /// A primary or backup hub terminates HTTPS locally and therefore requires
+  /// both halves of the venue TLS identity. Ordinary POS clients intentionally
+  /// receive only the public certificate and must never receive the private
+  /// key. This guided check runs before any cloud mutation so setup cannot end
+  /// half-configured or fail with a message hidden below the current viewport.
+  Future<bool> _ensureHubSecurityFiles({required String purpose}) async {
+    if (_hasCertificate && _hasPrivateKey) return true;
+    final importNow = await showAppDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.security_rounded),
+        title: const Text('Hub security files required'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'To $purpose, import this venue\'s certificate and matching '
+              'private key on this device first.',
+            ),
+            const SizedBox(height: 12),
+            _SecurityFileRequirement(
+              label: 'Venue certificate (.pem)',
+              installed: _hasCertificate,
+            ),
+            const SizedBox(height: 6),
+            _SecurityFileRequirement(
+              label: 'Hub private key (.pem)',
+              installed: _hasPrivateKey,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Android will open its file picker for each missing file. Keep '
+              'the private key only on approved primary or backup hub devices.',
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.file_open_outlined),
+            label: const Text('Import missing files'),
+          ),
+        ],
+      ),
     );
-    await _repository.configureOfflineVenueBackupHub(
-      scope: widget.scope,
-      deviceId: deviceId,
-      credentialId: credential.credentialId,
-      endpointHost: _host.text.trim(),
-      endpointPort: int.tryParse(_port.text.trim()) ?? 8443,
-    );
-    final raw = await _repository.fetchOfflineHubBootstrap(scope: widget.scope);
-    if (mounted) {
-      setState(() {
-        _bootstrap = VenueHubBootstrap.fromJson(raw);
-        _message =
-            'This device is armed as the passive backup hub. It cannot accept orders until secure failover completes.';
-      });
-    }
-  });
+    if (importNow != true || !mounted) return false;
+    if (!_hasCertificate && !await _chooseTlsFile('certificate')) return false;
+    if (!_hasPrivateKey && !await _chooseTlsFile('privateKey')) return false;
+    return _hasCertificate && _hasPrivateKey;
+  }
 
   Future<void> _removeBackup() => _run('Remove backup hub', () async {
     await _repository.removeOfflineVenueBackupHub(scope: widget.scope);
@@ -366,34 +432,38 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     await _startRuntime(snapshot: snapshot);
   });
 
-  Future<void> _chooseTlsFile(String kind) =>
-      _run('Choose TLS $kind', () async {
-        final result = await FilePicker.pickFiles(
-          type: FileType.custom,
-          allowedExtensions: const ['pem'],
-        );
-        final file = result?.files.single;
-        if (file == null) return;
-        final bytes = await file.readAsBytes();
-        final value = utf8.decode(bytes);
-        final expected = kind == 'certificate'
-            ? 'BEGIN CERTIFICATE'
-            : 'BEGIN PRIVATE KEY';
-        if (!value.contains(expected)) {
-          throw FormatException('The selected PEM file is not a valid $kind.');
-        }
-        await _secrets.write(key: '$_storagePrefix.$kind', value: value);
-        if (mounted) {
-          setState(() {
-            if (kind == 'certificate') {
-              _hasCertificate = true;
-            } else {
-              _hasPrivateKey = true;
-            }
-            _message = 'TLS $kind saved securely.';
-          });
-        }
-      });
+  Future<bool> _chooseTlsFile(String kind) async {
+    var saved = false;
+    await _run('Choose TLS $kind', () async {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['pem'],
+      );
+      final file = result?.files.single;
+      if (file == null) return;
+      final bytes = await file.readAsBytes();
+      final value = utf8.decode(bytes);
+      final expected = kind == 'certificate'
+          ? 'BEGIN CERTIFICATE'
+          : 'BEGIN PRIVATE KEY';
+      if (!value.contains(expected)) {
+        throw FormatException('The selected PEM file is not a valid $kind.');
+      }
+      await _secrets.write(key: '$_storagePrefix.$kind', value: value);
+      saved = true;
+      if (mounted) {
+        setState(() {
+          if (kind == 'certificate') {
+            _hasCertificate = true;
+          } else {
+            _hasPrivateKey = true;
+          }
+          _message = 'TLS $kind saved securely.';
+        });
+      }
+    });
+    return saved;
+  }
 
   Future<void> _startRuntime({
     Map<String, Object?>? snapshot,
@@ -625,7 +695,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                   const SizedBox(height: 8),
                   Text(
                     canHostVenueHub
-                        ? 'Import the venue certificate and its private key on the active hub. Other native POS devices import only the certificate. Plain HTTP is never allowed.'
+                        ? 'Every primary or backup hub must import the venue certificate and its private key. Ordinary native POS devices import only the certificate. Plain HTTP is never allowed.'
                         : 'Import only the public venue certificate on this POS device. The hub private key must never be copied to an ordinary till.',
                   ),
                   const SizedBox(height: 8),
@@ -777,4 +847,28 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       ),
     );
   }
+}
+
+class _SecurityFileRequirement extends StatelessWidget {
+  const _SecurityFileRequirement({
+    required this.label,
+    required this.installed,
+  });
+
+  final String label;
+  final bool installed;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Icon(
+        installed ? Icons.check_circle_rounded : Icons.warning_amber_rounded,
+        color: installed
+            ? Theme.of(context).colorScheme.primary
+            : Theme.of(context).colorScheme.error,
+      ),
+      const SizedBox(width: 8),
+      Expanded(child: Text('$label — ${installed ? 'installed' : 'required'}')),
+    ],
+  );
 }
