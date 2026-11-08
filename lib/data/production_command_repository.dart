@@ -2395,10 +2395,11 @@ class ProductionCommandRepository {
       );
     }
     if (!kIsWeb && !hub.isDeviceEnrolled(scope)) {
-      throw StateError(
-        'This device is not authorised for this venue. A manager must enrol '
-        'it and import the pinned venue certificate before it can process orders.',
-      );
+      const message =
+          'This device is not authorised for this venue. A manager must enrol '
+          'it and import the pinned venue certificate before it can process orders.';
+      VenueHubAvailability.markOffline(message);
+      throw StateError(message);
     }
     if (hub.isLocalHubHost(scope)) {
       throw StateError(
@@ -2556,9 +2557,13 @@ class ProductionCommandRepository {
       final error = body['error'];
       if (error is Map) {
         final message = Map<String, Object?>.from(error)['message'];
-        throw StateError(
-          message is String ? message : 'The POS action failed.',
-        );
+        final displayMessage = message is String
+            ? message
+            : 'The POS action failed.';
+        if (isVenueHubDeviceAuthorizationIssue(displayMessage)) {
+          VenueHubAvailability.markOffline(displayMessage);
+        }
+        throw StateError(displayMessage);
       }
       throw StateError('The POS action failed (${response.statusCode}).');
     }

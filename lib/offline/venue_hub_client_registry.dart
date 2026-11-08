@@ -276,6 +276,10 @@ class VenueHubClientRegistry {
     // credential is authorised by the server and its venue certificate is
     // pinned locally. This flag also gates the protected remote queue.
     _deviceEnrolled = true;
+    // Connectivity heartbeats are not proof that this particular terminal is
+    // authorised. Clear the persistent security warning only here, after both
+    // the cloud credential and the pinned certificate have been validated.
+    VenueHubAvailability.clearDeviceAuthorizationIssue();
     final loginClient = VenueHubClient(
       configuration: VenueHubClientConfiguration(
         endpoint: endpoint,

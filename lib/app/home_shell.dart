@@ -359,6 +359,7 @@ class HomeShell extends ConsumerWidget {
                 if (Firebase.apps.isNotEmpty)
                   const OperationalNotificationHost(),
                 if (Firebase.apps.isNotEmpty) const PushNotificationHost(),
+                const _VenueHubAccessNotificationHost(),
                 const _VenueHubSynchronizationNotificationHost(),
               ],
             ),
@@ -439,6 +440,63 @@ class HomeShell extends ConsumerWidget {
                 )
               : const PlatformAdminPage(),
       };
+}
+
+/// Keeps device enrolment and certificate failures in the manager-visible
+/// notification centre. Background retries are deduplicated, and successful
+/// hub recovery removes the alert automatically.
+class _VenueHubAccessNotificationHost extends ConsumerStatefulWidget {
+  const _VenueHubAccessNotificationHost();
+
+  @override
+  ConsumerState<_VenueHubAccessNotificationHost> createState() =>
+      _VenueHubAccessNotificationHostState();
+}
+
+class _VenueHubAccessNotificationHostState
+    extends ConsumerState<_VenueHubAccessNotificationHost> {
+  static const _notificationKey = 'venue-hub-device-authorisation';
+
+  @override
+  void initState() {
+    super.initState();
+    VenueHubAvailability.issue.addListener(_scheduleHandle);
+    _scheduleHandle();
+  }
+
+  void _scheduleHandle() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final issue = VenueHubAvailability.issue.value;
+      final controller = ref.read(appNotificationsProvider.notifier);
+      if (issue == null) {
+        controller.resolve(_notificationKey);
+        return;
+      }
+      final presentation = venueHubIssuePresentation(issue);
+      if (!presentation.requiresManagerAttention) {
+        controller.resolve(_notificationKey);
+        return;
+      }
+      controller.add(
+        title: presentation.title,
+        message: presentation.message,
+        level: AppNotificationLevel.error,
+        retentionSeconds: 60,
+        deduplicationKey: _notificationKey,
+        requiresAttention: true,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    VenueHubAvailability.issue.removeListener(_scheduleHandle);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
 }
 
 /// Promotes a durable hub/cloud conflict into the manager-visible notification

@@ -66,6 +66,9 @@ class TableSideCYApp extends ConsumerWidget {
           builder: (context, hubIssue, _) => ValueListenableBuilder<int>(
             valueListenable: AppBusyState.pending,
             builder: (context, busy, _) {
+              final hubPresentation = hubIssue == null
+                  ? null
+                  : venueHubIssuePresentation(hubIssue);
               final topInset = MediaQuery.paddingOf(context).top;
               final overlayOffsets = appStatusOverlayOffsets(
                 topInset: topInset,
@@ -138,7 +141,7 @@ class TableSideCYApp extends ConsumerWidget {
                                 const SizedBox(width: 10),
                                 Expanded(
                                   child: Text(
-                                    'HUB UNAVAILABLE · LAN devices should join the venue Wi-Fi; remote devices need the hub internet heartbeat.',
+                                    hubPresentation!.bannerLabel,
                                     style: Theme.of(context)
                                         .textTheme
                                         .labelLarge
@@ -273,15 +276,18 @@ class _HubOfflineDialogHostState extends State<_HubOfflineDialogHost> {
       }
       _dialogOpen = true;
       _lastShown = DateTime.now();
+      final presentation = venueHubIssuePresentation(widget.issue!);
       final navigator = Navigator.of(dialogContext);
       final route = DialogRoute<void>(
         context: dialogContext,
         builder: (dialogContext) => AlertDialog(
-          icon: const Icon(Icons.cloud_off_rounded),
-          title: const Text('Venue hub is unavailable'),
-          content: const Text(
-            'This device cannot safely save orders until the hub responds. Devices on the venue network can use the local hub even without internet. Devices on another Wi-Fi or mobile data work through Firebase whenever the hub internet heartbeat is live.',
+          icon: Icon(
+            presentation.requiresManagerAttention
+                ? Icons.admin_panel_settings_rounded
+                : Icons.cloud_off_rounded,
           ),
+          title: Text(presentation.title),
+          content: Text(presentation.message),
           actions: [
             FilledButton(
               onPressed: () => Navigator.pop(dialogContext),
