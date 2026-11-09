@@ -50,9 +50,71 @@ class VenueHubLeaseSilenceTracker {
   }
 }
 
-/// Keeps a configured backup passive until the primary's server-owned RTDB
-/// lease is stale. The backend repeats the lease test in an atomic authority
-/// transaction; this local observer is only a low-cost wake-up mechanism.
+/// Describes a backup device whose primary hub lease has stopped advancing.
+/// This is deliberately only a request for human attention: observing an
+/// expired lease never grants authority and never starts the backup runtime.
+class VenueHubManualTakeoverRequest {
+  const VenueHubManualTakeoverRequest({
+    required this.scope,
+    required this.primaryDeviceId,
+    required this.detectedAt,
+  });
+
+  final VenueScope scope;
+  final String primaryDeviceId;
+  final DateTime detectedAt;
+}
+
+/// Process-wide bridge between the passive backup monitor and the manager
+/// settings page. The callback is installed only by the configured backup
+/// monitor, keeping credentials and authority changes out of UI state.
+class VenueHubManualTakeoverCoordinator {
+  VenueHubManualTakeoverCoordinator._();
+
+  static final instance = VenueHubManualTakeoverCoordinator._();
+
+  final ValueNotifier<VenueHubManualTakeoverRequest?> pending =
+      ValueNotifier<VenueHubManualTakeoverRequest?>(null);
+  Future<void> Function(String managerPin, String reason)? _confirm;
+
+  void bind(Future<void> Function(String managerPin, String reason) confirm) {
+    _confirm = confirm;
+  }
+
+  void requireConfirmation(VenueHubManualTakeoverRequest request) {
+    final current = pending.value;
+    if (current?.scope == request.scope &&
+        current?.primaryDeviceId == request.primaryDeviceId) {
+      return;
+    }
+    pending.value = request;
+  }
+
+  void clear() => pending.value = null;
+
+  void unbind() {
+    _confirm = null;
+    clear();
+  }
+
+  Future<void> confirm({
+    required String managerPin,
+    required String reason,
+  }) async {
+    final callback = _confirm;
+    if (pending.value == null || callback == null) {
+      throw StateError(
+        'The primary hub is not currently eligible for manual takeover.',
+      );
+    }
+    await callback(managerPin, reason);
+  }
+}
+
+/// Keeps a configured backup passive and asks a manager to intervene when the
+/// primary's server-owned RTDB lease is stale. It never promotes itself. The
+/// backend repeats the lease test in an atomic authority transaction after a
+/// fresh manager PIN and explicit acknowledgement are supplied.
 class VenueHubBackupMonitor {
   VenueHubBackupMonitor({ProductionCommandRepository? repository})
     : _repository = repository ?? ProductionCommandRepository();
@@ -67,7 +129,7 @@ class VenueHubBackupMonitor {
   Map<Object?, Object?>? _latestAuthority;
   final VenueHubLeaseSilenceTracker _leaseSilence =
       VenueHubLeaseSilenceTracker();
-  bool _promoting = false;
+  bool _takingOver = false;
   Future<void> Function(int hubEpoch)? _onPromoted;
   VenueScope? _scope;
   String? _deviceId;
@@ -92,6 +154,7 @@ class VenueHubBackupMonitor {
     _credential = credential;
     _bootstrap = bootstrap;
     _onPromoted = onPromoted;
+    VenueHubManualTakeoverCoordinator.instance.bind(_confirmTakeover);
     final session = await _repository.issueRealtimeBackupHubSession(
       scope: scope,
       deviceId: deviceId,
@@ -175,14 +238,19 @@ class VenueHubBackupMonitor {
 
   void _receiveAuthority(Object? raw) {
     if (raw is Map) {
+      final previousReadyAt = _latestAuthority?['lastReadyAt'];
       _latestAuthority = Map<Object?, Object?>.from(raw);
       _leaseSilence.observe(raw['lastReadyAt']);
+      if (raw['lastReadyAt'] is int && raw['lastReadyAt'] != previousReadyAt) {
+        VenueHubManualTakeoverCoordinator.instance.clear();
+        VenueHubAvailability.markOnline();
+      }
       unawaited(_checkFailover());
     }
   }
 
   Future<void> _checkFailover() async {
-    if (_promoting) return;
+    if (_takingOver) return;
     final authority = _latestAuthority;
     final scope = _scope;
     final deviceId = _deviceId;
@@ -202,45 +270,63 @@ class VenueHubBackupMonitor {
     if (lastReadyAt is! int || !_leaseSilence.isSilentFor(_staleAfter)) {
       return;
     }
-    _promoting = true;
+    final primaryDeviceId = authority['deviceId'];
+    if (primaryDeviceId is! String || primaryDeviceId.isEmpty) return;
+    VenueHubManualTakeoverCoordinator.instance.requireConfirmation(
+      VenueHubManualTakeoverRequest(
+        scope: scope,
+        primaryDeviceId: primaryDeviceId,
+        detectedAt: DateTime.now(),
+      ),
+    );
+    VenueHubAvailability.markOffline(
+      'The primary venue hub appears offline. Orders remain blocked until a '
+      'manager confirms takeover in Settings > Venue offline hub.',
+    );
+    AppLogger.info(
+      'Primary hub authority lease stopped advancing; manual manager takeover '
+      'is required. No authority change was attempted automatically.',
+    );
+  }
+
+  Future<void> _confirmTakeover(String managerPin, String reason) async {
+    if (_takingOver) {
+      throw StateError('A hub takeover request is already in progress.');
+    }
+    final scope = _scope;
+    final deviceId = _deviceId;
+    final credential = _credential;
+    final bootstrap = _bootstrap;
+    if (scope == null ||
+        deviceId == null ||
+        credential == null ||
+        bootstrap == null ||
+        VenueHubManualTakeoverCoordinator.instance.pending.value?.scope !=
+            scope) {
+      throw StateError('The backup hub configuration is no longer current.');
+    }
+    _takingOver = true;
     try {
-      VenueHubAvailability.markOffline(
-        'The primary venue hub is unavailable. Secure backup promotion is in '
-        'progress; orders remain blocked until the backup is ready.',
-      );
-      AppLogger.info(
-        'Primary hub authority lease stopped advancing; requesting secure '
-        'backup promotion.',
-      );
       final promotion = await _repository.promoteOfflineBackupHub(
         scope: scope,
         deviceId: deviceId,
         hubEpoch: bootstrap.hubEpoch,
         credential: credential,
+        managerPin: managerPin,
+        reason: reason,
       );
       final promotedEpoch = promotion['hubEpoch'];
       if (promotedEpoch is! int || promotedEpoch <= bootstrap.hubEpoch) {
         throw StateError('The server returned an invalid promoted hub epoch.');
       }
+      VenueHubManualTakeoverCoordinator.instance.clear();
       AppLogger.info(
-        'Primary hub lease expired; this backup was promoted securely.',
+        'A manager confirmed backup takeover; the server transferred hub authority.',
       );
       final onPromoted = _onPromoted;
       if (onPromoted != null) await onPromoted(promotedEpoch);
-    } on Object catch (error, stackTrace) {
-      // A healthy primary or concurrent authority refresh is expected to
-      // reject the request. The backend remains the final decision maker.
-      AppLogger.error(
-        'Attempt automatic backup hub promotion',
-        error,
-        stackTrace,
-      );
-      VenueHubAvailability.markOffline(
-        'Automatic backup hub promotion failed. Check internet access and the '
-        'backup certificate, then contact an administrator if it does not recover.',
-      );
     } finally {
-      _promoting = false;
+      _takingOver = false;
     }
   }
 
@@ -267,6 +353,7 @@ class VenueHubBackupMonitor {
     _credential = null;
     _bootstrap = null;
     _onPromoted = null;
+    VenueHubManualTakeoverCoordinator.instance.unbind();
     if (_holdsAndroidService) {
       _holdsAndroidService = false;
       await AndroidVenueHubService.stop();

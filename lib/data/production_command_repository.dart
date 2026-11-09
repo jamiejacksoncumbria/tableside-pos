@@ -917,6 +917,8 @@ class ProductionCommandRepository {
     required String deviceId,
     required int hubEpoch,
     required VenueHubDeviceCredential credential,
+    required String managerPin,
+    required String reason,
   }) => _signedHubCall(
     action: 'promoteOfflineBackupHub',
     path: '/v1/backup-promote',
@@ -924,7 +926,12 @@ class ProductionCommandRepository {
     deviceId: deviceId,
     hubEpoch: hubEpoch,
     credential: credential,
-    body: <String, Object?>{'deviceId': deviceId},
+    body: <String, Object?>{
+      'deviceId': deviceId,
+      'managerPin': managerPin,
+      'reason': reason,
+      'confirmAuthorityTransfer': true,
+    },
   );
 
   Future<Map<String, Object?>> _signedHubCall({
@@ -949,6 +956,13 @@ class ProductionCommandRepository {
       body: body,
     );
     return _call(action, <String, Object?>{
+      // Manual backup promotion is authenticated twice: the device envelope
+      // proves this is the configured backup, while these explicit scope
+      // fields let the ordinary staff-session middleware prove which manager
+      // is authorising the transfer. Other signed hub calls safely ignore
+      // the duplicated scope values.
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
       'envelope': envelope.toJson(),
       'body': body,
     });

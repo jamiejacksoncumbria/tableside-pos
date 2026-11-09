@@ -2895,6 +2895,21 @@ async function promoteOfflineBackupHubFor(caller, rawData) {
   if (upload.role !== "backup") {
     throw new HttpsError("failed-precondition", "Only the configured backup hub can fail over.");
   }
+  if (upload.body.confirmAuthorityTransfer !== true) {
+    throw new HttpsError(
+      "failed-precondition",
+      "A manager must explicitly confirm the hub authority transfer.",
+    );
+  }
+  const takeoverReason = requiredText(upload.body, "reason", 200);
+  await requireFreshManagerPin(
+    caller,
+    upload.tenantId,
+    upload.venueId,
+    upload.body.managerPin,
+    "promoteOfflineVenueBackupHub",
+  );
+  const approvingManager = actorSnapshot(await auth.getUser(caller.uid));
   const venueRef = db.doc(`tenants/${upload.tenantId}/venues/${upload.venueId}`);
   const venue = await venueRef.get();
   const hub = venue.data()?.offlineHub;
@@ -2977,7 +2992,8 @@ async function promoteOfflineBackupHubFor(caller, rawData) {
         hubEpoch: nextEpoch,
         lastReadyAt: ServerValue.TIMESTAMP,
         promotedFromDeviceId: hub.deviceId,
-        promotedAutomatically: true,
+        promotedAutomatically: false,
+        promotedByManagerId: caller.uid,
       };
     }, undefined, false);
   } finally {
@@ -3015,7 +3031,7 @@ async function promoteOfflineBackupHubFor(caller, rawData) {
           endpoint: currentHub.backupEndpoint,
           epoch: nextEpoch,
           activatedAt: FieldValue.serverTimestamp(),
-          activatedByActor: "automaticBackupFailover",
+          activatedByActor: caller.uid,
           previousDeviceId: currentHub.deviceId,
         },
       });
@@ -3029,7 +3045,9 @@ async function promoteOfflineBackupHubFor(caller, rawData) {
           credentialId: upload.credentialId,
           previousHubEpoch: upload.hubEpoch,
           hubEpoch: nextEpoch,
-          actor: "automaticBackupFailover",
+          actor: approvingManager,
+          reason: takeoverReason,
+          confirmation: "manualManagerTakeover",
           createdAt: FieldValue.serverTimestamp(),
         },
       );
@@ -13029,7 +13047,7 @@ async function invokePosAction(action, caller, data) {
     "reconcileOfflineHubClosedOrders",
     "getOfflineHubSnapshot", "claimRemoteHubCommands",
     "issueRealtimeHubSession",
-    "issueRealtimeBackupHubSession", "promoteOfflineBackupHub",
+    "issueRealtimeBackupHubSession",
     "uploadDeviceDiagnostics",
     "completeRemoteHubCommand",
   ]);

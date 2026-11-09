@@ -12,6 +12,7 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
 import '../../offline/venue_hub_bootstrap.dart';
+import '../../offline/venue_hub_backup_monitor.dart';
 import '../../offline/hub_port_diagnostic.dart';
 import '../../offline/venue_hub_device_credential.dart';
 import '../../offline/venue_hub_client_registry.dart';
@@ -39,6 +40,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
   VenueHubDeviceCredential? _credential;
   VenueHubBootstrap? _bootstrap;
   late final StreamSubscription<VenueHubRuntimeStatus> _runtimeSubscription;
+  late final VoidCallback _takeoverListener;
   bool _busy = false;
   bool _hasCertificate = false;
   bool _hasPrivateKey = false;
@@ -50,6 +52,9 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
   @override
   void dispose() {
     _runtimeSubscription.cancel();
+    VenueHubManualTakeoverCoordinator.instance.pending.removeListener(
+      _takeoverListener,
+    );
     _host.dispose();
     _port.dispose();
     super.dispose();
@@ -61,6 +66,12 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     _runtimeSubscription = VenueHubRuntime.instance.statuses.listen((_) {
       if (mounted) setState(() {});
     });
+    _takeoverListener = () {
+      if (mounted) setState(() {});
+    };
+    VenueHubManualTakeoverCoordinator.instance.pending.addListener(
+      _takeoverListener,
+    );
     _refresh();
   }
 
@@ -365,6 +376,109 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     }
   });
 
+  Future<void> _confirmBackupTakeover() async {
+    final request = VenueHubManualTakeoverCoordinator.instance.pending.value;
+    if (request == null || request.scope != widget.scope) {
+      setState(() {
+        _message =
+            'The primary hub is responding or has not yet reached the secure takeover threshold.';
+      });
+      return;
+    }
+    final pinController = TextEditingController();
+    final reasonController = TextEditingController();
+    var acknowledged = false;
+    final approval = await showAppDialog<({String pin, String reason})>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.warning_amber_rounded),
+          title: const Text('Take over as the main hub?'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'The primary hub has stopped renewing its authority lease. '
+                  'Taking over revokes that hub and requires tills to reconnect. '
+                  'Only continue after checking that the original hub is stopped '
+                  'or cannot be recovered.',
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: pinController,
+                  obscureText: true,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  onChanged: (_) => setDialogState(() {}),
+                  decoration: const InputDecoration(
+                    labelText: 'Fresh manager PIN',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: reasonController,
+                  maxLength: 200,
+                  onChanged: (_) => setDialogState(() {}),
+                  decoration: const InputDecoration(
+                    labelText: 'Required takeover reason',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: acknowledged,
+                  onChanged: (value) =>
+                      setDialogState(() => acknowledged = value == true),
+                  title: const Text(
+                    'I confirm the original hub is unavailable and authorise this backup to replace it.',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton.icon(
+              onPressed:
+                  acknowledged &&
+                      RegExp(r'^\d{6}$').hasMatch(pinController.text.trim()) &&
+                      reasonController.text.trim().isNotEmpty
+                  ? () => Navigator.pop(dialogContext, (
+                      pin: pinController.text.trim(),
+                      reason: reasonController.text.trim(),
+                    ))
+                  : null,
+              icon: const Icon(Icons.swap_horiz_rounded),
+              label: const Text('Confirm takeover'),
+            ),
+          ],
+        ),
+      ),
+    );
+    pinController.dispose();
+    reasonController.dispose();
+    if (approval == null) return;
+    await _run('Confirm backup hub takeover', () async {
+      await VenueHubManualTakeoverCoordinator.instance.confirm(
+        managerPin: approval.pin,
+        reason: approval.reason,
+      );
+      if (mounted) {
+        setState(() {
+          _message =
+              'Takeover was approved. This device is starting as the authoritative venue hub.';
+        });
+      }
+    });
+  }
+
   Future<String?> _requestReason({
     required String title,
     required String message,
@@ -536,6 +650,10 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
         bootstrap?.enabled == true &&
         bootstrap?.backupDeviceId == deviceId &&
         bootstrap?.backupCredentialId == _credential?.credentialId;
+    final takeoverRequest =
+        VenueHubManualTakeoverCoordinator.instance.pending.value;
+    final takeoverRequired =
+        isThisBackup && takeoverRequest?.scope == widget.scope;
     final runtime = VenueHubRuntime.instance.status;
     return Scaffold(
       appBar: AppBar(title: const Text('Venue offline hub')),
@@ -594,6 +712,48 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                             ? 'This device is the passive backup hub.'
                             : 'A separate passive backup hub is configured.',
                       ),
+                      if (isThisBackup) ...[
+                        const SizedBox(height: 8),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: takeoverRequired
+                                ? Theme.of(context).colorScheme.errorContainer
+                                : Theme.of(
+                                    context,
+                                  ).colorScheme.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                takeoverRequired
+                                    ? 'Primary hub needs attention'
+                                    : 'Manual takeover only',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                takeoverRequired
+                                    ? 'The primary lease has stopped. Orders remain blocked until a manager confirms takeover or the primary returns.'
+                                    : 'This backup will never promote itself. If the primary stops, a manager must confirm the transfer here.',
+                              ),
+                              if (takeoverRequired) ...[
+                                const SizedBox(height: 10),
+                                FilledButton.icon(
+                                  onPressed: _busy
+                                      ? null
+                                      : _confirmBackupTakeover,
+                                  icon: const Icon(Icons.swap_horiz_rounded),
+                                  label: const Text('Take over as main hub'),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
                     ],
                   ],
                   if (canHostVenueHub) ...[

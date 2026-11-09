@@ -294,7 +294,7 @@ describe("POS role and replay protection", () => {
 });
 
 describe("venue hub cloud reconciliation", () => {
-  test("atomically promotes a configured backup after the primary lease expires", async () => {
+  test("requires explicit manager approval and atomically promotes a configured backup", async () => {
     await environment.withSecurityRulesDisabled(async (context) => {
       await set(ref(context.database(), "hubAuthorities/tenant-a/venue-a"), {
         enabled: true,
@@ -304,10 +304,30 @@ describe("venue hub cloud reconciliation", () => {
       });
     });
 
-    const response = await callPos(
-      "promoteOfflineBackupHub",
-      signedBackupHubRequest({}, "backup-promotion-a", "/v1/backup-promote"),
-    );
+    const unconfirmedBody = {managerPin: "123456", reason: "Primary power failure"};
+    const unconfirmed = await callPos("promoteOfflineBackupHub", {
+      ...managerSession(),
+      tenantId: "tenant-a",
+      venueId: "venue-a",
+      ...signedBackupHubRequest(
+        unconfirmedBody,
+        "backup-promotion-unconfirmed",
+        "/v1/backup-promote",
+      ),
+    });
+    assert.equal(unconfirmed.status, 412);
+
+    const body = {
+      managerPin: "123456",
+      reason: "Primary power failure",
+      confirmAuthorityTransfer: true,
+    };
+    const response = await callPos("promoteOfflineBackupHub", {
+      ...managerSession(),
+      tenantId: "tenant-a",
+      venueId: "venue-a",
+      ...signedBackupHubRequest(body, "backup-promotion-a", "/v1/backup-promote"),
+    });
 
     assert.equal(response.status, 200, JSON.stringify(response.body));
     assert.equal(response.body.data.promoted, true);
@@ -1423,7 +1443,7 @@ function approvedBootstrapActions() {
     "getOfflineHubSyncCursor",
     "reconcileOfflineHubClosedOrders", "getOfflineHubSnapshot",
     "claimRemoteHubCommands", "issueRealtimeHubSession",
-    "issueRealtimeBackupHubSession", "promoteOfflineBackupHub",
+    "issueRealtimeBackupHubSession",
     "completeRemoteHubCommand", "uploadDeviceDiagnostics",
   ];
 }
