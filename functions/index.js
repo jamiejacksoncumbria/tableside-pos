@@ -2907,6 +2907,10 @@ async function promoteOfflineBackupHubFor(caller, rawData) {
     .ref(`hubAuthorities/${upload.tenantId}/${upload.venueId}`);
   const nextEpoch = upload.hubEpoch + 1;
   let primaryWasFresh = false;
+  // The Admin SDK transaction signature is
+  // transaction(updateFunction, onComplete?, applyLocally?). Passing the
+  // client-SDK `{applyLocally: false}` options object as argument two makes
+  // Admin interpret it as a callback and reject every failover request.
   const authorityResult = await authorityRef.transaction((current) => {
     if (current?.enabled !== true || current.deviceId !== hub.deviceId ||
         Number(current.hubEpoch) !== upload.hubEpoch) return;
@@ -2923,7 +2927,7 @@ async function promoteOfflineBackupHubFor(caller, rawData) {
       promotedFromDeviceId: hub.deviceId,
       promotedAutomatically: true,
     };
-  }, {applyLocally: false});
+  }, undefined, false);
   if (!authorityResult.committed) {
     throw new HttpsError(
       "failed-precondition",

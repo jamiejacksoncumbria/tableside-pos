@@ -20,7 +20,7 @@ import {
   getDocs,
   setDoc,
 } from "firebase/firestore";
-import {ref, set} from "firebase/database";
+import {get, ref, set} from "firebase/database";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(directory, "..", "..");
@@ -47,6 +47,13 @@ const hubDeviceId = "device-v2-0123456789abcdef0123456789abcdef-89abcdef";
 const hubEpoch = 7;
 const hubKeys = generateKeyPairSync("ed25519");
 const hubPublicKeyBase64 = hubKeys.publicKey.export({
+  format: "der",
+  type: "spki",
+}).subarray(-32).toString("base64url");
+const backupCredentialId = "credential-backup";
+const backupDeviceId = "device-v2-fedcba9876543210fedcba9876543210-89abcdef";
+const backupKeys = generateKeyPairSync("ed25519");
+const backupPublicKeyBase64 = backupKeys.publicKey.export({
   format: "der",
   type: "spki",
 }).subarray(-32).toString("base64url");
@@ -287,6 +294,37 @@ describe("POS role and replay protection", () => {
 });
 
 describe("venue hub cloud reconciliation", () => {
+  test("atomically promotes a configured backup after the primary lease expires", async () => {
+    await environment.withSecurityRulesDisabled(async (context) => {
+      await set(ref(context.database(), "hubAuthorities/tenant-a/venue-a"), {
+        enabled: true,
+        deviceId: hubDeviceId,
+        hubEpoch,
+        lastReadyAt: Date.now() - 60000,
+      });
+    });
+
+    const response = await callPos(
+      "promoteOfflineBackupHub",
+      signedBackupHubRequest({}, "backup-promotion-a", "/v1/backup-promote"),
+    );
+
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.equal(response.body.data.promoted, true);
+    assert.equal(response.body.data.hubEpoch, hubEpoch + 1);
+    const venue = await readDocument("tenants/tenant-a/venues/venue-a");
+    assert.equal(venue.offlineHub.deviceId, backupDeviceId);
+    assert.equal(venue.offlineHub.credentialId, backupCredentialId);
+    assert.equal(venue.offlineHub.epoch, hubEpoch + 1);
+    await environment.withSecurityRulesDisabled(async (context) => {
+      const authority = (await get(ref(
+        context.database(), "hubAuthorities/tenant-a/venue-a",
+      ))).val();
+      assert.equal(authority.deviceId, backupDeviceId);
+      assert.equal(authority.hubEpoch, hubEpoch + 1);
+    });
+  });
+
   test("uses a later signed cloud baseline to recover an earlier order batch", async () => {
     const createdAt = new Date().toISOString();
     const events = [];
@@ -1424,6 +1462,10 @@ async function seedAuthorisationFixture() {
           deviceId: hubDeviceId,
           credentialId: hubCredentialId,
           epoch: hubEpoch,
+          endpoint: "https://192.168.1.10:8443",
+          backupDeviceId,
+          backupCredentialId,
+          backupEndpoint: "https://192.168.1.11:8443",
         },
       },
       "tenants/tenant-a/venues/venue-b": {name: "Venue B", status: "active"},
@@ -1474,6 +1516,13 @@ async function seedAuthorisationFixture() {
         deviceId: hubDeviceId,
         algorithm: "Ed25519",
         publicKeyBase64: hubPublicKeyBase64,
+      },
+      [`tenants/tenant-a/offlineDeviceCredentials/${backupCredentialId}`]: {
+        active: true,
+        venueId: "venue-a",
+        deviceId: backupDeviceId,
+        algorithm: "Ed25519",
+        publicKeyBase64: backupPublicKeyBase64,
       },
       "tenants/tenant-a/products/stock-curry": {
         venueId: "venue-a",
@@ -1597,6 +1646,45 @@ function signedHubRequest(body, nonce, path) {
     null,
     Buffer.from(canonicalHeaders, "utf8"),
     hubKeys.privateKey,
+  ).toString("base64url");
+  return {envelope, body};
+}
+
+function signedBackupHubRequest(body, nonce, path) {
+  const bodyHash = createHash("sha256")
+    .update(JSON.stringify(canonicalJsonValue(body)))
+    .digest("base64url");
+  const envelope = {
+    tenantId: "tenant-a",
+    venueId: "venue-a",
+    credentialId: backupCredentialId,
+    deviceId: backupDeviceId,
+    staffId: identities.manager.localId,
+    method: "POST",
+    path,
+    hubEpoch,
+    sentAtUtcMillis: Date.now(),
+    nonce,
+    bodyHash,
+  };
+  const canonicalHeaders = [
+    "v1",
+    envelope.credentialId,
+    envelope.tenantId,
+    envelope.venueId,
+    envelope.deviceId,
+    envelope.staffId,
+    envelope.method,
+    envelope.path,
+    envelope.hubEpoch,
+    envelope.sentAtUtcMillis,
+    envelope.nonce,
+    envelope.bodyHash,
+  ].join("\n");
+  envelope.signature = signMessage(
+    null,
+    Buffer.from(canonicalHeaders, "utf8"),
+    backupKeys.privateKey,
   ).toString("base64url");
   return {envelope, body};
 }
