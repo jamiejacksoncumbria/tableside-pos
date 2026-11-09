@@ -1955,6 +1955,12 @@ async function manageVenueConfigurationFor(caller, rawData) {
       );
     }
     const backupEndpoint = `https://${endpointHost}:${endpointPort}`;
+    if (backupEndpoint === hub.endpoint) {
+      throw new HttpsError(
+        "invalid-argument",
+        "The backup hub must use a different reserved LAN address from the primary hub.",
+      );
+    }
     await venueRef.update({
       "offlineHub.backupDeviceId": deviceId,
       "offlineHub.backupCredentialId": credentialId,

@@ -116,9 +116,19 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       });
       return;
     }
-    if (_host.text.trim().isEmpty && bootstrap.endpoint != null) {
-      _host.text = bootstrap.endpoint!.host;
-      _port.text = '${bootstrap.endpoint!.port}';
+    if (_host.text.trim().isEmpty) {
+      // Never copy the primary address into a different device's backup form.
+      // A backup must have its own reserved LAN address or takeover would send
+      // every till back to the unavailable primary endpoint.
+      final savedEndpoint = bootstrap.hubDeviceId == deviceId
+          ? bootstrap.endpoint
+          : bootstrap.backupDeviceId == deviceId
+          ? bootstrap.backupEndpoint
+          : null;
+      if (savedEndpoint != null) {
+        _host.text = savedEndpoint.host;
+        _port.text = '${savedEndpoint.port}';
+      }
     }
     setState(() {
       _deviceId = deviceId;
@@ -178,6 +188,13 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     if (!await _ensureHubSecurityFiles(
       purpose: 'make this device the venue hub',
     )) {
+      return;
+    }
+    final isAlreadyActive =
+        _bootstrap?.hubDeviceId == _deviceId &&
+        _bootstrap?.hubCredentialId == _credential?.credentialId;
+    if (!isAlreadyActive &&
+        !await _confirmStableLanAddress(role: 'primary hub')) {
       return;
     }
     String? takeoverReason;
@@ -269,6 +286,13 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     if (!await _ensureHubSecurityFiles(
       purpose: 'make this device the backup hub',
     )) {
+      return;
+    }
+    final isAlreadyBackup =
+        _bootstrap?.backupDeviceId == _deviceId &&
+        _bootstrap?.backupCredentialId == _credential?.credentialId;
+    if (!isAlreadyBackup &&
+        !await _confirmStableLanAddress(role: 'backup hub')) {
       return;
     }
     await _run('Configure backup hub', () async {
@@ -363,6 +387,58 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     if (!_hasCertificate && !await _chooseTlsFile('certificate')) return false;
     if (!_hasPrivateKey && !await _chooseTlsFile('privateKey')) return false;
     return _hasCertificate && _hasPrivateKey;
+  }
+
+  /// Confirms that the manager has reserved the advertised LAN address. Hub
+  /// discovery intentionally trusts a signed endpoint rather than scanning
+  /// the network, so silently changing DHCP addresses would make local tills
+  /// fail closed during an internet outage.
+  Future<bool> _confirmStableLanAddress({required String role}) async {
+    final host = _host.text.trim();
+    final port = int.tryParse(_port.text.trim()) ?? 8443;
+    if (host.isEmpty) {
+      setState(() {
+        _message =
+            'Enter this device\'s fixed LAN IP or reserved host name before configuring it as the $role.';
+      });
+      return false;
+    }
+    return await showAppDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => AlertDialog(
+            icon: const Icon(Icons.router_outlined),
+            title: const Text('Reserve this hub address'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('This $role will be saved as https://$host:$port.'),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Give this device a DHCP reservation or static LAN IP in '
+                    'the router first. The primary and backup must use '
+                    'different stable addresses. If either address changes, '
+                    'local terminals cannot find that hub until a manager '
+                    'updates this setup while online.',
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Go back'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Address is reserved'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
   }
 
   Future<void> _removeBackup() => _run('Remove backup hub', () async {
@@ -702,10 +778,16 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                     SelectableText(
                       'Active hub key: ${bootstrap.hubCredentialId ?? 'missing'}',
                     ),
+                    SelectableText(
+                      'Active hub endpoint: ${bootstrap.endpoint ?? 'missing'}',
+                    ),
                     if (bootstrap.backupDeviceId != null) ...[
                       const SizedBox(height: 4),
                       SelectableText(
                         'Backup hub ID: ${bootstrap.backupDeviceId}',
+                      ),
+                      SelectableText(
+                        'Backup hub endpoint: ${bootstrap.backupEndpoint ?? 'missing'}',
                       ),
                       Text(
                         isThisBackup
@@ -783,6 +865,31 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                           ),
                         ),
                       ],
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.secondaryContainer,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.info_outline_rounded),
+                          SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Network requirement: reserve a different fixed '
+                              'LAN address for each primary and backup hub. '
+                              'TableSide switches terminals to the saved backup '
+                              'endpoint after an approved takeover; it does not '
+                              'move the primary device\'s IP address.',
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                   const SizedBox(height: 12),
