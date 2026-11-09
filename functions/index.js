@@ -2907,28 +2907,91 @@ async function promoteOfflineBackupHubFor(caller, rawData) {
     .ref(`hubAuthorities/${upload.tenantId}/${upload.venueId}`);
   const nextEpoch = upload.hubEpoch + 1;
   let primaryWasFresh = false;
+  let authorityMismatch = null;
+  // Validate the server record before opening the atomic transaction. The
+  // compat client still needs an active listener below to retain this value in
+  // its synchronous transaction cache.
+  const authorityBefore = (await authorityRef.get()).val();
+  if (authorityBefore?.enabled !== true ||
+      authorityBefore.deviceId !== hub.deviceId ||
+      Number(authorityBefore.hubEpoch) !== upload.hubEpoch) {
+    console.error("Backup promotion found mismatched server authority", {
+      tenantId: upload.tenantId,
+      venueId: upload.venueId,
+      backupDeviceId: upload.deviceId,
+      expectedDeviceId: hub.deviceId,
+      expectedHubEpoch: upload.hubEpoch,
+      observedEnabled: authorityBefore?.enabled === true,
+      observedDeviceId: authorityBefore?.deviceId ?? null,
+      observedHubEpoch: Number.isSafeInteger(Number(authorityBefore?.hubEpoch)) ?
+        Number(authorityBefore.hubEpoch) : null,
+    });
+    throw new HttpsError(
+      "failed-precondition",
+      "The live hub authority changed; refresh before retrying.",
+    );
+  }
+  const initialLastReadyAt = Number(authorityBefore.lastReadyAt ?? 0);
+  if (Number.isSafeInteger(initialLastReadyAt) &&
+      Date.now() - initialLastReadyAt < 30000) {
+    throw new HttpsError(
+      "failed-precondition",
+      "The primary venue hub is still online.",
+    );
+  }
   // The Admin SDK transaction signature is
   // transaction(updateFunction, onComplete?, applyLocally?). Passing the
   // client-SDK `{applyLocally: false}` options object as argument two makes
   // Admin interpret it as a callback and reject every failover request.
-  const authorityResult = await authorityRef.transaction((current) => {
-    if (current?.enabled !== true || current.deviceId !== hub.deviceId ||
-        Number(current.hubEpoch) !== upload.hubEpoch) return;
-    const lastReadyAt = Number(current.lastReadyAt ?? 0);
-    if (Number.isSafeInteger(lastReadyAt) && Date.now() - lastReadyAt < 30000) {
-      primaryWasFresh = true;
-      return;
-    }
-    return {
-      enabled: true,
-      deviceId: upload.deviceId,
-      hubEpoch: nextEpoch,
-      lastReadyAt: ServerValue.TIMESTAMP,
-      promotedFromDeviceId: hub.deviceId,
-      promotedAutomatically: true,
-    };
-  }, undefined, false);
+  const keepAuthorityCacheWarm = () => {};
+  authorityRef.on("value", keepAuthorityCacheWarm);
+  let authorityResult;
+  try {
+    // Wait until the active listener has populated the local cache. Keeping it
+    // attached prevents compat from pruning that cache before transaction().
+    await authorityRef.once("value");
+    authorityResult = await authorityRef.transaction((current) => {
+      if (current?.enabled !== true || current.deviceId !== hub.deviceId ||
+          Number(current.hubEpoch) !== upload.hubEpoch) {
+        authorityMismatch = {
+          expectedDeviceId: hub.deviceId,
+          expectedHubEpoch: upload.hubEpoch,
+          observedEnabled: current?.enabled === true,
+          observedDeviceId: typeof current?.deviceId === "string" ?
+            current.deviceId : null,
+          observedHubEpoch: Number.isSafeInteger(Number(current?.hubEpoch)) ?
+            Number(current.hubEpoch) : null,
+          observedLastReadyAt: Number.isSafeInteger(Number(current?.lastReadyAt)) ?
+            Number(current.lastReadyAt) : null,
+        };
+        return;
+      }
+      const lastReadyAt = Number(current.lastReadyAt ?? 0);
+      if (Number.isSafeInteger(lastReadyAt) && Date.now() - lastReadyAt < 30000) {
+        primaryWasFresh = true;
+        return;
+      }
+      return {
+        enabled: true,
+        deviceId: upload.deviceId,
+        hubEpoch: nextEpoch,
+        lastReadyAt: ServerValue.TIMESTAMP,
+        promotedFromDeviceId: hub.deviceId,
+        promotedAutomatically: true,
+      };
+    }, undefined, false);
+  } finally {
+    authorityRef.off("value", keepAuthorityCacheWarm);
+  }
   if (!authorityResult.committed) {
+    if (authorityMismatch != null) {
+      console.error("Backup promotion found mismatched live authority", {
+        tenantId: upload.tenantId,
+        venueId: upload.venueId,
+        backupDeviceId: upload.deviceId,
+        ...authorityMismatch,
+      });
+    }
     throw new HttpsError(
       "failed-precondition",
       primaryWasFresh ? "The primary venue hub is still online." :
