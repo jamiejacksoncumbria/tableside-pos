@@ -281,18 +281,20 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
   }
 
   Future<void> _activatePromotedBackup(int promotedEpoch) async {
-    // Promotion changes both the trusted device and epoch. Do not start from
-    // the old cached bootstrap: doing so leaves the promoted device publishing
-    // presence while its local HTTPS runtime still routes to the former hub.
-    await _backupMonitor.stop();
-    _started = false;
-    final bootstrap = await _fetchChangedBootstrap(
-      expectedDeviceId: await LocalPrinterDeviceIdentity().deviceIdForScope(
-        widget.scope,
-      ),
-      expectedEpoch: promotedEpoch,
+    // Promotion can arrive both as the HTTPS response to the manager action
+    // and as an RTDB authority event. Route both through one serialised path;
+    // two concurrent restart paths can otherwise start the new generation and
+    // then let the losing path stop it again as if it were the former hub.
+    final deviceId = await LocalPrinterDeviceIdentity().deviceIdForScope(
+      widget.scope,
     );
-    await _start(preferredBootstrap: bootstrap);
+    await _handleAuthorityChange(
+      VenueHubAuthorityChange(
+        scope: widget.scope,
+        deviceId: deviceId,
+        hubEpoch: promotedEpoch,
+      ),
+    );
   }
 
   Future<void> _handleAuthorityChange(VenueHubAuthorityChange change) async {

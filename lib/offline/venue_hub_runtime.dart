@@ -72,6 +72,12 @@ class VenueHubRuntime {
   StreamSubscription? _pendingSubscription;
   Timer? _authorityTimer;
   Timer? _postCommitRetryTimer;
+  Future<void>? _stopOperation;
+  // Invalidates asynchronous work captured by an older hub generation. A
+  // cloud refresh may already be in flight when a manager promotes a backup;
+  // cancelling its Timer does not cancel that Future. Without this token the
+  // old Future can return later and stop the newly-authorised runtime.
+  int _lifecycleGeneration = 0;
   VenueHubRuntimeStatus _status = const VenueHubRuntimeStatus(
     state: VenueHubRuntimeState.stopped,
     pendingEvents: 0,
@@ -154,6 +160,7 @@ class VenueHubRuntime {
         _status.state != VenueHubRuntimeState.failed) {
       throw StateError('The venue hub is already starting or running.');
     }
+    final lifecycleGeneration = ++_lifecycleGeneration;
     _cloudSynchronizationIssue = null;
     _emit(
       const VenueHubRuntimeStatus(
@@ -1182,7 +1189,7 @@ class VenueHubRuntime {
         AppLogger.info(
           'Venue hub realtime authority was revoked; stopping immediately.',
         );
-        unawaited(stop());
+        unawaited(_stopIfCurrent(lifecycleGeneration));
       });
       var reconnectingRealtime = false;
       var realtimeRetryDelay = const Duration(seconds: 5);
@@ -1273,11 +1280,20 @@ class VenueHubRuntime {
         // must not interfere with local order or KDS processing.
         if (!cloudRuntimeAvailable) return;
         if (refreshingAuthority) return;
+        if (lifecycleGeneration != _lifecycleGeneration) return;
         refreshingAuthority = true;
         try {
           final raw = await _repository
               .fetchOfflineHubBootstrap(scope: scope)
               .timeout(const Duration(seconds: 8));
+          if (lifecycleGeneration != _lifecycleGeneration ||
+              _activeScope != scope ||
+              _activeBootstrap?.hubEpoch != bootstrap.hubEpoch) {
+            AppLogger.info(
+              'Ignored a completed authority refresh from an older hub generation.',
+            );
+            return;
+          }
           final current = VenueHubBootstrap.fromJson(raw);
           if (!current.enabled ||
               current.hubEpoch != bootstrap.hubEpoch ||
@@ -1286,7 +1302,7 @@ class VenueHubRuntime {
             AppLogger.info(
               'Venue hub authority changed in cloud; stopping the old hub.',
             );
-            await stop();
+            await _stopIfCurrent(lifecycleGeneration);
             return;
           }
           if (!activeRealtimePresence.connected.value) {
@@ -1332,6 +1348,14 @@ class VenueHubRuntime {
               'Download refreshed venue hub snapshot',
               error,
               stackTrace,
+            );
+            return;
+          }
+          if (lifecycleGeneration != _lifecycleGeneration ||
+              _activeScope != scope ||
+              _activeBootstrap?.hubEpoch != bootstrap.hubEpoch) {
+            AppLogger.info(
+              'Ignored a completed snapshot refresh from an older hub generation.',
             );
             return;
           }
@@ -1446,7 +1470,33 @@ class VenueHubRuntime {
     return false;
   }
 
-  Future<void> stop() async {
+  Future<void> _stopIfCurrent(int lifecycleGeneration) {
+    if (lifecycleGeneration != _lifecycleGeneration) {
+      return Future<void>.value();
+    }
+    return stop();
+  }
+
+  /// Stops the runtime exactly once even when an RTDB revocation, a cloud
+  /// bootstrap refresh and the auto-start host all observe the same authority
+  /// transfer together. Every concurrent caller awaits the same shutdown, so
+  /// none can finish late and tear down the replacement generation.
+  Future<void> stop() {
+    final existing = _stopOperation;
+    if (existing != null) return existing;
+    late final Future<void> operation;
+    operation = _performStop().whenComplete(() {
+      if (identical(_stopOperation, operation)) _stopOperation = null;
+    });
+    _stopOperation = operation;
+    return operation;
+  }
+
+  Future<void> _performStop() async {
+    // Invalidate every callback created by the runtime being stopped before
+    // awaiting I/O. This prevents an already-running authority refresh from
+    // mutating a replacement runtime that starts during those awaits.
+    _lifecycleGeneration++;
     _postCommitRetryTimer?.cancel();
     _postCommitRetryTimer = null;
     _authorityTimer?.cancel();

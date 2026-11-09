@@ -40,9 +40,9 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
   String? _deviceId;
   VenueHubDeviceCredential? _credential;
   VenueHubBootstrap? _bootstrap;
-  late final StreamSubscription<VenueHubRuntimeStatus> _runtimeSubscription;
-  late final StreamSubscription<VenueHubAuthorityChange> _authoritySubscription;
-  late final VoidCallback _takeoverListener;
+  StreamSubscription<VenueHubRuntimeStatus>? _runtimeSubscription;
+  StreamSubscription<VenueHubAuthorityChange>? _authoritySubscription;
+  VoidCallback? _takeoverListener;
   bool _busy = false;
   bool _hasCertificate = false;
   bool _hasPrivateKey = false;
@@ -53,11 +53,14 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
 
   @override
   void dispose() {
-    _runtimeSubscription.cancel();
-    _authoritySubscription.cancel();
-    VenueHubManualTakeoverCoordinator.instance.pending.removeListener(
-      _takeoverListener,
-    );
+    unawaited(_runtimeSubscription?.cancel());
+    unawaited(_authoritySubscription?.cancel());
+    final takeoverListener = _takeoverListener;
+    if (takeoverListener != null) {
+      VenueHubManualTakeoverCoordinator.instance.pending.removeListener(
+        takeoverListener,
+      );
+    }
     _host.dispose();
     _port.dispose();
     super.dispose();
@@ -75,11 +78,12 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
             unawaited(_refresh());
           }
         });
-    _takeoverListener = () {
+    void takeoverListener() {
       if (mounted) setState(() {});
-    };
+    }
+    _takeoverListener = takeoverListener;
     VenueHubManualTakeoverCoordinator.instance.pending.addListener(
-      _takeoverListener,
+      takeoverListener,
     );
     _refresh();
   }
@@ -592,21 +596,23 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       context: context,
       builder: (context) => AlertDialog(
         title: Text(title),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(message),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              maxLength: 200,
-              decoration: const InputDecoration(
-                labelText: 'Required reason',
-                border: OutlineInputBorder(),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(message),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                maxLength: 200,
+                decoration: const InputDecoration(
+                  labelText: 'Required reason',
+                  border: OutlineInputBorder(),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         actions: [
           TextButton(

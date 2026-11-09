@@ -27,9 +27,11 @@ import '../features/platform_admin/platform_admin_page.dart';
 import '../features/printing/print_delivery_monitor.dart';
 import '../features/reports/reports_page.dart';
 import '../features/settings/settings_page.dart';
+import '../features/settings/venue_offline_hub_page.dart';
 import '../features/training/training_mode_page.dart';
 import '../offline/venue_hub_client_cache.dart';
 import '../offline/venue_hub_availability.dart';
+import '../offline/venue_hub_backup_monitor.dart';
 import '../offline/venue_hub_runtime.dart';
 
 enum HomeSection {
@@ -361,6 +363,7 @@ class HomeShell extends ConsumerWidget {
                 if (Firebase.apps.isNotEmpty) const PushNotificationHost(),
                 const _VenueHubAccessNotificationHost(),
                 const _VenueHubSynchronizationNotificationHost(),
+                const _VenueHubTakeoverPromptHost(),
               ],
             ),
           ),
@@ -440,6 +443,113 @@ class HomeShell extends ConsumerWidget {
                 )
               : const PlatformAdminPage(),
       };
+}
+
+/// Makes a failed primary hub visible to an already-unlocked manager on every
+/// workspace screen. This is only navigation into the existing secured flow:
+/// authority still transfers exclusively after a fresh manager PIN, reason,
+/// acknowledgement, server-side lease check and audit event on the dedicated
+/// venue-hub settings page.
+class _VenueHubTakeoverPromptHost extends ConsumerStatefulWidget {
+  const _VenueHubTakeoverPromptHost();
+
+  @override
+  ConsumerState<_VenueHubTakeoverPromptHost> createState() =>
+      _VenueHubTakeoverPromptHostState();
+}
+
+class _VenueHubTakeoverPromptHostState
+    extends ConsumerState<_VenueHubTakeoverPromptHost> {
+  String? _lastPromptKey;
+  bool _promptScheduled = false;
+  bool _promptOpen = false;
+
+  void _schedulePrompt(
+    VenueHubManualTakeoverRequest request,
+    VenueScope activeScope,
+  ) {
+    final key =
+        '${request.scope.tenantId}/${request.scope.venueId}/'
+        '${request.primaryDeviceId}/${request.detectedAt.microsecondsSinceEpoch}';
+    if (_lastPromptKey == key || _promptScheduled || _promptOpen) return;
+    _promptScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      _promptScheduled = false;
+      if (!mounted) return;
+      final current = VenueHubManualTakeoverCoordinator.instance.pending.value;
+      final session = ref.read(activeStaffPinSessionProvider);
+      final isManager =
+          session?.roles.any(
+            (role) => role == 'owner' || role == 'manager',
+          ) ??
+          false;
+      if (current != request || current?.scope != activeScope || !isManager) {
+        return;
+      }
+      _lastPromptKey = key;
+      _promptOpen = true;
+      final review = await showAppDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.warning_amber_rounded),
+          title: const Text('Primary venue hub is unavailable'),
+          content: const SingleChildScrollView(
+            child: Text(
+              'This device is the configured backup and the primary hub has '
+              'stopped renewing its authority lease. Orders remain blocked. '
+              'Would you like to review the manager-authorised takeover now?',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Not now'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              icon: const Icon(Icons.settings_outlined),
+              label: const Text('Review takeover'),
+            ),
+          ],
+        ),
+      );
+      _promptOpen = false;
+      if (!mounted || review != true) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => VenueOfflineHubPage(scope: activeScope),
+        ),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final session = ref.watch(activeStaffPinSessionProvider);
+    final activeScope = ref.watch(activeVenueScopeProvider);
+    final isManager =
+        session?.roles.any(
+          (role) => role == 'owner' || role == 'manager',
+        ) ??
+        false;
+    // The takeover request is process-local operational state, not Riverpod
+    // application data. Listen to its ValueNotifier explicitly so the prompt
+    // appears immediately even if no unrelated widget/provider rebuild occurs.
+    return ValueListenableBuilder<VenueHubManualTakeoverRequest?>(
+      valueListenable: VenueHubManualTakeoverCoordinator.instance.pending,
+      builder: (context, request, _) {
+        if (request == null) {
+          _lastPromptKey = null;
+        } else if (isManager &&
+            activeScope != null &&
+            request.scope == activeScope) {
+          _schedulePrompt(request, activeScope);
+        }
+        return const SizedBox.shrink();
+      },
+    );
+  }
 }
 
 /// Keeps device enrolment and certificate failures in the manager-visible
