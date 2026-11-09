@@ -14,6 +14,19 @@ import 'venue_hub_availability.dart';
 import 'venue_hub_client_registry.dart';
 import 'windows_realtime_rest_session.dart';
 
+@immutable
+class VenueHubAuthorityChange {
+  const VenueHubAuthorityChange({
+    required this.scope,
+    required this.deviceId,
+    required this.hubEpoch,
+  });
+
+  final VenueScope scope;
+  final String deviceId;
+  final int hubEpoch;
+}
+
 @visibleForTesting
 bool venueHubPresenceIsFresh({
   required DateTime trustedNowUtc,
@@ -45,6 +58,7 @@ class VenueHubRealtimeClient {
   FirebaseDatabase? _database;
   WindowsRealtimeRestSession? _windowsSession;
   StreamSubscription<Object?>? _presenceSubscription;
+  StreamSubscription<Object?>? _authoritySubscription;
   StreamSubscription<Object?>? _printerPresenceSubscription;
   final StreamController<Map<String, DateTime>> _printerPresence =
       StreamController<Map<String, DateTime>>.broadcast();
@@ -55,6 +69,8 @@ class VenueHubRealtimeClient {
   Future<void>? _configuration;
   final StreamController<bool> _availabilityChanges =
       StreamController<bool>.broadcast();
+  final StreamController<VenueHubAuthorityChange> _authorityChanges =
+      StreamController<VenueHubAuthorityChange>.broadcast();
 
   bool isReadyFor(VenueScope scope, int hubEpoch) =>
       _ready &&
@@ -74,6 +90,8 @@ class VenueHubRealtimeClient {
   }
 
   Stream<Map<String, DateTime>> get printerPresence => _printerPresence.stream;
+  Stream<VenueHubAuthorityChange> get authorityChanges =>
+      _authorityChanges.stream;
 
   /// Waits briefly for the first live presence event instead of declaring the
   /// hub offline while Firebase is still opening its realtime socket.
@@ -196,6 +214,16 @@ class VenueHubRealtimeClient {
                 );
               },
             );
+        _authoritySubscription = windowsSession
+            .watch('hubAuthorities/${scope.tenantId}/${scope.venueId}')
+            .listen(
+              (raw) => _applyAuthority(scope, deviceId, hubEpoch, raw),
+              onError: (Object error, StackTrace stackTrace) => AppLogger.error(
+                'Watch realtime venue hub authority',
+                error,
+                stackTrace,
+              ),
+            );
         _printerPresenceSubscription = windowsSession
             .watch('printerPresence/${scope.tenantId}/${scope.venueId}')
             .listen(
@@ -255,6 +283,18 @@ class VenueHubRealtimeClient {
           );
         },
       );
+      _authoritySubscription = database
+          .ref('hubAuthorities/${scope.tenantId}/${scope.venueId}')
+          .onValue
+          .listen(
+            (event) =>
+                _applyAuthority(scope, deviceId, hubEpoch, event.snapshot.value),
+            onError: (Object error, StackTrace stackTrace) => AppLogger.error(
+              'Watch realtime venue hub authority',
+              error,
+              stackTrace,
+            ),
+          );
       _printerPresenceSubscription = database
           .ref('printerPresence/${scope.tenantId}/${scope.venueId}')
           .onValue
@@ -285,6 +325,30 @@ class VenueHubRealtimeClient {
       }
     }
     _printerPresence.add(result);
+  }
+
+  void _applyAuthority(
+    VenueScope scope,
+    String configuredDeviceId,
+    int configuredEpoch,
+    Object? raw,
+  ) {
+    if (raw is! Map || raw['enabled'] != true) return;
+    final deviceId = raw['deviceId'];
+    final hubEpoch = raw['hubEpoch'];
+    if (deviceId is! String || deviceId.isEmpty || hubEpoch is! int) return;
+    if (deviceId == configuredDeviceId && hubEpoch == configuredEpoch) return;
+    _serverOnline = false;
+    _publishAvailability(
+      detail: 'Venue hub authority changed; reconnecting securely…',
+    );
+    _authorityChanges.add(
+      VenueHubAuthorityChange(
+        scope: scope,
+        deviceId: deviceId,
+        hubEpoch: hubEpoch,
+      ),
+    );
   }
 
   void _finishConfiguration() {
@@ -377,6 +441,8 @@ class VenueHubRealtimeClient {
     _staleTimer = null;
     final presenceSubscription = _presenceSubscription;
     _presenceSubscription = null;
+    final authoritySubscription = _authoritySubscription;
+    _authoritySubscription = null;
     final printerPresenceSubscription = _printerPresenceSubscription;
     _printerPresenceSubscription = null;
     final app = _app;
@@ -392,6 +458,7 @@ class VenueHubRealtimeClient {
     _availabilityChanges.add(false);
     if (markOffline) VenueHubAvailability.markOffline();
     await presenceSubscription?.cancel();
+    await authoritySubscription?.cancel();
     await printerPresenceSubscription?.cancel();
     await windowsSession?.close();
     if (app != null) {

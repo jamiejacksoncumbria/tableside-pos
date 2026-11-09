@@ -15,6 +15,7 @@ import 'venue_hub_device_credential.dart';
 import 'offline_event_ledger.dart';
 import 'venue_hub_runtime.dart';
 import 'venue_hub_platform.dart';
+import 'venue_hub_realtime_client.dart';
 
 /// Starts the configured hub when its venue workspace opens. This deliberately
 /// needs no staff PIN, so local ticket delivery continues while the UI locks.
@@ -36,11 +37,15 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
   static const _secrets = FlutterSecureStorage();
   bool _started = false;
   Timer? _retryTimer;
+  StreamSubscription<VenueHubAuthorityChange>? _authoritySubscription;
+  bool _refreshingAuthority = false;
   final VenueHubBackupMonitor _backupMonitor = VenueHubBackupMonitor();
 
   @override
   void initState() {
     super.initState();
+    _authoritySubscription = VenueHubRealtimeClient.instance.authorityChanges
+        .listen(_handleAuthorityChange);
     unawaited(_start());
   }
 
@@ -55,7 +60,7 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
     }
   }
 
-  Future<void> _start() async {
+  Future<void> _start({VenueHubBootstrap? preferredBootstrap}) async {
     if (_started) return;
     _retryTimer?.cancel();
     _retryTimer = null;
@@ -63,8 +68,9 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
     try {
       final cache = VenueHubClientCache();
       final repository = ProductionCommandRepository();
-      VenueHubBootstrap? bootstrap = await cache.readBootstrap(widget.scope);
-      if (widget.cloudRefreshEnabled) {
+      VenueHubBootstrap? bootstrap =
+          preferredBootstrap ?? await cache.readBootstrap(widget.scope);
+      if (preferredBootstrap == null && widget.cloudRefreshEnabled) {
         try {
           final raw = await repository
               .fetchOfflineHubBootstrap(scope: widget.scope)
@@ -106,10 +112,7 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
             deviceId: deviceId,
             credential: credential,
             bootstrap: bootstrap,
-            onPromoted: () {
-              _started = false;
-              unawaited(_start());
-            },
+            onPromoted: _activatePromotedBackup,
           );
           // Keep a current encrypted snapshot on the standby so promotion can
           // start promptly. Snapshot verification accepts this configured
@@ -273,9 +276,91 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
     }
   }
 
+  Future<void> _activatePromotedBackup(int promotedEpoch) async {
+    // Promotion changes both the trusted device and epoch. Do not start from
+    // the old cached bootstrap: doing so leaves the promoted device publishing
+    // presence while its local HTTPS runtime still routes to the former hub.
+    await _backupMonitor.stop();
+    _started = false;
+    final bootstrap = await _fetchChangedBootstrap(
+      expectedDeviceId: await LocalPrinterDeviceIdentity().deviceIdForScope(
+        widget.scope,
+      ),
+      expectedEpoch: promotedEpoch,
+    );
+    await _start(preferredBootstrap: bootstrap);
+  }
+
+  Future<void> _handleAuthorityChange(VenueHubAuthorityChange change) async {
+    if (!mounted || change.scope != widget.scope || _refreshingAuthority) return;
+    _refreshingAuthority = true;
+    try {
+      final current = VenueHubClientRegistry.instance.bootstrapFor(widget.scope);
+      if (current?.hubDeviceId == change.deviceId &&
+          current?.hubEpoch == change.hubEpoch) {
+        return;
+      }
+      final bootstrap = await _fetchChangedBootstrap(
+        expectedDeviceId: change.deviceId,
+        expectedEpoch: change.hubEpoch,
+      );
+      VenueHubClientRegistry.instance.rememberBootstrap(
+        widget.scope,
+        bootstrap,
+      );
+      VenueHubClientRegistry.instance.staffSessionInvalidations.value++;
+      await VenueHubRealtimeClient.instance.clear();
+      await _backupMonitor.stop();
+      _started = false;
+      await _start(preferredBootstrap: bootstrap);
+      AppLogger.info(
+        'Applied promoted venue hub authority; a fresh staff PIN session is required.',
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Apply promoted venue hub authority', error, stackTrace);
+      _started = false;
+      _retryTimer?.cancel();
+      _retryTimer = Timer(const Duration(seconds: 5), () => unawaited(_start()));
+    } finally {
+      _refreshingAuthority = false;
+    }
+  }
+
+  Future<VenueHubBootstrap> _fetchChangedBootstrap({
+    required String expectedDeviceId,
+    required int expectedEpoch,
+  }) async {
+    final repository = ProductionCommandRepository();
+    Object? lastError;
+    for (var attempt = 1; attempt <= 6; attempt++) {
+      try {
+        final raw = await repository
+            .fetchOfflineHubBootstrap(scope: widget.scope)
+            .timeout(const Duration(seconds: 8));
+        final bootstrap = VenueHubBootstrap.fromJson(raw);
+        if (bootstrap.enabled &&
+            bootstrap.hubDeviceId == expectedDeviceId &&
+            bootstrap.hubEpoch == expectedEpoch) {
+          await VenueHubClientCache().saveBootstrap(widget.scope, bootstrap);
+          return bootstrap;
+        }
+        lastError = StateError(
+          'The signed bootstrap has not reached promoted epoch $expectedEpoch yet.',
+        );
+      } on Object catch (error) {
+        lastError = error;
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }
+    throw StateError(
+      'The promoted venue hub bootstrap could not be refreshed securely: $lastError',
+    );
+  }
+
   @override
   void dispose() {
     _retryTimer?.cancel();
+    unawaited(_authoritySubscription?.cancel());
     unawaited(_backupMonitor.stop());
     super.dispose();
   }

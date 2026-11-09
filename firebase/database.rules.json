@@ -5,7 +5,7 @@
     "hubAuthorities": {
       "$tenantId": {
         "$venueId": {
-          ".read": "auth != null && (auth.token.tablesideHub === true || auth.token.tablesideHubStandby === true) && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId",
+          ".read": "auth != null && (auth.token.tablesideHub === true || auth.token.tablesideHubStandby === true || auth.token.tablesidePos === true) && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId",
           ".write": "auth != null && auth.token.tablesideHub === true && auth.token.tenantId === $tenantId && auth.token.venueId === $venueId && data.child('enabled').val() === true && data.child('deviceId').val() === auth.token.deviceId && data.child('hubEpoch').val() === auth.token.hubEpoch && newData.child('enabled').val() === true && newData.child('deviceId').val() === data.child('deviceId').val() && newData.child('hubEpoch').val() === data.child('hubEpoch').val()",
           ".validate": "newData.hasChildren(['enabled', 'deviceId', 'hubEpoch', 'lastReadyAt']) && newData.child('enabled').isBoolean() && newData.child('deviceId').isString() && newData.child('hubEpoch').isNumber() && newData.child('lastReadyAt').isNumber() && newData.child('lastReadyAt').val() <= now + 5000"
         }

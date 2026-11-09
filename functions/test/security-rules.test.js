@@ -193,7 +193,13 @@ describe("Realtime Database scoped control-plane identities", () => {
     }).database();
 
     await assertSucceeds(get(ref(pos, "hubPresence/tenant-a/venue-a/hub-a")));
+    await assertSucceeds(get(ref(
+      pos, "hubAuthorities/tenant-a/venue-a",
+    )));
     await assertFails(get(ref(pos, "hubPresence/tenant-a/venue-b/hub-b")));
+    await assertFails(get(ref(
+      pos, "hubAuthorities/tenant-a/venue-b",
+    )));
   });
 
   test("backup hub is read-only until server-side promotion", async () => {

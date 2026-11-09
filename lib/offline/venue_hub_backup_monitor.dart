@@ -68,7 +68,7 @@ class VenueHubBackupMonitor {
   final VenueHubLeaseSilenceTracker _leaseSilence =
       VenueHubLeaseSilenceTracker();
   bool _promoting = false;
-  VoidCallback? _onPromoted;
+  Future<void> Function(int hubEpoch)? _onPromoted;
   VenueScope? _scope;
   String? _deviceId;
   VenueHubDeviceCredential? _credential;
@@ -80,7 +80,7 @@ class VenueHubBackupMonitor {
     required String deviceId,
     required VenueHubDeviceCredential credential,
     required VenueHubBootstrap bootstrap,
-    required VoidCallback onPromoted,
+    required Future<void> Function(int hubEpoch) onPromoted,
   }) async {
     await stop();
     if (bootstrap.backupDeviceId != deviceId ||
@@ -212,16 +212,21 @@ class VenueHubBackupMonitor {
         'Primary hub authority lease stopped advancing; requesting secure '
         'backup promotion.',
       );
-      await _repository.promoteOfflineBackupHub(
+      final promotion = await _repository.promoteOfflineBackupHub(
         scope: scope,
         deviceId: deviceId,
         hubEpoch: bootstrap.hubEpoch,
         credential: credential,
       );
+      final promotedEpoch = promotion['hubEpoch'];
+      if (promotedEpoch is! int || promotedEpoch <= bootstrap.hubEpoch) {
+        throw StateError('The server returned an invalid promoted hub epoch.');
+      }
       AppLogger.info(
         'Primary hub lease expired; this backup was promoted securely.',
       );
-      _onPromoted?.call();
+      final onPromoted = _onPromoted;
+      if (onPromoted != null) await onPromoted(promotedEpoch);
     } on Object catch (error, stackTrace) {
       // A healthy primary or concurrent authority refresh is expected to
       // reject the request. The backend remains the final decision maker.
