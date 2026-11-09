@@ -746,6 +746,33 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                     'Authority',
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
+                  if (bootstrap != null && !bootstrap.enabled) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.errorContainer,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.cloud_outlined),
+                          SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Cloud-only mode: internet is required for every '
+                              'order, payment and print job. If the connection '
+                              'or Firebase is unavailable, transactions are '
+                              'blocked. Configure a venue hub and backup before '
+                              'relying on LAN/offline operation.',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 8),
                   Text(
                     bootstrap == null

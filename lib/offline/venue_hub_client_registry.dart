@@ -233,7 +233,7 @@ class VenueHubClientRegistry {
     _scope = scope;
     _bootstrap = bootstrap;
     if (!bootstrap.enabled) {
-      VenueHubAvailability.reset();
+      VenueHubAvailability.markCloudOnly();
       return null;
     }
     _isLocalHubHost =
@@ -365,8 +365,7 @@ class VenueHubClientRegistry {
     if (_scope != null && _scope != scope) clear();
     _scope = scope;
     _bootstrap = bootstrap;
-    _deviceEnrolled =
-        bootstrap.credentials[credentialId]?.deviceId == deviceId;
+    _deviceEnrolled = bootstrap.credentials[credentialId]?.deviceId == deviceId;
     _isLocalHubHost =
         bootstrap.hubDeviceId == deviceId &&
         bootstrap.hubCredentialId == credentialId;

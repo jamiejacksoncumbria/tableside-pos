@@ -8,6 +8,7 @@ import '../core/tenant_scope.dart';
 import '../data/production_command_repository.dart';
 import '../features/printing/local_printer_device_identity.dart';
 import 'venue_hub_bootstrap.dart';
+import 'venue_hub_availability.dart';
 import 'venue_hub_backup_monitor.dart';
 import 'venue_hub_client_cache.dart';
 import 'venue_hub_client_registry.dart';
@@ -84,6 +85,9 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
         }
       }
       if (bootstrap == null || !bootstrap.enabled) {
+        if (bootstrap != null) {
+          VenueHubAvailability.markCloudOnly();
+        }
         AppLogger.info(
           'Venue offline hub auto-start skipped: hub is not enabled.',
         );
@@ -292,10 +296,14 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
   }
 
   Future<void> _handleAuthorityChange(VenueHubAuthorityChange change) async {
-    if (!mounted || change.scope != widget.scope || _refreshingAuthority) return;
+    if (!mounted || change.scope != widget.scope || _refreshingAuthority) {
+      return;
+    }
     _refreshingAuthority = true;
     try {
-      final current = VenueHubClientRegistry.instance.bootstrapFor(widget.scope);
+      final current = VenueHubClientRegistry.instance.bootstrapFor(
+        widget.scope,
+      );
       if (current?.hubDeviceId == change.deviceId &&
           current?.hubEpoch == change.hubEpoch) {
         return;
@@ -320,7 +328,10 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
       AppLogger.error('Apply promoted venue hub authority', error, stackTrace);
       _started = false;
       _retryTimer?.cancel();
-      _retryTimer = Timer(const Duration(seconds: 5), () => unawaited(_start()));
+      _retryTimer = Timer(
+        const Duration(seconds: 5),
+        () => unawaited(_start()),
+      );
     } finally {
       _refreshingAuthority = false;
     }

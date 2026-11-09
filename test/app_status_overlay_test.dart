@@ -102,6 +102,32 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('cloud-only venues show a persistent internet warning', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 500);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(VenueHubAvailability.reset);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appThemeControllerProvider.overrideWith(_TestThemeController.new),
+        ],
+        child: const TableSideCYApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(Tab).first);
+    await tester.pumpAndSettle();
+    VenueHubAvailability.markCloudOnly();
+    await tester.pump();
+
+    expect(find.text('Cloud-only · internet required'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 class _TestThemeController extends AppThemeController {

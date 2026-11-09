@@ -1,6 +1,13 @@
 import 'package:flutter/foundation.dart';
 
-enum VenueHubConnectivity { unknown, checking, online, lanOnly, unavailable }
+enum VenueHubConnectivity {
+  unknown,
+  checking,
+  cloudOnly,
+  online,
+  lanOnly,
+  unavailable,
+}
 
 /// Staff-facing explanation for a hub failure. This deliberately converts
 /// security-sensitive technical errors into controlled operational guidance;
@@ -109,12 +116,14 @@ class VenueHubConnectionStatus {
   final String? detail;
 
   bool get canProcessOrders =>
+      connectivity == VenueHubConnectivity.cloudOnly ||
       connectivity == VenueHubConnectivity.online ||
       connectivity == VenueHubConnectivity.lanOnly;
 
   String get shortLabel => switch (connectivity) {
     VenueHubConnectivity.unknown => 'Hub status unknown',
     VenueHubConnectivity.checking => 'Checking hub…',
+    VenueHubConnectivity.cloudOnly => 'Cloud-only · internet required',
     VenueHubConnectivity.online => 'Hub + internet online',
     VenueHubConnectivity.lanOnly => 'Hub online · LAN only',
     VenueHubConnectivity.unavailable => 'Hub offline · orders blocked',
@@ -155,6 +164,20 @@ class VenueHubAvailability {
     status.value = VenueHubConnectionStatus(
       connectivity: VenueHubConnectivity.checking,
       detail: detail,
+    );
+  }
+
+  /// Makes a deliberate no-hub venue unmistakable without presenting it as
+  /// an error. Orders may use the protected cloud API while online, but there
+  /// is no LAN authority, durable local queue, or backup takeover.
+  static void markCloudOnly() {
+    _lanOnline = false;
+    _remoteOnline = false;
+    issue.value = null;
+    status.value = const VenueHubConnectionStatus(
+      connectivity: VenueHubConnectivity.cloudOnly,
+      detail:
+          'This venue has no offline hub. Internet is required for orders, payments and printing.',
     );
   }
 

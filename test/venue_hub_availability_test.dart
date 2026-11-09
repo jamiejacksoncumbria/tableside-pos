@@ -56,6 +56,22 @@ void main() {
     expect(VenueHubAvailability.status.value.shortLabel, contains('online'));
   });
 
+  test('cloud-only mode is explicit and permits protected online work', () {
+    VenueHubAvailability.markCloudOnly();
+
+    expect(
+      VenueHubAvailability.status.value.connectivity,
+      VenueHubConnectivity.cloudOnly,
+    );
+    expect(
+      VenueHubAvailability.status.value.shortLabel,
+      contains('Cloud-only'),
+    );
+    expect(VenueHubAvailability.status.value.detail, contains('Internet'));
+    expect(VenueHubAvailability.canProcessOrders, isTrue);
+    expect(VenueHubAvailability.issue.value, isNull);
+  });
+
   test('device enrolment failures require visible manager attention', () {
     const issue =
         'This device is not enrolled with the venue hub. Orders are blocked.';

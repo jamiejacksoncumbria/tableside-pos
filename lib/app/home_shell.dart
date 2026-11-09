@@ -767,6 +767,11 @@ class _VenueHubStatusStrip extends StatelessWidget {
           Colors.white,
           Icons.cloud_done_rounded,
         ),
+        VenueHubConnectivity.cloudOnly => (
+          const Color(0xffef6c00),
+          Colors.white,
+          Icons.cloud_outlined,
+        ),
         VenueHubConnectivity.lanOnly => (
           const Color(0xfff9a825),
           Colors.black,
