@@ -39,6 +39,16 @@ class VenueHubBootstrap {
   final Map<String, VenueHubPublicCredential> credentials;
   final int serverTimeMillis;
 
+  /// Returns only the endpoint owned by this physical hub installation.
+  /// An old primary must not continue displaying the new primary's address,
+  /// and an ordinary terminal must not inherit either host address.
+  Uri? endpointForHostDevice(String? deviceId) {
+    if (deviceId == null) return null;
+    if (hubDeviceId == deviceId) return endpoint;
+    if (backupDeviceId == deviceId) return backupEndpoint;
+    return null;
+  }
+
   Map<String, Object?> toJson() => <String, Object?>{
     'enabled': enabled,
     'hubEpoch': hubEpoch,

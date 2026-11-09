@@ -18,6 +18,7 @@ import '../../offline/venue_hub_device_credential.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_runtime.dart';
 import '../../offline/venue_hub_platform.dart';
+import '../../offline/venue_hub_realtime_client.dart';
 import '../printing/local_printer_device_identity.dart';
 
 class VenueOfflineHubPage extends StatefulWidget {
@@ -40,6 +41,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
   VenueHubDeviceCredential? _credential;
   VenueHubBootstrap? _bootstrap;
   late final StreamSubscription<VenueHubRuntimeStatus> _runtimeSubscription;
+  late final StreamSubscription<VenueHubAuthorityChange> _authoritySubscription;
   late final VoidCallback _takeoverListener;
   bool _busy = false;
   bool _hasCertificate = false;
@@ -52,6 +54,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
   @override
   void dispose() {
     _runtimeSubscription.cancel();
+    _authoritySubscription.cancel();
     VenueHubManualTakeoverCoordinator.instance.pending.removeListener(
       _takeoverListener,
     );
@@ -66,6 +69,12 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     _runtimeSubscription = VenueHubRuntime.instance.statuses.listen((_) {
       if (mounted) setState(() {});
     });
+    _authoritySubscription = VenueHubRealtimeClient.instance.authorityChanges
+        .listen((change) {
+          if (mounted && change.scope == widget.scope && !_busy) {
+            unawaited(_refresh());
+          }
+        });
     _takeoverListener = () {
       if (mounted) setState(() {});
     };
@@ -116,20 +125,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       });
       return;
     }
-    if (_host.text.trim().isEmpty) {
-      // Never copy the primary address into a different device's backup form.
-      // A backup must have its own reserved LAN address or takeover would send
-      // every till back to the unavailable primary endpoint.
-      final savedEndpoint = bootstrap.hubDeviceId == deviceId
-          ? bootstrap.endpoint
-          : bootstrap.backupDeviceId == deviceId
-          ? bootstrap.backupEndpoint
-          : null;
-      if (savedEndpoint != null) {
-        _host.text = savedEndpoint.host;
-        _port.text = '${savedEndpoint.port}';
-      }
-    }
+    _applyEndpointEditors(bootstrap, deviceId);
     setState(() {
       _deviceId = deviceId;
       _credential = credential;
@@ -233,7 +229,10 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
         scope: widget.scope,
       );
       final bootstrap = VenueHubBootstrap.fromJson(raw);
-      if (mounted) setState(() => _bootstrap = bootstrap);
+      if (mounted) {
+        _applyEndpointEditors(bootstrap, deviceId);
+        setState(() => _bootstrap = bootstrap);
+      }
       final snapshot = await _repository.fetchOfflineHubSnapshot(
         scope: widget.scope,
         deviceId: deviceId,
@@ -274,8 +273,10 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
         scope: widget.scope,
       );
       if (mounted) {
+        final bootstrap = VenueHubBootstrap.fromJson(raw);
+        _applyEndpointEditors(bootstrap, _deviceId);
         setState(() {
-          _bootstrap = VenueHubBootstrap.fromJson(raw);
+          _bootstrap = bootstrap;
           _message = 'Venue offline routing is disabled.';
         });
       }
@@ -323,8 +324,10 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
         scope: widget.scope,
       );
       if (mounted) {
+        final bootstrap = VenueHubBootstrap.fromJson(raw);
+        _applyEndpointEditors(bootstrap, deviceId);
         setState(() {
-          _bootstrap = VenueHubBootstrap.fromJson(raw);
+          _bootstrap = bootstrap;
           _message =
               'This device is armed as the passive backup hub. It cannot accept orders until secure failover completes.';
         });
@@ -445,8 +448,10 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     await _repository.removeOfflineVenueBackupHub(scope: widget.scope);
     final raw = await _repository.fetchOfflineHubBootstrap(scope: widget.scope);
     if (mounted) {
+      final bootstrap = VenueHubBootstrap.fromJson(raw);
+      _applyEndpointEditors(bootstrap, _deviceId);
       setState(() {
-        _bootstrap = VenueHubBootstrap.fromJson(raw);
+        _bootstrap = bootstrap;
         _message = 'The backup hub assignment was removed.';
       });
     }
@@ -547,12 +552,34 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
         reason: approval.reason,
       );
       if (mounted) {
+        final raw = await _repository.fetchOfflineHubBootstrap(
+          scope: widget.scope,
+        );
+        if (!mounted) return;
+        final bootstrap = VenueHubBootstrap.fromJson(raw);
+        _applyEndpointEditors(bootstrap, _deviceId);
         setState(() {
+          _bootstrap = bootstrap;
           _message =
               'Takeover was approved. This device is starting as the authoritative venue hub.';
         });
       }
     });
+  }
+
+  /// Keeps the editable endpoint tied to this physical installation rather
+  /// than whichever hub happened to be active when the page first opened.
+  /// Former hubs are deliberately cleared after a transfer so a stale primary
+  /// IP cannot be mistaken for this device's current configuration.
+  void _applyEndpointEditors(VenueHubBootstrap bootstrap, String? deviceId) {
+    final savedEndpoint = bootstrap.endpointForHostDevice(deviceId);
+    if (savedEndpoint == null) {
+      _host.clear();
+      _port.text = '8443';
+      return;
+    }
+    _host.text = savedEndpoint.host;
+    _port.text = '${savedEndpoint.port}';
   }
 
   Future<String?> _requestReason({
