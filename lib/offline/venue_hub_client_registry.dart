@@ -292,9 +292,26 @@ class VenueHubClientRegistry {
         credential: credential,
         trustedCertificatePem: trustedCertificate,
       ),
+      // Health checks are deliberately short. PIN verification has its own
+      // slightly wider bound because deriving the encrypted offline verifier
+      // can take longer on entry-level Android hardware.
+      timeout: const Duration(seconds: 2),
+      loginTimeout: const Duration(seconds: 8),
     );
     try {
-      if (!await loginClient.isHealthy()) {
+      final trustedClock = TrustedClock.instance.snapshot;
+      final needsHubClockSample =
+          !_isLocalHubHost &&
+          (!trustedClock.isSynchronised ||
+              (trustedClock.authority == TrustedClockAuthority.venueHub &&
+                  trustedClock.hubEpoch != bootstrap.hubEpoch));
+      // A successful signed login already proves certificate trust, device
+      // enrolment, venue scope and hub epoch. Do not add a separate health
+      // round trip when time is already trusted. A cold offline terminal still
+      // samples the hub first so a wrong device clock cannot weaken replay
+      // protection. The hub host shares the server process clock and has also
+      // waited for its local listener above, so its preflight is redundant.
+      if (needsHubClockSample && !await loginClient.isHealthy()) {
         throw StateError(
           loginClient.lastHealthFailure ??
               'The venue hub is unavailable on the local network.',

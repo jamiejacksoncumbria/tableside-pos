@@ -518,7 +518,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
                 credential: credential,
                 endpointOverride: localHubEndpoint,
               )
-              .timeout(const Duration(seconds: 20));
+              .timeout(const Duration(seconds: 12));
           AppLogger.info('Staff PIN unlock: hub verification succeeded.');
         } on VenueHubClientException catch (error) {
           final verifierMissing = error.code == 'offline_verifier_unavailable';
