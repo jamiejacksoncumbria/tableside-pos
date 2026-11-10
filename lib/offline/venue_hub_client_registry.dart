@@ -12,6 +12,7 @@ import 'venue_hub_client.dart';
 import 'venue_hub_device_credential.dart';
 import 'venue_hub_offline_view.dart';
 import 'venue_hub_availability.dart';
+import 'venue_hub_runtime.dart';
 
 /// Process-local routing authority for operational POS commands.
 ///
@@ -317,12 +318,21 @@ class VenueHubClientRegistry {
         timeout: const Duration(seconds: 2),
       );
       _sessionExpiresAtUtc = login.expiresAtUtc;
-      final snapshotLoad = Stopwatch()..start();
-      VenueHubOfflineView.instance.install(await _client!.fetchCatalogue());
-      AppLogger.info(
-        'Venue hub catalogue loaded in ${snapshotLoad.elapsedMilliseconds} ms.',
-      );
-      if (_isLocalHubHost) {
+      final restoredLocalView =
+          _isLocalHubHost &&
+          VenueHubRuntime.instance.restoreLocalClientView(scope);
+      if (restoredLocalView) {
+        AppLogger.info(
+          'Venue hub POS view restored directly from its validated local runtime.',
+        );
+      } else {
+        final snapshotLoad = Stopwatch()..start();
+        VenueHubOfflineView.instance.install(await _client!.fetchCatalogue());
+        AppLogger.info(
+          'Venue hub catalogue loaded in ${snapshotLoad.elapsedMilliseconds} ms.',
+        );
+      }
+      if (_isLocalHubHost && !restoredLocalView) {
         // Runtime startup reconstructs every order from the encrypted ledger,
         // but `configure` first clears the preceding PIN session and its
         // in-memory view. Restore one authoritative snapshot immediately after
@@ -332,7 +342,7 @@ class VenueHubClientRegistry {
           await _client!.fetchOrders(),
         );
         AppLogger.info(
-          'Venue hub orders loaded in ${snapshotLoad.elapsedMilliseconds} ms total.',
+          'Venue hub orders loaded through the authenticated local fallback.',
         );
       }
       _lanHealthy = true;

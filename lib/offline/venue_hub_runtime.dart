@@ -84,6 +84,8 @@ class VenueHubRuntime {
   );
   VenueScope? _activeScope;
   VenueHubBootstrap? _activeBootstrap;
+  Map<String, Object?>? _localClientSnapshot;
+  List<Map<String, Object?>> _localClientOrders = const [];
   String? _cloudSynchronizationIssue;
 
   VenueHubRuntimeStatus get status => _status;
@@ -230,6 +232,9 @@ class VenueHubRuntime {
       }
 
       VenueHubOfflineView.instance.install(snapshot);
+      _localClientSnapshot = Map<String, Object?>.unmodifiable(
+        Map<String, Object?>.from(snapshot)..remove('staff'),
+      );
       final sessions = VenueHubStaffSessionAuthority(
         tenantId: scope.tenantId,
         venueId: scope.venueId,
@@ -258,9 +263,13 @@ class VenueHubRuntime {
         // the live source consumed by the hub's POS widgets. Publishing every
         // rebuild keeps table balances, named tabs and closed-order state in
         // sync immediately without waiting for a cloud snapshot refresh.
-        VenueHubOfflineView.instance.installOrders(
-          orders.values.map((order) => order.toJson()).toList(growable: false),
+        final serialized = orders.values
+            .map((order) => order.toJson())
+            .toList(growable: false);
+        _localClientOrders = List<Map<String, Object?>>.unmodifiable(
+          serialized.map((value) => Map<String, Object?>.from(value)),
         );
+        VenueHubOfflineView.instance.installOrders(serialized);
         return orders;
       }
 
@@ -324,6 +333,9 @@ class VenueHubRuntime {
         await pins.installSnapshot(refreshed);
         catalogue = refreshedCatalogue;
         snapshot = Map<String, Object?>.from(refreshed);
+        _localClientSnapshot = Map<String, Object?>.unmodifiable(
+          Map<String, Object?>.from(snapshot)..remove('staff'),
+        );
         await orderBook.installCloudBaselines(snapshot);
         await publishOrders();
         printQueue.installSnapshot(snapshot);
@@ -1525,6 +1537,8 @@ class VenueHubRuntime {
     _refreshAuthorityNow = null;
     _activeScope = null;
     _activeBootstrap = null;
+    _localClientSnapshot = null;
+    _localClientOrders = const [];
     await _server.stop();
     await AndroidVenueHubService.stop();
     _emit(
@@ -1550,6 +1564,27 @@ class VenueHubRuntime {
       throw StateError('The venue hub is not ready to refresh staff access.');
     }
     return install(snapshot);
+  }
+
+  /// Restores the hub host's POS view from the authoritative snapshot and
+  /// encrypted-ledger projection that this runtime has already validated.
+  ///
+  /// PIN lock intentionally clears process-local POS state. After a successful
+  /// certificate-pinned PIN login, making the hub download its own full
+  /// catalogue and order book over HTTPS is redundant and can noticeably delay
+  /// unlock on larger venues. This method fails closed unless the requested
+  /// scope is the currently running hub generation and the runtime is usable.
+  bool restoreLocalClientView(VenueScope scope) {
+    final snapshot = _localClientSnapshot;
+    if (_activeScope != scope ||
+        snapshot == null ||
+        (_status.state != VenueHubRuntimeState.ready &&
+            _status.state != VenueHubRuntimeState.degraded)) {
+      return false;
+    }
+    VenueHubOfflineView.instance.install(snapshot);
+    VenueHubOfflineView.instance.installOrders(_localClientOrders);
+    return true;
   }
 
   Stream<List<Map<String, Object?>>>? localPrintJobs(VenueScope scope) {
