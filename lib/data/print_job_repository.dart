@@ -306,9 +306,22 @@ class PrintJobRepository {
       // cloud queue for server-created jobs such as delivery notes/reprints.
       // The two queues use distinct job IDs and each claim is atomic.
       if (!hubPrinter.isDeviceEnrolled(scope)) return null;
-      final local = await hubPrinter.claim(scope);
-      if (local != null) {
-        return _fromLocal(tenantId, venueId, deviceId, local);
+      try {
+        final local = await hubPrinter.claim(scope);
+        if (local != null) {
+          return _fromLocal(tenantId, venueId, deviceId, local);
+        }
+      } on Object catch (error, stackTrace) {
+        // A printer may be enrolled at the venue while running on another
+        // internet connection. Failure to reach the certificate-pinned LAN
+        // queue must not strand server-created jobs: continue to the existing
+        // device-credential-protected cloud claim below. The cloud operation
+        // remains atomic, so this cannot print one cloud job twice.
+        AppLogger.error(
+          'Venue hub LAN print queue unavailable; trying secure cloud queue',
+          error,
+          stackTrace,
+        );
       }
     }
     if (deviceCredential == 'venue-hub-device-credential') {
