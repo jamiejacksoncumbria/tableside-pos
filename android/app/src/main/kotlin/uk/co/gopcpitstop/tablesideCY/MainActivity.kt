@@ -7,8 +7,11 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    private var androidCryptoChannel: AndroidCryptoChannel? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        androidCryptoChannel = AndroidCryptoChannel(flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "tableside/android_hub_service",
@@ -34,5 +37,11 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    override fun onDestroy() {
+        androidCryptoChannel?.dispose()
+        androidCryptoChannel = null
+        super.onDestroy()
     }
 }
