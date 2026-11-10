@@ -36,6 +36,11 @@ class VenueHubAutoStartHost extends StatefulWidget {
 
 class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
   static const _secrets = FlutterSecureStorage();
+  // Offline bootstrap can open a cached workspace just before Firebase's late
+  // success rebuilds the online workspace. Both widget instances represent the
+  // same process and venue, so they must join one runtime startup rather than
+  // stop/rebind port 8443 underneath a PIN request.
+  static final Set<VenueScope> _startingScopes = <VenueScope>{};
   bool _started = false;
   Timer? _retryTimer;
   StreamSubscription<VenueHubAuthorityChange>? _authoritySubscription;
@@ -66,6 +71,31 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
     _retryTimer?.cancel();
     _retryTimer = null;
     _started = true;
+    if (!_startingScopes.add(widget.scope)) {
+      try {
+        await VenueHubRuntime.instance.waitForLocalEndpoint(
+          widget.scope,
+          timeout: const Duration(seconds: 30),
+        );
+        AppLogger.info(
+          'Joined the venue hub startup already in progress for this venue.',
+        );
+      } on Object catch (error, stackTrace) {
+        AppLogger.error(
+          'Wait for concurrent venue hub auto-start',
+          error,
+          stackTrace,
+        );
+        _started = false;
+        if (mounted) {
+          _retryTimer = Timer(
+            const Duration(seconds: 5),
+            () => unawaited(_start()),
+          );
+        }
+      }
+      return;
+    }
     try {
       final cache = VenueHubClientCache();
       final repository = ProductionCommandRepository();
@@ -169,6 +199,33 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
         AppLogger.info(
           'Venue offline hub auto-start skipped: this installation has a new '
           'device credential. A manager must restart/replace the hub in settings.',
+        );
+        return;
+      }
+      final runtime = VenueHubRuntime.instance;
+      final runningBootstrap = runtime.activeBootstrap;
+      if (runtime.activeScope == widget.scope &&
+          runningBootstrap?.enabled == true &&
+          runningBootstrap?.hubDeviceId == deviceId &&
+          runningBootstrap?.hubCredentialId == credential.credentialId &&
+          runningBootstrap?.hubEpoch == bootstrap.hubEpoch &&
+          (runtime.status.state == VenueHubRuntimeState.ready ||
+              runtime.status.state == VenueHubRuntimeState.degraded)) {
+        // A late Firebase bootstrap has rebuilt the workspace around the same
+        // already-authoritative runtime. Reuse it: restarting here briefly
+        // closed port 8443 and made correct PINs look like LAN failures.
+        await VenueHubPrinterClientRegistry.instance.configure(
+          scope: widget.scope,
+          bootstrap: bootstrap,
+          deviceId: deviceId,
+          credential: credential,
+          endpointOverride: runtime.status.endpoint,
+        );
+        if (widget.cloudRefreshEnabled) {
+          unawaited(runtime.refreshAuthorityNow());
+        }
+        AppLogger.info(
+          'Venue offline hub runtime already active; reused it after workspace refresh.',
         );
         return;
       }
@@ -277,6 +334,8 @@ class _VenueHubAutoStartHostState extends State<VenueHubAutoStartHost> {
           () => unawaited(_start()),
         );
       }
+    } finally {
+      _startingScopes.remove(widget.scope);
     }
   }
 
