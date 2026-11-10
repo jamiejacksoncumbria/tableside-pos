@@ -523,55 +523,73 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         } on VenueHubClientException catch (error) {
           final verifierMissing = error.code == 'offline_verifier_unavailable';
           final verifierRejected = error.code == 'invalid_pin';
-          if (!verifierMissing && !verifierRejected) rethrow;
-          if (widget.offlineHubOnly) {
-            throw StateError(
+          final lanUnavailable = error.code == 'hub_lan_unavailable';
+          if (lanUnavailable) {
+            if (isLocalHubHost) rethrow;
+            // A remote terminal may legitimately be on mobile data or another
+            // network. Cloud PIN verification authenticates the staff member;
+            // RTDB presence and the signed remote queue still require the
+            // authoritative hub to be online before any order is accepted.
+            hubConnectionUnavailable = true;
+            AppLogger.info(
+              'Venue hub LAN login unavailable; continuing with the secure remote hub route.',
+            );
+          } else if (!verifierMissing && !verifierRejected) {
+            rethrow;
+          }
+          // A LAN transport failure continues below to normal cloud PIN
+          // verification. Only the two explicit verifier errors may enter the
+          // legacy repair flow and refresh hub secrets.
+          if (!lanUnavailable) {
+            if (widget.offlineHubOnly) {
+              throw StateError(
+                verifierMissing
+                    ? 'This PIN needs one successful online login before it can be used offline.'
+                    : 'The venue hub rejected this staff PIN.',
+              );
+            }
+            AppLogger.info(
               verifierMissing
-                  ? 'This PIN needs one successful online login before it can be used offline.'
-                  : 'The venue hub rejected this staff PIN.',
+                  ? 'Upgrading a legacy staff PIN for encrypted offline verification.'
+                  : 'Validating and repairing a rejected offline PIN verifier.',
+            );
+            migratedCloudSession = await _repository.verifyStaffPin(
+              scope: widget.scope,
+              userId: staff.userId,
+              pin: pin,
+              deviceId: deviceId,
+              repairOfflineVerifier: verifierRejected,
+            );
+            if (VenueHubRuntime.instance.activeScope != widget.scope) {
+              throw StateError(
+                'The PIN was upgraded. Wait up to 30 seconds for the venue hub '
+                'to refresh, then enter it again.',
+              );
+            }
+            final refreshed = await _repository.fetchOfflineHubSnapshot(
+              scope: widget.scope,
+              deviceId: deviceId,
+              hubEpoch: bootstrap.hubEpoch,
+              credential: credential,
+            );
+            await VenueHubRuntime.instance.installFreshSnapshot(refreshed);
+            final localHubEndpoint =
+                bootstrap.hubDeviceId == deviceId &&
+                    bootstrap.hubCredentialId == credential.credentialId
+                ? await VenueHubRuntime.instance.waitForLocalEndpoint(
+                    widget.scope,
+                  )
+                : null;
+            hubLogin = await VenueHubClientRegistry.instance.configure(
+              scope: widget.scope,
+              bootstrap: bootstrap,
+              deviceId: deviceId,
+              staffId: staff.userId,
+              pin: pin,
+              credential: credential,
+              endpointOverride: localHubEndpoint,
             );
           }
-          AppLogger.info(
-            verifierMissing
-                ? 'Upgrading a legacy staff PIN for encrypted offline verification.'
-                : 'Validating and repairing a rejected offline PIN verifier.',
-          );
-          migratedCloudSession = await _repository.verifyStaffPin(
-            scope: widget.scope,
-            userId: staff.userId,
-            pin: pin,
-            deviceId: deviceId,
-            repairOfflineVerifier: verifierRejected,
-          );
-          if (VenueHubRuntime.instance.activeScope != widget.scope) {
-            throw StateError(
-              'The PIN was upgraded. Wait up to 30 seconds for the venue hub '
-              'to refresh, then enter it again.',
-            );
-          }
-          final refreshed = await _repository.fetchOfflineHubSnapshot(
-            scope: widget.scope,
-            deviceId: deviceId,
-            hubEpoch: bootstrap.hubEpoch,
-            credential: credential,
-          );
-          await VenueHubRuntime.instance.installFreshSnapshot(refreshed);
-          final localHubEndpoint =
-              bootstrap.hubDeviceId == deviceId &&
-                  bootstrap.hubCredentialId == credential.credentialId
-              ? await VenueHubRuntime.instance.waitForLocalEndpoint(
-                  widget.scope,
-                )
-              : null;
-          hubLogin = await VenueHubClientRegistry.instance.configure(
-            scope: widget.scope,
-            bootstrap: bootstrap,
-            deviceId: deviceId,
-            staffId: staff.userId,
-            pin: pin,
-            credential: credential,
-            endpointOverride: localHubEndpoint,
-          );
         } on StateError catch (error, stackTrace) {
           if (isLocalHubHost) rethrow;
           // Certificate installation and device enrolment are managed from
@@ -700,7 +718,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           SnackBar(
             content: Text(
               hubConnectionUnavailable
-                  ? 'Signed in for recovery only. A manager must enrol this device and import the venue certificate before it can process orders.'
+                  ? 'Local hub connection unavailable. Connecting through the secure remote hub channel; orders remain blocked until live hub presence is confirmed.'
                   : 'Signed in for recovery only. Enrol this device in Venue offline hub settings before it can process orders.',
             ),
           ),

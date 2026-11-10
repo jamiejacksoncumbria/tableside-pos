@@ -296,7 +296,9 @@ class VenueHubClientRegistry {
       // slightly wider bound because deriving the encrypted offline verifier
       // can take longer on entry-level Android hardware.
       timeout: const Duration(seconds: 2),
-      loginTimeout: const Duration(seconds: 8),
+      loginTimeout: _isLocalHubHost
+          ? const Duration(seconds: 8)
+          : const Duration(seconds: 3),
     );
     try {
       final trustedClock = TrustedClock.instance.snapshot;
@@ -376,7 +378,16 @@ class VenueHubClientRegistry {
       _connectionFailure = error.toString();
       _clearSession(preserveAuthority: true);
       VenueHubAvailability.markLanOffline(error.toString());
-      rethrow;
+      if (error is VenueHubClientException) rethrow;
+      // Transport failures are different from a rejected PIN. Preserve that
+      // distinction so an enrolled terminal with working Firebase can verify
+      // the same PIN through the protected cloud API and use the authoritative
+      // remote hub queue. No command bypasses the hub: this only selects the
+      // secure transport used to reach it.
+      throw VenueHubClientException(
+        'The venue hub is not reachable over the local network.',
+        code: 'hub_lan_unavailable',
+      );
     }
   }
 
