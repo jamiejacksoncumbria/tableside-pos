@@ -317,7 +317,11 @@ class VenueHubClientRegistry {
         timeout: const Duration(seconds: 2),
       );
       _sessionExpiresAtUtc = login.expiresAtUtc;
+      final snapshotLoad = Stopwatch()..start();
       VenueHubOfflineView.instance.install(await _client!.fetchCatalogue());
+      AppLogger.info(
+        'Venue hub catalogue loaded in ${snapshotLoad.elapsedMilliseconds} ms.',
+      );
       if (_isLocalHubHost) {
         // Runtime startup reconstructs every order from the encrypted ledger,
         // but `configure` first clears the preceding PIN session and its
@@ -326,6 +330,9 @@ class VenueHubClientRegistry {
         // stream; subsequent durable commits publish directly from runtime.
         VenueHubOfflineView.instance.installOrders(
           await _client!.fetchOrders(),
+        );
+        AppLogger.info(
+          'Venue hub orders loaded in ${snapshotLoad.elapsedMilliseconds} ms total.',
         );
       }
       _lanHealthy = true;

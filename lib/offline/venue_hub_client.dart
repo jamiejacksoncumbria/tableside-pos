@@ -70,6 +70,7 @@ class VenueHubClient {
     http.Client? httpClient,
     this.timeout = const Duration(seconds: 8),
     this.loginTimeout = const Duration(seconds: 20),
+    this.snapshotTimeout = const Duration(seconds: 15),
   }) : _http =
            httpClient ??
            createVenueHubHttpClient(
@@ -96,6 +97,11 @@ class VenueHubClient {
   final VenueHubClientConfiguration configuration;
   final Duration timeout;
   final Duration loginTimeout;
+  /// Initial catalogue/order snapshots are materially larger than health and
+  /// mutation responses. Keep their limit separate so a two-second LAN health
+  /// policy cannot make a valid promoted hub impossible to unlock on slower
+  /// Android hardware or a debug emulator.
+  final Duration snapshotTimeout;
   final http.Client _http;
   String? _lastHealthFailure;
 
@@ -353,7 +359,7 @@ class VenueHubClient {
       'staffSessionToken': sessionToken,
       'action': action,
       'jobId': jobId,
-      if (reason != null) 'reason': reason,
+      'reason': ?reason,
     };
     final envelope =
         await VenueHubRequestSigner(configuration.credential.keyPair).sign(
@@ -400,7 +406,7 @@ class VenueHubClient {
       'staffSessionToken': sessionToken,
       if (statuses?.isNotEmpty == true) 'statuses': statuses!.toList(),
       if (sinceUtc != null) 'sinceUtc': sinceUtc.toUtc().toIso8601String(),
-      if (limit != null) 'limit': limit,
+      'limit': ?limit,
     };
     final response = await _signedPost('/v1/print/jobs', body);
     if (response.statusCode != 200) {
@@ -424,7 +430,11 @@ class VenueHubClient {
 
   Future<Map<String, Object?>> fetchCatalogue() async {
     const body = <String, Object?>{};
-    final response = await _signedPost('/v1/catalogue', body);
+    final response = await _signedPost(
+      '/v1/catalogue',
+      body,
+      requestTimeout: snapshotTimeout,
+    );
     if (response.statusCode != 200) {
       throw const VenueHubClientException(
         'The venue hub catalogue is unavailable.',
@@ -488,7 +498,11 @@ class VenueHubClient {
       'staffSessionId': sessionId,
       'staffSessionToken': sessionToken,
     };
-    final response = await _signedPost('/v1/orders', body);
+    final response = await _signedPost(
+      '/v1/orders',
+      body,
+      requestTimeout: snapshotTimeout,
+    );
     if (response.statusCode != 200) {
       throw _exceptionFromResponse(
         response,
@@ -580,8 +594,9 @@ class VenueHubClient {
 
   Future<http.Response> _signedPost(
     String path,
-    Map<String, Object?> body,
-  ) async {
+    Map<String, Object?> body, {
+    Duration? requestTimeout,
+  }) async {
     final envelope =
         await VenueHubRequestSigner(configuration.credential.keyPair).sign(
           credentialId: configuration.credential.credentialId,
@@ -601,7 +616,7 @@ class VenueHubClient {
           headers: const {'Content-Type': 'application/json'},
           body: jsonEncode({'envelope': envelope.toJson(), 'body': body}),
         )
-        .timeout(timeout);
+        .timeout(requestTimeout ?? timeout);
   }
 
   VenueHubClientException _exceptionFromResponse(

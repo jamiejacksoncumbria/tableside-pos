@@ -243,6 +243,38 @@ void main() {
       expect(sent['body']['limit'], 250);
     },
   );
+
+  test('large snapshots do not inherit the short health timeout', () async {
+    final credential =
+        await VenueHubDeviceCredentialStore(
+          secrets: _MemorySecrets(),
+        ).getOrCreate(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'device-a',
+        );
+    final client = VenueHubClient(
+      configuration: VenueHubClientConfiguration(
+        endpoint: Uri.parse('https://hub.example.test:8443'),
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'device-a',
+        staffId: 'staff-a',
+        staffSessionId: 'session-a',
+        staffSessionToken: '01234567890123456789012345678901',
+        hubEpoch: 2,
+        credential: credential,
+      ),
+      timeout: const Duration(milliseconds: 5),
+      snapshotTimeout: const Duration(milliseconds: 250),
+      httpClient: MockClient((_) async {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        return http.Response(jsonEncode({'version': 1}), 200);
+      }),
+    );
+
+    expect((await client.fetchCatalogue())['version'], 1);
+  });
 }
 
 class _MemorySecrets implements VenueHubSecretStore {
