@@ -150,7 +150,10 @@ class DiagnosticLogStore {
       r'$1=<redacted>',
     );
     value = value.replaceAll(
-      RegExp(r'([?&](?:token|key|signature)=)[^&\s]+', caseSensitive: false),
+      RegExp(
+        r'([?&](?:auth|token|key|signature)=)[^&\s]+',
+        caseSensitive: false,
+      ),
       r'$1<redacted>',
     );
     value = value.replaceAll(

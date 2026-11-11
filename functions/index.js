@@ -13411,7 +13411,10 @@ export const posApi = onRequest({cors: true}, async (request, response) => {
     response.status(500).json({
       error: {
         code: "internal",
-        message: `The POS action could not be completed: ${message}`,
+        // Detailed unexpected exceptions remain in protected Cloud Logging.
+        // Returning them to a client can disclose collection paths, library
+        // versions or implementation details useful to an attacker.
+        message: "The POS action could not be completed. Check the manager diagnostic log and contact support if it continues.",
       },
     });
   }

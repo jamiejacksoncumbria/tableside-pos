@@ -14,6 +14,7 @@ import '../../data/production_command_repository.dart';
 import '../../offline/venue_hub_bootstrap.dart';
 import '../../offline/venue_hub_backup_monitor.dart';
 import '../../offline/hub_port_diagnostic.dart';
+import '../../offline/local_network_address.dart';
 import '../../offline/venue_hub_device_credential.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_runtime.dart';
@@ -81,6 +82,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     void takeoverListener() {
       if (mounted) setState(() {});
     }
+
     _takeoverListener = takeoverListener;
     VenueHubManualTakeoverCoordinator.instance.pending.addListener(
       takeoverListener,
@@ -130,6 +132,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       return;
     }
     _applyEndpointEditors(bootstrap, deviceId);
+    await _prefillLanAddressIfEmpty();
     setState(() {
       _deviceId = deviceId;
       _credential = credential;
@@ -404,10 +407,25 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     final host = _host.text.trim();
     final port = int.tryParse(_port.text.trim()) ?? 8443;
     if (host.isEmpty) {
-      setState(() {
-        _message =
-            'Enter this device\'s fixed LAN IP or reserved host name before configuring it as the $role.';
-      });
+      await showAppDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.error_outline_rounded),
+          title: const Text('LAN address required'),
+          content: Text(
+            'TableSide could not detect this device\'s private LAN address. '
+            'Enter its fixed LAN IP or reserved host name before configuring '
+            'it as the $role.',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Enter address'),
+            ),
+          ],
+        ),
+      );
       return false;
     }
     return await showAppDialog<bool>(
@@ -424,7 +442,8 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                   Text('This $role will be saved as https://$host:$port.'),
                   const SizedBox(height: 12),
                   const Text(
-                    'Give this device a DHCP reservation or static LAN IP in '
+                    'TableSide has filled the most likely current LAN address. '
+                    'Check it, then give this device a DHCP reservation or static LAN IP in '
                     'the router first. The primary and backup must use '
                     'different stable addresses. If either address changes, '
                     'local terminals cannot find that hub until a manager '
@@ -584,6 +603,20 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     }
     _host.text = savedEndpoint.host;
     _port.text = '${savedEndpoint.port}';
+  }
+
+  /// Prefills first-time hub setup with the device's likely private IPv4
+  /// address. Existing signed primary/backup endpoints always win and the
+  /// manager must still confirm a router reservation before activation.
+  Future<void> _prefillLanAddressIfEmpty() async {
+    if (!canHostVenueHub || _host.text.trim().isNotEmpty) return;
+    try {
+      final detected = await preferredPrivateLanAddress();
+      if (!mounted || detected == null || _host.text.trim().isNotEmpty) return;
+      _host.text = detected;
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Detect venue hub LAN address', error, stackTrace);
+    }
   }
 
   Future<String?> _requestReason({

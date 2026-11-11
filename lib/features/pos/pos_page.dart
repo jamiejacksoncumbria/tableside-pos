@@ -742,13 +742,15 @@ class _TableButton extends ConsumerWidget {
         isTraining || scope == null || table.currentOrderId == null
         ? null
         : ref.watch(tableOpenOrderProvider(table.currentOrderId!));
-    final amountDueMinor = isTraining
-        ? trainingOrder?.balanceDueMinor
+    final openOrder = isTraining
+        ? trainingOrder
         : openOrderValue?.when(
-            data: (order) => order?.balanceDueMinor,
+            data: (order) => order,
             loading: () => null,
             error: (_, _) => null,
           );
+    final amountDueMinor = openOrder?.balanceDueMinor;
+    final needsAttention = openOrder?.hasPendingProductionLines == true;
     final isOpen = isTraining ? trainingOrder != null : table.hasOpenOrder;
     final openGreen = Theme.of(context).brightness == Brightness.dark
         ? Colors.green.shade700
@@ -760,12 +762,13 @@ class _TableButton extends ConsumerWidget {
         ? openGreen
         : scheme.surfaceContainerHighest;
     final foreground = isOpen || selected ? Colors.white : scheme.onSurface;
+    final titleColor = needsAttention ? Colors.orangeAccent : foreground;
     final width = compact ? 72.0 : 104.0;
     return Semantics(
       button: true,
       selected: selected,
       label: isOpen
-          ? 'Table ${table.label}, open, ${amountDueMinor == null ? 'amount loading' : formatMoney(amountDueMinor, currencyCode: currencyCode)} owed'
+          ? 'Table ${table.label}, open${needsAttention ? ', pending items not sent' : ''}, ${amountDueMinor == null ? 'amount loading' : formatMoney(amountDueMinor, currencyCode: currencyCode)} owed'
           : 'Table ${table.label}, available',
       child: InkWell(
         onTap: onTap,
@@ -791,7 +794,7 @@ class _TableButton extends ConsumerWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontWeight: FontWeight.w800,
-                        color: foreground,
+                        color: titleColor,
                       ),
                     ),
                     const SizedBox(height: 3),
@@ -879,17 +882,19 @@ class _NamedTabButton extends ConsumerWidget {
     final trainingOrder = ref.watch(trainingModeProvider) == null
         ? null
         : ref.watch(trainingOpenOrdersProvider)[tab.orderId];
-    final totalMinor = trainingOrder != null
-        ? trainingOrder.balanceDueMinor
-        : scope == null
-        ? null
-        : ref
-              .watch(tableOpenOrderProvider(tab.orderId))
-              .when(
-                data: (order) => order?.balanceDueMinor,
-                loading: () => null,
-                error: (_, _) => null,
-              );
+    final liveOrder =
+        trainingOrder ??
+        (scope == null
+            ? null
+            : ref
+                  .watch(tableOpenOrderProvider(tab.orderId))
+                  .when(
+                    data: (order) => order,
+                    loading: () => null,
+                    error: (_, _) => null,
+                  ));
+    final totalMinor = liveOrder?.balanceDueMinor;
+    final needsAttention = liveOrder?.hasPendingProductionLines == true;
     // Every item here represents a live named tab. Make that operational
     // state as obvious as an open table, not merely the currently selected
     // tab.
@@ -901,7 +906,7 @@ class _NamedTabButton extends ConsumerWidget {
       button: true,
       selected: selected,
       label:
-          'Open tab for ${tab.name}${totalMinor == null ? '' : ', ${formatMoney(totalMinor, currencyCode: currencyCode)} owed'}',
+          'Open tab for ${tab.name}${needsAttention ? ', pending items not sent' : ''}${totalMinor == null ? '' : ', ${formatMoney(totalMinor, currencyCode: currencyCode)} owed'}',
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(12),
@@ -927,7 +932,9 @@ class _NamedTabButton extends ConsumerWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontWeight: FontWeight.w700,
-                        color: foreground,
+                        color: needsAttention
+                            ? Colors.orangeAccent
+                            : foreground,
                       ),
                     ),
                     if (totalMinor != null)
@@ -979,7 +986,9 @@ class _FulfilmentOrderButton extends ConsumerWidget {
     final liveOrder = scope == null
         ? null
         : ref.watch(tableOpenOrderProvider(order.id)).value;
-    final amount = liveOrder?.balanceDueMinor ?? order.balanceDueMinor;
+    final displayedOrder = liveOrder ?? order;
+    final amount = displayedOrder.balanceDueMinor;
+    final needsAttention = displayedOrder.hasPendingProductionLines;
     final scheduled = order.scheduledFor;
     final background = selected
         ? Theme.of(context).colorScheme.primary
@@ -1013,10 +1022,12 @@ class _FulfilmentOrderButton extends ConsumerWidget {
                     order.customerName ?? 'Customer',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                    ),
+                    style: const TextStyle(fontWeight: FontWeight.w700)
+                        .copyWith(
+                          color: needsAttention
+                              ? Colors.orangeAccent
+                              : Colors.white,
+                        ),
                   ),
                 ),
                 if (onDeselect != null)
@@ -2997,6 +3008,11 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
         : order.tabName ??
               (tableLabel.isEmpty ? 'No table selected' : tableLabel);
     final scheme = Theme.of(context).colorScheme;
+    final orderTitleColor = hasUnsentLines
+        ? (Theme.of(context).brightness == Brightness.dark
+              ? Colors.orangeAccent
+              : Colors.orange.shade800)
+        : null;
     final staff = ref.watch(activeStaffPinSessionProvider);
     final canAdjustSale =
         staff?.roles.any((role) => role == 'owner' || role == 'manager') ??
@@ -3032,7 +3048,9 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                     orderLocationLabel,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.titleMedium?.copyWith(color: orderTitleColor),
                   ),
                 ),
                 const SizedBox(width: 8),

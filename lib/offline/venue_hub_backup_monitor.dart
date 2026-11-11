@@ -199,6 +199,10 @@ class VenueHubBackupMonitor {
               stackTrace,
             ),
           );
+      // Firebase normally sends an initial SSE put immediately. Read the same
+      // scoped value once as well so a proxy-delayed stream cannot leave a
+      // correctly configured Windows backup unaware of the primary lease.
+      _receiveAuthority(await windowsSession.read(path));
     } else {
       FirebaseApp app;
       try {
@@ -226,11 +230,13 @@ class VenueHubBackupMonitor {
               stackTrace,
             ),
           );
+      _receiveAuthority((await database.ref(path).get()).value);
     }
     _timer = Timer.periodic(
       const Duration(seconds: 5),
       (_) => unawaited(_checkFailover()),
     );
+    await _checkFailover();
     await AndroidVenueHubService.start(standby: true);
     _holdsAndroidService = true;
     AppLogger.info('Backup venue hub is armed in passive standby mode.');
@@ -240,8 +246,9 @@ class VenueHubBackupMonitor {
     if (raw is Map) {
       final previousReadyAt = _latestAuthority?['lastReadyAt'];
       _latestAuthority = Map<Object?, Object?>.from(raw);
-      _leaseSilence.observe(raw['lastReadyAt']);
-      if (raw['lastReadyAt'] is int && raw['lastReadyAt'] != previousReadyAt) {
+      final lastReadyAt = _integerValue(raw['lastReadyAt']);
+      _leaseSilence.observe(lastReadyAt);
+      if (lastReadyAt != null && lastReadyAt != previousReadyAt) {
         VenueHubManualTakeoverCoordinator.instance.clear();
         VenueHubAvailability.markOnline();
       }
@@ -263,11 +270,11 @@ class VenueHubBackupMonitor {
         bootstrap == null ||
         authority['enabled'] != true ||
         authority['deviceId'] != bootstrap.hubDeviceId ||
-        authority['hubEpoch'] != bootstrap.hubEpoch) {
+        _integerValue(authority['hubEpoch']) != bootstrap.hubEpoch) {
       return;
     }
-    final lastReadyAt = authority['lastReadyAt'];
-    if (lastReadyAt is! int || !_leaseSilence.isSilentFor(_staleAfter)) {
+    final lastReadyAt = _integerValue(authority['lastReadyAt']);
+    if (lastReadyAt == null || !_leaseSilence.isSilentFor(_staleAfter)) {
       return;
     }
     final primaryDeviceId = authority['deviceId'];
@@ -287,6 +294,14 @@ class VenueHubBackupMonitor {
       'Primary hub authority lease stopped advancing; manual manager takeover '
       'is required. No authority change was attempted automatically.',
     );
+  }
+
+  int? _integerValue(Object? value) {
+    if (value is int) return value;
+    if (value is num && value.isFinite && value == value.roundToDouble()) {
+      return value.toInt();
+    }
+    return null;
   }
 
   Future<void> _confirmTakeover(String managerPin, String reason) async {

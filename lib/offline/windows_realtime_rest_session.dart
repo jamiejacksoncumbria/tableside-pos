@@ -67,6 +67,32 @@ class WindowsRealtimeRestSession {
   Future<void> update(String path, Map<String, Object?> value) =>
       _write('PATCH', path, value);
 
+  /// Reads one current RTDB value using the same scoped, renewable identity
+  /// as the SSE listener. Backup hubs use this once at startup so failover
+  /// monitoring does not depend on the timing of Firebase's initial SSE put.
+  Future<Object?> read(String path) async {
+    var token = await _validIdToken();
+    var response = await _client.get(
+      _databaseUri(path),
+      headers: _authorizationHeaders(token),
+    );
+    if ((response.statusCode == 401 || response.statusCode == 403) &&
+        renewCustomToken != null) {
+      await _renewCredential();
+      token = await _validIdToken();
+      response = await _client.get(
+        _databaseUri(path),
+        headers: _authorizationHeaders(token),
+      );
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError(
+        'Realtime read failed (${response.statusCode}): ${response.body}',
+      );
+    }
+    return jsonDecode(response.body);
+  }
+
   /// Emits the complete projected value after every Firebase SSE put/patch.
   /// It reconnects after transient socket closure and refreshes the scoped ID
   /// token before expiry. Cancelling the Dart subscription stops reconnects.
@@ -81,8 +107,9 @@ class WindowsRealtimeRestSession {
       while (!cancelled && !_closed) {
         try {
           final token = await _validIdToken();
-          final request = http.Request('GET', _databaseUri(path, token));
+          final request = http.Request('GET', _databaseUri(path));
           request.headers['Accept'] = 'text/event-stream';
+          request.headers['Authorization'] = 'Bearer $token';
           final response = await _client.send(request);
           if (response.statusCode < 200 || response.statusCode >= 300) {
             final body = await response.stream.bytesToString();
@@ -203,8 +230,9 @@ class WindowsRealtimeRestSession {
     Object? value,
     String token,
   ) {
-    final request = http.Request(method, _databaseUri(path, token))
+    final request = http.Request(method, _databaseUri(path))
       ..headers['Content-Type'] = 'application/json'
+      ..headers['Authorization'] = 'Bearer $token'
       ..body = jsonEncode(value);
     return _client.send(request);
   }
@@ -287,7 +315,11 @@ class WindowsRealtimeRestSession {
     _expiresAt = DateTime.now().add(Duration(seconds: seconds));
   }
 
-  Uri _databaseUri(String path, String token) {
+  Map<String, String> _authorizationHeaders(String token) => <String, String>{
+    'Authorization': 'Bearer $token',
+  };
+
+  Uri _databaseUri(String path) {
     final base = databaseUrl.endsWith('/')
         ? databaseUrl.substring(0, databaseUrl.length - 1)
         : databaseUrl;
@@ -296,9 +328,7 @@ class WindowsRealtimeRestSession {
         .where((segment) => segment.isNotEmpty)
         .map(Uri.encodeComponent)
         .join('/');
-    return Uri.parse(
-      '$base/$encodedPath.json',
-    ).replace(queryParameters: {'auth': token});
+    return Uri.parse('$base/$encodedPath.json');
   }
 
   static Map<String, Object?> _decodedObject(String source) {

@@ -1094,6 +1094,12 @@ class PosOrder {
 
   bool get isSplitOrder => splitFromOrderId?.trim().isNotEmpty == true;
 
+  /// Unsent lines are still a draft: they have not reached production and can
+  /// be forgotten if staff switch tables. POS location labels render these
+  /// orders in orange until every line is confirmed as sent.
+  bool get hasPendingProductionLines =>
+      lines.any((line) => !line.isSentToProduction);
+
   int get totalMinor =>
       lines.fold(0, (total, line) => total + line.totalMinor) +
       (channel == OrderChannel.delivery ? deliveryFeeMinor : 0);

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -30,8 +31,10 @@ import '../features/settings/settings_page.dart';
 import '../features/settings/venue_offline_hub_page.dart';
 import '../features/training/training_mode_page.dart';
 import '../offline/venue_hub_client_cache.dart';
+import '../offline/venue_hub_client_registry.dart';
 import '../offline/venue_hub_availability.dart';
 import '../offline/venue_hub_backup_monitor.dart';
+import '../offline/venue_hub_realtime_client.dart';
 import '../offline/venue_hub_runtime.dart';
 
 enum HomeSection {
@@ -363,6 +366,7 @@ class HomeShell extends ConsumerWidget {
                 if (Firebase.apps.isNotEmpty) const PushNotificationHost(),
                 const _VenueHubAccessNotificationHost(),
                 const _VenueHubSynchronizationNotificationHost(),
+                const _VenueHubRealtimeStatusHost(),
                 const _VenueHubTakeoverPromptHost(),
               ],
             ),
@@ -445,6 +449,100 @@ class HomeShell extends ConsumerWidget {
       };
 }
 
+/// Starts the browser's RTDB presence listener as soon as the unlocked venue
+/// workspace appears. Previously this was effectively lazy: if the PIN path's
+/// fire-and-forget setup raced a rebuild, hub status remained "unknown" until
+/// an order command happened to configure the same channel.
+class _VenueHubRealtimeStatusHost extends ConsumerStatefulWidget {
+  const _VenueHubRealtimeStatusHost();
+
+  @override
+  ConsumerState<_VenueHubRealtimeStatusHost> createState() =>
+      _VenueHubRealtimeStatusHostState();
+}
+
+class _VenueHubRealtimeStatusHostState
+    extends ConsumerState<_VenueHubRealtimeStatusHost> {
+  Timer? _retryTimer;
+  String? _configurationKey;
+  bool _configuring = false;
+
+  void _scheduleConfiguration() {
+    if (!kIsWeb || _configuring) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_configure());
+    });
+  }
+
+  Future<void> _configure() async {
+    if (_configuring || !mounted) return;
+    final scope = ref.read(activeVenueScopeProvider);
+    final session = ref.read(activeStaffPinSessionProvider);
+    if (scope == null || session == null) return;
+    final bootstrap = VenueHubClientRegistry.instance.bootstrapFor(scope);
+    if (bootstrap == null) {
+      _scheduleRetry(const Duration(milliseconds: 500));
+      return;
+    }
+    if (!bootstrap.enabled) {
+      _configurationKey = '${scope.tenantId}/${scope.venueId}/cloud-only';
+      VenueHubAvailability.markCloudOnly();
+      return;
+    }
+    final key =
+        '${scope.tenantId}/${scope.venueId}/${bootstrap.hubEpoch}/${session.sessionId}';
+    if (_configurationKey == key &&
+        VenueHubRealtimeClient.instance.isReadyFor(scope, bootstrap.hubEpoch)) {
+      return;
+    }
+    _configuring = true;
+    _retryTimer?.cancel();
+    if (VenueHubAvailability.status.value.connectivity ==
+        VenueHubConnectivity.unknown) {
+      VenueHubAvailability.markChecking('Connecting to venue hub presence…');
+    }
+    try {
+      await VenueHubRealtimeClient.instance.ensureConfigured(
+        scope: scope,
+        hubEpoch: bootstrap.hubEpoch,
+        repository: ProductionCommandRepository(),
+      );
+      _configurationKey = key;
+    } on Object catch (error, stackTrace) {
+      AppLogger.error(
+        'Start realtime venue hub status for web workspace',
+        error,
+        stackTrace,
+      );
+      VenueHubAvailability.markOffline(
+        'The venue hub status channel could not connect. Orders remain blocked until it reconnects.',
+      );
+      _scheduleRetry(const Duration(seconds: 10));
+    } finally {
+      _configuring = false;
+    }
+  }
+
+  void _scheduleRetry(Duration delay) {
+    _retryTimer?.cancel();
+    _retryTimer = Timer(delay, _scheduleConfiguration);
+  }
+
+  @override
+  void dispose() {
+    _retryTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    ref.watch(activeVenueScopeProvider);
+    ref.watch(activeStaffPinSessionProvider);
+    _scheduleConfiguration();
+    return const SizedBox.shrink();
+  }
+}
+
 /// Makes a failed primary hub visible to an already-unlocked manager on every
 /// workspace screen. This is only navigation into the existing secured flow:
 /// authority still transfers exclusively after a fresh manager PIN, reason,
@@ -479,9 +577,10 @@ class _VenueHubTakeoverPromptHostState
       final current = VenueHubManualTakeoverCoordinator.instance.pending.value;
       final session = ref.read(activeStaffPinSessionProvider);
       final isManager =
-          session?.roles.any(
-            (role) => role == 'owner' || role == 'manager',
-          ) ??
+          session?.roles.any((role) {
+            final normalized = role.trim().toLowerCase();
+            return normalized == 'owner' || normalized == 'manager';
+          }) ??
           false;
       if (current != request || current?.scope != activeScope || !isManager) {
         return;
@@ -529,9 +628,10 @@ class _VenueHubTakeoverPromptHostState
     final session = ref.watch(activeStaffPinSessionProvider);
     final activeScope = ref.watch(activeVenueScopeProvider);
     final isManager =
-        session?.roles.any(
-          (role) => role == 'owner' || role == 'manager',
-        ) ??
+        session?.roles.any((role) {
+          final normalized = role.trim().toLowerCase();
+          return normalized == 'owner' || normalized == 'manager';
+        }) ??
         false;
     // The takeover request is process-local operational state, not Riverpod
     // application data. Listen to its ValueNotifier explicitly so the prompt
@@ -998,6 +1098,12 @@ class _CurrentOrderLocationIndicator extends ConsumerWidget {
     final tabName = order.tabName?.trim();
     final tableId = order.tableId;
     final scheme = Theme.of(context).colorScheme;
+    final needsAttention = order.hasPendingProductionLines;
+    final identityColor = needsAttention
+        ? (Theme.of(context).brightness == Brightness.dark
+              ? Colors.orangeAccent
+              : Colors.orange.shade800)
+        : scheme.primary;
     final customerName = order.customerName?.trim();
     final (icon, label) = order.channel == OrderChannel.delivery
         ? (
@@ -1030,7 +1136,7 @@ class _CurrentOrderLocationIndicator extends ConsumerWidget {
               Expanded(
                 child: Row(
                   children: [
-                    Icon(icon, size: 18, color: scheme.primary),
+                    Icon(icon, size: 18, color: identityColor),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -1039,6 +1145,7 @@ class _CurrentOrderLocationIndicator extends ConsumerWidget {
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.labelLarge?.copyWith(
                           fontWeight: FontWeight.w700,
+                          color: needsAttention ? identityColor : null,
                         ),
                       ),
                     ),
