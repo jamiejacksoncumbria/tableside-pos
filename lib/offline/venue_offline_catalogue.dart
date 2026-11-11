@@ -21,6 +21,7 @@ class VenueOfflineCatalogue {
     required this.products,
     required this.modifierGroups,
     required this.routedProductionAreas,
+    required this.deliveryAreas,
   });
 
   factory VenueOfflineCatalogue.fromSnapshot(Map<String, Object?> snapshot) {
@@ -29,6 +30,7 @@ class VenueOfflineCatalogue {
     final rawProducts = snapshot['products'];
     final rawGroups = snapshot['modifierGroups'];
     final rawRoutes = snapshot['printerRoutes'] ?? const <Object?>[];
+    final rawDeliveryAreas = snapshot['serviceAreas'] ?? const <Object?>[];
     final cloudLastSequence = snapshot['cloudLastSequence'] ?? 0;
     if (version is! int ||
         version < 1 ||
@@ -37,6 +39,7 @@ class VenueOfflineCatalogue {
         rawProducts is! List ||
         rawGroups is! List ||
         rawRoutes is! List ||
+        rawDeliveryAreas is! List ||
         cloudLastSequence is! int ||
         cloudLastSequence < 0) {
       throw const VenueOfflineCatalogueException(
@@ -70,6 +73,23 @@ class VenueOfflineCatalogue {
         }
       }
     }
+    final deliveryAreas = <String, OfflineDeliveryArea>{};
+    for (final raw in rawDeliveryAreas) {
+      final value = _map(raw, 'delivery area');
+      if (value['active'] == false) continue;
+      final area = OfflineDeliveryArea(
+        id: _requiredText(value, 'id'),
+        name: _requiredText(value, 'name'),
+        deliveryFeeMinor: (value['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
+        minimumOrderMinor: (value['minimumOrderMinor'] as num?)?.toInt() ?? 0,
+      );
+      if (area.deliveryFeeMinor < 0 || area.minimumOrderMinor < 0) {
+        throw const VenueOfflineCatalogueException(
+          'A delivery area has invalid prices.',
+        );
+      }
+      deliveryAreas[area.id] = area;
+    }
     return VenueOfflineCatalogue._(
       version: version,
       currencyCode: currencyCode,
@@ -87,6 +107,7 @@ class VenueOfflineCatalogue {
             )
             .map((route) => route['productionArea'] as String),
       ),
+      deliveryAreas: UnmodifiableMapView(deliveryAreas),
     );
   }
 
@@ -96,6 +117,20 @@ class VenueOfflineCatalogue {
   final Map<String, OfflineCatalogueProduct> products;
   final Map<String, OfflineModifierGroup> modifierGroups;
   final Set<String> routedProductionAreas;
+  final Map<String, OfflineDeliveryArea> deliveryAreas;
+
+  void validateDeliveryArea(Map<String, Object?> payload) {
+    if (payload['channel'] != 'delivery') return;
+    final areaId = payload['serviceAreaId'];
+    final area = areaId is String ? deliveryAreas[areaId] : null;
+    if (area == null ||
+        payload['serviceAreaName'] != area.name ||
+        payload['deliveryFeeMinor'] != area.deliveryFeeMinor) {
+      throw const VenueOfflineCatalogueException(
+        'Choose an active delivery town or area from the venue settings.',
+      );
+    }
+  }
 
   void validatePrintRoutes(
     OfflineOrderProjection order,
@@ -140,6 +175,16 @@ class VenueOfflineCatalogue {
         final lineId = event.payload['lineId'];
         if (lineId is String) {
           linePayloads[lineId] = Map<String, Object?>.from(event.payload);
+        }
+      } else if (event.type == 'order.itemsAdded') {
+        final items = event.payload['items'];
+        if (items is List) {
+          for (final raw in items) {
+            if (raw is! Map) continue;
+            final item = Map<String, Object?>.from(raw);
+            final lineId = item['lineId'];
+            if (lineId is String) linePayloads[lineId] = item;
+          }
         }
       } else if (event.type == 'order.itemQuantityChanged') {
         final lineId = event.payload['lineId'];
@@ -241,6 +286,33 @@ class VenueOfflineCatalogue {
         'Only a manager may override offline stock.',
       );
     }
+    if (eventType == 'order.itemsAdded') {
+      final orderId = _requiredText(payload, 'orderId');
+      final rawItems = payload['items'];
+      if (rawItems is! List || rawItems.isEmpty || rawItems.length > 25) {
+        throw const VenueOfflineCatalogueException(
+          'A basket batch must contain between 1 and 25 items.',
+        );
+      }
+      final canonicalItems = <Map<String, Object?>>[];
+      final lineIds = <String>{};
+      for (final raw in rawItems) {
+        final item = _map(raw, 'basket item');
+        final canonical = await validateEvent(
+          'order.itemAdded',
+          <String, Object?>{...item, 'orderId': orderId},
+          grant,
+        );
+        final lineId = canonical['lineId']! as String;
+        if (!lineIds.add(lineId)) {
+          throw const VenueOfflineCatalogueException(
+            'A basket line was included more than once.',
+          );
+        }
+        canonicalItems.add(canonical);
+      }
+      return <String, Object?>{'orderId': orderId, 'items': canonicalItems};
+    }
     if (eventType != 'order.itemAdded') return payload;
     final productId = _requiredText(payload, 'productId');
     final product = products[productId];
@@ -250,11 +322,18 @@ class VenueOfflineCatalogue {
       );
     }
     final channel = payload['channel'] as String? ?? 'dineIn';
+    final channelAvailabilityOverride =
+        payload['channelAvailabilityOverride'] == true;
     if ((channel == 'collection' && !product.availableForCollection) ||
         (channel == 'delivery' && !product.availableForDelivery)) {
-      throw VenueOfflineCatalogueException(
-        'This product is unavailable for $channel.',
-      );
+      if (channelAvailabilityOverride) {
+        // Staff explicitly confirmed this exception in the POS. Preserve it
+        // in the immutable hub event so the decision remains auditable.
+      } else {
+        throw VenueOfflineCatalogueException(
+          'This product is unavailable for $channel.',
+        );
+      }
     }
     final quantity = _positiveInt(payload, 'quantity');
     final lineId = _requiredText(payload, 'lineId');
@@ -285,26 +364,48 @@ class VenueOfflineCatalogue {
     for (final raw in selections) {
       final selection = _map(raw, 'modifier selection');
       final groupId = _requiredText(selection, 'groupId');
-      final optionId = _requiredText(selection, 'optionId');
       if (!product.modifierGroupIds.contains(groupId)) {
         throw const VenueOfflineCatalogueException(
           'A selected modifier is not available for this product.',
         );
       }
       final group = modifierGroups[groupId]!;
-      final option = group.options[optionId];
-      if (!group.available || option == null || !option.available) {
+      // Production clients submit the same grouped schema as the online API
+      // (`optionIds`). Older locally enrolled clients submitted one flattened
+      // `optionId` per record. Accept both shapes, then canonicalise them to
+      // the same trusted option snapshots below.
+      final rawOptionIds = selection['optionIds'];
+      final optionIds = rawOptionIds is List
+          ? rawOptionIds
+                .map(
+                  (value) => value is String && value.trim().isNotEmpty
+                      ? value.trim()
+                      : throw const VenueOfflineCatalogueException(
+                          'A selected modifier is invalid.',
+                        ),
+                )
+                .toList(growable: false)
+          : <String>[_requiredText(selection, 'optionId')];
+      if (optionIds.isEmpty) {
         throw const VenueOfflineCatalogueException(
-          'A selected modifier is not available.',
+          'A selected modifier is invalid.',
         );
       }
       final list = selectedByGroup.putIfAbsent(groupId, () => []);
-      if (list.any((item) => item.id == optionId)) {
-        throw const VenueOfflineCatalogueException(
-          'A modifier option was selected more than once.',
-        );
+      for (final optionId in optionIds) {
+        final option = group.options[optionId];
+        if (!group.available || option == null || !option.available) {
+          throw const VenueOfflineCatalogueException(
+            'A selected modifier is not available.',
+          );
+        }
+        if (list.any((item) => item.id == optionId)) {
+          throw const VenueOfflineCatalogueException(
+            'A modifier option was selected more than once.',
+          );
+        }
+        list.add(option);
       }
-      list.add(option);
     }
     final canonicalSelections = <Map<String, Object?>>[];
     for (final groupId in product.modifierGroupIds) {
@@ -382,8 +483,23 @@ class VenueOfflineCatalogue {
       'courseReleasePolicy': channel == 'dineIn'
           ? product.courseReleasePolicy
           : 'immediate',
+      if (channelAvailabilityOverride) 'channelAvailabilityOverride': true,
     };
   }
+}
+
+class OfflineDeliveryArea {
+  const OfflineDeliveryArea({
+    required this.id,
+    required this.name,
+    required this.deliveryFeeMinor,
+    required this.minimumOrderMinor,
+  });
+
+  final String id;
+  final String name;
+  final int deliveryFeeMinor;
+  final int minimumOrderMinor;
 }
 
 class OfflineCatalogueProduct {

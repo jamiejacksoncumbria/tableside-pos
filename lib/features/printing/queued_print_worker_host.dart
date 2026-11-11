@@ -1,14 +1,15 @@
 import 'dart:async';
 
-import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
+import '../../offline/venue_hub_client_registry.dart';
+import '../../offline/venue_hub_runtime.dart';
 import '../notifications/notification_centre.dart';
 import 'native_print_worker.dart';
-import 'queued_bluetooth_print_worker.dart';
+import 'queued_native_print_worker.dart';
 
 /// Keeps an enrolled native printer device alive for the selected venue even
 /// while the staff workspace is PIN-locked.
@@ -28,13 +29,16 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
   QueuedNativePrintWorker? _worker;
   Timer? _retryTimer;
   StreamSubscription<int>? _queuedJobsSubscription;
+  StreamSubscription<VenueHubRuntimeStatus>? _hubStatusSubscription;
   VenueScope? _scope;
+  bool _watchingLocalHubQueue = false;
   bool _processing = false;
 
   @override
   void dispose() {
     _retryTimer?.cancel();
     _queuedJobsSubscription?.cancel();
+    _hubStatusSubscription?.cancel();
     super.dispose();
   }
 
@@ -49,9 +53,45 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     if (!mounted || scope == _scope) return;
     _retryTimer?.cancel();
     _queuedJobsSubscription?.cancel();
+    _hubStatusSubscription?.cancel();
     _scope = scope;
-    if (scope == null || Firebase.apps.isEmpty) return;
+    _watchingLocalHubQueue = false;
+    if (scope == null) return;
     final worker = _worker ??= QueuedNativePrintWorker();
+    _subscribeToQueue(worker, scope);
+    // The print worker is mounted before the asynchronous venue hub startup
+    // completes. Rebind as soon as the encrypted hub queue becomes ready;
+    // otherwise the worker remains attached only to the legacy Firestore
+    // queue and misses the immediate wake-up for local production tickets.
+    _hubStatusSubscription = VenueHubRuntime.instance.statuses.listen((status) {
+      if (!mounted || _scope != scope) return;
+      final localReady =
+          VenueHubRuntime.instance.activeScope == scope &&
+          (status.state == VenueHubRuntimeState.ready ||
+              status.state == VenueHubRuntimeState.degraded);
+      if (localReady != _watchingLocalHubQueue) {
+        _watchingLocalHubQueue = localReady;
+        _subscribeToQueue(worker, scope);
+        if (localReady) {
+          AppLogger.info(
+            'Printer worker attached to the ready encrypted venue-hub queue.',
+          );
+          unawaited(_processAvailable(scope));
+        }
+      }
+    });
+    _retryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      unawaited(worker.maintainHeartbeat(scope));
+      // Queue streams and the RTDB printer signal wake real jobs. Do not issue
+      // an empty Cloud Function claim on a timer: fifty venues would otherwise
+      // create thousands of unnecessary invocations every day.
+    });
+    unawaited(worker.maintainHeartbeat(scope));
+    unawaited(_processAvailable(scope));
+  }
+
+  void _subscribeToQueue(QueuedNativePrintWorker worker, VenueScope scope) {
+    unawaited(_queuedJobsSubscription?.cancel());
     _queuedJobsSubscription = worker
         .watchQueuedJobCount(scope)
         .listen(
@@ -74,18 +114,24 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
             );
           },
         );
-    _retryTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      unawaited(worker.maintainHeartbeat(scope));
-      // Hub-local jobs are not visible in the Firestore queue count. A cheap
-      // signed claim every ten seconds keeps printing live during an outage.
-      unawaited(_processAvailable(scope));
-    });
-    unawaited(worker.maintainHeartbeat(scope));
-    unawaited(_processAvailable(scope));
   }
 
   Future<void> _processAvailable(VenueScope scope) async {
     if (_processing || !mounted || _scope != scope) return;
+    final runtime = VenueHubRuntime.instance;
+    if (VenueHubPrinterClientRegistry.instance.isLocalHubHost(scope) &&
+        runtime.activeScope != scope) {
+      // The worker and hub auto-start hosts mount together. The printer
+      // registry already knows this device owns the hub before its HTTPS
+      // listener has bound. Wait for the runtime status stream to wake this
+      // worker instead of recording a false failed ticket/notification.
+      return;
+    }
+    if (VenueHubPrinterClientRegistry.instance.isLocalHubHost(scope) &&
+        runtime.status.state != VenueHubRuntimeState.ready &&
+        runtime.status.state != VenueHubRuntimeState.degraded) {
+      return;
+    }
     final worker = _worker;
     if (worker == null) return;
     _processing = true;

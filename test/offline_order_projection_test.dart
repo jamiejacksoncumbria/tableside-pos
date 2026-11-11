@@ -3,6 +3,64 @@ import 'package:tableside_pos/offline/offline_event.dart';
 import 'package:tableside_pos/offline/offline_order_projection.dart';
 
 void main() {
+  test('basket batch adds every line atomically to the projection', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemsAdded', {
+        'orderId': 'order-a',
+        'items': [
+          {
+            'orderId': 'order-a',
+            'lineId': 'line-a',
+            'productId': 'product-a',
+            'productName': 'Starter',
+            'quantity': 1,
+            'unitPriceMinor': 500,
+          },
+          {
+            'orderId': 'order-a',
+            'lineId': 'line-b',
+            'productId': 'product-b',
+            'productName': 'Main',
+            'quantity': 2,
+            'unitPriceMinor': 1200,
+          },
+        ],
+      }),
+    ]);
+
+    expect(projection.lines.keys, containsAll(['line-a', 'line-b']));
+    expect(projection.totalMinor, 2900);
+  });
+
+  test('basket batch rejects duplicate line identities', () {
+    expect(
+      () => projectOfflineOrder([
+        _event(1, 'order.opened', {'orderId': 'order-a'}),
+        _event(2, 'order.itemsAdded', {
+          'orderId': 'order-a',
+          'items': [
+            {
+              'lineId': 'line-a',
+              'productId': 'product-a',
+              'productName': 'Starter',
+              'quantity': 1,
+              'unitPriceMinor': 500,
+            },
+            {
+              'lineId': 'line-a',
+              'productId': 'product-b',
+              'productName': 'Main',
+              'quantity': 1,
+              'unitPriceMinor': 1200,
+            },
+          ],
+        }),
+      ]),
+      throwsA(isA<OfflineProjectionException>()),
+    );
+  });
+
   test('replay produces a paid, closed deterministic order', () {
     final projection = projectOfflineOrder([
       _event(1, 'order.opened', {'orderId': 'order-a'}),
@@ -61,6 +119,410 @@ void main() {
     expect(projection.payments.single.exchangeRateToBase, '1');
   });
 
+  test('production ticket status survives replay and financial close', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 2000,
+        'productionArea': 'kitchen',
+      }),
+      _event(3, 'order.sent', {
+        'orderId': 'order-a',
+        'lineIds': ['line-a'],
+      }),
+      _event(4, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 2000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }),
+      _event(5, 'order.closed', {'orderId': 'order-a'}),
+      _event(6, 'order.productionTicketUpdated', {
+        'orderId': 'order-a',
+        'ticketId': 'offline_evt_3_kitchen',
+        'flowStatus': 'preparing',
+        'isDelayed': false,
+      }),
+      _event(7, 'order.productionTicketUpdated', {
+        'orderId': 'order-a',
+        'ticketId': 'offline_evt_3_kitchen',
+        'flowStatus': 'ready',
+        'isDelayed': true,
+      }),
+    ]);
+
+    expect(projection.lines['line-a']!.sentEventId, 'evt_3');
+    expect(
+      projection.productionTicketStates['offline_evt_3_kitchen']?.status,
+      'ready',
+    );
+    expect(
+      projection.productionTicketStates['offline_evt_3_kitchen']?.isDelayed,
+      isTrue,
+    );
+  });
+
+  test('payment batch records split tender and closes atomically', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 2000,
+      }),
+      _event(3, 'payment.batchRecorded', {
+        'orderId': 'order-a',
+        'batchId': 'checkout-a',
+        'payments': [
+          {
+            'paymentId': 'checkout-a-0',
+            'baseAmountMinor': 750,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+          },
+          {
+            'paymentId': 'checkout-a-1',
+            'baseAmountMinor': 1250,
+            'method': 'cardTerminal',
+            'currencyCode': 'TRY',
+          },
+        ],
+        'closeIfSettled': true,
+        'receiptNumber': 'OFF-2-checkout-a',
+      }),
+    ]);
+
+    expect(projection.payments, hasLength(2));
+    expect(projection.paidMinor, 2000);
+    expect(projection.balanceDueMinor, 0);
+    expect(projection.isClosed, isTrue);
+    expect(projection.receiptNumber, 'OFF-2-checkout-a');
+  });
+
+  test('payment batch is rejected in full when split tender overpays', () {
+    final events = [
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 2000,
+      }),
+      _event(3, 'payment.batchRecorded', {
+        'orderId': 'order-a',
+        'batchId': 'checkout-a',
+        'payments': [
+          {
+            'paymentId': 'checkout-a-0',
+            'baseAmountMinor': 1000,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+          },
+          {
+            'paymentId': 'checkout-a-1',
+            'baseAmountMinor': 1500,
+            'method': 'cardTerminal',
+            'currencyCode': 'TRY',
+          },
+        ],
+        'closeIfSettled': true,
+      }),
+    ];
+
+    expect(
+      () => projectOfflineOrder(events),
+      throwsA(isA<OfflineProjectionException>()),
+    );
+  });
+
+  test('manager adjustment changes the authoritative hub balance', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a', 'tableId': 'table-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 2,
+        'unitPriceMinor': 1500,
+      }),
+      _event(3, 'order.lineAdjusted', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'operation': 'discountUnitAmount',
+        'valueMinor': 250,
+        'reason': 'Manager goodwill',
+      }),
+    ]);
+
+    expect(projection.lines.values.single.unitPriceMinor, 1250);
+    expect(projection.totalMinor, 2500);
+    expect(projection.balanceDueMinor, 2500);
+  });
+
+  test('manager can remove the final item from an unpaid order', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Mistake',
+        'quantity': 1,
+        'unitPriceMinor': 1500,
+      }),
+      _event(3, 'order.lineAdjusted', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'operation': 'remove',
+        'reason': 'Added by mistake',
+      }),
+    ]);
+
+    expect(projection.lines, isEmpty);
+    expect(projection.totalMinor, 0);
+    expect(projection.balanceDueMinor, 0);
+  });
+
+  test('empty unpaid order can be cancelled without creating a sale', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a', 'tableId': 'table-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Mistake',
+        'quantity': 1,
+        'unitPriceMinor': 1500,
+      }),
+      _event(3, 'order.lineAdjusted', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'operation': 'remove',
+        'reason': 'Added by mistake',
+      }),
+      _event(4, 'order.cancelled', {
+        'orderId': 'order-a',
+        'reason': 'All items removed',
+      }),
+    ]);
+
+    expect(projection.lines, isEmpty);
+    expect(projection.payments, isEmpty);
+    expect(projection.isClosed, isTrue);
+    expect(projection.receiptNumber, isNull);
+  });
+
+  test('order cancellation rejects an order which still has an item', () {
+    expect(
+      () => projectOfflineOrder([
+        _event(1, 'order.opened', {'orderId': 'order-a'}),
+        _event(2, 'order.itemAdded', {
+          'orderId': 'order-a',
+          'lineId': 'line-a',
+          'productId': 'product-a',
+          'productName': 'Meal',
+          'quantity': 1,
+          'unitPriceMinor': 1500,
+        }),
+        _event(3, 'order.cancelled', {
+          'orderId': 'order-a',
+          'reason': 'Invalid cancellation',
+        }),
+      ]),
+      throwsA(isA<OfflineProjectionException>()),
+    );
+  });
+
+  test('manager adjustment cannot reduce a bill below recorded payments', () {
+    final events = [
+      _event(1, 'order.opened', {'orderId': 'order-a'}),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 1500,
+      }),
+      _event(3, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 1000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }),
+      _event(4, 'order.lineAdjusted', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'operation': 'setUnitPrice',
+        'valueMinor': 500,
+        'reason': 'Invalid reduction',
+      }),
+    ];
+
+    expect(
+      () => projectOfflineOrder(events),
+      throwsA(
+        isA<OfflineProjectionException>().having(
+          (error) => error.message,
+          'message',
+          contains('payments already recorded'),
+        ),
+      ),
+    );
+  });
+
+  test('delivery fee is included in payment and close validation', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {
+        'orderId': 'order-a',
+        'channel': 'delivery',
+        'customerId': 'customer-a',
+        'customerName': 'Delivery Customer',
+        'deliveryAddress': 'Kyrenia Centre',
+        'serviceAreaId': 'kyrenia',
+        'serviceAreaName': 'Kyrenia',
+        'deliveryFeeMinor': 250,
+      }),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 1000,
+      }),
+      _event(3, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 1250,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }),
+      _event(4, 'order.closed', {'orderId': 'order-a'}),
+    ]);
+
+    expect(projection.totalMinor, 1250);
+    expect(projection.paidMinor, 1250);
+    expect(projection.balanceDueMinor, 0);
+    expect(projection.isClosed, isTrue);
+  });
+
+  test('replacement hub repairs a legacy order before replaying payment', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {
+        'orderId': 'order-a',
+        'channel': 'delivery',
+        'customerId': 'customer-a',
+        'customerName': 'Jamie Jackson',
+        'deliveryAddress': 'Kyrenia Centre',
+      }, hubEpoch: 3),
+      _event(2, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 50000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }, hubEpoch: 3),
+      _event(3, 'order.cloudBaseline', {
+        'orderId': 'order-a',
+        'sourceOfflineHubEpoch': 2,
+        'openedAtUtc': '2026-09-12T11:00:00.000Z',
+        'channel': 'delivery',
+        'customerId': 'customer-a',
+        'customerName': 'Jamie Jackson',
+        'deliveryAddress': 'Kyrenia Centre',
+        'deliveryFeeMinor': 0,
+        'lines': [
+          {
+            'id': 'line-a',
+            'productId': 'product-a',
+            'name': 'Prawn Salad',
+            'quantity': 1,
+            'unitPriceMinor': 50000,
+            'sent': true,
+          },
+        ],
+        'payments': <Object?>[],
+      }, hubEpoch: 3),
+    ]);
+
+    expect(projection.lines.values.single.name, 'Prawn Salad');
+    expect(projection.totalMinor, 50000);
+    expect(projection.paidMinor, 50000);
+    expect(projection.balanceDueMinor, 0);
+  });
+
+  test('same-epoch cloud baseline replays synced mutations idempotently', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {'orderId': 'order-a'}, hubEpoch: 3),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 2000,
+      }, hubEpoch: 3),
+      _event(3, 'order.itemQuantityChanged', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'quantity': 2,
+      }, hubEpoch: 3),
+      _event(4, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 1000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }, hubEpoch: 3),
+      _event(5, 'order.cloudBaseline', {
+        'orderId': 'order-a',
+        'sourceOfflineHubEpoch': 3,
+        'openedAtUtc': '2026-09-12T11:00:00.000Z',
+        'channel': 'dineIn',
+        'tableId': 'table-a',
+        'deliveryFeeMinor': 0,
+        'lines': [
+          {
+            'id': 'line-a',
+            'productId': 'product-a',
+            'name': 'Meal',
+            'quantity': 2,
+            'unitPriceMinor': 2000,
+            'sent': false,
+          },
+        ],
+        'payments': [
+          {
+            'id': 'payment-a',
+            'baseAmountMinor': 1000,
+            'tenderedAmountMinor': 1000,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+          },
+        ],
+      }, hubEpoch: 3),
+    ]);
+
+    expect(projection.lines.values.single.quantity, 2);
+    expect(projection.totalMinor, 4000);
+    expect(projection.paidMinor, 1000);
+    expect(projection.balanceDueMinor, 3000);
+  });
+
   test('interleaved global ledger sequences remain valid per order', () {
     final projection = projectOfflineOrder([
       _event(1, 'order.opened', {'orderId': 'order-a'}),
@@ -103,7 +565,13 @@ void main() {
     ];
     expect(
       () => projectOfflineOrder(overpayment),
-      throwsA(isA<OfflineProjectionException>()),
+      throwsA(
+        isA<OfflineProjectionException>().having(
+          (error) => error.message,
+          'message',
+          contains('attempted 1001 minor units; remaining 1000'),
+        ),
+      ),
     );
 
     final stale = [
@@ -181,6 +649,9 @@ void main() {
           'customerName': 'Jamie Jackson',
           'customerPhone': '+905551234567',
           'deliveryAddress': 'Kyrenia Centre',
+          'serviceAreaId': 'kyrenia',
+          'serviceAreaName': 'Kyrenia',
+          'deliveryFeeMinor': 15000,
           'scheduledForUtc': '2026-09-12T18:30:00.000Z',
         }),
         _event(2, 'order.fulfilmentChanged', {
@@ -204,6 +675,110 @@ void main() {
     },
   );
 
+  test('paid delivery can continue its audited fulfilment workflow', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {
+        'orderId': 'order-a',
+        'channel': 'delivery',
+        'customerId': 'customer-a',
+        'customerName': 'Jamie Jackson',
+        'deliveryAddress': 'Kyrenia Centre',
+        'serviceAreaId': 'kyrenia',
+        'serviceAreaName': 'Kyrenia',
+      }),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 1000,
+      }),
+      _event(3, 'payment.recorded', {
+        'orderId': 'order-a',
+        'paymentId': 'payment-a',
+        'baseAmountMinor': 1000,
+        'method': 'cash',
+        'currencyCode': 'TRY',
+      }),
+      _event(4, 'order.closed', {'orderId': 'order-a'}),
+      _event(5, 'order.fulfilmentChanged', {
+        'orderId': 'order-a',
+        'status': 'assigned',
+        'driverId': 'driver-a',
+        'managerAuthorized': true,
+      }, staffId: 'manager-a'),
+    ]);
+
+    expect(projection.isClosed, isTrue);
+    expect(projection.balanceDueMinor, 0);
+    expect(projection.assignedDriverId, 'driver-a');
+    expect(projection.fulfilmentStatus, 'assigned');
+  });
+
+  test('paying a collection marks its handover collected automatically', () {
+    final projection = projectOfflineOrder([
+      _event(1, 'order.opened', {
+        'orderId': 'order-a',
+        'channel': 'collection',
+        'customerId': 'customer-a',
+        'customerName': 'Collection Customer',
+        'customerPhone': '+905551234567',
+      }),
+      _event(2, 'order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'product-a',
+        'productName': 'Meal',
+        'quantity': 1,
+        'unitPriceMinor': 1000,
+      }),
+      _event(3, 'payment.batchRecorded', {
+        'orderId': 'order-a',
+        'batchId': 'batch-a',
+        'closeIfSettled': true,
+        'receiptNumber': 'R-1',
+        'payments': [
+          {
+            'paymentId': 'payment-a',
+            'baseAmountMinor': 1000,
+            'tenderedAmountMinor': 1000,
+            'method': 'cash',
+            'currencyCode': 'TRY',
+          },
+        ],
+      }),
+    ]);
+
+    expect(projection.isClosed, isTrue);
+    expect(projection.fulfilmentStatus, 'collected');
+  });
+
+  test(
+    'legacy delivery orders remain replayable after service-area upgrade',
+    () {
+      final projection = projectOfflineOrder([
+        _event(1, 'order.opened', {
+          'orderId': 'order-a',
+          'channel': 'delivery',
+          'customerId': 'customer-a',
+          'customerName': 'Legacy Customer',
+          'deliveryAddress': 'Old free-text address',
+        }),
+        _event(2, 'order.fulfilmentChanged', {
+          'orderId': 'order-a',
+          'status': 'readyForCollection',
+          'managerAuthorized': true,
+        }, staffId: 'manager-a'),
+      ]);
+
+      expect(projection.channel, 'delivery');
+      expect(projection.serviceAreaId, isNull);
+      expect(projection.deliveryFeeMinor, 0);
+      expect(projection.fulfilmentStatus, 'readyForCollection');
+    },
+  );
+
   test('an unassigned driver cannot claim an offline delivery', () {
     final events = [
       _event(1, 'order.opened', {
@@ -212,6 +787,9 @@ void main() {
         'customerId': 'customer-a',
         'customerName': 'Jamie Jackson',
         'deliveryAddress': 'Kyrenia Centre',
+        'serviceAreaId': 'kyrenia',
+        'serviceAreaName': 'Kyrenia',
+        'deliveryFeeMinor': 15000,
       }),
       _event(2, 'order.fulfilmentChanged', {
         'orderId': 'order-a',

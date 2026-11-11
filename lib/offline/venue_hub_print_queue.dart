@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../core/app_logger.dart';
 import '../core/trusted_clock.dart';
 import 'offline_event_ledger.dart';
 import 'offline_order_projection.dart';
@@ -115,7 +116,19 @@ class VenueHubPrintQueue {
   Map<String, Object?> snapshot;
   final OfflineEventLedger _ledger;
   final Map<String, VenueHubLocalPrintJob> _jobs = {};
+  final StreamController<List<Map<String, Object?>>> _changes =
+      StreamController<List<Map<String, Object?>>>.broadcast();
   Future<void> _serial = Future.value();
+
+  /// Local jobs remain durable in the encrypted hub ledger. This stream also
+  /// exposes them to the recovery desk and alert monitor; those screens used
+  /// to watch only the legacy Firestore queue and therefore hid hub jobs.
+  Stream<List<Map<String, Object?>>> get changes async* {
+    yield _visibleJobs();
+    yield* _changes.stream;
+  }
+
+  List<Map<String, Object?>> get visibleJobs => _visibleJobs();
 
   Future<void> initialize() async {
     final stored = await _ledger.readSnapshot(
@@ -166,9 +179,16 @@ class VenueHubPrintQueue {
     }
     for (final entry in grouped.entries) {
       final route = routes[entry.key];
-      if (route == null || route.primaryDeviceId.isEmpty) continue;
+      if (route == null || route.primaryDeviceId.isEmpty) {
+        // A requested ticket must never disappear merely because staging (or
+        // a venue change) has an incomplete route. Reject the send visibly so
+        // staff can correct routing and safely retry the unchanged order.
+        throw StateError(
+          'No active printer route is configured for ${entry.key}.',
+        );
+      }
       final id =
-          'offline-${hubEpoch}-${order.orderId}-${entry.key}-${lineIds.join('-')}';
+          'offline-$hubEpoch-${order.orderId}-${entry.key}-${lineIds.join('-')}';
       _jobs.putIfAbsent(
         id,
         () => VenueHubLocalPrintJob(
@@ -189,6 +209,15 @@ class VenueHubPrintQueue {
             'productionArea': entry.key,
             'tableLabel': _tableLabel(order.tableId),
             'tabName': order.tabName,
+            'channel': order.channel,
+            'customerName': order.customerName,
+            'deliveryAddress': order.deliveryAddress,
+            'deliveryAddressLabel': order.deliveryAddressLabel,
+            'deliveryLatitude': order.deliveryLatitude,
+            'deliveryLongitude': order.deliveryLongitude,
+            'scheduledForMillis': order.scheduledForUtc
+                ?.toLocal()
+                .millisecondsSinceEpoch,
             'createdByName': createdByName,
             'lines': entry.value
                 .map(
@@ -202,7 +231,75 @@ class VenueHubPrintQueue {
           },
         ),
       );
+      AppLogger.info(
+        'Hub print queued: job=$id, area=${entry.key}, device=${route.primaryDeviceId}.',
+      );
     }
+    await _persist();
+  });
+
+  /// Queues a clearly marked cancellation ticket when a manager removes an
+  /// item which has already reached production. The sale adjustment remains
+  /// authoritative even if a venue has no active route, matching the online
+  /// server behaviour, but the missing route is logged rather than silently
+  /// inventing a successful print.
+  Future<void> enqueueCancellation({
+    required OfflineOrderProjection order,
+    required OfflineProjectedLine line,
+    required String reason,
+    required String createdByName,
+    required String eventId,
+  }) => _run(() async {
+    final route = _routes()[line.productionArea];
+    if (route == null || route.primaryDeviceId.isEmpty) {
+      AppLogger.info(
+        'Hub cancellation ticket not queued: no active ${line.productionArea} route for order ${order.orderId}.',
+      );
+      return;
+    }
+    final id =
+        'offline-$hubEpoch-${order.orderId}-${line.productionArea}-cancel-$eventId';
+    _jobs.putIfAbsent(
+      id,
+      () => VenueHubLocalPrintJob(
+        id: id,
+        targetDeviceId: route.primaryDeviceId,
+        fallbackDeviceId: route.fallbackDeviceId,
+        orderId: order.orderId,
+        productionArea: line.productionArea,
+        createdAtUtc: TrustedClock.instance.nowUtc(),
+        attempts: 0,
+        status: 'queued',
+        payload: <String, Object?>{
+          'type': 'production',
+          'ticketId': id,
+          'restaurantName':
+              snapshot['venueName'] ?? snapshot['tenantName'] ?? '',
+          'reference': 'CANCEL ${order.orderId.split('-').last}',
+          'productionArea': line.productionArea,
+          'tableLabel': _tableLabel(order.tableId),
+          'tabName': order.tabName,
+          'channel': order.channel,
+          'customerName': order.customerName,
+          'deliveryAddress': order.deliveryAddress,
+          'scheduledForMillis': order.scheduledForUtc
+              ?.toLocal()
+              .millisecondsSinceEpoch,
+          'createdByName': createdByName,
+          'isAddition': true,
+          'lines': <Map<String, Object?>>[
+            <String, Object?>{
+              'name': 'CANCEL ${line.name}',
+              'quantity': line.quantity,
+              'details': <String>['Reason: $reason'],
+            },
+          ],
+        },
+      ),
+    );
+    AppLogger.info(
+      'Hub cancellation queued: job=$id, device=${route.primaryDeviceId}.',
+    );
     await _persist();
   });
 
@@ -210,11 +307,15 @@ class VenueHubPrintQueue {
     required OfflineOrderProjection order,
     required bool printRequired,
     bool isPreReceipt = false,
+    bool isPartPayment = false,
+    bool isDeliveryNote = false,
     String? jobSuffix,
   }) => _run(() async {
     if (!printRequired) return;
     final route = _routes()['receipt'];
-    if (route == null || route.primaryDeviceId.isEmpty) return;
+    if (route == null || route.primaryDeviceId.isEmpty) {
+      throw StateError('No active receipt printer route is configured.');
+    }
     final id =
         'offline-$hubEpoch-${order.orderId}-receipt-${jobSuffix ?? order.lastSequence}';
     final total = order.totalMinor;
@@ -232,6 +333,13 @@ class VenueHubPrintQueue {
         'taxMinor': (current?['taxMinor'] ?? 0) + tax,
       };
     }
+    if (order.channel == 'delivery' && order.deliveryFeeMinor > 0) {
+      net += order.deliveryFeeMinor;
+      taxByName['Delivery fee'] = <String, int>{
+        'basisPoints': 0,
+        'taxMinor': 0,
+      };
+    }
     _jobs.putIfAbsent(
       id,
       () => VenueHubLocalPrintJob(
@@ -246,6 +354,8 @@ class VenueHubPrintQueue {
         payload: <String, Object?>{
           'type': 'receipt',
           'isPreReceipt': isPreReceipt,
+          'isPartPayment': isPartPayment,
+          'isDeliveryNote': isDeliveryNote,
           'receiptNumber':
               order.receiptNumber ?? 'OFF-$hubEpoch-${order.lastSequence}',
           'restaurantName':
@@ -253,6 +363,18 @@ class VenueHubPrintQueue {
           'currencyCode': snapshot['currencyCode'] ?? 'GBP',
           'tableLabel': _tableLabel(order.tableId),
           'tabName': order.tabName,
+          'channel': order.channel,
+          'customerName': order.customerName,
+          'deliveryAddress': order.deliveryAddress,
+          'deliveryAddressLabel': order.deliveryAddressLabel,
+          'deliveryLatitude': order.deliveryLatitude,
+          'deliveryLongitude': order.deliveryLongitude,
+          'deliveryChargeMinor': order.deliveryFeeMinor,
+          'serviceAreaId': order.serviceAreaId,
+          'serviceAreaName': order.serviceAreaName,
+          'scheduledForMillis': order.scheduledForUtc
+              ?.toLocal()
+              .millisecondsSinceEpoch,
           'businessDate': _businessDate(
             order.payments.lastOrNull?.recordedAtUtc ?? order.openedAtUtc,
           ),
@@ -262,9 +384,15 @@ class VenueHubPrintQueue {
           'lines': order.lines.values
               .map(
                 (line) => <String, Object?>{
+                  'productId': line.productId,
                   'name': line.name,
                   'quantity': line.quantity,
+                  'unitPriceMinor': line.unitPriceMinor,
                   'lineTotalMinor': line.totalMinor,
+                  'details': line.details,
+                  'taxRateBasisPoints': line.taxRateBasisPoints,
+                  'taxRateName': line.taxRateName,
+                  'addedAtMillis': line.addedAtUtc?.millisecondsSinceEpoch,
                 },
               )
               .toList(growable: false),
@@ -278,7 +406,8 @@ class VenueHubPrintQueue {
                   'exchangeRateToBase': payment.exchangeRateToBase,
                   'terminalLabel': payment.terminalLabel,
                   'cashChangeBaseMinor': payment.cashChangeBaseMinor,
-                  'recordedAt': payment.recordedAtUtc.toIso8601String(),
+                  'recordedAtMillis':
+                      payment.recordedAtUtc.millisecondsSinceEpoch,
                 },
               )
               .toList(growable: false),
@@ -301,9 +430,15 @@ class VenueHubPrintQueue {
                 const <String>[],
             'receiptFooter': snapshot['receiptFooter'] ?? '',
           },
-          if (isPreReceipt) 'balanceDueMinor': order.balanceDueMinor,
+          if (isPreReceipt || isPartPayment) ...<String, Object?>{
+            'paidTotalMinor': order.paidMinor,
+            'balanceDueMinor': order.balanceDueMinor,
+          },
         },
       ),
+    );
+    AppLogger.info(
+      'Hub receipt queued: job=$id, device=${route.primaryDeviceId}.',
     );
     await _persist();
   });
@@ -311,6 +446,8 @@ class VenueHubPrintQueue {
   Future<Map<String, Object?>?> claim(String deviceId) => _run(() async {
     final now = TrustedClock.instance.nowUtc();
     var recoveredClaim = false;
+    var routeRepaired = false;
+    final activeRoutes = _routes();
     for (final job in _jobs.values.toList(growable: false)) {
       if (job.status == 'claimed' &&
           job.claimedAtUtc != null &&
@@ -323,6 +460,27 @@ class VenueHubPrintQueue {
         );
         recoveredClaim = true;
       }
+      // A manager may replace a printer after a ticket was queued. Reconcile
+      // only unclaimed work with the latest signed hub snapshot so a stale
+      // device ID cannot strand that ticket indefinitely.
+      final route = activeRoutes[job.productionArea];
+      if (job.status == 'queued' &&
+          route != null &&
+          route.primaryDeviceId.isNotEmpty &&
+          job.targetDeviceId != route.primaryDeviceId &&
+          job.targetDeviceId != route.fallbackDeviceId) {
+        // A job deliberately moved to the configured fallback after three
+        // failed primary attempts is already on a valid route. Reassigning it
+        // to the primary here creates an endless primary/fallback loop. A
+        // genuinely changed route still repairs the job because its previous
+        // target matches neither current device.
+        _jobs[job.id] = job.copyWith(
+          targetDeviceId: route.primaryDeviceId,
+          clearClaim: true,
+          failureReason: 'Printer route changed; ticket safely reassigned.',
+        );
+        routeRepaired = true;
+      }
     }
     final historyPruned = _pruneHistory(now);
     final candidates =
@@ -333,7 +491,17 @@ class VenueHubPrintQueue {
             .toList()
           ..sort((a, b) => a.createdAtUtc.compareTo(b.createdAtUtc));
     if (candidates.isEmpty) {
-      if (recoveredClaim || historyPruned) await _persist();
+      final queuedTargets = _jobs.values
+          .where((job) => job.status == 'queued')
+          .map((job) => job.targetDeviceId)
+          .toSet();
+      if (queuedTargets.isNotEmpty) {
+        AppLogger.info(
+          'Hub print claim found queued work, but none targets this device. '
+          'claimingDevice=$deviceId, queuedTargets=${queuedTargets.join(',')}.',
+        );
+      }
+      if (recoveredClaim || routeRepaired || historyPruned) await _persist();
       return null;
     }
     final selected = candidates.first.copyWith(
@@ -386,12 +554,67 @@ class VenueHubPrintQueue {
     await _persist();
   });
 
+  Future<void> retry(String jobId) => _run(() async {
+    final job = _jobs[jobId];
+    if (job == null || job.status != 'failed') {
+      throw StateError('Only a failed local print job can be retried.');
+    }
+    _jobs[jobId] = VenueHubLocalPrintJob(
+      id: job.id,
+      targetDeviceId: job.targetDeviceId,
+      fallbackDeviceId: job.fallbackDeviceId,
+      orderId: job.orderId,
+      productionArea: job.productionArea,
+      createdAtUtc: job.createdAtUtc,
+      attempts: 0,
+      status: 'queued',
+      payload: <String, Object?>{...job.payload, 'isReprint': true},
+    );
+    await _persist();
+  });
+
+  Future<void> reprint(String jobId) => _run(() async {
+    final job = _jobs[jobId];
+    if (job == null || job.status != 'printed') {
+      throw StateError('Only a printed local ticket can be reprinted.');
+    }
+    final now = TrustedClock.instance.nowUtc();
+    final reprintId = '${job.id}-reprint-${now.microsecondsSinceEpoch}';
+    _jobs[reprintId] = VenueHubLocalPrintJob(
+      id: reprintId,
+      targetDeviceId: job.targetDeviceId,
+      fallbackDeviceId: job.fallbackDeviceId,
+      orderId: job.orderId,
+      productionArea: job.productionArea,
+      createdAtUtc: now,
+      attempts: 0,
+      status: 'queued',
+      payload: <String, Object?>{...job.payload, 'isReprint': true},
+    );
+    await _persist();
+  });
+
+  Future<List<String>> cancel(String jobId, String reason) => _run(() async {
+    final job = _jobs[jobId];
+    if (job == null || !{'queued', 'failed'}.contains(job.status)) {
+      throw StateError('This local print job can no longer be cleared.');
+    }
+    _jobs[jobId] = job.copyWith(
+      status: 'cancelled',
+      clearClaim: true,
+      failureReason: reason,
+    );
+    await _persist();
+    return <String>[jobId];
+  });
+
   bool _pruneHistory(DateTime nowUtc) {
     final oldestRetained = nowUtc.subtract(const Duration(days: 5));
     final before = _jobs.length;
     _jobs.removeWhere(
       (_, job) =>
-          job.status == 'printed' && job.createdAtUtc.isBefore(oldestRetained),
+          {'printed', 'cancelled'}.contains(job.status) &&
+          job.createdAtUtc.isBefore(oldestRetained),
     );
     return _jobs.length != before;
   }
@@ -440,16 +663,27 @@ class VenueHubPrintQueue {
         '${venueTime.day.toString().padLeft(2, '0')}';
   }
 
-  Future<void> _persist() => _ledger.saveSnapshot(
-    tenantId: tenantId,
-    venueId: venueId,
-    kind: _kind,
-    version: DateTime.now().toUtc().microsecondsSinceEpoch,
-    value: <String, Object?>{
-      'hubEpoch': hubEpoch,
-      'jobs': _jobs.values.map((job) => job.toJson()).toList(growable: false),
-    },
-  );
+  Future<void> _persist() async {
+    await _ledger.saveSnapshot(
+      tenantId: tenantId,
+      venueId: venueId,
+      kind: _kind,
+      version: DateTime.now().toUtc().microsecondsSinceEpoch,
+      value: <String, Object?>{
+        'hubEpoch': hubEpoch,
+        'jobs': _jobs.values.map((job) => job.toJson()).toList(growable: false),
+      },
+    );
+    if (!_changes.isClosed) _changes.add(_visibleJobs());
+  }
+
+  List<Map<String, Object?>> _visibleJobs() {
+    final values = _jobs.values.toList(growable: false)
+      ..sort((left, right) => right.createdAtUtc.compareTo(left.createdAtUtc));
+    return values.map((job) => job.toJson()).toList(growable: false);
+  }
+
+  Future<void> dispose() => _changes.close();
 
   Future<T> _run<T>(Future<T> Function() operation) {
     final completer = Completer<T>();

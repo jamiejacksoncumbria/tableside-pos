@@ -1,22 +1,29 @@
+import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:math';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:tableside_pos/core/tenant_scope.dart';
 
 import '../core/app_logger.dart';
+import '../core/app_busy_state.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/staff_pin_session_store.dart';
-import '../firebase_options.dart';
+import '../core/firebase_environment_options.dart';
+import '../core/trusted_clock.dart';
 import '../features/pos/domain.dart';
 import '../offline/offline_event.dart';
 import '../offline/venue_hub_device_credential.dart';
 import '../offline/venue_hub_protocol.dart';
 import '../offline/venue_hub_client_registry.dart';
 import '../offline/venue_hub_client.dart';
+import '../offline/venue_hub_availability.dart';
 import '../offline/venue_hub_remote_command_client.dart';
+import '../offline/venue_hub_realtime_client.dart';
+import '../offline/venue_hub_runtime.dart';
 
 class ProductionDispatchResult {
   const ProductionDispatchResult({
@@ -28,6 +35,23 @@ class ProductionDispatchResult {
   final List<String> queuedPrintJobIds;
   final List<String> queuedProductionAreas;
   final List<String> unroutedProductionAreas;
+}
+
+/// Server-owned position in one venue hub's immutable event chain.
+///
+/// The hub uses this only to select a replay suffix after a cursor conflict.
+/// It never renumbers or deletes local events, and the server independently
+/// verifies every event ID, sequence, previous hash and event hash on replay.
+class OfflineHubSyncCursor {
+  const OfflineHubSyncCursor({
+    required this.hubEpoch,
+    required this.lastSequence,
+    required this.lastEventHash,
+  });
+
+  final int hubEpoch;
+  final int lastSequence;
+  final String lastEventHash;
 }
 
 class VenuePinStaff {
@@ -55,6 +79,7 @@ class StaffPinVerification {
     required this.expiresAt,
     required this.tenantId,
     required this.venueId,
+    required this.deviceId,
     required this.userId,
     required this.displayName,
     required this.isPlatformAdmin,
@@ -69,6 +94,7 @@ class StaffPinVerification {
   final DateTime expiresAt;
   final String tenantId;
   final String venueId;
+  final String deviceId;
   final String userId;
   final String displayName;
   final bool isPlatformAdmin;
@@ -83,6 +109,7 @@ class StaffPinVerification {
     expiresAt: expiresAt ?? this.expiresAt,
     tenantId: tenantId,
     venueId: venueId,
+    deviceId: deviceId,
     userId: userId,
     displayName: displayName,
     isPlatformAdmin: isPlatformAdmin,
@@ -368,12 +395,14 @@ class ProductionCommandRepository {
           'The menu server returned an invalid bulk update result.',
         );
       }
+      await _refreshHubConfiguration(scope);
       return;
     }
     final returnedId = response['documentId'];
     if (returnedId is! String || returnedId.isEmpty) {
       throw StateError('The menu server returned an invalid document ID.');
     }
+    await _refreshHubConfiguration(scope);
   }
 
   /// Performs manager-only supplier, purchasing and stock mutations. The
@@ -386,10 +415,14 @@ class ProductionCommandRepository {
     String? documentId,
     Map<String, Object?> values = const {},
   }) async {
+    final requestNonce = Random.secure().nextInt(0x7fffffff).toRadixString(16);
+    final requestId =
+        'inventory-$operation-${DateTime.now().microsecondsSinceEpoch}-$requestNonce';
     final response = await _call('manageInventory', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'operation': operation,
+      'requestId': requestId,
       if (documentId != null && documentId.trim().isNotEmpty)
         'documentId': documentId,
       'values': values,
@@ -405,13 +438,14 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String resource,
     required Map<String, Object?> values,
-  }) {
-    return _call('manageVenueConfiguration', {
+  }) async {
+    await _call('manageVenueConfiguration', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'resource': resource,
       'values': values,
     });
+    await _refreshHubConfiguration(scope);
   }
 
   Future<Map<String, dynamic>> manageFulfilment({
@@ -419,36 +453,82 @@ class ProductionCommandRepository {
     required String operation,
     String? documentId,
     Map<String, Object?> values = const <String, Object?>{},
+    bool background = false,
   }) {
     final hub = VenueHubClientRegistry.instance;
     if (operation == 'updateOrderFulfilment' &&
         documentId != null &&
         hub.requiresHub(scope)) {
-      return _sendHubEvent(
-            scope: scope,
-            eventType: 'order.fulfilmentChanged',
-            payload: <String, Object?>{
-              'orderId': documentId,
-              'status': values['status'],
-              if (values['driverId'] != null) 'driverId': values['driverId'],
-            },
-          )
-          .then(
-            (acknowledgement) => <String, dynamic>{
-              'documentId': documentId,
-              'eventId': acknowledgement.eventId,
-              'updated': true,
-            },
-          );
+      final event = background
+          ? _sendHubEventUnblocked(
+              scope: scope,
+              eventType: 'order.fulfilmentChanged',
+              payload: <String, Object?>{
+                'orderId': documentId,
+                'status': values['status'],
+                if (values['driverId'] != null) 'driverId': values['driverId'],
+              },
+              showBusy: false,
+            )
+          : _sendHubEvent(
+              scope: scope,
+              eventType: 'order.fulfilmentChanged',
+              payload: <String, Object?>{
+                'orderId': documentId,
+                'status': values['status'],
+                if (values['driverId'] != null) 'driverId': values['driverId'],
+              },
+            );
+      return event.then(
+        (acknowledgement) => <String, dynamic>{
+          'documentId': documentId,
+          'eventId': acknowledgement.eventId,
+          'updated': true,
+        },
+      );
     }
-    return _call('manageFulfilment', {
+    final request = <String, Object?>{
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'operation': operation,
       if (documentId != null && documentId.trim().isNotEmpty)
         'documentId': documentId,
       'values': values,
+    };
+    final operationResult = background
+        ? _callUnblocked('manageFulfilment', request)
+        : _call('manageFulfilment', request);
+    return operationResult.then((response) async {
+      await _refreshHubConfiguration(scope);
+      return response;
     });
+  }
+
+  /// Cloud configuration triggers update the hub generation asynchronously.
+  /// Two short refresh attempts cover that propagation window and make menu,
+  /// customer and fulfilment edits visible without an application restart.
+  /// This never changes order authority and is a no-op on non-hub devices.
+  Future<void> _refreshHubConfiguration(VenueScope scope) async {
+    try {
+      final runtime = VenueHubRuntime.instance;
+      if (runtime.activeScope != scope) {
+        await VenueHubClientRegistry.instance.refreshCatalogue(scope);
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 750));
+      await runtime.refreshAuthorityNow();
+      await Future<void>.delayed(const Duration(milliseconds: 750));
+      await runtime.refreshAuthorityNow();
+    } catch (error, stackTrace) {
+      // The cloud mutation has already succeeded. Preserve that success and
+      // let the periodic authority refresh recover, while retaining a useful
+      // diagnostic instead of falsely telling the manager the save failed.
+      AppLogger.error(
+        'Refresh venue configuration after save',
+        error,
+        stackTrace,
+      );
+    }
   }
 
   Future<String> registerPrinterDevice({
@@ -557,6 +637,32 @@ class ProductionCommandRepository {
     return epoch;
   }
 
+  Future<void> configureOfflineVenueBackupHub({
+    required VenueScope scope,
+    required String deviceId,
+    required String credentialId,
+    required String endpointHost,
+    int endpointPort = 8443,
+  }) => _call('manageVenueConfiguration', {
+    'tenantId': scope.tenantId,
+    'venueId': scope.venueId,
+    'resource': 'offlineHubBackup',
+    'values': {
+      'deviceId': deviceId,
+      'credentialId': credentialId,
+      'endpointHost': endpointHost,
+      'endpointPort': endpointPort,
+    },
+  });
+
+  Future<void> removeOfflineVenueBackupHub({required VenueScope scope}) =>
+      _call('manageVenueConfiguration', {
+        'tenantId': scope.tenantId,
+        'venueId': scope.venueId,
+        'resource': 'offlineHubBackupRemoval',
+        'values': const <String, Object?>{},
+      });
+
   Future<Map<String, Object?>> fetchOfflineHubBootstrap({
     required VenueScope scope,
   }) => _call('getOfflineHubBootstrap', {
@@ -564,12 +670,31 @@ class ProductionCommandRepository {
     'venueId': scope.venueId,
   });
 
+  Future<void> uploadDeviceDiagnostics({
+    required VenueScope scope,
+    required String deviceId,
+    required String platform,
+    required List<Map<String, Object?>> entries,
+  }) async {
+    if (entries.isEmpty) return;
+    await _call('uploadDeviceDiagnostics', <String, Object?>{
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'deviceId': deviceId,
+      'environment': 'staging',
+      'platform': platform,
+      'entries': entries,
+    });
+  }
+
   Future<Set<String>> uploadOfflineHubEvents({
     required VenueScope scope,
     required String deviceId,
     required int hubEpoch,
     required VenueHubDeviceCredential credential,
     required List<OfflineEvent> events,
+    bool projectionRecovery = false,
+    List<OfflineEvent> recoveryBaselines = const <OfflineEvent>[],
   }) async {
     if (events.isEmpty || events.length > 25) {
       throw ArgumentError.value(
@@ -582,6 +707,19 @@ class ProductionCommandRepository {
       'events': events
           .map((event) => event.toCloudJson())
           .toList(growable: false),
+      // Recovery never weakens event verification. It tells the server that
+      // already-stored, hash-matching events may be used to reconstruct a
+      // missing materialized order document, without repeating side effects.
+      if (projectionRecovery) 'projectionRecovery': true,
+      // A replacement hub can append its cloud-signed baseline after earlier
+      // order events. Recovery is uploaded in global 25-event batches, so the
+      // batch containing an early item event would otherwise be unable to see
+      // the later baseline. These anchors are signed with the whole request
+      // and are context only: they do not advance the immutable event cursor.
+      if (projectionRecovery && recoveryBaselines.isNotEmpty)
+        'recoveryBaselines': recoveryBaselines
+            .map((event) => event.toCloudJson())
+            .toList(growable: false),
     };
     final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
       credentialId: credential.credentialId,
@@ -592,7 +730,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/cloud-sync',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     final response = await _call('ingestOfflineHubEvents', {
@@ -606,6 +744,98 @@ class ProductionCommandRepository {
     return rawIds.whereType<String>().toSet();
   }
 
+  Future<OfflineHubSyncCursor> fetchOfflineHubSyncCursor({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+  }) async {
+    const body = <String, Object?>{};
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: '/v1/cloud-sync-cursor',
+      hubEpoch: hubEpoch,
+      sentAtUtc: await _trustedHubSigningTime(scope),
+      body: body,
+    );
+    final response = await _call('getOfflineHubSyncCursor', {
+      // Keep the ordinary venue scope alongside the signed envelope. Current
+      // servers authorize this bootstrap action directly from the hub
+      // credential; an older instance during a rolling Functions deployment
+      // may still classify it through the PIN-session boundary and therefore
+      // needs these fields to resolve the same venue after staff unlock.
+      // The server never trusts these values for the cursor itself: the
+      // Ed25519-signed envelope below remains authoritative.
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+    final returnedEpoch = response['hubEpoch'];
+    final lastSequence = response['lastSequence'];
+    final lastEventHash = response['lastEventHash'];
+    if (returnedEpoch is! int ||
+        returnedEpoch != hubEpoch ||
+        lastSequence is! int ||
+        lastSequence < 0 ||
+        lastEventHash is! String ||
+        (lastSequence > 0 && lastEventHash.isEmpty)) {
+      throw StateError('The server returned an invalid hub sync cursor.');
+    }
+    return OfflineHubSyncCursor(
+      hubEpoch: returnedEpoch,
+      lastSequence: lastSequence,
+      lastEventHash: lastEventHash,
+    );
+  }
+
+  /// Publishes the hub's durable closed-order projections so a cloud document
+  /// that was left open by an interrupted earlier sync cannot resurrect a bill
+  /// on remote terminals. The active hub credential signs the complete body;
+  /// the server independently validates identity and a zero balance.
+  Future<Set<String>> reconcileOfflineHubClosedOrders({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+    required List<Map<String, Object?>> orders,
+  }) async {
+    if (orders.isEmpty || orders.length > 25) {
+      throw ArgumentError.value(
+        orders.length,
+        'orders',
+        'Reconcile between 1 and 25 closed orders.',
+      );
+    }
+    final body = <String, Object?>{'orders': orders};
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: '/v1/reconcile-closed-orders',
+      hubEpoch: hubEpoch,
+      sentAtUtc: await _trustedHubSigningTime(scope),
+      body: body,
+    );
+    final response = await _call('reconcileOfflineHubClosedOrders', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+    final rawIds = response['reconciledOrderIds'];
+    if (rawIds is! List) {
+      throw StateError('The server returned an invalid order reconciliation.');
+    }
+    return rawIds.whereType<String>().toSet();
+  }
+
   Future<Map<String, Object?>> fetchOfflineHubSnapshot({
     required VenueScope scope,
     required String deviceId,
@@ -613,6 +843,7 @@ class ProductionCommandRepository {
     required VenueHubDeviceCredential credential,
     String? knownSnapshotDigest,
     int? knownSnapshotGeneration,
+    Map<String, int>? knownSnapshotSections,
   }) async {
     final body = <String, Object?>{
       'snapshotVersion': 1,
@@ -620,6 +851,8 @@ class ProductionCommandRepository {
         'knownSnapshotDigest': knownSnapshotDigest,
       if (knownSnapshotGeneration != null)
         'knownSnapshotGeneration': knownSnapshotGeneration,
+      if (knownSnapshotSections?.isNotEmpty == true)
+        'knownSnapshotSections': knownSnapshotSections,
     };
     final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
       credentialId: credential.credentialId,
@@ -630,7 +863,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/snapshot',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     return _call('getOfflineHubSnapshot', {
@@ -639,17 +872,13 @@ class ProductionCommandRepository {
     });
   }
 
-  Future<void> heartbeatRemoteHub({
+  Future<Map<String, Object?>> issueRealtimeHubSession({
     required VenueScope scope,
     required String deviceId,
     required int hubEpoch,
     required VenueHubDeviceCredential credential,
-    required int pendingLocalEvents,
   }) async {
-    final body = <String, Object?>{
-      'deviceId': deviceId,
-      'pendingLocalEvents': pendingLocalEvents,
-    };
+    final body = <String, Object?>{'deviceId': deviceId};
     final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
       credentialId: credential.credentialId,
       tenantId: scope.tenantId,
@@ -657,13 +886,107 @@ class ProductionCommandRepository {
       deviceId: deviceId,
       staffId: 'venue-hub',
       method: 'POST',
-      path: '/v1/remote-heartbeat',
+      path: '/v1/realtime-session',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
-    await _call('heartbeatRemoteHub', {'envelope': envelope.toJson(), 'body': body});
+    return _call('issueRealtimeHubSession', {
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
   }
+
+  Future<Map<String, Object?>> issueRealtimeBackupHubSession({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+  }) => _signedHubCall(
+    action: 'issueRealtimeBackupHubSession',
+    path: '/v1/backup-realtime-session',
+    scope: scope,
+    deviceId: deviceId,
+    hubEpoch: hubEpoch,
+    credential: credential,
+    body: <String, Object?>{'deviceId': deviceId},
+  );
+
+  Future<Map<String, Object?>> promoteOfflineBackupHub({
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+    required String managerPin,
+    required String reason,
+  }) => _signedHubCall(
+    action: 'promoteOfflineBackupHub',
+    path: '/v1/backup-promote',
+    scope: scope,
+    deviceId: deviceId,
+    hubEpoch: hubEpoch,
+    credential: credential,
+    body: <String, Object?>{
+      'deviceId': deviceId,
+      'managerPin': managerPin,
+      'reason': reason,
+      'confirmAuthorityTransfer': true,
+    },
+  );
+
+  Future<Map<String, Object?>> _signedHubCall({
+    required String action,
+    required String path,
+    required VenueScope scope,
+    required String deviceId,
+    required int hubEpoch,
+    required VenueHubDeviceCredential credential,
+    required Map<String, Object?> body,
+  }) async {
+    final envelope = await VenueHubRequestSigner(credential.keyPair).sign(
+      credentialId: credential.credentialId,
+      tenantId: scope.tenantId,
+      venueId: scope.venueId,
+      deviceId: deviceId,
+      staffId: 'venue-hub',
+      method: 'POST',
+      path: path,
+      hubEpoch: hubEpoch,
+      sentAtUtc: await _trustedHubSigningTime(scope),
+      body: body,
+    );
+    return _call(action, <String, Object?>{
+      // Manual backup promotion is authenticated twice: the device envelope
+      // proves this is the configured backup, while these explicit scope
+      // fields let the ordinary staff-session middleware prove which manager
+      // is authorising the transfer. Other signed hub calls safely ignore
+      // the duplicated scope values.
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'envelope': envelope.toJson(),
+      'body': body,
+    });
+  }
+
+  /// Opens one short-lived, staff-scoped RTDB session for presence and command
+  /// acknowledgements. Order data still travels only through the POS API.
+  Future<Map<String, Object?>> issueRealtimePosSession({
+    required VenueScope scope,
+  }) => _call('issueRealtimePosSession', {
+    'tenantId': scope.tenantId,
+    'venueId': scope.venueId,
+  });
+
+  Future<Map<String, Object?>> issueRealtimePrinterSession({
+    required VenueScope scope,
+    required String deviceId,
+    required String deviceCredential,
+  }) => _call('issueRealtimePrinterSession', {
+    'tenantId': scope.tenantId,
+    'venueId': scope.venueId,
+    'deviceId': deviceId,
+    'deviceCredential': deviceCredential,
+  });
 
   Future<List<Map<String, Object?>>> claimRemoteHubCommands({
     required VenueScope scope,
@@ -682,7 +1005,7 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/remote-claim',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     final response = await _call('claimRemoteHubCommands', {
@@ -691,7 +1014,10 @@ class ProductionCommandRepository {
     });
     final commands = response['commands'];
     return commands is List
-        ? commands.whereType<Map>().map(Map<String, Object?>.from).toList(growable: false)
+        ? commands
+              .whereType<Map>()
+              .map(Map<String, Object?>.from)
+              .toList(growable: false)
         : const <Map<String, Object?>>[];
   }
 
@@ -723,25 +1049,12 @@ class ProductionCommandRepository {
       method: 'POST',
       path: '/v1/remote-complete',
       hubEpoch: hubEpoch,
-      sentAtUtc: DateTime.now().toUtc(),
+      sentAtUtc: await _trustedHubSigningTime(scope),
       body: body,
     );
     await _call('completeRemoteHubCommand', {
       'envelope': envelope.toJson(),
       'body': body,
-    });
-  }
-
-  Future<void> heartbeatPrinterDevice({
-    required VenueScope scope,
-    required String deviceId,
-    required String deviceCredential,
-  }) {
-    return _call('heartbeatPrinterDevice', {
-      'tenantId': scope.tenantId,
-      'venueId': scope.venueId,
-      'deviceId': deviceId,
-      'deviceCredential': deviceCredential,
     });
   }
 
@@ -758,6 +1071,24 @@ class ProductionCommandRepository {
       throw StateError('The server returned an invalid trusted time sample.');
     }
     return serverTimeMillis;
+  }
+
+  /// Signed hub requests have a narrow replay window. Obtain one authenticated
+  /// server sample before the first such request so an incorrect Android or
+  /// Windows wall clock cannot prevent backup promotion or cloud recovery.
+  Future<DateTime> _trustedHubSigningTime(VenueScope scope) async {
+    if (!TrustedClock.instance.snapshot.isSynchronised) {
+      try {
+        await TrustedClock.instance.synchroniseFirebase(
+          () => fetchTrustedTime(scope: scope),
+        );
+      } on Object catch (error, stackTrace) {
+        // The signed request will still be verified by the server and fail
+        // closed if the fallback device clock is outside its replay window.
+        AppLogger.error('Synchronise hub signing clock', error, stackTrace);
+      }
+    }
+    return TrustedClock.instance.nowUtc();
   }
 
   Future<Map<String, Object?>?> claimDevicePrintJob({
@@ -853,6 +1184,7 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String userId,
     required String pin,
+    required String deviceId,
     bool repairOfflineVerifier = false,
   }) async {
     final response = await _call('verifyStaffPin', {
@@ -860,6 +1192,7 @@ class ProductionCommandRepository {
       'venueId': scope.venueId,
       'userId': userId,
       'pin': pin,
+      'deviceId': deviceId,
       if (repairOfflineVerifier) 'repairOfflineVerifier': true,
     });
     return StaffPinVerification(
@@ -868,6 +1201,14 @@ class ProductionCommandRepository {
       expiresAt: DateTime.parse(response['expiresAt'] as String),
       tenantId: scope.tenantId,
       venueId: scope.venueId,
+      // During a rolling deployment an older Function can return a valid
+      // session without echoing the newly introduced device binding. Keep the
+      // locally supplied identity so that the same client works before and
+      // after the server update; the updated server still validates it on
+      // every protected command.
+      deviceId: response['deviceId'] is String
+          ? response['deviceId'] as String
+          : deviceId,
       userId: response['userId'] as String,
       displayName: response['displayName'] as String,
       isPlatformAdmin: response['isPlatformAdmin'] == true,
@@ -954,7 +1295,7 @@ class ProductionCommandRepository {
     required String password,
     required String expectedUserId,
   }) async {
-    final options = DefaultFirebaseOptions.currentPlatform;
+    final options = FirebaseEnvironmentOptions.currentPlatform;
     final endpoint = Uri.https(
       'identitytoolkit.googleapis.com',
       '/v1/accounts:signInWithPassword',
@@ -1106,14 +1447,19 @@ class ProductionCommandRepository {
     return orderId;
   }
 
-  /// Persists one not-yet-sent order line.  Draft lines are intentionally
-  /// server-owned so another till can open the same table and see changes in
-  /// real time, while printing and stock movements remain deferred until Send.
-  Future<void> addDraftLine({
+  /// Saves a burst of basket taps as one atomic hub event. The UI can add the
+  /// lines optimistically, while the authoritative hub still validates every
+  /// product, variant, modifier and channel price before accepting any line.
+  Future<void> addDraftLines({
     required VenueScope scope,
     required PosOrder order,
-    required OrderLine line,
+    required List<({OrderLine line, bool channelAvailabilityOverride})>
+    additions,
   }) async {
+    if (additions.isEmpty) return;
+    if (additions.length > 25) {
+      throw StateError('No more than 25 basket items may be saved at once.');
+    }
     final hub = VenueHubClientRegistry.instance;
     if (hub.requiresHub(scope)) {
       await _ensureHubOrderOpened(
@@ -1126,57 +1472,76 @@ class ProductionCommandRepository {
         customerName: order.customerName,
         customerPhone: order.customerPhone,
         deliveryAddress: order.deliveryAddress,
+        deliveryAddressLabel: order.deliveryAddressLabel,
+        deliveryLatitude: order.deliveryLatitude,
+        deliveryLongitude: order.deliveryLongitude,
+        serviceAreaId: order.serviceAreaId,
+        serviceAreaName: order.serviceAreaName,
+        deliveryFeeMinor: order.deliveryFeeMinor,
         scheduledFor: order.scheduledFor,
+        assignedDriverId: order.assignedDriverId,
+        assignedDriverName: order.assignedDriverName,
+        background: true,
       );
-      await _sendHubEvent(
+      await _sendHubEventUnblocked(
         scope: scope,
-        eventType: 'order.itemAdded',
+        eventType: 'order.itemsAdded',
         payload: <String, Object?>{
           'orderId': order.id,
-          'lineId': line.id,
-          'productId': line.productId,
-          'quantity': line.quantity,
-          'channel': order.channel.name,
-          if (line.variantId?.trim().isNotEmpty == true)
-            'variantId': line.variantId!.trim(),
-          'modifierSelections': _modifierSelections(line),
-          if (line.itemNote.trim().isNotEmpty) 'itemNote': line.itemNote.trim(),
-          'courseId': line.courseId,
-          'courseName': line.courseName,
-          'courseSequence': line.courseSequence,
-          'courseReleasePolicy': line.courseReleasePolicy.name,
+          'items': [
+            for (final addition in additions)
+              _draftHubLinePayload(
+                addition.line,
+                order.channel,
+                addition.channelAvailabilityOverride,
+              ),
+          ],
         },
+        showBusy: false,
       );
       return;
     }
-    await _call('addOrderDraftLine', {
-      'tenantId': scope.tenantId,
-      'venueId': scope.venueId,
-      'orderId': order.id,
-      'tableId': order.tableId,
-      'tabName': order.tabName,
-      'channel': order.channel.name,
-      'customerId': order.customerId,
-      'customerName': order.customerName,
-      'customerPhone': order.customerPhone,
-      'deliveryAddress': order.deliveryAddress,
-      'scheduledForMillis': order.scheduledFor?.millisecondsSinceEpoch,
-      'primaryWaiterId': order.primaryWaiterId,
-      'primaryWaiterName': order.primaryWaiterName,
-      'clientObservedAtMillis': DateTime.now().toUtc().millisecondsSinceEpoch,
-      'line': {
-        'id': line.id,
-        'productId': line.productId,
-        'quantity': line.quantity,
-        'variantId': line.variantId,
-        'modifierSelections': _modifierSelections(line),
-        'itemNote': line.itemNote,
-        'courseId': line.courseId,
-        'courseName': line.courseName,
-        'courseSequence': line.courseSequence,
-        'courseReleasePolicy': line.courseReleasePolicy.name,
-      },
-    });
+    // Legacy/demo venues which do not yet use a hub retain the established
+    // protected API. Production hub venues use the single atomic event above.
+    for (final addition in additions) {
+      await _call('addOrderDraftLine', {
+        'tenantId': scope.tenantId,
+        'venueId': scope.venueId,
+        'orderId': order.id,
+        'tableId': order.tableId,
+        'tabName': order.tabName,
+        'channel': order.channel.name,
+        'customerId': order.customerId,
+        'customerName': order.customerName,
+        'customerPhone': order.customerPhone,
+        'deliveryAddress': order.deliveryAddress,
+        'deliveryAddressLabel': order.deliveryAddressLabel,
+        'deliveryLatitude': order.deliveryLatitude,
+        'deliveryLongitude': order.deliveryLongitude,
+        'serviceAreaId': order.serviceAreaId,
+        'serviceAreaName': order.serviceAreaName,
+        'deliveryFeeMinor': order.deliveryFeeMinor,
+        'scheduledForMillis': order.scheduledFor?.millisecondsSinceEpoch,
+        'primaryWaiterId': order.primaryWaiterId,
+        'primaryWaiterName': order.primaryWaiterName,
+        'assignedDriverId': order.assignedDriverId,
+        if (addition.channelAvailabilityOverride)
+          'channelAvailabilityOverride': true,
+        'clientObservedAtMillis': DateTime.now().toUtc().millisecondsSinceEpoch,
+        'line': {
+          'id': addition.line.id,
+          'productId': addition.line.productId,
+          'quantity': addition.line.quantity,
+          'variantId': addition.line.variantId,
+          'modifierSelections': _modifierSelections(addition.line),
+          'itemNote': addition.line.itemNote,
+          'courseId': addition.line.courseId,
+          'courseName': addition.line.courseName,
+          'courseSequence': addition.line.courseSequence,
+          'courseReleasePolicy': addition.line.courseReleasePolicy.name,
+        },
+      });
+    }
   }
 
   /// Changes an unsent draft line. A quantity of zero removes it. The server
@@ -1219,13 +1584,22 @@ class ProductionCommandRepository {
     required String operation,
     required String reason,
     int? valueMinor,
-  }) {
+  }) async {
     if (VenueHubClientRegistry.instance.requiresHub(scope)) {
-      throw StateError(
-        'Item discounts and removals are unavailable while venue-hub routing is active.',
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'order.lineAdjusted',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'lineId': lineId,
+          'operation': operation,
+          'reason': reason.trim(),
+          if (valueMinor != null) 'valueMinor': valueMinor,
+        },
       );
+      return;
     }
-    return _call('adjustOrderLine', {
+    await _call('adjustOrderLine', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'orderId': order.id,
@@ -1259,7 +1633,15 @@ class ProductionCommandRepository {
         customerName: order.customerName,
         customerPhone: order.customerPhone,
         deliveryAddress: order.deliveryAddress,
+        deliveryAddressLabel: order.deliveryAddressLabel,
+        deliveryLatitude: order.deliveryLatitude,
+        deliveryLongitude: order.deliveryLongitude,
+        serviceAreaId: order.serviceAreaId,
+        serviceAreaName: order.serviceAreaName,
+        deliveryFeeMinor: order.deliveryFeeMinor,
         scheduledFor: order.scheduledFor,
+        assignedDriverId: order.assignedDriverId,
+        assignedDriverName: order.assignedDriverName,
       );
       await _sendHubEvent(
         scope: scope,
@@ -1317,15 +1699,59 @@ class ProductionCommandRepository {
   Future<void> updateProductionTicket({
     required VenueScope scope,
     required String ticketId,
+    String? orderId,
     required String flowStatus,
     required bool isDelayed,
+    bool background = false,
   }) {
-    return _call('updateProductionTicket', {
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      if (orderId == null || orderId.trim().isEmpty) {
+        return Future<void>.error(
+          StateError('The production ticket does not identify its order.'),
+        );
+      }
+      final payload = <String, Object?>{
+        'orderId': orderId,
+        'ticketId': ticketId,
+        'flowStatus': flowStatus,
+        'isDelayed': isDelayed,
+      };
+      final operation = background
+          ? _sendHubEventUnblocked(
+              scope: scope,
+              eventType: 'order.productionTicketUpdated',
+              payload: payload,
+              showBusy: false,
+            )
+          : _sendHubEvent(
+              scope: scope,
+              eventType: 'order.productionTicketUpdated',
+              payload: payload,
+            );
+      return operation.then((_) {});
+    }
+    final request = <String, Object?>{
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
       'ticketId': ticketId,
       'flowStatus': flowStatus,
       'isDelayed': isDelayed,
+    };
+    final operation = background
+        ? _callUnblocked('updateProductionTicket', request)
+        : _call('updateProductionTicket', request);
+    return operation.then((_) {});
+  }
+
+  /// Releases scheduled collection/delivery tickets whose venue lead-time
+  /// boundary has arrived. It is deliberately idempotent and background-safe;
+  /// several KDS displays may call it without producing duplicate tickets or
+  /// print jobs because the server transitions each held ticket once.
+  Future<void> releaseDueFulfilmentTickets(VenueScope scope) async {
+    await _call('releaseDueFulfilmentTickets', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
     });
   }
 
@@ -1336,6 +1762,10 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String jobId,
   }) {
+    final hubClient = VenueHubClientRegistry.instance.clientFor(scope);
+    if (jobId.startsWith('offline-') && hubClient != null) {
+      return hubClient.managePrintJob(action: 'retry', jobId: jobId);
+    }
     return _call('retryFailedPrintJob', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
@@ -1349,6 +1779,10 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required String jobId,
   }) {
+    final hubClient = VenueHubClientRegistry.instance.clientFor(scope);
+    if (jobId.startsWith('offline-') && hubClient != null) {
+      return hubClient.managePrintJob(action: 'reprint', jobId: jobId);
+    }
     return _call('reprintPrintedJob', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
@@ -1364,6 +1798,15 @@ class ProductionCommandRepository {
     required String jobId,
     required String reason,
   }) async {
+    final hubClient = VenueHubClientRegistry.instance.clientFor(scope);
+    if (jobId.startsWith('offline-') && hubClient != null) {
+      final response = await hubClient.managePrintJob(
+        action: 'cancel',
+        jobId: jobId,
+        reason: reason,
+      );
+      return _stringList(response['cancelledJobIds']);
+    }
     final response = await _call('cancelPrintJob', {
       'tenantId': scope.tenantId,
       'venueId': scope.venueId,
@@ -1410,6 +1853,7 @@ class ProductionCommandRepository {
     required VenueScope scope,
     required PosOrder order,
     required List<BillPaymentInput> payments,
+    required String baseCurrencyCode,
     required bool printReceipt,
     required String requestId,
   }) async {
@@ -1420,53 +1864,72 @@ class ProductionCommandRepository {
         orderId: order.id,
         tableId: order.tableId,
         tabName: order.tabName,
+        channel: order.channel,
+        customerId: order.customerId,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        deliveryAddress: order.deliveryAddress,
+        deliveryAddressLabel: order.deliveryAddressLabel,
+        deliveryLatitude: order.deliveryLatitude,
+        deliveryLongitude: order.deliveryLongitude,
+        serviceAreaId: order.serviceAreaId,
+        serviceAreaName: order.serviceAreaName,
+        deliveryFeeMinor: order.deliveryFeeMinor,
+        scheduledFor: order.scheduledFor,
+        assignedDriverId: order.assignedDriverId,
+        assignedDriverName: order.assignedDriverName,
       );
       var paidThisTime = 0;
+      final hubPayments = <Map<String, Object?>>[];
       for (var index = 0; index < payments.length; index++) {
         final payment = payments[index];
         final baseAmount = _baseAmountMinor(payment);
         paidThisTime += baseAmount;
-        await _sendHubEvent(
-          scope: scope,
-          eventType: 'payment.recorded',
-          payload: <String, Object?>{
-            'orderId': order.id,
-            'paymentId': '$requestId-$index',
-            'method': payment.method.name,
-            'baseAmountMinor': baseAmount,
-            'tenderedAmountMinor': payment.tenderedAmountMinor,
-            'currencyCode': payment.tenderedCurrencyCode,
-            'exchangeRateToBase': payment.exchangeRateToBase,
-            if (payment.terminalLabel != null)
-              'terminalLabel': payment.terminalLabel,
-            'cashChangeBaseMinor': payment.cashChangeBaseMinor,
-          },
-        );
+        hubPayments.add(<String, Object?>{
+          'paymentId': '$requestId-$index',
+          'method': payment.method.name,
+          'baseAmountMinor': baseAmount,
+          'tenderedAmountMinor': payment.tenderedAmountMinor,
+          'currencyCode': payment.tenderedCurrencyCode,
+          'exchangeRateToBase': payment.exchangeRateToBase,
+          if (payment.terminalLabel != null)
+            'terminalLabel': payment.terminalLabel,
+          'cashChangeBaseMinor': payment.cashChangeBaseMinor,
+        });
       }
       final paidTotal = order.paidMinor + paidThisTime;
       final balance = (order.totalMinor - paidTotal).clamp(0, order.totalMinor);
       final closed = balance == 0;
       final receiptNumber =
           'OFF-${hub.hubEpochFor(scope)}-${requestId.split('-').last}';
-      if (closed) {
-        await _sendHubEvent(
-          scope: scope,
-          eventType: 'order.closed',
-          payload: <String, Object?>{
-            'orderId': order.id,
-            'printReceipt': printReceipt,
-            'receiptNumber': receiptNumber,
-          },
-        );
-      }
+      // All tenders and the close decision are one idempotent ledger fact.
+      // Previously a network break between payment.recorded and order.closed
+      // could accept money while reporting that checkout failed.
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'payment.batchRecorded',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'batchId': requestId,
+          'payments': hubPayments,
+          'closeIfSettled': closed,
+          'printReceipt': printReceipt,
+          'receiptNumber': receiptNumber,
+          if (order.splitFromOrderId != null)
+            'splitFromOrderId': order.splitFromOrderId,
+        },
+      );
       return BillCloseResult(
         billId: 'offline-${order.id}',
         totalMinor: order.totalMinor,
-        currencyCode: payments.firstOrNull?.tenderedCurrencyCode ?? 'GBP',
+        // Bill values, outstanding balance and change are always denominated
+        // in the venue's reporting currency. The currency tendered by the
+        // customer belongs only on the individual payment entry.
+        currencyCode: baseCurrencyCode.trim().toUpperCase(),
         receiptNumber: receiptNumber,
         alreadyClosed: false,
-        receiptPrintRequested: printReceipt && closed,
-        receiptPrintQueued: printReceipt && closed,
+        receiptPrintRequested: printReceipt,
+        receiptPrintQueued: printReceipt && (closed || payments.isNotEmpty),
         orderClosed: closed,
         paidThisTimeMinor: paidThisTime,
         paidTotalMinor: paidTotal,
@@ -1505,6 +1968,62 @@ class ProductionCommandRepository {
       paidTotalMinor: response['paidTotalMinor'] as int? ?? 0,
       balanceDueMinor: response['balanceDueMinor'] as int? ?? 0,
     );
+  }
+
+  /// Closes a durable order which has had every item removed. This is a
+  /// cancellation, not a zero-value sale: it never creates a bill or print
+  /// job, and both the hub and cloud re-check that no payment exists.
+  Future<void> cancelEmptyOrder({
+    required VenueScope scope,
+    required PosOrder order,
+    required String reason,
+  }) async {
+    final normalizedReason = reason.trim();
+    if (order.lines.isNotEmpty || order.payments.isNotEmpty) {
+      throw StateError('Only an empty, unpaid order can be cancelled.');
+    }
+    if (normalizedReason.length < 3) {
+      throw StateError('Enter a short reason for closing the empty order.');
+    }
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      await _ensureHubOrderOpened(
+        scope: scope,
+        orderId: order.id,
+        tableId: order.tableId,
+        tabName: order.tabName,
+        channel: order.channel,
+        customerId: order.customerId,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        deliveryAddress: order.deliveryAddress,
+        deliveryAddressLabel: order.deliveryAddressLabel,
+        deliveryLatitude: order.deliveryLatitude,
+        deliveryLongitude: order.deliveryLongitude,
+        serviceAreaId: order.serviceAreaId,
+        serviceAreaName: order.serviceAreaName,
+        deliveryFeeMinor: order.deliveryFeeMinor,
+        scheduledFor: order.scheduledFor,
+        assignedDriverId: order.assignedDriverId,
+        assignedDriverName: order.assignedDriverName,
+      );
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'order.cancelled',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'reason': normalizedReason,
+        },
+      );
+      return;
+    }
+    await _call('cancelEmptyOrder', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'orderId': order.id,
+      'reason': normalizedReason,
+      'requestId': 'cancel-${DateTime.now().microsecondsSinceEpoch}',
+    });
   }
 
   int _baseAmountMinor(BillPaymentInput payment) {
@@ -1664,9 +2183,55 @@ class ProductionCommandRepository {
     required String splitOrderId,
     required Map<String, int> lineQuantities,
   }) async {
+    final selected = lineQuantities.entries
+        .where((entry) => entry.value > 0)
+        .toList(growable: false);
     if (VenueHubClientRegistry.instance.requiresHub(scope)) {
-      throw StateError(
-        'Bill splitting is not yet available through the venue hub. Reconnect and deactivate hub routing before splitting.',
+      await _ensureHubOrderOpened(
+        scope: scope,
+        orderId: order.id,
+        tableId: order.tableId,
+        tabName: order.tabName,
+        channel: order.channel,
+        customerId: order.customerId,
+        customerName: order.customerName,
+        customerPhone: order.customerPhone,
+        deliveryAddress: order.deliveryAddress,
+        deliveryAddressLabel: order.deliveryAddressLabel,
+        deliveryLatitude: order.deliveryLatitude,
+        deliveryLongitude: order.deliveryLongitude,
+        serviceAreaId: order.serviceAreaId,
+        serviceAreaName: order.serviceAreaName,
+        deliveryFeeMinor: order.deliveryFeeMinor,
+        scheduledFor: order.scheduledFor,
+        assignedDriverId: order.assignedDriverId,
+        assignedDriverName: order.assignedDriverName,
+      );
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'order.splitCreated',
+        payload: <String, Object?>{
+          'orderId': order.id,
+          'splitOrderId': splitOrderId,
+          'splitLines': selected
+              .map(
+                (entry) => <String, Object?>{
+                  'lineId': entry.key,
+                  'quantity': entry.value,
+                },
+              )
+              .toList(growable: false),
+        },
+      );
+      var splitTotalMinor = 0;
+      for (final line in order.lines) {
+        splitTotalMinor += line.unitPriceMinor * (lineQuantities[line.id] ?? 0);
+      }
+      return OrderSplitResult(
+        splitOrderId: splitOrderId,
+        splitTotalMinor: splitTotalMinor,
+        remainingTotalMinor: order.totalMinor - splitTotalMinor,
+        alreadySplit: false,
       );
     }
     final response = await _call('splitOrder', {
@@ -1674,8 +2239,7 @@ class ProductionCommandRepository {
       'venueId': scope.venueId,
       'orderId': order.id,
       'splitOrderId': splitOrderId,
-      'splitLines': lineQuantities.entries
-          .where((entry) => entry.value > 0)
+      'splitLines': selected
           .map(
             (entry) => <String, Object?>{
               'lineId': entry.key,
@@ -1736,7 +2300,16 @@ class ProductionCommandRepository {
     String? customerName,
     String? customerPhone,
     String? deliveryAddress,
+    String? deliveryAddressLabel,
+    double? deliveryLatitude,
+    double? deliveryLongitude,
+    String? serviceAreaId,
+    String? serviceAreaName,
+    int deliveryFeeMinor = 0,
     DateTime? scheduledFor,
+    String? assignedDriverId,
+    String? assignedDriverName,
+    bool background = false,
   }) async {
     final hub = VenueHubClientRegistry.instance;
     if (hub.hasUsableSession(scope)) {
@@ -1750,27 +2323,62 @@ class ProductionCommandRepository {
         customerName: customerName,
         customerPhone: customerPhone,
         deliveryAddress: deliveryAddress,
+        deliveryAddressLabel: deliveryAddressLabel,
+        deliveryLatitude: deliveryLatitude,
+        deliveryLongitude: deliveryLongitude,
+        serviceAreaId: serviceAreaId,
+        serviceAreaName: serviceAreaName,
+        deliveryFeeMinor: deliveryFeeMinor,
         scheduledFor: scheduledFor,
+        assignedDriverId: assignedDriverId,
+        assignedDriverName: assignedDriverName,
       );
       return;
     }
-    await _sendHubEvent(
-      scope: scope,
-      eventType: 'order.opened',
-      payload: <String, Object?>{
-        'orderId': orderId,
-        if (tableId?.trim().isNotEmpty == true) 'tableId': tableId!.trim(),
-        if (tabName?.trim().isNotEmpty == true) 'tabName': tabName!.trim(),
-        'channel': channel.name,
-        if (customerId?.trim().isNotEmpty == true) 'customerId': customerId!.trim(),
-        if (customerName?.trim().isNotEmpty == true) 'customerName': customerName!.trim(),
-        if (customerPhone?.trim().isNotEmpty == true) 'customerPhone': customerPhone!.trim(),
-        if (deliveryAddress?.trim().isNotEmpty == true)
-          'deliveryAddress': deliveryAddress!.trim(),
-        if (scheduledFor != null)
-          'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
-      },
-    );
+    final payload = <String, Object?>{
+      'orderId': orderId,
+      if (tableId?.trim().isNotEmpty == true) 'tableId': tableId!.trim(),
+      if (tabName?.trim().isNotEmpty == true) 'tabName': tabName!.trim(),
+      'channel': channel.name,
+      if (customerId?.trim().isNotEmpty == true)
+        'customerId': customerId!.trim(),
+      if (customerName?.trim().isNotEmpty == true)
+        'customerName': customerName!.trim(),
+      if (customerPhone?.trim().isNotEmpty == true)
+        'customerPhone': customerPhone!.trim(),
+      if (deliveryAddress?.trim().isNotEmpty == true)
+        'deliveryAddress': deliveryAddress!.trim(),
+      if (deliveryAddressLabel?.trim().isNotEmpty == true)
+        'deliveryAddressLabel': deliveryAddressLabel!.trim(),
+      if (deliveryLatitude != null) 'deliveryLatitude': deliveryLatitude,
+      if (deliveryLongitude != null) 'deliveryLongitude': deliveryLongitude,
+      if (serviceAreaId?.trim().isNotEmpty == true)
+        'serviceAreaId': serviceAreaId!.trim(),
+      if (serviceAreaName?.trim().isNotEmpty == true)
+        'serviceAreaName': serviceAreaName!.trim(),
+      if (channel == OrderChannel.delivery)
+        'deliveryFeeMinor': deliveryFeeMinor,
+      if (scheduledFor != null)
+        'scheduledForUtc': scheduledFor.toUtc().toIso8601String(),
+      if (assignedDriverId?.trim().isNotEmpty == true)
+        'assignedDriverId': assignedDriverId!.trim(),
+      if (assignedDriverName?.trim().isNotEmpty == true)
+        'assignedDriverName': assignedDriverName!.trim(),
+    };
+    if (background) {
+      await _sendHubEventUnblocked(
+        scope: scope,
+        eventType: 'order.opened',
+        payload: payload,
+        showBusy: false,
+      );
+    } else {
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'order.opened',
+        payload: payload,
+      );
+    }
   }
 
   Future<VenueHubEventAcknowledgement> _sendHubEvent({
@@ -1778,10 +2386,38 @@ class ProductionCommandRepository {
     required String eventType,
     required Map<String, Object?> payload,
     DateTime? businessTimestampUtc,
+  }) => AppBusyState.guard(
+    () => _sendHubEventUnblocked(
+      scope: scope,
+      eventType: eventType,
+      payload: payload,
+      businessTimestampUtc: businessTimestampUtc,
+      showBusy: false,
+    ),
+  );
+
+  /// Keeps the global duplicate-submit barrier active until the authoritative
+  /// hub has durably accepted the command. The nested HTTP submission may
+  /// finish several seconds earlier, so guarding only `_call` exposed the
+  /// underlying dialog while the same command was still in flight.
+  Future<VenueHubEventAcknowledgement> _sendHubEventUnblocked({
+    required VenueScope scope,
+    required String eventType,
+    required Map<String, Object?> payload,
+    DateTime? businessTimestampUtc,
+    bool showBusy = true,
   }) async {
     final hub = VenueHubClientRegistry.instance;
     if (!hub.requiresHub(scope)) {
       throw StateError('The venue hub is not authoritative for this venue.');
+    }
+    final hubConnectivity = VenueHubAvailability.status.value.connectivity;
+    if (hubConnectivity == VenueHubConnectivity.unavailable ||
+        hubConnectivity == VenueHubConnectivity.checking) {
+      throw StateError(
+        VenueHubAvailability.status.value.detail ??
+            'The venue hub is offline. Orders are blocked until it reconnects.',
+      );
     }
     if (hub.hasUsableSession(scope)) {
       return hub.send(
@@ -1791,21 +2427,118 @@ class ProductionCommandRepository {
         businessTimestampUtc: businessTimestampUtc,
       );
     }
+    if (!kIsWeb && !hub.isDeviceEnrolled(scope)) {
+      const message =
+          'This device is not authorised for this venue. A manager must enrol '
+          'it and import the pinned venue certificate before it can process orders.';
+      VenueHubAvailability.markOffline(message);
+      throw StateError(message);
+    }
+    if (hub.isLocalHubHost(scope)) {
+      throw StateError(
+        'The venue hub staff session is unavailable. Select your name and enter your PIN again.',
+      );
+    }
     final epoch = hub.hubEpochFor(scope);
     if (epoch == null || epoch < 1) {
       throw StateError('The venue hub generation is unavailable.');
     }
+    final realtime = VenueHubRealtimeClient.instance;
+    await realtime.ensureConfigured(
+      scope: scope,
+      hubEpoch: epoch,
+      repository: this,
+    );
+    await realtime.waitUntilHubOnline();
     return _remoteHub.send(
       scope: scope,
       hubEpoch: epoch,
       eventType: eventType,
       payload: payload,
       businessTimestampUtc: businessTimestampUtc,
-      submit: (request) => _call('submitRemoteHubCommand', request),
+      showBusy: showBusy,
+      submit: (request) => showBusy
+          ? _call('submitRemoteHubCommand', request)
+          : _callUnblocked('submitRemoteHubCommand', request),
+      waitForStatus: (request) async {
+        try {
+          return await realtime.waitForCommand(
+            scope,
+            request['commandId'] as String,
+            timeout: const Duration(seconds: 12),
+          );
+        } on TimeoutException {
+          // RTDB is the normal low-latency path. A single protected long poll
+          // preserves a durable acknowledgement if its metadata publish was
+          // interrupted after Firestore already committed the result.
+          return showBusy
+              ? _call('waitForRemoteHubCommand', request)
+              : _callUnblocked('waitForRemoteHubCommand', request);
+        }
+      },
     );
   }
 
   Future<Map<String, Object?>> _call(
+    String action,
+    Map<String, Object?> data, {
+    String? firebaseIdToken,
+  }) async {
+    if (!_backgroundActions.contains(action)) {
+      return AppBusyState.guard(
+        () => _callUnblocked(action, data, firebaseIdToken: firebaseIdToken),
+      );
+    }
+    return _callUnblocked(action, data, firebaseIdToken: firebaseIdToken);
+  }
+
+  /// Creates an audited replacement print job for a live production ticket
+  /// and sends it to the manager-selected active device. The server rebuilds
+  /// the payload from its immutable ticket snapshot; the client cannot alter
+  /// item names, quantities, notes or routing area.
+  Future<void> reprintProductionTicket({
+    required VenueScope scope,
+    required String ticketId,
+    required String targetDeviceId,
+  }) {
+    return _call('reprintProductionTicket', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'ticketId': ticketId,
+      'targetDeviceId': targetDeviceId,
+    });
+  }
+
+  /// Queues an address-bearing delivery/collection note on a specifically
+  /// selected receipt printer. The server reconstructs every price and line
+  /// from the live order; the client supplies only the order and device IDs.
+  Future<void> printFulfilmentDeliveryNote({
+    required VenueScope scope,
+    required String orderId,
+    required String targetDeviceId,
+  }) async {
+    final hub = VenueHubClientRegistry.instance;
+    if (hub.requiresHub(scope)) {
+      await _sendHubEvent(
+        scope: scope,
+        eventType: 'receipt.requested',
+        payload: <String, Object?>{'orderId': orderId, 'isDeliveryNote': true},
+      );
+      return;
+    }
+    await _call('printFulfilmentDeliveryNote', {
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'orderId': orderId,
+      'targetDeviceId': targetDeviceId,
+      'requestId': 'delivery-note-${DateTime.now().microsecondsSinceEpoch}',
+    });
+  }
+
+  /// Executes the HTTP request after foreground-operation classification.
+  /// Keeping the overlay outside token acquisition also prevents rapid double
+  /// taps while Firebase is refreshing an expired identity token.
+  Future<Map<String, Object?>> _callUnblocked(
     String action,
     Map<String, Object?> data, {
     String? firebaseIdToken,
@@ -1819,18 +2552,21 @@ class ProductionCommandRepository {
       throw StateError('Could not obtain a Firebase sign-in token.');
     }
     final appCheckToken = await currentFirebaseAppCheckToken();
-    final projectId = DefaultFirebaseOptions.currentPlatform.projectId;
+    final projectId = FirebaseEnvironmentOptions.currentPlatform.projectId;
     final endpoint = Uri.https(
       'europe-west2-$projectId.cloudfunctions.net',
       'posApi',
     );
-    AppLogger.info('POS API $action: sending request.');
+    final recordRequest = action != 'uploadDeviceDiagnostics';
+    if (recordRequest) AppLogger.info('POS API $action: sending request.');
     final staffSession = StaffPinSessionStore.current;
     final requestData = <String, Object?>{
       ...data,
       if (staffSession != null) 'staffPinSessionId': staffSession.sessionId,
       if (staffSession != null)
         'staffPinSessionToken': staffSession.sessionToken,
+      if (staffSession != null)
+        'staffPinSessionDeviceId': staffSession.deviceId,
     };
     final response = await http.post(
       endpoint,
@@ -1841,7 +2577,9 @@ class ProductionCommandRepository {
       },
       body: jsonEncode({'action': action, 'data': requestData}),
     );
-    AppLogger.info('POS API $action: HTTP ${response.statusCode}.');
+    if (recordRequest) {
+      AppLogger.info('POS API $action: HTTP ${response.statusCode}.');
+    }
 
     final decoded = jsonDecode(response.body);
     if (decoded is! Map) {
@@ -1852,9 +2590,13 @@ class ProductionCommandRepository {
       final error = body['error'];
       if (error is Map) {
         final message = Map<String, Object?>.from(error)['message'];
-        throw StateError(
-          message is String ? message : 'The POS action failed.',
-        );
+        final displayMessage = message is String
+            ? message
+            : 'The POS action failed.';
+        if (isVenueHubDeviceAuthorizationIssue(displayMessage)) {
+          VenueHubAvailability.markOffline(displayMessage);
+        }
+        throw StateError(displayMessage);
       }
       throw StateError('The POS action failed (${response.statusCode}).');
     }
@@ -1865,6 +2607,30 @@ class ProductionCommandRepository {
         ? Map<String, Object?>.from(result)
         : const {};
   }
+
+  static const Set<String> _backgroundActions = {
+    'getOfflineHubBootstrap',
+    'uploadDeviceDiagnostics',
+    'getOfflineHubSnapshot',
+    'ingestOfflineHubEvents',
+    'getOfflineHubSyncCursor',
+    'reconcileOfflineHubClosedOrders',
+    'issueRealtimeHubSession',
+    'issueRealtimeBackupHubSession',
+    'promoteOfflineBackupHub',
+    'issueRealtimePosSession',
+    'issueRealtimePrinterSession',
+    'claimRemoteHubCommands',
+    'completeRemoteHubCommand',
+    'getTrustedTime',
+    'claimDevicePrintJob',
+    'completeDevicePrintJob',
+    'listVenuePinStaff',
+    'refreshStaffPinSession',
+    'submitRemoteHubCommand',
+    'waitForRemoteHubCommand',
+    'releaseDueFulfilmentTickets',
+  };
 
   List<String> _stringList(Object? value) => value is List
       ? value.whereType<String>().toList(growable: false)
@@ -1886,4 +2652,24 @@ class ProductionCommandRepository {
         )
         .toList(growable: false);
   }
+
+  Map<String, Object?> _draftHubLinePayload(
+    OrderLine line,
+    OrderChannel channel,
+    bool channelAvailabilityOverride,
+  ) => <String, Object?>{
+    'lineId': line.id,
+    'productId': line.productId,
+    'quantity': line.quantity,
+    'channel': channel.name,
+    if (channelAvailabilityOverride) 'channelAvailabilityOverride': true,
+    if (line.variantId?.trim().isNotEmpty == true)
+      'variantId': line.variantId!.trim(),
+    'modifierSelections': _modifierSelections(line),
+    if (line.itemNote.trim().isNotEmpty) 'itemNote': line.itemNote.trim(),
+    'courseId': line.courseId,
+    'courseName': line.courseName,
+    'courseSequence': line.courseSequence,
+    'courseReleasePolicy': line.courseReleasePolicy.name,
+  };
 }

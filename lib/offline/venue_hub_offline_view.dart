@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../core/trusted_clock.dart';
 import '../features/fulfilment/fulfilment_domain.dart';
 import '../features/pos/domain.dart';
 
@@ -15,6 +16,7 @@ class VenueHubOfflineView {
   final StreamController<List<PosOrder>> _orders =
       StreamController<List<PosOrder>>.broadcast();
   List<PosOrder> _currentOrders = const [];
+  Map<String, Map<String, _OfflineTicketState>> _ticketStatesByOrder = const {};
 
   void install(Map<String, Object?> snapshot) {
     _snapshot = Map<String, Object?>.unmodifiable(snapshot);
@@ -27,6 +29,7 @@ class VenueHubOfflineView {
   void clear() {
     _snapshot = null;
     _currentOrders = const [];
+    _ticketStatesByOrder = const {};
     _catalogueChanges.add(null);
     _orders.add(_currentOrders);
   }
@@ -80,14 +83,172 @@ class VenueHubOfflineView {
     }
   }
 
+  Stream<List<MenuCourse>> get courseStream async* {
+    yield courses;
+    await for (final _ in _catalogueChanges.stream) {
+      yield courses;
+    }
+  }
+
+  Stream<List<FulfilmentStaffMember>> get staffStream async* {
+    yield staff;
+    await for (final _ in _catalogueChanges.stream) {
+      yield staff;
+    }
+  }
+
   Stream<List<PosOrder>> get orderStream async* {
     yield _currentOrders;
     yield* _orders.stream;
   }
 
+  /// Production tickets reconstructed from the hub's durable order ledger.
+  /// Lines sent in the same operation share an exact `sentAt` timestamp and
+  /// are grouped by production area/course, matching the cloud ticket model.
+  Stream<List<OrderFlowOrder>> get orderFlowStream async* {
+    yield orderFlowOrders;
+    await for (final _ in _orders.stream) {
+      yield orderFlowOrders;
+    }
+  }
+
+  /// Forces time-sensitive held tickets to be recalculated without mutating
+  /// any order data. Used by the KDS clock when running without Firebase.
+  void refreshOrderFlow() => _orders.add(_currentOrders);
+
   List<PosOrder> get currentOrders => _currentOrders;
 
+  List<OrderFlowOrder> get orderFlowOrders {
+    final productVisibility = <String, bool>{
+      for (final product in products) product.id: product.showOnOrderFlow,
+    };
+    final tableNames = <String, String>{
+      for (final table in tables) table.id: table.label,
+    };
+    final staffNames = <String, String>{
+      for (final member in staff) member.id: member.name,
+    };
+    final result = <OrderFlowOrder>[];
+    for (final order in _currentOrders) {
+      final grouped = <String, List<OrderLine>>{};
+      for (final line in order.lines) {
+        if (!line.isSentToProduction ||
+            productVisibility[line.productId] == false) {
+          continue;
+        }
+        final sentAt = line.sentAt ?? order.openedAt;
+        final batchId =
+            line.productionBatchId ??
+            'legacy_${sentAt.toUtc().microsecondsSinceEpoch}';
+        final key = '$batchId:${line.productionArea.name}';
+        grouped.putIfAbsent(key, () => <OrderLine>[]).add(line);
+      }
+      for (final entry in grouped.entries) {
+        final lines = entry.value;
+        final first = lines.first;
+        final batchId =
+            first.productionBatchId ??
+            'legacy_${(first.sentAt ?? order.openedAt).toUtc().microsecondsSinceEpoch}';
+        final ticketId = 'offline_${batchId}_${first.productionArea.name}';
+        final savedState = _ticketStatesByOrder[order.id]?[ticketId];
+        final sentAt = first.sentAt ?? order.openedAt;
+        final leadMinutes = order.channel == OrderChannel.delivery
+            ? fulfilmentSettings.deliveryLeadMinutes
+            : fulfilmentSettings.collectionLeadMinutes;
+        final releaseAt =
+            order.channel == OrderChannel.dineIn || order.scheduledFor == null
+            ? sentAt
+            : order.scheduledFor!.subtract(Duration(minutes: leadMinutes));
+        final initiallyHeld =
+            order.channel != OrderChannel.dineIn &&
+            TrustedClock.instance.nowUtc().isBefore(releaseAt.toUtc());
+        final status =
+            savedState?.status ??
+            (initiallyHeld ? OrderFlowStatus.held : OrderFlowStatus.newOrder);
+        if (order.status == OrderStatus.closed && savedState == null) continue;
+        if (status.isTerminal) continue;
+        result.add(
+          OrderFlowOrder(
+            id: ticketId,
+            tenantId: order.tenantId,
+            venueId: order.venueId,
+            reference:
+                order.tabName ??
+                order.customerName ??
+                tableNames[order.tableId] ??
+                'Order',
+            productionArea: first.productionArea,
+            status: status,
+            ticketReleasedAt: releaseAt,
+            itemSummary: <String>[
+              for (final line in lines) ...<String>[
+                '${line.quantity} x ${line.productName}',
+                ...line.productionDetails.map((detail) => '  $detail'),
+              ],
+            ],
+            tableLabel: order.tableId == null
+                ? null
+                : tableNames[order.tableId] ?? order.tableId,
+            tabName: order.tabName,
+            createdByName: order.primaryWaiterName ?? 'Staff member',
+            hasAllergyAlert: lines.any(
+              (line) => line.productionDetails.any(
+                (detail) => detail.toLowerCase().contains('allerg'),
+              ),
+            ),
+            channel: order.channel,
+            customerName: order.customerName,
+            scheduledFor: order.scheduledFor,
+            courseName: first.courseName,
+            orderId: order.id,
+            assignedDriverName:
+                order.assignedDriverName ??
+                (order.assignedDriverId == null
+                    ? null
+                    : staffNames[order.assignedDriverId]),
+            driverDeclined:
+                order.fulfilmentStatus == FulfilmentStatus.driverDeclined,
+            isDelayed: savedState?.isDelayed ?? false,
+          ),
+        );
+      }
+    }
+    result.sort(
+      (left, right) => left.ticketReleasedAt.compareTo(right.ticketReleasedAt),
+    );
+    return result;
+  }
+
+  String get venueCountry =>
+      _snapshot?['venueCountry'] as String? ?? 'Kuzey Kıbrıs Türk Cumhuriyeti';
+
+  /// Current venue wall-clock offset captured by the signed hub snapshot.
+  /// This is used only for display; event ordering and elapsed timers always
+  /// compare UTC instants and therefore remain independent of time zones.
+  int get venueUtcOffsetMinutes =>
+      (_snapshot?['venueUtcOffsetMinutes'] as num?)?.toInt() ??
+      DateTime.now().timeZoneOffset.inMinutes;
+
+  Map<String, List<String>> get deliveryLocations {
+    final raw = _snapshot?['deliveryLocations'];
+    if (raw is! Map) return const <String, List<String>>{};
+    return <String, List<String>>{
+      for (final entry in raw.entries)
+        if (entry.key is String && entry.value is List)
+          entry.key as String: (entry.value as List).whereType<String>().toList(
+            growable: false,
+          ),
+    };
+  }
+
   void installOrders(List<Map<String, Object?>> values) {
+    _ticketStatesByOrder = <String, Map<String, _OfflineTicketState>>{
+      for (final value in values)
+        if (value['orderId'] is String)
+          value['orderId']! as String: _ticketStates(
+            value['productionTicketStates'],
+          ),
+    };
     _currentOrders = values
         .map(_order)
         .whereType<PosOrder>()
@@ -119,6 +280,19 @@ class VenueHubOfflineView {
             productionArea: area,
             trackStock: false,
             isSentToProduction: line['sent'] == true,
+            taxRateBasisPoints:
+                (line['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
+            taxRateName: line['taxRateName'] as String? ?? 'Zero Rate',
+            addedAt: DateTime.tryParse(
+              line['addedAtUtc'] as String? ?? '',
+            )?.toLocal(),
+            sentAt: DateTime.tryParse(
+              line['sentAtUtc'] as String? ?? '',
+            )?.toLocal(),
+            productionBatchId: line['sentEventId'] as String?,
+            persistedProductionDetails: (line['details'] as List? ?? const [])
+                .whereType<String>()
+                .toList(growable: false),
           );
         })
         .toList(growable: false);
@@ -163,6 +337,13 @@ class VenueHubOfflineView {
           ? OrderStatus.sent
           : OrderStatus.open,
       lines: lines,
+      splitFromOrderId: value['splitFromOrderId'] as String?,
+      splitSequence: (value['splitSequence'] as num?)?.toInt(),
+      openSplitOrderIds:
+          (value['openSplitOrderIds'] as List?)?.whereType<String>().toList(
+            growable: false,
+          ) ??
+          const <String>[],
       payments: payments,
       channel: switch (value['channel']) {
         'collection' => OrderChannel.collection,
@@ -173,6 +354,7 @@ class VenueHubOfflineView {
         'readyForCollection' => FulfilmentStatus.readyForCollection,
         'awaitingDriver' => FulfilmentStatus.awaitingDriver,
         'assigned' => FulfilmentStatus.assigned,
+        'driverDeclined' => FulfilmentStatus.driverDeclined,
         'outForDelivery' => FulfilmentStatus.outForDelivery,
         'collected' => FulfilmentStatus.collected,
         'delivered' => FulfilmentStatus.delivered,
@@ -184,10 +366,27 @@ class VenueHubOfflineView {
       customerName: value['customerName'] as String?,
       customerPhone: value['customerPhone'] as String?,
       deliveryAddress: value['deliveryAddress'] as String?,
+      deliveryAddressLabel: value['deliveryAddressLabel'] as String?,
+      deliveryLatitude: (value['deliveryLatitude'] as num?)?.toDouble(),
+      deliveryLongitude: (value['deliveryLongitude'] as num?)?.toDouble(),
+      serviceAreaId: value['serviceAreaId'] as String?,
+      serviceAreaName: value['serviceAreaName'] as String?,
+      deliveryFeeMinor: (value['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
       scheduledFor: DateTime.tryParse(
         value['scheduledForUtc'] as String? ?? '',
       )?.toLocal(),
     );
+  }
+
+  Map<String, _OfflineTicketState> _ticketStates(Object? raw) {
+    if (raw is! Map) return const <String, _OfflineTicketState>{};
+    return <String, _OfflineTicketState>{
+      for (final entry in raw.entries)
+        if (entry.key is String && entry.value is Map)
+          entry.key as String: _OfflineTicketState.fromJson(
+            Map<String, Object?>.from(entry.value as Map),
+          ),
+    };
   }
 
   DateTime _businessDate(DateTime utc) {
@@ -230,6 +429,7 @@ class VenueHubOfflineView {
             id: item['id'] as String,
             label: item['label'] as String,
             seats: (item['seats'] as num?)?.toInt() ?? 0,
+            sortOrder: (item['sortOrder'] as num?)?.toInt(),
           );
         })
         .toList(growable: false);
@@ -267,6 +467,9 @@ class VenueHubOfflineView {
                     area: address['area'] as String? ?? '',
                     addressLines: address['addressLines'] as String? ?? '',
                     notes: address['notes'] as String? ?? '',
+                    isDefault: address['isDefault'] as bool? ?? false,
+                    latitude: (address['latitude'] as num?)?.toDouble(),
+                    longitude: (address['longitude'] as num?)?.toDouble(),
                   );
                 })
                 .toList(growable: false),
@@ -282,10 +485,73 @@ class VenueHubOfflineView {
     return result;
   }
 
+  List<MenuCourse> get courses {
+    final raw = _snapshot?['courses'];
+    if (raw is! List) return const <MenuCourse>[];
+    final result = raw.whereType<Map>().map((item) {
+      return MenuCourse(
+        id: item['id'] as String,
+        name: item['name'] as String? ?? 'Course',
+        sequence: (item['sequence'] as num?)?.toInt() ?? 0,
+        releasePolicy: switch (item['releasePolicy']) {
+          'manual' => CourseReleasePolicy.manual,
+          'afterPreviousCollected' =>
+            CourseReleasePolicy.afterPreviousCollected,
+          'afterPreviousServed' => CourseReleasePolicy.afterPreviousServed,
+          _ => CourseReleasePolicy.immediate,
+        },
+        amberMinutes: (item['amberMinutes'] as num?)?.toInt() ?? 15,
+        redMinutes: (item['redMinutes'] as num?)?.toInt() ?? 25,
+        productionAreas: (item['productionAreas'] as List? ?? const [])
+            .whereType<String>()
+            .map(
+              (area) => switch (area) {
+                'bar' => ProductionArea.bar,
+                'dessert' => ProductionArea.dessert,
+                _ => ProductionArea.kitchen,
+              },
+            )
+            .toList(growable: false),
+      );
+    }).toList();
+    result.sort((left, right) => left.sequence.compareTo(right.sequence));
+    return result;
+  }
+
+  List<FulfilmentStaffMember> get staff {
+    final raw = _snapshot?['staff'];
+    if (raw is! List) return const <FulfilmentStaffMember>[];
+    final result = raw
+        .whereType<Map>()
+        .map(
+          (item) => FulfilmentStaffMember(
+            id: item['staffId'] as String? ?? '',
+            name: item['displayName'] as String? ?? 'Staff member',
+            roles: (item['roles'] as List? ?? const [])
+                .whereType<String>()
+                .toList(growable: false),
+            venueIds: (item['venueIds'] as List? ?? const [])
+                .whereType<String>()
+                .toList(growable: false),
+          ),
+        )
+        .where((item) => item.id.isNotEmpty)
+        .toList();
+    result.sort(
+      (left, right) =>
+          left.name.toLowerCase().compareTo(right.name.toLowerCase()),
+    );
+    return result;
+  }
+
   VenueFulfilmentSettings get fulfilmentSettings => VenueFulfilmentSettings(
     collectionEnabled: _snapshot?['collectionEnabled'] == true,
     deliveryEnabled: _snapshot?['deliveryEnabled'] == true,
     courseControlEnabled: _snapshot?['courseControlEnabled'] == true,
+    collectionLeadMinutes:
+        (_snapshot?['collectionLeadMinutes'] as num?)?.toInt() ?? 20,
+    deliveryLeadMinutes:
+        (_snapshot?['deliveryLeadMinutes'] as num?)?.toInt() ?? 20,
     collectionWindows: _serviceWindows(_snapshot?['collectionWindows']),
     deliveryWindows: _serviceWindows(_snapshot?['deliveryWindows']),
     serviceAreas: _serviceAreas(_snapshot?['serviceAreas']),
@@ -315,6 +581,10 @@ class VenueHubOfflineView {
           return ServiceArea(
             id: area['id'] as String? ?? '',
             name: area['name'] as String? ?? 'Area',
+            country:
+                area['country'] as String? ?? 'Kuzey Kıbrıs Türk Cumhuriyeti',
+            district: area['district'] as String? ?? '',
+            town: area['town'] as String? ?? area['name'] as String? ?? '',
             deliveryFeeMinor: (area['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
             minimumOrderMinor:
                 (area['minimumOrderMinor'] as num?)?.toInt() ?? 0,
@@ -486,4 +756,27 @@ class VenueHubOfflineView {
         })
         .toList(growable: false);
   }
+}
+
+class _OfflineTicketState {
+  const _OfflineTicketState({required this.status, required this.isDelayed});
+
+  factory _OfflineTicketState.fromJson(Map<String, Object?> value) =>
+      _OfflineTicketState(
+        status: switch (value['status']) {
+          'held' => OrderFlowStatus.held,
+          'preparing' => OrderFlowStatus.preparing,
+          'ready' => OrderFlowStatus.ready,
+          'collected' => OrderFlowStatus.collected,
+          'served' => OrderFlowStatus.served,
+          'cancelled' => OrderFlowStatus.cancelled,
+          'voided' => OrderFlowStatus.voided,
+          'newOrder' => OrderFlowStatus.newOrder,
+          _ => null,
+        },
+        isDelayed: value['isDelayed'] == true,
+      );
+
+  final OrderFlowStatus? status;
+  final bool isDelayed;
 }

@@ -57,4 +57,35 @@ void main() {
     expect(order.unsentStockReservedFor(product.id), 0);
     expect(order.canAddProduct(product), isTrue);
   });
+
+  test('pending production state clears only after every line is sent', () {
+    final pending = orderWithLines(const [
+      OrderLine(
+        id: 'line-1',
+        productId: 'stocked-product',
+        productName: 'Stocked product',
+        quantity: 1,
+        unitPriceMinor: 500,
+        productionArea: ProductionArea.kitchen,
+        trackStock: false,
+      ),
+    ]);
+    final sent = pending.copyWith(
+      lines: const [
+        OrderLine(
+          id: 'line-1',
+          productId: 'stocked-product',
+          productName: 'Stocked product',
+          quantity: 1,
+          unitPriceMinor: 500,
+          productionArea: ProductionArea.kitchen,
+          trackStock: false,
+          isSentToProduction: true,
+        ),
+      ],
+    );
+
+    expect(pending.hasPendingProductionLines, isTrue);
+    expect(sent.hasPendingProductionLines, isFalse);
+  });
 }

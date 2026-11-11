@@ -56,6 +56,7 @@ class WindowsPrintLine {
   final WindowsPrintTextAlignment alignment;
   final bool bold;
   final int fontSizeDelta;
+
   /// A validated square QR matrix encoded as rows of `0` and `1` characters.
   /// The native Windows layer draws this as graphics so printer font metrics
   /// cannot stretch or wrap the code.
@@ -69,8 +70,7 @@ class WindowsPrintLine {
     'bold': bold,
     'fontSizeDelta': fontSizeDelta,
     if (qrRows != null) 'qrRows': qrRows,
-    if (qrSizeMillimetres != null)
-      'qrSizeMillimetres': qrSizeMillimetres,
+    if (qrSizeMillimetres != null) 'qrSizeMillimetres': qrSizeMillimetres,
   };
 }
 
@@ -82,11 +82,16 @@ abstract interface class WindowsPrintQueue {
 
   Future<List<WindowsPrintQueueDevice>> installedPrinters();
 
-  Future<WindowsPrintQueueDevice?> selectedPrinter();
+  /// Returns the printer bound to [productionArea]. A missing area-specific
+  /// binding falls back to the device default for backwards compatibility.
+  Future<WindowsPrintQueueDevice?> selectedPrinter({String? productionArea});
 
-  Future<void> selectPrinter(WindowsPrintQueueDevice printer);
+  Future<void> selectPrinter(
+    WindowsPrintQueueDevice printer, {
+    String? productionArea,
+  });
 
-  Future<void> clearSelectedPrinter();
+  Future<void> clearSelectedPrinter({String? productionArea});
 
   Future<void> printText({
     required WindowsPrintQueueDevice printer,

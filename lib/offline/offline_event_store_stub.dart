@@ -64,5 +64,12 @@ class _UnsupportedOfflineEventStore implements OfflineEventStore {
   Future<void> quarantine(String eventId, String reason) async {}
 
   @override
+  Future<int> restoreQuarantinedCloudBaselines({
+    required String tenantId,
+    required String venueId,
+    required int hubEpoch,
+  }) async => 0;
+
+  @override
   Future<void> close() async {}
 }

@@ -37,6 +37,43 @@ void main() {
     },
   );
 
+  test('basket batch canonicalises every item at the hub', () async {
+    final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
+    final payload = await catalogue.validateEvent('order.itemsAdded', {
+      'orderId': 'order-a',
+      'items': [
+        {
+          'lineId': 'line-a',
+          'productId': 'steak',
+          'quantity': 1,
+          'variantId': 'large',
+          'modifierSelections': [
+            {'groupId': 'cooking', 'optionId': 'medium'},
+          ],
+          'unitPriceMinor': 1,
+        },
+        {
+          'lineId': 'line-b',
+          'productId': 'steak',
+          'quantity': 2,
+          'variantId': 'large',
+          'modifierSelections': [
+            {'groupId': 'cooking', 'optionId': 'medium'},
+          ],
+          'productName': 'Untrusted name',
+        },
+      ],
+    }, grant);
+
+    final items = payload['items'] as List<Map<String, Object?>>;
+    expect(items, hasLength(2));
+    expect(
+      items.every((item) => item['productName'] == 'Sirloin Steak'),
+      isTrue,
+    );
+    expect(items.every((item) => item['unitPriceMinor'] == 2800), isTrue);
+  });
+
   test('required modifier cannot be omitted', () async {
     final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
     expect(
@@ -65,6 +102,60 @@ void main() {
       'itemNote': '',
     }, grant);
     expect(payload['itemNote'], '');
+  });
+
+  test(
+    'grouped online modifier selections are canonicalised by the hub',
+    () async {
+      final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
+      final payload = await catalogue.validateEvent('order.itemAdded', {
+        'orderId': 'order-a',
+        'lineId': 'line-a',
+        'productId': 'steak',
+        'quantity': 1,
+        'variantId': 'large',
+        'modifierSelections': [
+          {
+            'groupId': 'cooking',
+            'optionIds': ['medium'],
+          },
+        ],
+      }, grant);
+
+      final selections = payload['modifierSelections'] as List<Object?>;
+      expect(selections, hasLength(1));
+      expect((selections.single as Map<String, Object?>)['optionId'], 'medium');
+      expect(payload['unitPriceMinor'], 2800);
+    },
+  );
+
+  test('delivery-only exclusion requires an explicit staff override', () async {
+    final snapshot = _snapshot();
+    final product =
+        (snapshot['products'] as List).first as Map<String, Object?>;
+    product['availableForDelivery'] = false;
+    final catalogue = VenueOfflineCatalogue.fromSnapshot(snapshot);
+    final basePayload = <String, Object?>{
+      'orderId': 'order-a',
+      'lineId': 'line-a',
+      'productId': 'steak',
+      'quantity': 1,
+      'channel': 'delivery',
+      'variantId': 'large',
+      'modifierSelections': [
+        {'groupId': 'cooking', 'optionId': 'medium'},
+      ],
+    };
+
+    await expectLater(
+      catalogue.validateEvent('order.itemAdded', basePayload, grant),
+      throwsA(isA<VenueOfflineCatalogueException>()),
+    );
+    final accepted = await catalogue.validateEvent('order.itemAdded', {
+      ...basePayload,
+      'channelAvailabilityOverride': true,
+    }, grant);
+    expect(accepted['channelAvailabilityOverride'], isTrue);
   });
 
   test('required printing fails closed without a matching route', () {

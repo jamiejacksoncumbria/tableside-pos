@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
 import '../../core/money.dart';
@@ -224,7 +225,7 @@ class _RefundsPageState extends ConsumerState<RefundsPage> {
           .fold<int>(0, (sum, item) => sum + item.quantity);
       remaining[line.id] = (line.quantity - refunded).clamp(0, line.quantity);
     }
-    final selection = await showDialog<_RefundRequest>(
+    final selection = await showAppDialog<_RefundRequest>(
       context: context,
       builder: (_) => _RefundDialog(bill: bill, remainingByLine: remaining),
     );
@@ -249,7 +250,7 @@ class _RefundsPageState extends ConsumerState<RefundsPage> {
         message: 'Refund ${result.refundNumber} recorded.',
       );
       if (result.stockAdjustmentRequired) {
-        final openStock = await showDialog<bool>(
+        final openStock = await showAppDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('Refund complete'),

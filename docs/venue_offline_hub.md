@@ -133,7 +133,7 @@ ordinary database-file copy alone.
 
 ## iOS POS test setup
 
-iOS 13 or later is supported as a POS client, not as a hub. Firebase options,
+iOS 15 or later is supported as a POS client, not as a hub. Firebase options,
 the CocoaPods file, camera permission and local-network permission are present
 in the project. A Mac with current Xcode and an Apple development team is still
 required to build and sign the app:
@@ -143,14 +143,16 @@ flutter pub get
 cd ios
 pod install
 cd ..
-flutter run -d <iphone-device-id> --dart-define=TABLESIDE_USE_FIREBASE=true
+flutter run -d <iphone-device-id> --dart-define-from-file=config/firebase-staging.json
 ```
 
-Impeller is currently disabled in `ios/Runner/Info.plist` so debug simulators
-without Metal passthrough can use Flutter's software renderer. This setting is
-also honoured by Xcode launches. Re-enable Impeller only after testing the
-supported physical devices and every simulator/virtualised Mac environment
-with Metal acceleration available.
+Current Flutter iOS builds require Metal/Impeller to display the application.
+When an iOS simulator runs in a virtualised or remote environment without
+Metal, Flutter starts Dart and can report a completed first frame, but its iOS
+engine deliberately uses a no-op rendering context and the display remains
+blank. Do not use `--enable-software-rendering` or disable Impeller. Enable GPU
+passthrough/Metal in the host, use a Metal-capable simulator host, or test on a
+physical iPhone.
 
 Open `ios/Runner.xcworkspace` in Xcode once, select the Runner target, choose
 the Apple team, and confirm the bundle identifier is

@@ -1,0 +1,150 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:tableside_pos/core/safe_dialog.dart';
+import 'package:tableside_pos/features/auth/staff_pin_gate.dart';
+
+void main() {
+  for (final size in const <Size>[
+    Size(320, 480),
+    Size(600, 360),
+    Size(600, 800),
+    Size(1280, 720),
+  ]) {
+    for (final brightness in Brightness.values) {
+      testWidgets(
+        'PIN pad fits ${size.width.toInt()}x${size.height.toInt()} in ${brightness.name} mode',
+        (tester) async {
+          tester.view.physicalSize = size;
+          tester.view.devicePixelRatio = 1;
+          tester.platformDispatcher.platformBrightnessTestValue = brightness;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          addTearDown(
+            tester.platformDispatcher.clearPlatformBrightnessTestValue,
+          );
+
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: ThemeData.light(),
+              darkTheme: ThemeData.dark(),
+              themeMode: ThemeMode.system,
+              home: _PinDialogHarness(),
+            ),
+          );
+          await tester.tap(find.text('Open PIN'));
+          await tester.pumpAndSettle();
+
+          expect(find.text('Enter PIN'), findsOneWidget);
+          expect(find.text('Cancel'), findsOneWidget);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  testWidgets(
+    'PIN pad remains laid out and submits on a compact touch screen',
+    (tester) async {
+      // A representative landscape POS tablet viewport. The keypad must fit
+      // without relying on vertical scrolling or clipping.
+      tester.view.physicalSize = const Size(600, 360);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(MaterialApp(home: _PinDialogHarness()));
+      await tester.tap(find.text('Open PIN'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      for (final digit in const ['1', '2', '3', '4', '5', '6']) {
+        await tester.tap(find.text(digit));
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+      }
+      await tester.pumpAndSettle();
+
+      expect(find.text('PIN: 123456'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'inline PIN gate can mount the authenticated interface immediately',
+    (tester) async {
+      tester.view.physicalSize = const Size(800, 480);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(MaterialApp(home: _InlinePinGateHarness()));
+
+      for (final digit in const ['1', '2', '3', '4', '5', '6']) {
+        await tester.tap(find.text(digit));
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+      }
+      await tester.pumpAndSettle();
+
+      expect(find.text('Venue interface loaded'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      semantics.dispose();
+    },
+  );
+}
+
+class _PinDialogHarness extends StatefulWidget {
+  @override
+  State<_PinDialogHarness> createState() => _PinDialogHarnessState();
+}
+
+class _PinDialogHarnessState extends State<_PinDialogHarness> {
+  String? _pin;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FilledButton(
+            onPressed: () async {
+              final pin = await showAppDialog<String>(
+                context: context,
+                builder: (_) => buildStaffPinDialogForTest(),
+              );
+              if (mounted) setState(() => _pin = pin);
+            },
+            child: const Text('Open PIN'),
+          ),
+          if (_pin != null) Text('PIN: $_pin'),
+        ],
+      ),
+    ),
+  );
+}
+
+class _InlinePinGateHarness extends StatefulWidget {
+  @override
+  State<_InlinePinGateHarness> createState() => _InlinePinGateHarnessState();
+}
+
+class _InlinePinGateHarnessState extends State<_InlinePinGateHarness> {
+  bool _unlocked = false;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: Center(
+      child: _unlocked
+          ? const Text('Venue interface loaded')
+          : ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 390),
+              child: buildStaffPinPanelForTest(
+                onCancel: () {},
+                onSubmitted: (_) => setState(() => _unlocked = true),
+              ),
+            ),
+    ),
+  );
+}

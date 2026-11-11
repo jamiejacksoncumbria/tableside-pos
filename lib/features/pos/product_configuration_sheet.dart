@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/money.dart';
+import '../../core/safe_modal_bottom_sheet.dart';
 import 'domain.dart';
 
 /// Lets staff choose a product variant, reusable option groups and an
@@ -12,8 +14,10 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
   required List<MenuModifierGroup> availableGroups,
   required List<MenuProduct> availableProducts,
   required String currencyCode,
+  Future<void> Function(ProductConfigurationSelection selection)? onAdd,
 }) async {
   final note = TextEditingController();
+  final noteFocus = FocusNode(debugLabel: 'Product item note');
   final groupsById = <String, MenuModifierGroup>{
     for (final group in availableGroups) group.id: group,
   };
@@ -45,9 +49,11 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
     for (final group in groups) group.id: <String>{},
   };
   String? validationMessage;
+  var submitting = false;
+  var closingAfterSuccess = false;
 
   try {
-    return await showModalBottomSheet<ProductConfigurationSelection>(
+    return await showAppModalBottomSheet<ProductConfigurationSelection>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
@@ -92,212 +98,300 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
             padding: EdgeInsets.only(
               bottom: MediaQuery.viewInsetsOf(context).bottom,
             ),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 720),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 18, 12, 10),
-                    child: Row(
-                      children: [
-                        Expanded(
+            child: AnimatedOpacity(
+              opacity: closingAfterSuccess ? 0 : 1,
+              duration: const Duration(milliseconds: 240),
+              curve: Curves.easeInCubic,
+              child: AnimatedScale(
+                scale: closingAfterSuccess ? .72 : 1,
+                duration: const Duration(milliseconds: 240),
+                curve: Curves.easeInBack,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 720),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 18, 12, 10),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    product.name,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleLarge,
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    'Configure this item before adding it to the order.',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodySmall,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'Cancel',
+                              onPressed: submitting
+                                  ? null
+                                  : () => Navigator.pop(sheetContext),
+                              icon: const Icon(Icons.close_rounded),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      Flexible(
+                        child: SingleChildScrollView(
+                          padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
+                              if (hasUnavailableVariant)
+                                const _ConfigurationNotice(
+                                  message:
+                                      'This product has no available variants. Ask a manager to update the menu before selling it.',
+                                  isError: true,
+                                )
+                              else if (variants.isNotEmpty) ...[
+                                Text(
+                                  'Size / variant *',
+                                  style: Theme.of(context).textTheme.titleSmall,
+                                ),
+                                const SizedBox(height: 4),
+                                const Text('Choose one option.'),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 8,
+                                  children: [
+                                    for (final variant in variants)
+                                      ChoiceChip(
+                                        label: Text(
+                                          _priceChoiceLabel(
+                                            variant.name,
+                                            variant.priceDeltaMinor,
+                                            currencyCode,
+                                          ),
+                                        ),
+                                        selected:
+                                            selectedVariant?.id == variant.id,
+                                        onSelected: (_) => setSheetState(() {
+                                          selectedVariant = variant;
+                                          validationMessage = null;
+                                        }),
+                                      ),
+                                  ],
+                                ),
+                                const SizedBox(height: 20),
+                              ],
+                              if (missingGroupCount > 0)
+                                const _ConfigurationNotice(
+                                  message:
+                                      'One or more product option groups are unavailable. Ask a manager to review this product.',
+                                  isError: true,
+                                ),
+                              for (final group in groups) ...[
+                                _GroupChooser(
+                                  group: group,
+                                  unavailableOptionIds: {
+                                    for (final option in group.options)
+                                      if (!componentsAvailable(
+                                        option.stockComponents,
+                                      ))
+                                        option.id,
+                                  },
+                                  selectedOptionIds:
+                                      selectedOptionIds[group.id] ?? const {},
+                                  currencyCode: currencyCode,
+                                  onChanged: (optionId, isSelected) {
+                                    setSheetState(() {
+                                      final ids = selectedOptionIds[group.id]!;
+                                      if (isSelected) {
+                                        if (ids.length <
+                                            group.maximumSelections) {
+                                          ids.add(optionId);
+                                        }
+                                      } else {
+                                        ids.remove(optionId);
+                                      }
+                                      validationMessage = null;
+                                    });
+                                  },
+                                ),
+                                const SizedBox(height: 20),
+                              ],
                               Text(
-                                product.name,
-                                style: Theme.of(context).textTheme.titleLarge,
+                                'Item note',
+                                style: Theme.of(context).textTheme.titleSmall,
                               ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'Configure this item before adding it to the order.',
-                                style: Theme.of(context).textTheme.bodySmall,
+                              const SizedBox(height: 4),
+                              TextField(
+                                controller: note,
+                                focusNode: noteFocus,
+                                minLines: 1,
+                                maxLines: 3,
+                                maxLength: 500,
+                                textCapitalization:
+                                    TextCapitalization.sentences,
+                                decoration: InputDecoration(
+                                  hintText:
+                                      'Optional instruction for kitchen or bar, for example “allergy discussed”.',
+                                  suffixIcon: IconButton(
+                                    tooltip: 'Open keyboard for item note',
+                                    onPressed: () {
+                                      FocusScope.of(
+                                        context,
+                                      ).requestFocus(noteFocus);
+                                      // Android can ignore TextInput.show when it
+                                      // arrives in the same frame as the focus
+                                      // change. Wait until the TextField owns the
+                                      // input connection before asking for IME.
+                                      WidgetsBinding.instance
+                                          .addPostFrameCallback((_) {
+                                            if (noteFocus.hasFocus) {
+                                              SystemChannels.textInput
+                                                  .invokeMethod<void>(
+                                                    'TextInput.show',
+                                                  );
+                                            }
+                                          });
+                                    },
+                                    icon: const Icon(
+                                      Icons.keyboard_alt_outlined,
+                                    ),
+                                  ),
+                                ),
+                                onChanged: (_) {
+                                  if (validationMessage != null) {
+                                    setSheetState(
+                                      () => validationMessage = null,
+                                    );
+                                  }
+                                },
                               ),
+                              if (validationMessage != null) ...[
+                                const SizedBox(height: 8),
+                                _ConfigurationNotice(
+                                  message: validationMessage!,
+                                  isError: true,
+                                ),
+                              ],
                             ],
                           ),
                         ),
-                        IconButton(
-                          tooltip: 'Cancel',
-                          onPressed: () => Navigator.pop(sheetContext),
-                          icon: const Icon(Icons.close_rounded),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Divider(height: 1),
-                  Flexible(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (hasUnavailableVariant)
-                            const _ConfigurationNotice(
-                              message:
-                                  'This product has no available variants. Ask a manager to update the menu before selling it.',
-                              isError: true,
-                            )
-                          else if (variants.isNotEmpty) ...[
-                            Text(
-                              'Size / variant *',
-                              style: Theme.of(context).textTheme.titleSmall,
-                            ),
-                            const SizedBox(height: 4),
-                            const Text('Choose one option.'),
-                            const SizedBox(height: 8),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                for (final variant in variants)
-                                  ChoiceChip(
-                                    label: Text(
-                                      _priceChoiceLabel(
-                                        variant.name,
-                                        variant.priceDeltaMinor,
-                                        currencyCode,
-                                      ),
-                                    ),
-                                    selected: selectedVariant?.id == variant.id,
-                                    onSelected: (_) => setSheetState(() {
-                                      selectedVariant = variant;
-                                      validationMessage = null;
-                                    }),
-                                  ),
-                              ],
-                            ),
-                            const SizedBox(height: 20),
-                          ],
-                          if (missingGroupCount > 0)
-                            const _ConfigurationNotice(
-                              message:
-                                  'One or more product option groups are unavailable. Ask a manager to review this product.',
-                              isError: true,
-                            ),
-                          for (final group in groups) ...[
-                            _GroupChooser(
-                              group: group,
-                              unavailableOptionIds: {
-                                for (final option in group.options)
-                                  if (!componentsAvailable(
-                                    option.stockComponents,
-                                  ))
-                                    option.id,
-                              },
-                              selectedOptionIds:
-                                  selectedOptionIds[group.id] ?? const {},
-                              currencyCode: currencyCode,
-                              onChanged: (optionId, isSelected) {
-                                setSheetState(() {
-                                  final ids = selectedOptionIds[group.id]!;
-                                  if (isSelected) {
-                                    if (ids.length < group.maximumSelections) {
-                                      ids.add(optionId);
-                                    }
-                                  } else {
-                                    ids.remove(optionId);
-                                  }
-                                  validationMessage = null;
-                                });
-                              },
-                            ),
-                            const SizedBox(height: 20),
-                          ],
-                          Text(
-                            'Item note',
-                            style: Theme.of(context).textTheme.titleSmall,
-                          ),
-                          const SizedBox(height: 4),
-                          TextField(
-                            controller: note,
-                            minLines: 1,
-                            maxLines: 3,
-                            maxLength: 500,
-                            textCapitalization: TextCapitalization.sentences,
-                            decoration: const InputDecoration(
-                              hintText:
-                                  'Optional instruction for kitchen or bar, for example “allergy discussed”.',
-                            ),
-                            onChanged: (_) {
-                              if (validationMessage != null) {
-                                setSheetState(() => validationMessage = null);
-                              }
-                            },
-                          ),
-                          if (validationMessage != null) ...[
-                            const SizedBox(height: 8),
-                            _ConfigurationNotice(
-                              message: validationMessage!,
-                              isError: true,
-                            ),
-                          ],
-                        ],
                       ),
-                    ),
-                  ),
-                  const Divider(height: 1),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Total: ${formatMoney(totalMinor, currencyCode: currencyCode)}',
-                            style: Theme.of(context).textTheme.titleMedium,
-                          ),
+                      const Divider(height: 1),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                'Total: ${formatMoney(totalMinor, currencyCode: currencyCode)}',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                            ),
+                            FilledButton.icon(
+                              onPressed:
+                                  hasUnavailableVariant ||
+                                      missingGroupCount > 0 ||
+                                      totalMinor < 0 ||
+                                      submitting
+                                  ? null
+                                  : () async {
+                                      if (variants.isNotEmpty &&
+                                          selectedVariant == null) {
+                                        setSheetState(
+                                          () => validationMessage =
+                                              'Choose a size or variant.',
+                                        );
+                                        return;
+                                      }
+                                      for (final group in groups) {
+                                        final selected =
+                                            selectedOptionIds[group.id]
+                                                ?.length ??
+                                            0;
+                                        if (!group.isAvailable) {
+                                          setSheetState(
+                                            () => validationMessage =
+                                                '${group.name} is currently unavailable.',
+                                          );
+                                          return;
+                                        }
+                                        if (selected <
+                                                group.minimumSelections ||
+                                            selected >
+                                                group.maximumSelections) {
+                                          setSheetState(
+                                            () => validationMessage =
+                                                '${group.name}: choose ${_selectionRequirement(group)}.',
+                                          );
+                                          return;
+                                        }
+                                      }
+                                      final selection =
+                                          ProductConfigurationSelection(
+                                            variant: selectedVariant,
+                                            modifiers: selectedModifiers,
+                                            itemNote: note.text.trim(),
+                                          );
+                                      if (onAdd == null) {
+                                        Navigator.pop(sheetContext, selection);
+                                        return;
+                                      }
+                                      setSheetState(() {
+                                        submitting = true;
+                                        validationMessage = null;
+                                      });
+                                      try {
+                                        await onAdd(selection);
+                                        if (!sheetContext.mounted) return;
+                                        setSheetState(
+                                          () => closingAfterSuccess = true,
+                                        );
+                                        await Future<void>.delayed(
+                                          const Duration(milliseconds: 240),
+                                        );
+                                        if (sheetContext.mounted) {
+                                          Navigator.pop(
+                                            sheetContext,
+                                            selection,
+                                          );
+                                        }
+                                      } on Object catch (error) {
+                                        if (!sheetContext.mounted) return;
+                                        setSheetState(() {
+                                          submitting = false;
+                                          validationMessage =
+                                              'The item was not added. $error';
+                                        });
+                                      }
+                                    },
+                              icon: submitting
+                                  ? const SizedBox.square(
+                                      dimension: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.add_shopping_cart_rounded),
+                              label: Text(
+                                submitting ? 'Adding…' : 'Add to order',
+                              ),
+                            ),
+                          ],
                         ),
-                        FilledButton.icon(
-                          onPressed:
-                              hasUnavailableVariant ||
-                                  missingGroupCount > 0 ||
-                                  totalMinor < 0
-                              ? null
-                              : () {
-                                  if (variants.isNotEmpty &&
-                                      selectedVariant == null) {
-                                    setSheetState(
-                                      () => validationMessage =
-                                          'Choose a size or variant.',
-                                    );
-                                    return;
-                                  }
-                                  for (final group in groups) {
-                                    final selected =
-                                        selectedOptionIds[group.id]?.length ??
-                                        0;
-                                    if (!group.isAvailable) {
-                                      setSheetState(
-                                        () => validationMessage =
-                                            '${group.name} is currently unavailable.',
-                                      );
-                                      return;
-                                    }
-                                    if (selected < group.minimumSelections ||
-                                        selected > group.maximumSelections) {
-                                      setSheetState(
-                                        () => validationMessage =
-                                            '${group.name}: choose ${_selectionRequirement(group)}.',
-                                      );
-                                      return;
-                                    }
-                                  }
-                                  Navigator.pop(
-                                    sheetContext,
-                                    ProductConfigurationSelection(
-                                      variant: selectedVariant,
-                                      modifiers: selectedModifiers,
-                                      itemNote: note.text.trim(),
-                                    ),
-                                  );
-                                },
-                          icon: const Icon(Icons.add_shopping_cart_rounded),
-                          label: const Text('Add to order'),
-                        ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
           );
@@ -305,6 +399,7 @@ Future<ProductConfigurationSelection?> showProductConfigurationSheet({
       ),
     );
   } finally {
+    noteFocus.dispose();
     note.dispose();
   }
 }

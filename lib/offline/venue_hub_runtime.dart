@@ -1,12 +1,16 @@
 import 'dart:async';
 
+import 'package:firebase_core/firebase_core.dart';
+
 import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
 import '../core/trusted_clock.dart';
 import '../data/production_command_repository.dart';
 import 'offline_event.dart';
 import 'offline_event_ledger.dart';
+import 'offline_order_projection.dart';
 import 'venue_hub_bootstrap.dart';
+import 'venue_hub_availability.dart';
 import 'venue_hub_cloud_sync.dart';
 import 'venue_hub_command_processor.dart';
 import 'venue_hub_device_credential.dart';
@@ -14,6 +18,7 @@ import 'venue_hub_offline_pin.dart';
 import 'venue_hub_server.dart';
 import 'venue_hub_staff_sessions.dart';
 import 'venue_hub_print_queue.dart';
+import 'venue_hub_realtime_presence.dart';
 import 'venue_hub_platform.dart';
 import 'venue_hub_offline_view.dart';
 import 'venue_offline_catalogue.dart';
@@ -57,19 +62,89 @@ class VenueHubRuntime {
       StreamController<VenueHubRuntimeStatus>.broadcast();
   VenueHubCloudSync? _sync;
   VenueHubPrintQueue? _printQueue;
+  VenueHubRealtimePresence? _realtimePresence;
+  void Function()? _realtimeConnectedListener;
+  StreamSubscription<void>? _realtimeSignalSubscription;
+  StreamSubscription<bool>? _realtimeAuthoritySubscription;
+  Timer? _realtimeReconnectTimer;
   Future<void> Function(Map<String, Object?> snapshot)? _installFreshSnapshot;
+  Future<void> Function()? _refreshAuthorityNow;
   StreamSubscription? _pendingSubscription;
   Timer? _authorityTimer;
-  Timer? _remoteCommandTimer;
+  Timer? _postCommitRetryTimer;
+  Future<void>? _stopOperation;
+  // Invalidates asynchronous work captured by an older hub generation. A
+  // cloud refresh may already be in flight when a manager promotes a backup;
+  // cancelling its Timer does not cancel that Future. Without this token the
+  // old Future can return later and stop the newly-authorised runtime.
+  int _lifecycleGeneration = 0;
   VenueHubRuntimeStatus _status = const VenueHubRuntimeStatus(
     state: VenueHubRuntimeState.stopped,
     pendingEvents: 0,
   );
   VenueScope? _activeScope;
+  VenueHubBootstrap? _activeBootstrap;
+  Map<String, Object?>? _localClientSnapshot;
+  List<Map<String, Object?>> _localClientOrders = const [];
+  String? _cloudSynchronizationIssue;
 
   VenueHubRuntimeStatus get status => _status;
   Stream<VenueHubRuntimeStatus> get statuses => _statuses.stream;
   VenueScope? get activeScope => _activeScope;
+  VenueHubBootstrap? get activeBootstrap => _activeBootstrap;
+
+  /// Waits for this process's hub listener to become usable.
+  ///
+  /// The active scope is installed before the HTTPS listener has finished
+  /// binding. PIN entry can therefore race hub startup. Hub hosts must use the
+  /// loopback endpoint once it is ready instead of being mistaken for a remote
+  /// POS and routing their own commands through Firebase.
+  Future<Uri> waitForLocalEndpoint(
+    VenueScope scope, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    Uri? readyEndpoint() {
+      final current = _status;
+      if (_activeScope == scope &&
+          (current.state == VenueHubRuntimeState.ready ||
+              current.state == VenueHubRuntimeState.degraded) &&
+          current.endpoint != null) {
+        return current.endpoint;
+      }
+      return null;
+    }
+
+    final current = readyEndpoint();
+    if (current != null) return current;
+    if (_status.state == VenueHubRuntimeState.failed) {
+      throw StateError(
+        _status.message ?? 'The venue hub local service failed to start.',
+      );
+    }
+    try {
+      final resolved = await statuses
+          .firstWhere(
+            (value) =>
+                value.state == VenueHubRuntimeState.failed ||
+                (_activeScope == scope &&
+                    (value.state == VenueHubRuntimeState.ready ||
+                        value.state == VenueHubRuntimeState.degraded) &&
+                    value.endpoint != null),
+          )
+          .timeout(timeout);
+      if (resolved.state == VenueHubRuntimeState.failed) {
+        throw StateError(
+          resolved.message ?? 'The venue hub local service failed to start.',
+        );
+      }
+      return resolved.endpoint!;
+    } on TimeoutException {
+      throw StateError(
+        'This device is the venue hub, but its local service did not become ready. '
+        'Check Venue offline hub settings before processing orders.',
+      );
+    }
+  }
 
   Future<void> start({
     required VenueScope scope,
@@ -87,6 +162,8 @@ class VenueHubRuntime {
         _status.state != VenueHubRuntimeState.failed) {
       throw StateError('The venue hub is already starting or running.');
     }
+    final lifecycleGeneration = ++_lifecycleGeneration;
+    _cloudSynchronizationIssue = null;
     _emit(
       const VenueHubRuntimeStatus(
         state: VenueHubRuntimeState.starting,
@@ -141,17 +218,23 @@ class VenueHubRuntime {
       var catalogue = VenueOfflineCatalogue.fromSnapshot(snapshot);
       String staffDisplayName(String staffId) {
         final rawStaff = snapshot['staff'];
-        if (rawStaff is! List) return staffId;
+        if (rawStaff is! List) return 'Staff member';
         for (final raw in rawStaff.whereType<Map>()) {
           if (raw['staffId'] == staffId) {
             final name = raw['displayName'];
             if (name is String && name.trim().isNotEmpty) return name.trim();
           }
         }
-        return staffId;
+        // Never leak a Firebase UID onto a customer or production ticket.
+        // A refreshed hub snapshot normally supplies the staff name; this
+        // neutral fallback is safer and clearer if an old snapshot does not.
+        return 'Staff member';
       }
 
       VenueHubOfflineView.instance.install(snapshot);
+      _localClientSnapshot = Map<String, Object?>.unmodifiable(
+        Map<String, Object?>.from(snapshot)..remove('staff'),
+      );
       final sessions = VenueHubStaffSessionAuthority(
         tenantId: scope.tenantId,
         venueId: scope.venueId,
@@ -173,7 +256,24 @@ class VenueHubRuntime {
         catalogueProvider: () => catalogue,
         ledger: _ledger,
       );
-      await orderBook.rebuild();
+      await orderBook.installCloudBaselines(snapshot);
+      Future<Map<String, OfflineOrderProjection>> publishOrders() async {
+        final orders = await orderBook.rebuild();
+        // The order book is the durable authority, while the offline view is
+        // the live source consumed by the hub's POS widgets. Publishing every
+        // rebuild keeps table balances, named tabs and closed-order state in
+        // sync immediately without waiting for a cloud snapshot refresh.
+        final serialized = orders.values
+            .map((order) => order.toJson())
+            .toList(growable: false);
+        _localClientOrders = List<Map<String, Object?>>.unmodifiable(
+          serialized.map((value) => Map<String, Object?>.from(value)),
+        );
+        VenueHubOfflineView.instance.installOrders(serialized);
+        return orders;
+      }
+
+      await publishOrders();
       final printQueue = VenueHubPrintQueue(
         tenantId: scope.tenantId,
         venueId: scope.venueId,
@@ -184,6 +284,44 @@ class VenueHubRuntime {
       await printQueue.initialize();
       _printQueue = printQueue;
       _activeScope = scope;
+      _activeBootstrap = bootstrap;
+      final pendingPostCommitEffects = <String, Future<void> Function()>{};
+      var postCommitRetryRunning = false;
+
+      // A sale is accepted as soon as its immutable event is committed to the
+      // encrypted ledger. Printing and live-view publication happen after that
+      // durability boundary and must never turn an accepted payment/order into
+      // a rejection. Their operations are idempotent, so transient failures can
+      // be retried safely without duplicating a physical ticket.
+      Future<void> retryPostCommitEffects() async {
+        if (postCommitRetryRunning || pendingPostCommitEffects.isEmpty) return;
+        postCommitRetryRunning = true;
+        try {
+          for (final entry in pendingPostCommitEffects.entries.toList()) {
+            try {
+              await entry.value();
+              pendingPostCommitEffects.remove(entry.key);
+              AppLogger.info(
+                'Recovered post-commit effects for offline event ${entry.key}.',
+              );
+            } catch (error, stackTrace) {
+              AppLogger.error(
+                'Retry post-commit effects for offline event ${entry.key}',
+                error,
+                stackTrace,
+              );
+            }
+          }
+        } finally {
+          postCommitRetryRunning = false;
+        }
+      }
+
+      _postCommitRetryTimer?.cancel();
+      _postCommitRetryTimer = Timer.periodic(
+        const Duration(seconds: 3),
+        (_) => unawaited(retryPostCommitEffects()),
+      );
       Future<void> installFreshSnapshot(Map<String, Object?> refreshed) async {
         if (refreshed['hubEpoch'] != bootstrap.hubEpoch ||
             refreshed['version'] is! int) {
@@ -195,6 +333,11 @@ class VenueHubRuntime {
         await pins.installSnapshot(refreshed);
         catalogue = refreshedCatalogue;
         snapshot = Map<String, Object?>.from(refreshed);
+        _localClientSnapshot = Map<String, Object?>.unmodifiable(
+          Map<String, Object?>.from(snapshot)..remove('staff'),
+        );
+        await orderBook.installCloudBaselines(snapshot);
+        await publishOrders();
         printQueue.installSnapshot(snapshot);
         VenueHubOfflineView.instance.install(snapshot);
         await _ledger.saveSnapshot(
@@ -215,36 +358,90 @@ class VenueHubRuntime {
         authorizeStaff: sessions.authorize,
         validateEvent: catalogue.validateEvent,
         commitEvent: (draft, epoch) async {
+          OfflineOrderProjection? orderBeforeAdjustment;
+          OfflineProjectedLine? removedProductionLine;
+          if (draft.type == 'order.lineAdjusted' &&
+              draft.payload['operation'] == 'remove') {
+            final orderId = draft.payload['orderId'] as String;
+            orderBeforeAdjustment = await orderBook.order(orderId);
+            final lineId = draft.payload['lineId'] as String;
+            final line = orderBeforeAdjustment.lines[lineId];
+            if (line?.sent == true) removedProductionLine = line;
+          }
           final event = await orderBook.commit(draft, epoch);
-          if (event.type == 'order.sent') {
-            final orderId = event.payload['orderId'] as String;
-            final lineIds = (event.payload['lineIds'] as List)
-                .whereType<String>()
-                .toList();
-            await printQueue.enqueueProduction(
-              order: await orderBook.order(orderId),
-              lineIds: lineIds,
-              printRequired: event.payload['printRequired'] == true,
-              createdByName: staffDisplayName(event.staffId),
-            );
-          } else if (event.type == 'order.closed') {
-            final orderId = event.payload['orderId'] as String;
-            await printQueue.enqueueReceipt(
-              order: await orderBook.order(orderId),
-              printRequired: event.payload['printReceipt'] == true,
-            );
-          } else if (event.type == 'receipt.requested') {
-            final orderId = event.payload['orderId'] as String;
-            await printQueue.enqueueReceipt(
-              order: await orderBook.order(orderId),
-              printRequired: true,
-              isPreReceipt: true,
-              jobSuffix: event.id,
+          Future<void> applyPostCommitEffects() async {
+            if (event.type == 'order.sent') {
+              final orderId = event.payload['orderId'] as String;
+              final lineIds = (event.payload['lineIds'] as List)
+                  .whereType<String>()
+                  .toList();
+              await printQueue.enqueueProduction(
+                order: await orderBook.order(orderId),
+                lineIds: lineIds,
+                printRequired: event.payload['printRequired'] == true,
+                createdByName: staffDisplayName(event.staffId),
+              );
+            } else if (event.type == 'order.closed') {
+              final orderId = event.payload['orderId'] as String;
+              await printQueue.enqueueReceipt(
+                order: await orderBook.order(orderId),
+                printRequired: event.payload['printReceipt'] == true,
+              );
+            } else if (event.type == 'receipt.requested') {
+              final orderId = event.payload['orderId'] as String;
+              final isDeliveryNote = event.payload['isDeliveryNote'] == true;
+              final isPartPayment = event.payload['isPartPayment'] == true;
+              await printQueue.enqueueReceipt(
+                order: await orderBook.order(orderId),
+                printRequired: true,
+                isPreReceipt: !isDeliveryNote && !isPartPayment,
+                isPartPayment: isPartPayment,
+                isDeliveryNote: isDeliveryNote,
+                jobSuffix: event.id,
+              );
+            } else if (event.type == 'payment.batchRecorded' &&
+                event.payload['printReceipt'] == true) {
+              final orderId = event.payload['orderId'] as String;
+              final order = await orderBook.order(orderId);
+              final rawPayments = event.payload['payments'];
+              final hasNewPayment =
+                  rawPayments is List && rawPayments.isNotEmpty;
+              if (order.isClosed || hasNewPayment) {
+                await printQueue.enqueueReceipt(
+                  order: order,
+                  printRequired: true,
+                  isPartPayment: !order.isClosed,
+                  jobSuffix: event.id,
+                );
+              }
+            } else if (event.type == 'order.lineAdjusted' &&
+                removedProductionLine != null &&
+                orderBeforeAdjustment != null) {
+              await printQueue.enqueueCancellation(
+                order: orderBeforeAdjustment,
+                line: removedProductionLine,
+                reason: event.payload['reason'] as String,
+                createdByName: staffDisplayName(event.staffId),
+                eventId: event.id,
+              );
+            }
+            await publishOrders();
+          }
+
+          try {
+            await applyPostCommitEffects();
+          } catch (error, stackTrace) {
+            pendingPostCommitEffects[event.id] = applyPostCommitEffects;
+            AppLogger.error(
+              'Defer post-commit effects for accepted offline event ${event.id}',
+              error,
+              stackTrace,
             );
           }
           return event;
         },
       );
+      Future<void> Function()? refreshAuthorityCallback;
       final endpoint = await _server.start(
         VenueHubServerConfiguration(
           bindAddress: bindAddress,
@@ -297,34 +494,470 @@ class VenueHubRuntime {
                 printed: printed,
                 failureReason: failureReason,
               ),
+          managePrintJob:
+              (action, jobId, reason, clientDeviceId, staffId) async {
+                await _ledger.commit(
+                  OfflineEventDraft(
+                    tenantId: scope.tenantId,
+                    venueId: scope.venueId,
+                    deviceId: clientDeviceId,
+                    staffId: staffId,
+                    type: 'security.printQueueManaged',
+                    payload: <String, Object?>{
+                      'action': action,
+                      'jobId': jobId,
+                      'reason': ?reason,
+                    },
+                  ),
+                  hubEpoch: bootstrap.hubEpoch,
+                );
+                switch (action) {
+                  case 'retry':
+                    await printQueue.retry(jobId);
+                    return const <String, Object?>{'updated': true};
+                  case 'reprint':
+                    await printQueue.reprint(jobId);
+                    return const <String, Object?>{'updated': true};
+                  case 'cancel':
+                    return <String, Object?>{
+                      'cancelledJobIds': await printQueue.cancel(
+                        jobId,
+                        reason ?? 'Cleared by manager.',
+                      ),
+                    };
+                  default:
+                    throw StateError(
+                      'That local print action is not supported.',
+                    );
+                }
+              },
           readClientSnapshot: () async =>
               Map<String, Object?>.from(snapshot)..remove('staff'),
-          readOrders: () async => (await orderBook.rebuild()).values
+          refreshSnapshot: () async {
+            final refresh = refreshAuthorityCallback;
+            if (refresh == null) {
+              throw StateError('The venue catalogue refresh is not ready.');
+            }
+            await refresh();
+          },
+          readPrintJobs: (statuses, sinceUtc, limit) async {
+            final filtered = printQueue.visibleJobs.where((job) {
+              if (statuses != null && !statuses.contains(job['status'])) {
+                return false;
+              }
+              if (sinceUtc != null) {
+                final createdAt = DateTime.tryParse(
+                  job['createdAtUtc'] as String? ?? '',
+                );
+                if (createdAt == null || createdAt.isBefore(sinceUtc)) {
+                  return false;
+                }
+              }
+              return true;
+            });
+            return (limit == null ? filtered : filtered.take(limit)).toList(
+              growable: false,
+            );
+          },
+          readOrders: () async => (await publishOrders()).values
               .map((order) => order.toJson())
               .toList(growable: false),
           allowedOrigins: allowedOrigins,
         ),
       );
+      Future<Set<String>> uploadEvents(
+        List<OfflineEvent> events, {
+        bool projectionRecovery = false,
+        List<OfflineEvent> recoveryBaselines = const <OfflineEvent>[],
+      }) => _repository.uploadOfflineHubEvents(
+        scope: scope,
+        deviceId: deviceId,
+        hubEpoch: bootstrap.hubEpoch,
+        credential: credential,
+        events: events,
+        projectionRecovery: projectionRecovery,
+        recoveryBaselines: recoveryBaselines,
+      );
+
+      Future<Set<String>> repairCloudCursorAndUpload(
+        List<OfflineEvent> pending,
+      ) async {
+        final cursor = await _repository.fetchOfflineHubSyncCursor(
+          scope: scope,
+          deviceId: deviceId,
+          hubEpoch: bootstrap.hubEpoch,
+          credential: credential,
+        );
+        final local =
+            await _ledger.eventsForVenue(
+                tenantId: scope.tenantId,
+                venueId: scope.venueId,
+                hubEpoch: bootstrap.hubEpoch,
+                limit: 100000,
+              )
+              ..sort((left, right) => left.sequence.compareTo(right.sequence));
+        if (local.isEmpty) {
+          throw StateError(
+            'Hub synchronization conflict: the cloud cursor cannot be '
+            'reconciled because the local event chain is empty.',
+          );
+        }
+        for (var index = 1; index < local.length; index++) {
+          final previous = local[index - 1];
+          final current = local[index];
+          if (current.sequence != previous.sequence + 1 ||
+              current.previousHash != previous.eventHash) {
+            throw StateError(
+              'Hub synchronization conflict: the durable local event chain '
+              'contains a gap and was not uploaded.',
+            );
+          }
+        }
+        if (cursor.lastSequence > 0) {
+          final anchors = local.where(
+            (event) => event.sequence == cursor.lastSequence,
+          );
+          if (anchors.length != 1 ||
+              anchors.single.eventHash != cursor.lastEventHash) {
+            throw StateError(
+              'Hub synchronization conflict: the cloud and local histories '
+              'do not share the same verified cursor.',
+            );
+          }
+        } else if (local.first.sequence != 1) {
+          throw StateError(
+            'Hub synchronization conflict: cloud history is empty but the '
+            'durable local chain does not begin at sequence 1.',
+          );
+        }
+
+        AppLogger.info(
+          'Hub sync diagnostic: epoch=${bootstrap.hubEpoch}, '
+          'cloudCursor=${cursor.lastSequence}, localEvents=${local.length}, '
+          'localRange=${local.first.sequence}-${local.last.sequence}, '
+          'pendingEvents=${pending.length}.',
+        );
+
+        // Re-send the complete verified chain in explicit projection-recovery
+        // mode. A cursor suffix is insufficient when immutable event records
+        // survived but a materialized order document did not: the server must
+        // see that order's signed order.opened event before later item events.
+        // Existing healthy projections are skipped server-side, and recovery
+        // events never repeat stock, printing, audit or notification effects.
+        final replay = local;
+        final baselinesByOrder = <String, OfflineEvent>{};
+        for (final event in local) {
+          if (event.type != 'order.cloudBaseline') continue;
+          final orderId = event.payload['orderId'];
+          if (orderId is String && orderId.isNotEmpty) {
+            baselinesByOrder[orderId] = event;
+          }
+        }
+        AppLogger.info(
+          'Hub sync diagnostic: recovery baselines=${baselinesByOrder.length} '
+          '${baselinesByOrder.entries.map((entry) => '${entry.value.sequence}:${entry.key}').join(', ')}.',
+        );
+        var replayedThrough = cursor.lastSequence;
+        for (var offset = 0; offset < replay.length; offset += 25) {
+          final end = (offset + 25).clamp(0, replay.length).toInt();
+          final batch = replay.sublist(offset, end);
+          final batchOrderIds = batch
+              .map((event) => event.payload['orderId'])
+              .whereType<String>()
+              .toSet();
+          final recoveryBaselines = batchOrderIds
+              .map((orderId) => baselinesByOrder[orderId])
+              .whereType<OfflineEvent>()
+              .toList(growable: false);
+          final batchSummary = batch
+              .map(
+                (event) =>
+                    '${event.sequence}:${event.type}:'
+                    '${event.payload['orderId'] ?? '-'}',
+              )
+              .join(', ');
+          final baselineSummary = recoveryBaselines
+              .map(
+                (event) =>
+                    '${event.sequence}:${event.payload['orderId'] ?? '-'}',
+              )
+              .join(', ');
+          AppLogger.info(
+            'Hub sync diagnostic: uploading recovery batch '
+            '${batch.first.sequence}-${batch.last.sequence}; '
+            'events=[$batchSummary]; baselines=[$baselineSummary].',
+          );
+          late Set<String> acknowledged;
+          try {
+            acknowledged = await uploadEvents(
+              batch,
+              projectionRecovery: true,
+              recoveryBaselines: recoveryBaselines,
+            );
+          } catch (error, stackTrace) {
+            AppLogger.error(
+              'Hub sync diagnostic: recovery batch '
+              '${batch.first.sequence}-${batch.last.sequence} failed; '
+              'events=[$batchSummary]; baselines=[$baselineSummary].',
+              error,
+              stackTrace,
+            );
+            rethrow;
+          }
+          if (acknowledged.length != batch.length ||
+              batch.any((event) => !acknowledged.contains(event.id))) {
+            throw StateError(
+              'Hub synchronization conflict: the server did not acknowledge '
+              'the complete immutable replay batch.',
+            );
+          }
+          replayedThrough = batch.last.sequence;
+          AppLogger.info(
+            'Hub sync diagnostic: recovery batch acknowledged through '
+            '$replayedThrough (${acknowledged.length}/${batch.length}).',
+          );
+        }
+        if (pending.any((event) => event.sequence > replayedThrough)) {
+          throw StateError(
+            'Hub synchronization conflict: pending events remain beyond the '
+            'reconciled cloud cursor.',
+          );
+        }
+        AppLogger.info(
+          'Venue hub cloud cursor reconciled through event $replayedThrough.',
+        );
+        return pending.map((event) => event.id).toSet();
+      }
+
       _sync = VenueHubCloudSync(
         ledger: _ledger,
         upload: (events) async {
-          final acknowledged = await _repository.uploadOfflineHubEvents(
+          late Set<String> acknowledged;
+          try {
+            acknowledged = await uploadEvents(events);
+          } on StateError catch (error) {
+            final message = error.toString();
+            final cursorConflict = message.contains(
+              'The hub event chain has a gap or conflict.',
+            );
+            final missingProjection = message.contains(
+              'The offline order is unavailable in cloud data.',
+            );
+            if (!cursorConflict && !missingProjection) {
+              rethrow;
+            }
+            AppLogger.info(
+              'Venue hub cloud cursor is behind or conflicted; validating '
+              'and replaying the immutable local suffix.',
+            );
+            try {
+              acknowledged = await repairCloudCursorAndUpload(events);
+            } on Object catch (repairError) {
+              throw StateError(
+                'Hub synchronization conflict: automatic repair could not '
+                'complete. Contact the system administrator. Pending events '
+                'remain stored on this hub and must not be cleared. '
+                'Cause: $repairError',
+              );
+            }
+          }
+          return VenueHubCloudUploadResult(acknowledgedEventIds: acknowledged);
+        },
+        onFailure: (error, _) {
+          final requiresAdministrator = error.toString().contains(
+            'Hub synchronization conflict',
+          );
+          _cloudSynchronizationIssue = requiresAdministrator
+              ? 'Cloud synchronization conflict. Contact the system '
+                    'administrator now. Pending sales and operational events '
+                    'remain safely stored on this hub but are not yet backed '
+                    'up to the cloud. Do not clear app data, replace this hub, '
+                    'or disable offline routing until the issue is resolved.'
+              : 'Cloud synchronization is temporarily unavailable. Pending '
+                    'events remain safely stored on this hub.';
+          _emit(
+            VenueHubRuntimeStatus(
+              state: VenueHubRuntimeState.degraded,
+              pendingEvents: _status.pendingEvents,
+              endpoint: endpoint,
+              message: _cloudSynchronizationIssue,
+            ),
+          );
+        },
+        onRecovered: () {
+          _cloudSynchronizationIssue = null;
+          _emit(
+            VenueHubRuntimeStatus(
+              state: VenueHubRuntimeState.ready,
+              pendingEvents: _status.pendingEvents,
+              endpoint: endpoint,
+            ),
+          );
+        },
+      );
+      var reconcilingClosedOrders = false;
+      final closedOrderRetryAfter = <String, DateTime>{};
+      Future<void> reconcileClosedCloudOrders() async {
+        if (reconcilingClosedOrders || _activeScope != scope) return;
+        final rawCloudOrders = snapshot['openOrders'];
+        if (rawCloudOrders is! List || rawCloudOrders.isEmpty) return;
+        final cloudOpenIds = rawCloudOrders
+            .whereType<Map>()
+            .map((order) => order['orderId'])
+            .whereType<String>()
+            .toSet();
+        if (cloudOpenIds.isEmpty) return;
+        reconcilingClosedOrders = true;
+        try {
+          // Upload ordinary immutable events first. Reconciliation is a
+          // narrow repair for a cloud document that still says open after the
+          // same hub's durable projection has already closed it.
+          await _sync!.flush();
+          final localOrders = await publishOrders();
+          final now = DateTime.now().toUtc();
+          final ghosts = localOrders.values
+              .where(
+                (order) =>
+                    order.isClosed &&
+                    cloudOpenIds.contains(order.orderId) &&
+                    !(closedOrderRetryAfter[order.orderId]?.isAfter(now) ??
+                        false),
+              )
+              .toList(growable: false);
+          for (final order in ghosts) {
+            try {
+              final repaired = await _repository
+                  .reconcileOfflineHubClosedOrders(
+                    scope: scope,
+                    deviceId: deviceId,
+                    hubEpoch: bootstrap.hubEpoch,
+                    credential: credential,
+                    orders: [order.toJson()],
+                  );
+              closedOrderRetryAfter.remove(order.orderId);
+              if (!repaired.contains(order.orderId)) continue;
+              AppLogger.info(
+                'Reconciled locally closed order ${order.orderId} that '
+                'was still advertised as open in cloud data.',
+              );
+            } catch (error, stackTrace) {
+              // One malformed historical order must not prevent independent
+              // valid orders from being repaired. Backoff also prevents a
+              // permanent data conflict from calling the API every refresh.
+              closedOrderRetryAfter[order.orderId] = now.add(
+                const Duration(minutes: 5),
+              );
+              AppLogger.error(
+                'Reconcile locally closed order ${order.orderId}',
+                error,
+                stackTrace,
+              );
+            }
+          }
+        } catch (error, stackTrace) {
+          // Never stop the LAN hub for a cloud repair failure. The signed,
+          // idempotent repair retries during the next authority refresh.
+          AppLogger.error(
+            'Reconcile locally closed orders with cloud terminals',
+            error,
+            stackTrace,
+          );
+        } finally {
+          reconcilingClosedOrders = false;
+        }
+      }
+
+      // RTDB is the sole internet-presence and wake channel. A failure here is
+      // non-fatal for the local HTTPS hub: LAN terminals must remain usable
+      // during a venue internet outage, while remote commands fail closed.
+      // Keep the presence object attached even when its first cloud session
+      // request fails. The local HTTPS hub must remain available on the LAN,
+      // while the verified authority refresh below can retry only the RTDB
+      // connection without restarting the hub or re-opening its local ledger.
+      final activeRealtimePresence = _realtimePresence ??=
+          VenueHubRealtimePresence(repository: _repository);
+      // RTDB can report a successful connection synchronously from start().
+      // The command processor is installed later because it depends on the
+      // local runtime state below, so keep this nullable during bootstrap. A
+      // connection transition must still wake the durable outbox immediately,
+      // but it must not call an uninitialised local callback.
+      Future<void> Function()? remoteTick;
+      // The Windows offline bootstrap deliberately does not create a Firebase
+      // app when the executable cannot reach Firebase. Starting the RTDB
+      // presence client in that state can never succeed and previously caused
+      // repeated [core/no-app] errors while the otherwise healthy LAN hub was
+      // running. Cloud presence is restored after the user retries online and
+      // the normal Firebase bootstrap rebuilds this workspace.
+      final cloudRuntimeAvailable = Firebase.apps.isNotEmpty;
+      final oldConnectionListener = _realtimeConnectedListener;
+      if (oldConnectionListener != null) {
+        activeRealtimePresence.connected.removeListener(oldConnectionListener);
+      }
+      var wasRealtimeConnected = activeRealtimePresence.connected.value;
+      void publishConnectionStatus() {
+        if (_activeScope != scope) return;
+        final isConnected = activeRealtimePresence.connected.value;
+        // The native HTTPS listener is authoritative and remains usable over
+        // LAN without internet. RTDB connectivity determines only whether
+        // remote/mobile-data terminals can reach this hub.
+        VenueHubAvailability.markLanOnline(
+          internetAvailable: isConnected,
+        );
+        if (isConnected && !wasRealtimeConnected) {
+          // Realtime presence recovering is the earliest reliable indication
+          // that Firebase is reachable again. Wake the durable outbox here;
+          // waiting for a new local event or a process restart can otherwise
+          // leave already-saved sales pending indefinitely.
+          AppLogger.info(
+            'Venue hub internet restored; waking durable cloud synchronization.',
+          );
+          unawaited(_sync?.flush());
+          unawaited(reconcileClosedCloudOrders());
+          final tick = remoteTick;
+          if (tick != null) unawaited(tick());
+        }
+        wasRealtimeConnected = isConnected;
+      }
+
+      _realtimeConnectedListener = publishConnectionStatus;
+      activeRealtimePresence.connected.addListener(publishConnectionStatus);
+      publishConnectionStatus();
+      if (cloudRuntimeAvailable) {
+        try {
+          await activeRealtimePresence.start(
             scope: scope,
             deviceId: deviceId,
             hubEpoch: bootstrap.hubEpoch,
             credential: credential,
-            events: events,
           );
-          return VenueHubCloudUploadResult(acknowledgedEventIds: acknowledged);
-        },
-      );
+        } on Object catch (error, stackTrace) {
+          // start() may have created a Windows REST session before the first
+          // authentication/write failed. Clear that partial session so the
+          // five-second reconnect loop is allowed to request a fresh scoped
+          // token as soon as internet connectivity returns.
+          await activeRealtimePresence.stop();
+          AppLogger.error(
+            'Start venue hub realtime presence; remote commands are unavailable but LAN remains active',
+            error,
+            stackTrace,
+          );
+        }
+      } else {
+        AppLogger.info(
+          'Firebase was not started; cloud presence and remote commands are '
+          'paused while the certificate-pinned LAN hub remains active.',
+        );
+      }
       var remoteTickRunning = false;
-      var remoteCloudAvailable = true;
+      var remoteTickRequested = false;
+      var remoteClaimAvailable = true;
       VenueHubStaffGrant? remoteGrant(Map<String, Object?> command) {
         final staffId = command['staffId'];
         final expectedPinVersion = command['pinVersion'];
         final expectedMembershipVersion = command['membershipVersion'];
-        final expiresAt = DateTime.tryParse(command['expiresAt'] as String? ?? '');
+        final expiresAt = DateTime.tryParse(
+          command['expiresAt'] as String? ?? '',
+        );
         if (staffId is! String ||
             expectedPinVersion is! int ||
             expectedMembershipVersion is! int ||
@@ -353,32 +986,92 @@ class VenueHubRuntime {
         return null;
       }
 
-      Future<void> remoteTick() async {
-        if (remoteTickRunning || _activeScope != scope) return;
+      Future<void> completeRemoteCommandReliably({
+        required String commandId,
+        required String claimToken,
+        required bool accepted,
+        Map<String, Object?> result = const <String, Object?>{},
+        String? rejectionMessage,
+      }) async {
+        Object? lastError;
+        StackTrace? lastStack;
+        for (var attempt = 1; attempt <= 3; attempt++) {
+          if (_activeScope != scope) return;
+          try {
+            await _repository
+                .completeRemoteHubCommand(
+                  scope: scope,
+                  deviceId: deviceId,
+                  hubEpoch: bootstrap.hubEpoch,
+                  credential: credential,
+                  commandId: commandId,
+                  claimToken: claimToken,
+                  accepted: accepted,
+                  result: result,
+                  rejectionMessage: rejectionMessage,
+                )
+                .timeout(const Duration(seconds: 12));
+            if (attempt > 1) {
+              AppLogger.info(
+                'Remote hub command $commandId: acknowledgement restored on '
+                'attempt $attempt.',
+              );
+            }
+            return;
+          } catch (error, stackTrace) {
+            lastError = error;
+            lastStack = stackTrace;
+            if (attempt < 3 && _activeScope == scope) {
+              AppLogger.info(
+                'Remote hub command $commandId: acknowledgement attempt '
+                '$attempt was interrupted; retrying the same committed result.',
+              );
+              await Future<void>.delayed(Duration(milliseconds: 400 * attempt));
+            }
+          }
+        }
+        AppLogger.error(
+          accepted
+              ? 'Confirm projected remote command $commandId after retries'
+              : 'Report rejected remote command $commandId after retries',
+          lastError ?? StateError('Remote command acknowledgement failed.'),
+          lastStack ?? StackTrace.current,
+        );
+      }
+
+      remoteTick = () async {
+        if (_activeScope != scope) return;
+        if (remoteTickRunning) {
+          // Coalesce wake signals without losing one that arrives while a
+          // previous claim batch is still validating or committing.
+          remoteTickRequested = true;
+          return;
+        }
         remoteTickRunning = true;
         try {
-          await _repository.heartbeatRemoteHub(
-            scope: scope,
-            deviceId: deviceId,
-            hubEpoch: bootstrap.hubEpoch,
-            credential: credential,
-            pendingLocalEvents: (await _ledger.pending()).length,
-          );
-          final commands = await _repository.claimRemoteHubCommands(
-            scope: scope,
-            deviceId: deviceId,
-            hubEpoch: bootstrap.hubEpoch,
-            credential: credential,
-          );
-          if (!remoteCloudAvailable) {
-            AppLogger.info('Venue hub remote command connection restored.');
-            remoteCloudAvailable = true;
+          // Bound each signal-triggered claim so a half-open HTTP connection
+          // cannot permanently block a later RTDB wake signal.
+          final commands = await _repository
+              .claimRemoteHubCommands(
+                scope: scope,
+                deviceId: deviceId,
+                hubEpoch: bootstrap.hubEpoch,
+                credential: credential,
+              )
+              .timeout(const Duration(seconds: 12));
+          if (!remoteClaimAvailable) {
+            AppLogger.info('Venue hub secure command claiming restored.');
+            remoteClaimAvailable = true;
           }
           for (final command in commands) {
             final commandId = command['commandId'];
             final claimToken = command['claimToken'];
             if (commandId is! String || claimToken is! String) continue;
+            VenueHubCommandAcknowledgement? acknowledgement;
             try {
+              AppLogger.info(
+                'Remote hub command $commandId: claimed; validating locally.',
+              );
               final grant = remoteGrant(command);
               final eventType = command['eventType'];
               final payload = command['payload'];
@@ -387,7 +1080,7 @@ class VenueHubRuntime {
                   'The staff permission snapshot changed before the command was accepted.',
                 );
               }
-              final acknowledgement = await processor.processRemote(
+              acknowledgement = await processor.processRemote(
                 commandId: commandId,
                 eventType: eventType,
                 payload: Map<String, Object?>.from(payload),
@@ -398,63 +1091,173 @@ class VenueHubRuntime {
                 ),
                 trustedNowUtc: TrustedClock.instance.nowUtc(),
               );
-              await _repository.completeRemoteHubCommand(
-                scope: scope,
-                deviceId: deviceId,
-                hubEpoch: bootstrap.hubEpoch,
-                credential: credential,
+              AppLogger.info(
+                'Remote hub command $commandId: durably committed as '
+                '${acknowledgement.eventId}.',
+              );
+            } catch (error, stackTrace) {
+              // A failure before the durable event exists is a genuine
+              // business rejection. It is safe to tell the originating POS
+              // that nothing was committed.
+              AppLogger.error(
+                'Reject remote venue command $commandId before commit',
+                error,
+                stackTrace,
+              );
+              await completeRemoteCommandReliably(
+                commandId: commandId,
+                claimToken: claimToken,
+                accepted: false,
+                rejectionMessage: error.toString(),
+              );
+              continue;
+            }
+
+            // Do not acknowledge success directly from the hub. Cloud event
+            // ingestion projects the order and marks the remote command
+            // accepted in one Firestore transaction. This ordering guarantees
+            // that a terminal cannot be told "finished" while its live cloud
+            // order still contains the old collection/delivery state.
+            //
+            // A failed upload leaves the immutable event in the encrypted
+            // outbox. The command remains claimed and its waiter keeps showing
+            // "Waiting for venue hub" until a later retry projects it. This is
+            // deliberately fail-closed and does not weaken hub authority.
+            final committedAcknowledgement = acknowledgement;
+            final projected = await _waitForCloudProjection(
+              scope: scope,
+              hubEpoch: bootstrap.hubEpoch,
+              eventId: committedAcknowledgement.eventId,
+            );
+            if (!projected) {
+              AppLogger.info(
+                'Remote hub command $commandId remains durably committed but '
+                'unacknowledged until cloud projection succeeds.',
+              );
+              continue;
+            }
+            // For a new event, ingestion has already acknowledged this
+            // command transactionally. For an idempotent order-open retry,
+            // the reused event may belong to an older command. Retry only this
+            // idempotent acknowledgement; never re-run the committed order.
+            unawaited(
+              completeRemoteCommandReliably(
                 commandId: commandId,
                 claimToken: claimToken,
                 accepted: true,
                 result: <String, Object?>{
-                  'eventId': acknowledgement.eventId,
-                  'sequence': acknowledgement.sequence,
-                  'eventHash': acknowledgement.eventHash,
-                  'committedAtUtc': acknowledgement.committedAtUtc.toUtc().toIso8601String(),
+                  'eventId': committedAcknowledgement.eventId,
+                  'sequence': committedAcknowledgement.sequence,
+                  'eventHash': committedAcknowledgement.eventHash,
+                  'committedAtUtc': committedAcknowledgement.committedAtUtc
+                      .toUtc()
+                      .toIso8601String(),
                 },
+              ),
+            );
+          }
+        } catch (error, stackTrace) {
+          if (remoteClaimAvailable) {
+            AppLogger.error(
+              'Claim signalled remote venue commands; LAN orders remain available',
+              error,
+              stackTrace,
+            );
+            remoteClaimAvailable = false;
+          }
+        } finally {
+          remoteTickRunning = false;
+          if (remoteTickRequested && _activeScope == scope) {
+            remoteTickRequested = false;
+            final tick = remoteTick;
+            if (tick != null) unawaited(tick());
+          }
+        }
+      };
+
+      await _realtimeSignalSubscription?.cancel();
+      // The stream controller survives a failed initial connection. Attaching
+      // now means a later authenticated retry can immediately wake the same
+      // command processor without rebuilding the venue runtime.
+      _realtimeSignalSubscription = activeRealtimePresence.commandSignals
+          .listen(
+            (_) {
+              final tick = remoteTick;
+              if (tick != null) unawaited(tick());
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              AppLogger.error(
+                'Receive realtime hub wake signal',
+                error,
+                stackTrace,
               );
-              unawaited(_sync!.flush());
-            } catch (error, stackTrace) {
-              AppLogger.error('Process remote venue command', error, stackTrace);
+            },
+          );
+      await _realtimeAuthoritySubscription?.cancel();
+      _realtimeAuthoritySubscription = activeRealtimePresence.authority.listen((
+        active,
+      ) {
+        if (active || _activeScope != scope) return;
+        AppLogger.info(
+          'Venue hub realtime authority was revoked; stopping immediately.',
+        );
+        unawaited(_stopIfCurrent(lifecycleGeneration));
+      });
+      var reconnectingRealtime = false;
+      var realtimeRetryDelay = const Duration(seconds: 5);
+      var nextRealtimeRetryAt = DateTime.now();
+      _realtimeReconnectTimer?.cancel();
+      _realtimeReconnectTimer = cloudRuntimeAvailable
+          ? Timer.periodic(const Duration(seconds: 5), (_) async {
+              if (_activeScope != scope ||
+                  activeRealtimePresence.started ||
+                  reconnectingRealtime ||
+                  DateTime.now().isBefore(nextRealtimeRetryAt)) {
+                return;
+              }
+              reconnectingRealtime = true;
               try {
-                await _repository.completeRemoteHubCommand(
+                await activeRealtimePresence.start(
                   scope: scope,
                   deviceId: deviceId,
                   hubEpoch: bootstrap.hubEpoch,
                   credential: credential,
-                  commandId: commandId,
-                  claimToken: claimToken,
-                  accepted: false,
-                  rejectionMessage: error.toString(),
                 );
-              } catch (_) {
-                // The short claim lease makes an ambiguous completion retryable.
+                realtimeRetryDelay = const Duration(seconds: 5);
+                AppLogger.info('Venue hub realtime channel restored.');
+                final tick = remoteTick;
+                if (tick != null) unawaited(tick());
+              } catch (error, stackTrace) {
+                await activeRealtimePresence.stop();
+                AppLogger.error(
+                  'Retry venue hub realtime channel; LAN remains available',
+                  error,
+                  stackTrace,
+                );
+                nextRealtimeRetryAt = DateTime.now().add(realtimeRetryDelay);
+                realtimeRetryDelay = Duration(
+                  seconds: (realtimeRetryDelay.inSeconds * 2).clamp(5, 60),
+                );
+              } finally {
+                reconnectingRealtime = false;
               }
-            }
-          }
-        } catch (_) {
-          if (remoteCloudAvailable) {
-            AppLogger.info(
-              'Venue hub remote command connection is offline; LAN orders remain available.',
-            );
-            remoteCloudAvailable = false;
-          }
-        } finally {
-          remoteTickRunning = false;
-        }
+            })
+          : null;
+      if (activeRealtimePresence.connected.value) {
+        // Recover commands queued just before the realtime listener connected.
+        // Assignment above is complete before execution reaches this point.
+        unawaited(remoteTick());
       }
-      _remoteCommandTimer = Timer.periodic(
-        const Duration(seconds: 5),
-        (_) => unawaited(remoteTick()),
-      );
-      unawaited(remoteTick());
       _pendingSubscription = _ledger.watchPending().listen(
         (events) {
           _emit(
             VenueHubRuntimeStatus(
-              state: VenueHubRuntimeState.ready,
+              state: _cloudSynchronizationIssue == null
+                  ? VenueHubRuntimeState.ready
+                  : VenueHubRuntimeState.degraded,
               pendingEvents: events.length,
               endpoint: endpoint,
+              message: _cloudSynchronizationIssue,
             ),
           );
           if (events.isNotEmpty) unawaited(_sync!.flush());
@@ -478,17 +1281,31 @@ class VenueHubRuntime {
           endpoint: endpoint,
         ),
       );
-      unawaited(_sync!.flush());
+      publishConnectionStatus();
+      unawaited(reconcileClosedCloudOrders());
       var refreshingAuthority = false;
       Future<void> refreshAuthority() async {
+        // A LAN-only hub deliberately starts without a Firebase app. Its last
+        // verified encrypted snapshot remains authoritative until connectivity
+        // returns and the application performs a normal cloud bootstrap.
+        // Calling a Firebase repository here only produces `core/no-app` and
+        // must not interfere with local order or KDS processing.
+        if (!cloudRuntimeAvailable) return;
         if (refreshingAuthority) return;
+        if (lifecycleGeneration != _lifecycleGeneration) return;
         refreshingAuthority = true;
-        var cloudResponded = false;
         try {
           final raw = await _repository
               .fetchOfflineHubBootstrap(scope: scope)
               .timeout(const Duration(seconds: 8));
-          cloudResponded = true;
+          if (lifecycleGeneration != _lifecycleGeneration ||
+              _activeScope != scope ||
+              _activeBootstrap?.hubEpoch != bootstrap.hubEpoch) {
+            AppLogger.info(
+              'Ignored a completed authority refresh from an older hub generation.',
+            );
+            return;
+          }
           final current = VenueHubBootstrap.fromJson(raw);
           if (!current.enabled ||
               current.hubEpoch != bootstrap.hubEpoch ||
@@ -497,8 +1314,31 @@ class VenueHubRuntime {
             AppLogger.info(
               'Venue hub authority changed in cloud; stopping the old hub.',
             );
-            await stop();
+            await _stopIfCurrent(lifecycleGeneration);
             return;
+          }
+          if (!activeRealtimePresence.connected.value) {
+            try {
+              // Retry only while disconnected. Healthy hubs remain on their
+              // persistent RTDB socket, so this adds no steady-state Function
+              // polling or heartbeat cost.
+              await activeRealtimePresence.start(
+                scope: scope,
+                deviceId: deviceId,
+                hubEpoch: bootstrap.hubEpoch,
+                credential: credential,
+              );
+              AppLogger.info('Venue hub realtime presence session restored.');
+              final tick = remoteTick;
+              if (tick != null) unawaited(tick());
+            } catch (error, stackTrace) {
+              await activeRealtimePresence.stop();
+              AppLogger.error(
+                'Retry venue hub realtime presence; LAN remains available',
+                error,
+                stackTrace,
+              );
+            }
           }
           processor.installCredentials(current.credentials);
           late Map<String, Object?> refreshed;
@@ -510,8 +1350,25 @@ class VenueHubRuntime {
               credential: credential,
               knownSnapshotDigest: snapshot['snapshotDigest'] as String?,
               knownSnapshotGeneration: snapshot['snapshotGeneration'] as int?,
+              knownSnapshotSections: (snapshot['snapshotSections'] as Map?)
+                  ?.map(
+                    (key, value) => MapEntry('$key', (value as num).toInt()),
+                  ),
             );
-          } catch (_) {
+          } catch (error, stackTrace) {
+            AppLogger.error(
+              'Download refreshed venue hub snapshot',
+              error,
+              stackTrace,
+            );
+            return;
+          }
+          if (lifecycleGeneration != _lifecycleGeneration ||
+              _activeScope != scope ||
+              _activeBootstrap?.hubEpoch != bootstrap.hubEpoch) {
+            AppLogger.info(
+              'Ignored a completed snapshot refresh from an older hub generation.',
+            );
             return;
           }
           if (refreshed['unchanged'] == true) {
@@ -531,28 +1388,53 @@ class VenueHubRuntime {
             AppLogger.info(
               'Venue hub snapshot is current; retained the encrypted local copy.',
             );
+            unawaited(reconcileClosedCloudOrders());
             return;
           }
-          await installFreshSnapshot(refreshed);
-        } catch (error, stackTrace) {
-          // Cloud loss is expected; continue with the last authenticated
-          // encrypted snapshot until connectivity returns.
-          if (cloudResponded) {
-            AppLogger.error('Refresh venue hub authority', error, stackTrace);
-            await stop();
+          if (refreshed['partial'] == true) {
+            final merged = Map<String, Object?>.from(snapshot);
+            for (final entry in refreshed.entries) {
+              if (entry.key == 'partial' || entry.key == 'unchanged') continue;
+              merged[entry.key] = entry.value;
+            }
+            refreshed = merged;
           }
+          await installFreshSnapshot(refreshed);
+          unawaited(reconcileClosedCloudOrders());
+        } catch (error, stackTrace) {
+          // A timeout, malformed response, or snapshot refresh failure is not
+          // evidence that cloud authority was revoked. Stopping here used to
+          // kill command polling permanently because the auto-start host still
+          // believed the runtime was running. Retain the last authenticated,
+          // encrypted snapshot and retry. Explicit, successfully parsed
+          // authority changes are handled above and still stop immediately.
+          // Every cloud command remains protected by the server's current hub
+          // credential and epoch checks, so this does not create a bypass.
+          AppLogger.error(
+            'Refresh venue hub authority; retaining last verified authority',
+            error,
+            stackTrace,
+          );
         } finally {
           refreshingAuthority = false;
         }
       }
 
+      // Configuration writes are cloud-owned rather than order events. Keep a
+      // callable refresh hook so a successful menu/customer/settings edit can
+      // update the hub catalogue immediately instead of leaving every native
+      // screen on the old encrypted snapshot until the 30-second safety poll.
+      _refreshAuthorityNow = refreshAuthority;
+      refreshAuthorityCallback = refreshAuthority;
+
       _authorityTimer = Timer.periodic(
-        const Duration(seconds: 30),
+        const Duration(minutes: 5),
         (_) => unawaited(refreshAuthority()),
       );
       await AndroidVenueHubService.start();
     } catch (error, stackTrace) {
       AppLogger.error('Start venue offline hub', error, stackTrace);
+      VenueHubAvailability.markOffline(error.toString());
       await _server.stop();
       _emit(
         VenueHubRuntimeStatus(
@@ -565,18 +1447,98 @@ class VenueHubRuntime {
     }
   }
 
-  Future<void> stop() async {
+  /// Waits until the immutable event has been accepted by cloud ingestion.
+  /// This is the ordering barrier between the hub's durable local commit and
+  /// the success response shown by a remote terminal.
+  Future<bool> _waitForCloudProjection({
+    required VenueScope scope,
+    required int hubEpoch,
+    required String eventId,
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      await _sync?.flush();
+      final events = await _ledger.eventsForVenue(
+        tenantId: scope.tenantId,
+        venueId: scope.venueId,
+        hubEpoch: hubEpoch,
+      );
+      OfflineEvent? target;
+      for (final event in events) {
+        if (event.id == eventId) {
+          target = event;
+          break;
+        }
+      }
+      if (target?.syncState == OfflineEventSyncState.synced) return true;
+      if (target?.syncState == OfflineEventSyncState.quarantined) {
+        throw StateError(
+          'The committed hub event was permanently rejected during cloud projection.',
+        );
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+    return false;
+  }
+
+  Future<void> _stopIfCurrent(int lifecycleGeneration) {
+    if (lifecycleGeneration != _lifecycleGeneration) {
+      return Future<void>.value();
+    }
+    return stop();
+  }
+
+  /// Stops the runtime exactly once even when an RTDB revocation, a cloud
+  /// bootstrap refresh and the auto-start host all observe the same authority
+  /// transfer together. Every concurrent caller awaits the same shutdown, so
+  /// none can finish late and tear down the replacement generation.
+  Future<void> stop() {
+    final existing = _stopOperation;
+    if (existing != null) return existing;
+    late final Future<void> operation;
+    operation = _performStop().whenComplete(() {
+      if (identical(_stopOperation, operation)) _stopOperation = null;
+    });
+    _stopOperation = operation;
+    return operation;
+  }
+
+  Future<void> _performStop() async {
+    // Invalidate every callback created by the runtime being stopped before
+    // awaiting I/O. This prevents an already-running authority refresh from
+    // mutating a replacement runtime that starts during those awaits.
+    _lifecycleGeneration++;
+    _postCommitRetryTimer?.cancel();
+    _postCommitRetryTimer = null;
     _authorityTimer?.cancel();
     _authorityTimer = null;
-    _remoteCommandTimer?.cancel();
-    _remoteCommandTimer = null;
+    _realtimeReconnectTimer?.cancel();
+    _realtimeReconnectTimer = null;
+    await _realtimeSignalSubscription?.cancel();
+    _realtimeSignalSubscription = null;
+    await _realtimeAuthoritySubscription?.cancel();
+    _realtimeAuthoritySubscription = null;
+    final realtimePresence = _realtimePresence;
+    final realtimeConnectedListener = _realtimeConnectedListener;
+    if (realtimePresence != null && realtimeConnectedListener != null) {
+      realtimePresence.connected.removeListener(realtimeConnectedListener);
+    }
+    _realtimeConnectedListener = null;
+    await realtimePresence?.stop();
     await _pendingSubscription?.cancel();
     _pendingSubscription = null;
     _sync?.dispose();
     _sync = null;
+    _cloudSynchronizationIssue = null;
+    await _printQueue?.dispose();
     _printQueue = null;
     _installFreshSnapshot = null;
+    _refreshAuthorityNow = null;
     _activeScope = null;
+    _activeBootstrap = null;
+    _localClientSnapshot = null;
+    _localClientOrders = const [];
     await _server.stop();
     await AndroidVenueHubService.stop();
     _emit(
@@ -585,6 +1547,7 @@ class VenueHubRuntime {
         pendingEvents: 0,
       ),
     );
+    VenueHubAvailability.reset();
   }
 
   Future<Map<String, Object?>?> claimLocalPrintJob(String deviceId) {
@@ -601,6 +1564,40 @@ class VenueHubRuntime {
       throw StateError('The venue hub is not ready to refresh staff access.');
     }
     return install(snapshot);
+  }
+
+  /// Restores the hub host's POS view from the authoritative snapshot and
+  /// encrypted-ledger projection that this runtime has already validated.
+  ///
+  /// PIN lock intentionally clears process-local POS state. After a successful
+  /// certificate-pinned PIN login, making the hub download its own full
+  /// catalogue and order book over HTTPS is redundant and can noticeably delay
+  /// unlock on larger venues. This method fails closed unless the requested
+  /// scope is the currently running hub generation and the runtime is usable.
+  bool restoreLocalClientView(VenueScope scope) {
+    final snapshot = _localClientSnapshot;
+    if (_activeScope != scope ||
+        snapshot == null ||
+        (_status.state != VenueHubRuntimeState.ready &&
+            _status.state != VenueHubRuntimeState.degraded)) {
+      return false;
+    }
+    VenueHubOfflineView.instance.install(snapshot);
+    VenueHubOfflineView.instance.installOrders(_localClientOrders);
+    return true;
+  }
+
+  Stream<List<Map<String, Object?>>>? localPrintJobs(VenueScope scope) {
+    if (_activeScope != scope) return null;
+    return _printQueue?.changes;
+  }
+
+  /// Requests an immediate cloud-authority refresh when this process is the
+  /// active hub. Non-hub clients safely do nothing; they receive the refreshed
+  /// catalogue from the hub on their next explicit catalogue fetch.
+  Future<void> refreshAuthorityNow() async {
+    final refresh = _refreshAuthorityNow;
+    if (refresh != null) await refresh();
   }
 
   Future<void> completeLocalPrintJob({

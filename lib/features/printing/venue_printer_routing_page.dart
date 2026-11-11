@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/printer_device_repository.dart';
@@ -115,6 +116,44 @@ class _VenuePrinterRoutingPageState
     });
     try {
       final deviceId = await _identity.deviceIdForScope(scope);
+      final venueDevices = await _devices
+          .watchVenueDevices(tenantId: scope.tenantId, venueId: scope.venueId)
+          .first;
+      final priorNamedDevice = venueDevices
+          .where(
+            (device) =>
+                device.id != deviceId &&
+                device.active &&
+                device.name.trim().toLowerCase() == name.toLowerCase(),
+          )
+          .firstOrNull;
+      if (!mounted) return;
+      var replaceExistingNamedDevice = false;
+      if (priorNamedDevice != null) {
+        final replace = await showAppDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Reconnect this printer device?'),
+            content: Text(
+              'An older registration named ${priorNamedDevice.name} is still active. '
+              'This commonly happens after reinstalling or renaming TableSideCY. '
+              'Replace it with this physical device and transfer its printer routes?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('Reconnect device'),
+              ),
+            ],
+          ),
+        );
+        if (replace != true) return;
+        replaceExistingNamedDevice = true;
+      }
       final hasSession = ref
           .read(activeStaffPinSessionProvider.notifier)
           .restoreCredentials();
@@ -134,6 +173,7 @@ class _VenuePrinterRoutingPageState
           active: true,
         ),
         tenantId: scope.tenantId,
+        replaceExistingNamedDevice: replaceExistingNamedDevice,
       );
       await _identity.saveCredential(scope, deviceCredential);
       if (!mounted) return;
@@ -164,7 +204,8 @@ class _VenuePrinterRoutingPageState
     required PrinterDevice device,
   }) async {
     final localDeviceId = await _identity.deviceIdForScope(scope);
-    final remove = await showDialog<bool>(
+    if (!mounted) return;
+    final remove = await showAppDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text('Remove ${device.name}?'),
@@ -241,7 +282,7 @@ class _VenuePrinterRoutingPageState
     var fallbackDeviceId = availableIds.contains(existing?.fallbackDeviceId)
         ? existing?.fallbackDeviceId
         : null;
-    await showDialog<void>(
+    await showAppDialog<void>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(

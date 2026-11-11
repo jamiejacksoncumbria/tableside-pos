@@ -1,4 +1,5 @@
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +9,8 @@ import '../../core/app_theme_controller.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/tenant_profile_repository.dart';
 import '../../data/production_command_repository.dart';
+import '../../offline/venue_hub_availability.dart';
+import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_platform.dart';
 import '../auth/staff_pin_gate.dart';
 import '../fulfilment/fulfilment_management_page.dart';
@@ -69,6 +72,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   @override
   void initState() {
     super.initState();
+    VenueHubAvailability.status.addListener(_handleHubStatusChanged);
     final TenantProfile profile =
         widget.profileOverride ?? ref.read(tenantProfileProvider);
     _displayName = TextEditingController(text: profile.displayName);
@@ -124,6 +128,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   @override
   void dispose() {
+    VenueHubAvailability.status.removeListener(_handleHubStatusChanged);
     _displayName.dispose();
     _legalName.dispose();
     _address.dispose();
@@ -143,6 +148,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _orderFlowRedMinutes.dispose();
     _defaultBookingDurationMinutes.dispose();
     super.dispose();
+  }
+
+  void _handleHubStatusChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _selectLogo() async {
@@ -408,6 +417,25 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               (role) => role == 'owner' || role == 'manager',
             ) ??
             false);
+    final hubRequired =
+        venueScope != null &&
+        VenueHubClientRegistry.instance.requiresHub(venueScope);
+    final cloudAvailable =
+        Firebase.apps.isNotEmpty &&
+        (!hubRequired ||
+            VenueHubAvailability.status.value.connectivity ==
+                VenueHubConnectivity.online);
+    void showOnlineOnlyMessage() {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Online mode required',
+        message:
+            'This setting can only be saved while the venue hub and its internet connection are online. Local ordering, kitchen flow and printing remain available over the venue network.',
+        level: AppNotificationLevel.warning,
+      );
+    }
+
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
@@ -536,6 +564,19 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           ),
         ),
         const SizedBox(height: 16),
+        if (!cloudAvailable) ...[
+          Card(
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            child: const ListTile(
+              leading: Icon(Icons.cloud_off_rounded),
+              title: Text('Offline hub mode'),
+              subtitle: Text(
+                'Ordering, kitchen flow and local printing remain available. Cloud administration is disabled until internet connectivity returns.',
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
         _SettingsCard(
           title: 'Venues and devices',
           child: Column(
@@ -547,11 +588,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   'Create and safely manage table numbers and names.',
                 ),
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const TableManagementPage(),
-                  ),
-                ),
+                onTap: cloudAvailable
+                    ? () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const TableManagementPage(),
+                        ),
+                      )
+                    : showOnlineOnlyMessage,
               ),
               const Divider(),
               ListTile(
@@ -561,13 +604,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   'Manage stock, supplier packs and recommended purchase orders.',
                 ),
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => StockManagementPage(
-                      baseCurrencyCode: profile.currencyCode,
-                    ),
-                  ),
-                ),
+                onTap: cloudAvailable
+                    ? () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => StockManagementPage(
+                            baseCurrencyCode: profile.currencyCode,
+                          ),
+                        ),
+                      )
+                    : showOnlineOnlyMessage,
               ),
               if (!kIsWeb &&
                   defaultTargetPlatform == TargetPlatform.android) ...[
@@ -618,11 +663,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   'See live printer failures and let a manager reprint safely.',
                 ),
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const PrintQueueRecoveryPage(),
-                  ),
-                ),
+                onTap: cloudAvailable
+                    ? () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const PrintQueueRecoveryPage(),
+                        ),
+                      )
+                    : showOnlineOnlyMessage,
               ),
               const Divider(),
               ListTile(
@@ -632,11 +679,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   'Register this device and route bar, kitchen, and dessert tickets.',
                 ),
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => const VenuePrinterRoutingPage(),
-                  ),
-                ),
+                onTap: cloudAvailable
+                    ? () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const VenuePrinterRoutingPage(),
+                        ),
+                      )
+                    : showOnlineOnlyMessage,
               ),
               if (canManageVenue) ...[
                 if (widget.venueOverride != null) ...[
@@ -648,13 +697,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       'Configure order channels, kitchen courses and telephone customers.',
                     ),
                     trailing: const Icon(Icons.chevron_right_rounded),
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => FulfilmentManagementPage(
-                          venue: widget.venueOverride!,
-                        ),
-                      ),
-                    ),
+                    onTap: cloudAvailable
+                        ? () => Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                              builder: (_) => FulfilmentManagementPage(
+                                venue: widget.venueOverride!,
+                              ),
+                            ),
+                          )
+                        : showOnlineOnlyMessage,
                   ),
                 ],
                 const Divider(),
@@ -665,11 +716,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     'Run isolated practice orders with no live sales, stock or payments.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const TrainingModePage(),
-                    ),
-                  ),
+                  onTap: cloudAvailable
+                      ? () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const TrainingModePage(),
+                          ),
+                        )
+                      : showOnlineOnlyMessage,
                 ),
                 const Divider(),
                 ListTile(
@@ -679,12 +732,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     'Find closed bills and securely refund full or selected items.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) =>
-                          RefundsPage(currencyCode: profile.currencyCode),
-                    ),
-                  ),
+                  onTap: cloudAvailable
+                      ? () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) =>
+                                RefundsPage(currencyCode: profile.currencyCode),
+                          ),
+                        )
+                      : showOnlineOnlyMessage,
                 ),
                 const Divider(),
                 ListTile(
@@ -694,13 +749,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     'Issue paid or complimentary vouchers and review balances.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => VoucherManagementPage(
-                        currencyCode: profile.currencyCode,
-                      ),
-                    ),
-                  ),
+                  onTap: cloudAvailable
+                      ? () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => VoucherManagementPage(
+                              currencyCode: profile.currencyCode,
+                            ),
+                          ),
+                        )
+                      : showOnlineOnlyMessage,
                 ),
                 const Divider(),
                 ListTile(
@@ -710,11 +767,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     'Lock, unlock or securely replace staff PINs.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const StaffPinManagementPage(),
-                    ),
-                  ),
+                  onTap: cloudAvailable
+                      ? () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const StaffPinManagementPage(),
+                          ),
+                        )
+                      : showOnlineOnlyMessage,
                 ),
                 const Divider(),
                 ListTile(
@@ -724,11 +783,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     'Review the restaurant’s immutable operational history.',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const AuditTrailPage(),
-                    ),
-                  ),
+                  onTap: cloudAvailable
+                      ? () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => const AuditTrailPage(),
+                          ),
+                        )
+                      : showOnlineOnlyMessage,
                 ),
                 const Divider(),
                 ListTile(
@@ -831,7 +892,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   child: FilledButton.icon(
                     onPressed: _saving
                         ? null
-                        : () => _saveVenueReceiptDetails(venueScope),
+                        : cloudAvailable
+                        ? () => _saveVenueReceiptDetails(venueScope)
+                        : showOnlineOnlyMessage,
                     icon: const Icon(Icons.storefront_outlined),
                     label: const Text('Save venue details'),
                   ),
@@ -969,7 +1032,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   child: FilledButton.icon(
                     onPressed: _savingNotificationRetention
                         ? null
-                        : () => _saveVenueNotificationRetention(venueScope),
+                        : cloudAvailable
+                        ? () => _saveVenueNotificationRetention(venueScope)
+                        : showOnlineOnlyMessage,
                     icon: const Icon(Icons.timer_outlined),
                     label: Text(
                       _savingNotificationRetention
@@ -986,7 +1051,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         Align(
           alignment: Alignment.centerRight,
           child: FilledButton.icon(
-            onPressed: _saving ? null : _save,
+            onPressed: _saving
+                ? null
+                : widget.persistToFirebase && !cloudAvailable
+                ? showOnlineOnlyMessage
+                : _save,
             icon: const Icon(Icons.save_outlined),
             label: const Text('Save company details'),
           ),

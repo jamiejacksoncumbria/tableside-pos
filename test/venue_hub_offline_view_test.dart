@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tableside_pos/features/fulfilment/fulfilment_domain.dart';
+import 'package:tableside_pos/features/pos/domain.dart';
 import 'package:tableside_pos/offline/venue_hub_offline_view.dart';
 
 void main() {
@@ -112,6 +113,139 @@ void main() {
     await settingsExpectation;
     expect(view.customers.single.displayName, 'Test Customer');
     expect(view.fulfilmentSettings.serviceAreas.single.name, 'Kyrenia');
+    view.clear();
+  });
+
+  test('hub roster exposes a driver who has no offline PIN verifier', () {
+    final view = VenueHubOfflineView.instance..clear();
+    view.install({
+      'staff': [
+        {
+          'staffId': 'driver-a',
+          'displayName': 'Driver A',
+          'roles': ['driver'],
+          'venueIds': ['venue-a'],
+          'offlinePinReady': false,
+        },
+      ],
+    });
+
+    expect(view.staff, hasLength(1));
+    expect(view.staff.single.id, 'driver-a');
+    expect(view.staff.single.roles, contains('driver'));
+    view.clear();
+  });
+
+  test('hub order stream publishes accepted and closed projections', () async {
+    final view = VenueHubOfflineView.instance..clear();
+    final expectation = expectLater(
+      view.orderStream.take(3),
+      emitsInOrder([
+        isEmpty,
+        predicate<List<PosOrder>>(
+          (orders) =>
+              orders.single.tableId == 'table-7' &&
+              orders.single.status == OrderStatus.open,
+          'open table projection',
+        ),
+        predicate<List<PosOrder>>(
+          (orders) => orders.single.status == OrderStatus.closed,
+          'closed table projection',
+        ),
+      ]),
+    );
+
+    Map<String, Object?> order({required bool closed}) => {
+      'orderId': 'order-1',
+      'tenantId': 'tenant-1',
+      'venueId': 'venue-1',
+      'tableId': 'table-7',
+      'openedAtUtc': '2026-10-16T12:00:00.000Z',
+      'isClosed': closed,
+      'lines': <Object?>[],
+      'payments': <Object?>[],
+    };
+
+    await Future<void>.delayed(Duration.zero);
+    view.installOrders([order(closed: false)]);
+    view.installOrders([order(closed: true)]);
+    await expectation;
+    view.clear();
+  });
+
+  test('sent local lines appear immediately on the offline order flow', () {
+    final view = VenueHubOfflineView.instance..clear();
+    view.install({
+      'products': [
+        {
+          'id': 'curry',
+          'name': 'Chicken Curry',
+          'priceMinor': 1200,
+          'sectionIds': <String>[],
+          'productionArea': 'kitchen',
+          'isAvailable': true,
+          'isArchived': false,
+          'showOnOrderFlow': true,
+          'variants': <Object?>[],
+          'modifierGroupIds': <String>[],
+          'stockComponents': <Object?>[],
+        },
+      ],
+      'tables': [
+        {'id': 'table-7', 'label': 'Table 7', 'active': true},
+      ],
+      'staff': [
+        {
+          'staffId': 'staff-1',
+          'displayName': 'Jamie',
+          'roles': ['manager'],
+        },
+      ],
+      'courses': [
+        {'id': 'main', 'name': 'Main', 'sequence': 2},
+      ],
+    });
+    view.installOrders([
+      {
+        'orderId': 'order-1',
+        'tenantId': 'tenant-1',
+        'venueId': 'venue-1',
+        'tableId': 'table-7',
+        'openedAtUtc': '2026-10-27T12:00:00.000Z',
+        'isClosed': false,
+        'lines': <Object?>[
+          {
+            'id': 'line-1',
+            'productId': 'curry',
+            'name': 'Chicken Curry',
+            'quantity': 2,
+            'unitPriceMinor': 1200,
+            'productionArea': 'kitchen',
+            'sent': true,
+            'sentAtUtc': '2026-10-27T12:05:00.000Z',
+            'sentEventId': 'evt-send-1',
+            'details': ['NOTE: No chilli'],
+          },
+        ],
+        'payments': <Object?>[],
+        'productionTicketStates': {
+          'offline_evt-send-1_kitchen': {
+            'status': 'preparing',
+            'isDelayed': false,
+          },
+        },
+      },
+    ]);
+
+    expect(view.courses.single.name, 'Main');
+    expect(view.staff.single.name, 'Jamie');
+    expect(view.orderFlowOrders, hasLength(1));
+    final ticket = view.orderFlowOrders.single;
+    expect(ticket.tableLabel, 'Table 7');
+    expect(ticket.productionArea, ProductionArea.kitchen);
+    expect(ticket.id, 'offline_evt-send-1_kitchen');
+    expect(ticket.status, OrderFlowStatus.preparing);
+    expect(ticket.itemSummary, ['2 x Chicken Curry', '  NOTE: No chilli']);
     view.clear();
   });
 }

@@ -1,17 +1,20 @@
 import 'dart:async';
 
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/app_theme_controller.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/order_flow_display_mode.dart';
 import '../../core/staff_pin_session_store.dart';
 import '../../core/training_mode.dart';
+import '../../core/trusted_clock.dart';
 import '../../data/production_command_repository.dart';
 import '../../features/printing/local_printer_device_identity.dart';
 import '../../offline/venue_hub_bootstrap.dart';
@@ -20,6 +23,26 @@ import '../../offline/venue_hub_client_cache.dart';
 import '../../offline/venue_hub_client.dart';
 import '../../offline/venue_hub_device_credential.dart';
 import '../../offline/venue_hub_runtime.dart';
+import '../../offline/venue_hub_realtime_client.dart';
+
+User? get _currentFirebaseUser =>
+    Firebase.apps.isEmpty ? null : FirebaseAuth.instance.currentUser;
+
+/// PIN sessions issued by the offline hub use its trusted clock authority.
+/// Comparing them with the raw device clock can immediately expire a valid
+/// session when a till's system clock differs from the last trusted sample.
+@visibleForTesting
+bool isStaffPinSessionCurrent(DateTime expiresAt) =>
+    expiresAt.toUtc().isAfter(TrustedClock.instance.nowUtc());
+
+Duration _staffPinSessionRemaining(DateTime expiresAt) =>
+    expiresAt.toUtc().difference(TrustedClock.instance.nowUtc());
+
+/// Internal control flow used to avoid touching Firebase during a verified
+/// native hub cold start. It is never shown to the operator.
+class _UseCachedHubBootstrap implements Exception {
+  const _UseCachedHubBootstrap();
+}
 
 final activeStaffPinSessionProvider =
     NotifierProvider<ActiveStaffPinSessionController, StaffPinVerification?>(
@@ -67,6 +90,7 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
       sessionToken: session.sessionToken,
       tenantId: scope.tenantId,
       venueId: scope.venueId,
+      deviceId: session.deviceId,
     );
     state = session;
     ref
@@ -83,6 +107,10 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
   void lock() {
     StaffPinSessionStore.current = null;
     VenueHubClientRegistry.instance.clear();
+    // The realtime custom token is staff-scoped. Drop it whenever the PIN
+    // session locks so the next staff member cannot inherit the prior staff
+    // member's command-status access.
+    unawaited(VenueHubRealtimeClient.instance.clear());
     state = null;
     ref.read(trainingModeProvider.notifier).clear();
     ref.read(appThemeControllerProvider.notifier).clearUserPreference();
@@ -101,7 +129,7 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
   /// only the still-valid server verification held in state may be restored.
   bool restoreCredentials() {
     final session = state;
-    if (session == null || !session.expiresAt.isAfter(DateTime.now())) {
+    if (session == null || !isStaffPinSessionCurrent(session.expiresAt)) {
       lock();
       return false;
     }
@@ -110,6 +138,7 @@ class ActiveStaffPinSessionController extends Notifier<StaffPinVerification?> {
       sessionToken: session.sessionToken,
       tenantId: session.tenantId,
       venueId: session.venueId,
+      deviceId: session.deviceId,
     );
     return true;
   }
@@ -123,7 +152,7 @@ Future<void> changeCurrentStaffPin({
   required WidgetRef ref,
   required VenueScope scope,
 }) async {
-  final firstPin = await showDialog<String>(
+  final firstPin = await showAppDialog<String>(
     context: context,
     builder: (context) => const _PinPadDialog(
       title: Text('Change your staff PIN'),
@@ -132,7 +161,7 @@ Future<void> changeCurrentStaffPin({
     ),
   );
   if (firstPin == null || !context.mounted) return;
-  final confirmedPin = await showDialog<String>(
+  final confirmedPin = await showAppDialog<String>(
     context: context,
     builder: (context) => const _PinPadDialog(
       title: Text('Confirm new PIN'),
@@ -178,6 +207,7 @@ class StaffPinGate extends ConsumerStatefulWidget {
     required this.onSwitchVenue,
     required this.onSignOut,
     this.backgroundLockSeconds = 120,
+    this.offlineHubOnly = false,
   });
 
   final VenueScope scope;
@@ -185,6 +215,7 @@ class StaffPinGate extends ConsumerStatefulWidget {
   final VoidCallback onSwitchVenue;
   final VoidCallback onSignOut;
   final int backgroundLockSeconds;
+  final bool offlineHubOnly;
 
   @override
   ConsumerState<StaffPinGate> createState() => _StaffPinGateState();
@@ -196,6 +227,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   final VenueHubClientCache _hubCache = VenueHubClientCache();
   List<VenuePinStaff>? _staff;
   String? _selectedUserId;
+  String? _pinEntryUserId;
   bool _loading = true;
   bool _submitting = false;
   String? _error;
@@ -209,13 +241,38 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    VenueHubClientRegistry.instance.staffSessionInvalidations.addListener(
+      _handleHubStaffSessionInvalidation,
+    );
     _loadStaff();
+  }
+
+  void _handleHubStaffSessionInvalidation() {
+    if (!mounted || ref.read(activeStaffPinSessionProvider) == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || ref.read(activeStaffPinSessionProvider) == null) return;
+      ref.read(activeStaffPinSessionProvider.notifier).lock();
+      if (mounted) {
+        setState(() {
+          _error = 'Your staff session ended. Enter your PIN again.';
+          _pinEntryUserId = null;
+          _submitting = false;
+        });
+      }
+    });
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.inactive:
+        // Windows reports `inactive` for ordinary focus changes (including a
+        // printer/system dialog). Treating that as backgrounding repeatedly
+        // returned an attended hub to the PIN screen. Mobile still records it
+        // because an incoming system surface can genuinely obscure the POS.
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) break;
+        _backgroundedAt ??= DateTime.now();
+        break;
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
         _backgroundedAt ??= DateTime.now();
@@ -224,7 +281,8 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         final backgroundedAt = _backgroundedAt;
         _backgroundedAt = null;
         if (backgroundedAt != null &&
-            DateTime.now().difference(backgroundedAt) >= _backgroundLockAfter) {
+            DateTime.now().difference(backgroundedAt) >= _backgroundLockAfter &&
+            !ref.read(orderFlowDisplayActiveProvider)) {
           AppLogger.info(
             'Shared device locked after its configured background timeout.',
           );
@@ -249,6 +307,9 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    VenueHubClientRegistry.instance.staffSessionInvalidations.removeListener(
+      _handleHubStaffSessionInvalidation,
+    );
     _expiryTimer?.cancel();
     super.dispose();
   }
@@ -259,10 +320,29 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       _error = null;
     });
     try {
+      if (widget.offlineHubOnly) {
+        final cached = await _hubCache.readStaff(widget.scope);
+        if (cached.isEmpty) {
+          throw StateError(
+            'No cached staff list is available. Reconnect this hub to the internet once.',
+          );
+        }
+        if (!mounted) return;
+        setState(() {
+          _staff = cached;
+          _selectedUserId = cached.firstOrNull?.userId;
+          _loading = false;
+          _error = 'Internet unavailable. Using the encrypted venue hub.';
+        });
+        return;
+      }
       final staff = await _repository.listVenuePinStaff(widget.scope);
+      // The cache is optional. Its implementation absorbs local-storage
+      // failures so a successfully loaded cloud list always opens the PIN
+      // screen instead of being misclassified as an offline failure.
       await _hubCache.saveStaff(widget.scope, staff);
       if (!mounted) return;
-      final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+      final currentUserId = _currentFirebaseUser?.uid;
       setState(() {
         _staff = staff;
         _selectedUserId = staff.any((item) => item.userId == currentUserId)
@@ -292,33 +372,65 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   }
 
   Future<void> _enterPin(VenuePinStaff staff) async {
+    setState(() {
+      _pinEntryUserId = staff.userId;
+      _error = null;
+    });
+  }
+
+  /// Verifies a PIN entered on the locked screen.
+  ///
+  /// Staff login deliberately does not use a modal route. Replacing the PIN
+  /// gate with the venue shell while a dialog route is being removed can leave
+  /// Flutter's semantics parent data dirty on desktop and halt every following
+  /// frame. Keeping the keypad in the gate's own render tree gives the unlock
+  /// transition one owner and remains usable with touch or a physical keyboard.
+  Future<void> _verifyPin(VenuePinStaff staff, String pin) async {
     try {
-      final pin = await showDialog<String>(
-        context: context,
-        builder: (context) => _PinPadDialog(
-          title: Text('Enter PIN for ${staff.displayName}'),
-          message: 'Enter your six-digit staff PIN.',
-          confirmLabel: 'Unlock',
-        ),
-      );
-      if (pin == null || !mounted) return;
       setState(() => _submitting = true);
+      AppLogger.info(
+        'Staff PIN unlock started: staff=${staff.userId}, '
+        'offline=${widget.offlineHubOnly}.',
+      );
       VenueHubBootstrap? bootstrap;
       try {
+        if (widget.offlineHubOnly) {
+          AppLogger.info('Staff PIN unlock: loading cached hub authority.');
+          throw const _UseCachedHubBootstrap();
+        }
         final rawBootstrap = await _repository.fetchOfflineHubBootstrap(
           scope: widget.scope,
         );
         bootstrap = VenueHubBootstrap.fromJson(rawBootstrap);
         await _hubCache.saveBootstrap(widget.scope, bootstrap);
       } catch (error, stackTrace) {
-        AppLogger.error('Refresh venue hub discovery', error, stackTrace);
+        if (error is! _UseCachedHubBootstrap) {
+          AppLogger.error('Refresh venue hub discovery', error, stackTrace);
+        }
         bootstrap = await _hubCache.readBootstrap(widget.scope);
+        // The hub host already passed cloud authority checks when its runtime
+        // started. Prefer that in-memory authority if the router loses its
+        // internet link before PIN entry and the older disk cache is absent or
+        // still says disabled. This never helps a different, unenrolled
+        // device bypass hub authentication.
+        final runningBootstrap =
+            VenueHubRuntime.instance.activeScope == widget.scope
+            ? VenueHubRuntime.instance.activeBootstrap
+            : null;
+        if (runningBootstrap?.enabled == true &&
+            (bootstrap == null || !bootstrap.enabled)) {
+          bootstrap = runningBootstrap;
+        }
       }
       if (bootstrap == null) {
         throw StateError(
           'The cloud is unavailable and this device has no saved venue hub configuration.',
         );
       }
+      AppLogger.info('Staff PIN unlock: hub authority is ready.');
+      final deviceId = await LocalPrinterDeviceIdentity()
+          .deviceIdForScope(widget.scope)
+          .timeout(const Duration(seconds: 5));
       if (kIsWeb) {
         // Browsers do not retain the hub's native device key. Their
         // PIN-authenticated mutations use the short-lived Firebase queue and
@@ -331,85 +443,155 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           scope: widget.scope,
           userId: staff.userId,
           pin: pin,
+          deviceId: deviceId,
+        );
+        await _hubCache.saveStaffPreferences(
+          widget.scope,
+          userId: session.userId,
+          themeModePreference: session.themeModePreference,
+          posCategoryViewPreference: session.posCategoryViewPreference,
+          posProductSortPreference: session.posProductSortPreference,
         );
         ref
             .read(activeStaffPinSessionProvider.notifier)
             .unlock(session, widget.scope);
+        if (bootstrap.enabled) {
+          unawaited(
+            VenueHubRealtimeClient.instance
+                .ensureConfigured(
+                  scope: widget.scope,
+                  hubEpoch: bootstrap.hubEpoch,
+                  repository: _repository,
+                )
+                .catchError((Object error, StackTrace stackTrace) {
+                  AppLogger.error(
+                    'Start realtime POS channel after PIN unlock',
+                    error,
+                    stackTrace,
+                  );
+                }),
+          );
+        }
         _scheduleExpiryCheck();
         return;
       }
-      final deviceId = await LocalPrinterDeviceIdentity().deviceIdForScope(
-        widget.scope,
-      );
-      final credential = await VenueHubDeviceCredentialStore().getOrCreate(
-        tenantId: widget.scope.tenantId,
-        venueId: widget.scope.venueId,
-        deviceId: deviceId,
-      );
-      await VenueHubPrinterClientRegistry.instance.configure(
-        scope: widget.scope,
-        bootstrap: bootstrap,
-        deviceId: deviceId,
-        credential: credential,
-      );
+      final credential = await VenueHubDeviceCredentialStore()
+          .getOrCreate(
+            tenantId: widget.scope.tenantId,
+            venueId: widget.scope.venueId,
+            deviceId: deviceId,
+          )
+          .timeout(const Duration(seconds: 5));
+      AppLogger.info('Staff PIN unlock: device identity is ready.');
+      await VenueHubPrinterClientRegistry.instance
+          .configure(
+            scope: widget.scope,
+            bootstrap: bootstrap,
+            deviceId: deviceId,
+            credential: credential,
+          )
+          .timeout(const Duration(seconds: 5));
       VenueHubLoginResult? hubLogin;
       StaffPinVerification? migratedCloudSession;
       var hubConnectionUnavailable = false;
+      final isLocalHubHost =
+          bootstrap.hubDeviceId == deviceId &&
+          bootstrap.hubCredentialId == credential.credentialId;
       if (bootstrap.enabled) {
         try {
-          hubLogin = await VenueHubClientRegistry.instance.configure(
-            scope: widget.scope,
-            bootstrap: bootstrap,
-            deviceId: deviceId,
-            staffId: staff.userId,
-            pin: pin,
-            credential: credential,
-            endpointOverride:
-                VenueHubRuntime.instance.activeScope == widget.scope
-                ? VenueHubRuntime.instance.status.endpoint
-                : null,
+          final localHubEndpoint = isLocalHubHost
+              ? await VenueHubRuntime.instance.waitForLocalEndpoint(
+                  widget.scope,
+                  timeout: const Duration(seconds: 8),
+                )
+              : null;
+          AppLogger.info(
+            'Staff PIN unlock: verifying with the certificate-pinned hub.',
           );
+          hubLogin = await VenueHubClientRegistry.instance
+              .configure(
+                scope: widget.scope,
+                bootstrap: bootstrap,
+                deviceId: deviceId,
+                staffId: staff.userId,
+                pin: pin,
+                credential: credential,
+                endpointOverride: localHubEndpoint,
+              )
+              .timeout(const Duration(seconds: 12));
+          AppLogger.info('Staff PIN unlock: hub verification succeeded.');
         } on VenueHubClientException catch (error) {
           final verifierMissing = error.code == 'offline_verifier_unavailable';
           final verifierRejected = error.code == 'invalid_pin';
-          if (!verifierMissing && !verifierRejected) rethrow;
-          AppLogger.info(
-            verifierMissing
-                ? 'Upgrading a legacy staff PIN for encrypted offline verification.'
-                : 'Validating and repairing a rejected offline PIN verifier.',
-          );
-          migratedCloudSession = await _repository.verifyStaffPin(
-            scope: widget.scope,
-            userId: staff.userId,
-            pin: pin,
-            repairOfflineVerifier: verifierRejected,
-          );
-          if (VenueHubRuntime.instance.activeScope != widget.scope) {
-            throw StateError(
-              'The PIN was upgraded. Wait up to 30 seconds for the venue hub '
-              'to refresh, then enter it again.',
+          final lanUnavailable = error.code == 'hub_lan_unavailable';
+          if (lanUnavailable) {
+            if (isLocalHubHost) rethrow;
+            // A remote terminal may legitimately be on mobile data or another
+            // network. Cloud PIN verification authenticates the staff member;
+            // RTDB presence and the signed remote queue still require the
+            // authoritative hub to be online before any order is accepted.
+            hubConnectionUnavailable = true;
+            AppLogger.info(
+              'Venue hub LAN login unavailable; continuing with the secure remote hub route.',
+            );
+          } else if (!verifierMissing && !verifierRejected) {
+            rethrow;
+          }
+          // A LAN transport failure continues below to normal cloud PIN
+          // verification. Only the two explicit verifier errors may enter the
+          // legacy repair flow and refresh hub secrets.
+          if (!lanUnavailable) {
+            if (widget.offlineHubOnly) {
+              throw StateError(
+                verifierMissing
+                    ? 'This PIN needs one successful online login before it can be used offline.'
+                    : 'The venue hub rejected this staff PIN.',
+              );
+            }
+            AppLogger.info(
+              verifierMissing
+                  ? 'Upgrading a legacy staff PIN for encrypted offline verification.'
+                  : 'Validating and repairing a rejected offline PIN verifier.',
+            );
+            migratedCloudSession = await _repository.verifyStaffPin(
+              scope: widget.scope,
+              userId: staff.userId,
+              pin: pin,
+              deviceId: deviceId,
+              repairOfflineVerifier: verifierRejected,
+            );
+            if (VenueHubRuntime.instance.activeScope != widget.scope) {
+              throw StateError(
+                'The PIN was upgraded. Wait up to 30 seconds for the venue hub '
+                'to refresh, then enter it again.',
+              );
+            }
+            final refreshed = await _repository.fetchOfflineHubSnapshot(
+              scope: widget.scope,
+              deviceId: deviceId,
+              hubEpoch: bootstrap.hubEpoch,
+              credential: credential,
+            );
+            await VenueHubRuntime.instance.installFreshSnapshot(refreshed);
+            final localHubEndpoint =
+                bootstrap.hubDeviceId == deviceId &&
+                    bootstrap.hubCredentialId == credential.credentialId
+                ? await VenueHubRuntime.instance.waitForLocalEndpoint(
+                    widget.scope,
+                  )
+                : null;
+            hubLogin = await VenueHubClientRegistry.instance.configure(
+              scope: widget.scope,
+              bootstrap: bootstrap,
+              deviceId: deviceId,
+              staffId: staff.userId,
+              pin: pin,
+              credential: credential,
+              endpointOverride: localHubEndpoint,
             );
           }
-          final refreshed = await _repository.fetchOfflineHubSnapshot(
-            scope: widget.scope,
-            deviceId: deviceId,
-            hubEpoch: bootstrap.hubEpoch,
-            credential: credential,
-          );
-          await VenueHubRuntime.instance.installFreshSnapshot(refreshed);
-          hubLogin = await VenueHubClientRegistry.instance.configure(
-            scope: widget.scope,
-            bootstrap: bootstrap,
-            deviceId: deviceId,
-            staffId: staff.userId,
-            pin: pin,
-            credential: credential,
-            endpointOverride:
-                VenueHubRuntime.instance.activeScope == widget.scope
-                ? VenueHubRuntime.instance.status.endpoint
-                : null,
-          );
         } on StateError catch (error, stackTrace) {
+          if (isLocalHubHost) rethrow;
           // Certificate installation and device enrolment are managed from
           // inside the authenticated Settings area. If Firebase is online,
           // permit a cloud-verified manager to enter that recovery surface.
@@ -428,8 +610,39 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
           bootstrap,
         );
       }
+      final cachedPreferences = await _hubCache
+          .readStaffPreferences(widget.scope, staff.userId)
+          .timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => const <String, String>{},
+          );
       StaffPinVerification session;
-      if (migratedCloudSession != null) {
+      if (widget.offlineHubOnly) {
+        if (hubLogin == null) {
+          throw StateError('The local venue hub did not verify this PIN.');
+        }
+        session = StaffPinVerification(
+          sessionId: hubLogin.sessionId,
+          sessionToken: hubLogin.sessionToken,
+          expiresAt: hubLogin.expiresAtUtc,
+          tenantId: widget.scope.tenantId,
+          venueId: widget.scope.venueId,
+          deviceId: deviceId,
+          userId: staff.userId,
+          displayName: staff.displayName,
+          isPlatformAdmin: false,
+          roles: staff.roles,
+          // Preserve the venue default restored from local preferences while
+          // Firebase is unavailable. "system" previously passed through a
+          // light/dark-only parser and incorrectly forced the light theme.
+          themeModePreference:
+              cachedPreferences['themeModePreference'] ?? 'venue',
+          posCategoryViewPreference:
+              cachedPreferences['posCategoryViewPreference'] ?? 'bars',
+          posProductSortPreference:
+              cachedPreferences['posProductSortPreference'] ?? 'alphabetical',
+        );
+      } else if (migratedCloudSession != null) {
         session = migratedCloudSession;
       } else {
         try {
@@ -437,6 +650,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             scope: widget.scope,
             userId: staff.userId,
             pin: pin,
+            deviceId: deviceId,
           );
         } catch (error, stackTrace) {
           if (!bootstrap.enabled || hubLogin == null) rethrow;
@@ -451,26 +665,61 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
             expiresAt: hubLogin.expiresAtUtc,
             tenantId: widget.scope.tenantId,
             venueId: widget.scope.venueId,
+            deviceId: deviceId,
             userId: staff.userId,
             displayName: staff.displayName,
             isPlatformAdmin: false,
             roles: staff.roles,
-            themeModePreference: 'system',
-            posCategoryViewPreference: 'bars',
-            posProductSortPreference: 'alphabetical',
+            themeModePreference:
+                cachedPreferences['themeModePreference'] ?? 'venue',
+            posCategoryViewPreference:
+                cachedPreferences['posCategoryViewPreference'] ?? 'bars',
+            posProductSortPreference:
+                cachedPreferences['posProductSortPreference'] ?? 'alphabetical',
           );
         }
       }
+      if (hubLogin != null &&
+          hubLogin.expiresAtUtc.isBefore(session.expiresAt)) {
+        session = session.copyWith(expiresAt: hubLogin.expiresAtUtc);
+      }
+      await _hubCache
+          .saveStaffPreferences(
+            widget.scope,
+            userId: session.userId,
+            themeModePreference: session.themeModePreference,
+            posCategoryViewPreference: session.posCategoryViewPreference,
+            posProductSortPreference: session.posProductSortPreference,
+          )
+          .timeout(const Duration(seconds: 5), onTimeout: () {});
+      AppLogger.info('Staff PIN unlock: activating the verified session.');
       ref
           .read(activeStaffPinSessionProvider.notifier)
           .unlock(session, widget.scope);
+      if (bootstrap.enabled && !widget.offlineHubOnly) {
+        unawaited(
+          VenueHubRealtimeClient.instance
+              .ensureConfigured(
+                scope: widget.scope,
+                hubEpoch: bootstrap.hubEpoch,
+                repository: _repository,
+              )
+              .catchError((Object error, StackTrace stackTrace) {
+                AppLogger.error(
+                  'Start realtime POS channel after PIN unlock',
+                  error,
+                  stackTrace,
+                );
+              }),
+        );
+      }
       if (bootstrap.enabled && hubLogin == null && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
               hubConnectionUnavailable
-                  ? 'Signed in online. Orders will use the protected remote hub queue while its heartbeat is live. Install the venue certificate for LAN offline use.'
-                  : 'Signed in online. Orders will use the protected remote hub queue; enrol this device only if it also needs LAN offline use.',
+                  ? 'Local hub connection unavailable. Connecting through the secure remote hub channel; orders remain blocked until live hub presence is confirmed.'
+                  : 'Signed in for recovery only. Enrol this device in Venue offline hub settings before it can process orders.',
             ),
           ),
         );
@@ -480,7 +729,10 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     } on Object catch (error, stackTrace) {
       AppLogger.error('Verify staff PIN', error, stackTrace);
       if (!mounted) return;
-      setState(() => _error = '$error');
+      setState(() {
+        _error = '$error';
+        _pinEntryUserId = null;
+      });
       await _loadStaff();
     } finally {
       if (mounted) setState(() => _submitting = false);
@@ -491,11 +743,11 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     _expiryTimer?.cancel();
     final session = ref.read(activeStaffPinSessionProvider);
     if (session == null) return;
-    final remaining = session.expiresAt.difference(DateTime.now());
+    final remaining = _staffPinSessionRemaining(session.expiresAt);
     _expiryTimer = Timer(remaining.isNegative ? Duration.zero : remaining, () {
       final current = ref.read(activeStaffPinSessionProvider);
       if (current == null) return;
-      if (current.expiresAt.isAfter(DateTime.now())) {
+      if (isStaffPinSessionCurrent(current.expiresAt)) {
         _scheduleExpiryCheck();
       } else if (ref.read(orderFlowDisplayActiveProvider)) {
         _expiryTimer = Timer(const Duration(seconds: 30), _scheduleExpiryCheck);
@@ -505,9 +757,19 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
     });
   }
 
+  void _dismissProtectedRoutesAfterLock() {
+    if (!mounted) return;
+    final navigator = Navigator.maybeOf(context, rootNavigator: true);
+    if (navigator == null || !navigator.canPop()) return;
+    AppLogger.info(
+      'Staff PIN session locked; closing protected dialogs and sheets.',
+    );
+    navigator.popUntil((route) => route.isFirst);
+  }
+
   Future<void> _setOwnPin() async {
     try {
-      final firstPin = await showDialog<String>(
+      final firstPin = await showAppDialog<String>(
         context: context,
         builder: (context) => const _PinPadDialog(
           title: Text('Create your staff PIN'),
@@ -516,7 +778,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         ),
       );
       if (firstPin == null || !mounted) return;
-      final confirmedPin = await showDialog<String>(
+      final confirmedPin = await showAppDialog<String>(
         context: context,
         builder: (context) => const _PinPadDialog(
           title: Text('Confirm your staff PIN'),
@@ -543,7 +805,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
   }
 
   Future<void> _recoverOwnPin(VenuePinStaff staff) async {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = _currentFirebaseUser;
     final email = user?.email;
     if (user == null || user.uid != staff.userId || email == null) {
       setState(() {
@@ -552,7 +814,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       });
       return;
     }
-    final password = await showDialog<String>(
+    final password = await showAppDialog<String>(
       context: context,
       barrierDismissible: false,
       builder: (context) => _PasswordReauthenticationDialog(email: email),
@@ -579,7 +841,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       AppLogger.info('PIN recovery: Firebase account password verified.');
       if (!mounted) return;
       AppLogger.info('PIN recovery: opening replacement PIN entry.');
-      final newPin = await showDialog<String>(
+      final newPin = await showAppDialog<String>(
         context: context,
         barrierDismissible: false,
         builder: (context) => const _PinPadDialog(
@@ -589,7 +851,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         ),
       );
       if (newPin == null || !mounted) return;
-      final confirmation = await showDialog<String>(
+      final confirmation = await showAppDialog<String>(
         context: context,
         barrierDismissible: false,
         builder: (context) => const _PinPadDialog(
@@ -634,15 +896,31 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
 
   @override
   Widget build(BuildContext context) {
+    // Dialogs and modal sheets are routes above this gate. Without explicitly
+    // dismissing them, an expired session can correctly rebuild the PIN screen
+    // underneath a checkout sheet while leaving that protected sheet visible.
+    ref.listen<StaffPinVerification?>(activeStaffPinSessionProvider, (
+      previous,
+      next,
+    ) {
+      if (previous != null && next == null) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _dismissProtectedRoutesAfterLock(),
+        );
+      }
+    });
     final session = ref.watch(activeStaffPinSessionProvider);
-    if (session != null && session.expiresAt.isAfter(DateTime.now())) {
+    if (session != null && isStaffPinSessionCurrent(session.expiresAt)) {
       return widget.child;
     }
     final staff = _staff ?? const <VenuePinStaff>[];
     final selected = staff
         .where((item) => item.userId == _selectedUserId)
         .firstOrNull;
-    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    final pinEntryStaff = staff
+        .where((item) => item.userId == _pinEntryUserId)
+        .firstOrNull;
+    final currentUserId = _currentFirebaseUser?.uid;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Staff PIN'),
@@ -662,15 +940,35 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       ),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+          // PIN entry must fit without scrolling on short POS tablets. The
+          // staff picker keeps its roomier layout, while the keypad removes
+          // decorative padding and sizes its keys from the actual viewport.
+          padding: EdgeInsets.all(pinEntryStaff == null ? 24 : 8),
           child: Center(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 760),
+              constraints: BoxConstraints(
+                maxWidth: pinEntryStaff == null ? 760 : 430,
+              ),
               child: Card(
                 child: Padding(
-                  padding: const EdgeInsets.all(28),
+                  padding: EdgeInsets.all(pinEntryStaff == null ? 28 : 12),
                   child: _loading
                       ? const Center(child: CircularProgressIndicator())
+                      : pinEntryStaff != null
+                      ? _PinPadPanel(
+                          key: ValueKey(pinEntryStaff.userId),
+                          title: Text(
+                            'Enter PIN for ${pinEntryStaff.displayName}',
+                          ),
+                          message: 'Enter your six-digit staff PIN.',
+                          confirmLabel: 'Unlock',
+                          enabled: !_submitting,
+                          onCancel: () {
+                            if (_submitting) return;
+                            setState(() => _pinEntryUserId = null);
+                          },
+                          onSubmitted: (pin) => _verifyPin(pinEntryStaff, pin),
+                        )
                       : Column(
                           mainAxisSize: MainAxisSize.min,
                           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -914,6 +1212,7 @@ class _PasswordReauthenticationDialogState
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    scrollable: true,
     title: const Text('Verify your Firebase account'),
     content: SizedBox(
       width: 420,
@@ -964,7 +1263,36 @@ class _PasswordReauthenticationDialogState
   );
 }
 
-class _PinPadDialog extends StatefulWidget {
+/// Exposes the production PIN entry surface to widget tests without making
+/// its mutable state part of the application API.
+@visibleForTesting
+Widget buildStaffPinDialogForTest({
+  String title = 'Enter PIN',
+  String message = 'Enter your six-digit staff PIN.',
+  String confirmLabel = 'Unlock',
+}) => _PinPadDialog(
+  title: Text(title),
+  message: message,
+  confirmLabel: confirmLabel,
+);
+
+/// Exposes the inline login keypad so tests can verify the exact transition
+/// from a locked screen to the authenticated application shell.
+@visibleForTesting
+Widget buildStaffPinPanelForTest({
+  required ValueChanged<String> onSubmitted,
+  required VoidCallback onCancel,
+  bool enabled = true,
+}) => _PinPadPanel(
+  title: const Text('Enter PIN'),
+  message: 'Enter your six-digit staff PIN.',
+  confirmLabel: 'Unlock',
+  enabled: enabled,
+  onCancel: onCancel,
+  onSubmitted: onSubmitted,
+);
+
+class _PinPadDialog extends StatelessWidget {
   const _PinPadDialog({
     required this.title,
     required this.message,
@@ -976,10 +1304,51 @@ class _PinPadDialog extends StatefulWidget {
   final String confirmLabel;
 
   @override
-  State<_PinPadDialog> createState() => _PinPadDialogState();
+  Widget build(BuildContext context) => Dialog(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 390),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 22, 24, 16),
+        child: _PinPadPanel(
+          title: title,
+          message: message,
+          confirmLabel: confirmLabel,
+          onCancel: () => Navigator.of(context).pop(),
+          onSubmitted: (pin) => Navigator.of(context).pop(pin),
+        ),
+      ),
+    ),
+  );
 }
 
-class _PinPadDialogState extends State<_PinPadDialog> {
+/// Reusable PIN keypad whose caller owns navigation and authentication.
+///
+/// The staff-login gate embeds this panel directly, avoiding a dialog route
+/// being removed in the same frame that the entire authenticated shell is
+/// mounted. Other workflows may safely host it inside [_PinPadDialog].
+class _PinPadPanel extends StatefulWidget {
+  const _PinPadPanel({
+    super.key,
+    required this.title,
+    required this.message,
+    required this.confirmLabel,
+    required this.onCancel,
+    required this.onSubmitted,
+    this.enabled = true,
+  });
+
+  final Widget title;
+  final String message;
+  final String confirmLabel;
+  final VoidCallback onCancel;
+  final ValueChanged<String> onSubmitted;
+  final bool enabled;
+
+  @override
+  State<_PinPadPanel> createState() => _PinPadPanelState();
+}
+
+class _PinPadPanelState extends State<_PinPadPanel> {
   String _pin = '';
   bool _submitted = false;
   final FocusNode _keyboardFocus = FocusNode(debugLabel: 'Staff PIN keypad');
@@ -999,19 +1368,17 @@ class _PinPadDialogState extends State<_PinPadDialog> {
   }
 
   void _digit(String digit) {
-    if (_submitted || _pin.length >= 6) return;
+    if (!widget.enabled || _submitted || _pin.length >= 6) return;
     setState(() => _pin += digit);
     if (_pin.length == 6) _submit();
     _keyboardFocus.requestFocus();
   }
 
   void _submit() {
-    if (_submitted || _pin.length != 6) return;
+    if (!widget.enabled || _submitted || _pin.length != 6) return;
     _submitted = true;
     final completedPin = _pin;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) Navigator.of(context).pop(completedPin);
-    });
+    widget.onSubmitted(completedPin);
   }
 
   void _backspace() {
@@ -1050,7 +1417,7 @@ class _PinPadDialogState extends State<_PinPadDialog> {
       return;
     }
     if (event.logicalKey == LogicalKeyboardKey.escape) {
-      Navigator.of(context).pop();
+      if (widget.enabled) widget.onCancel();
       return;
     }
     if ((event.logicalKey == LogicalKeyboardKey.enter ||
@@ -1061,100 +1428,135 @@ class _PinPadDialogState extends State<_PinPadDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: widget.title,
-    content: KeyboardListener(
+  Widget build(BuildContext context) {
+    final viewport = MediaQuery.sizeOf(context);
+    final compact = viewport.height < 700 || viewport.width < 600;
+    final gap = compact ? 4.0 : 10.0;
+    final keySpacing = compact ? 4.0 : 5.0;
+    final keyHeight = compact ? 38.0 : 48.0;
+    final keyStyle = ButtonStyle(
+      minimumSize: const WidgetStatePropertyAll(Size.zero),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      padding: const WidgetStatePropertyAll(EdgeInsets.zero),
+      visualDensity: compact ? VisualDensity.compact : VisualDensity.standard,
+    );
+    return KeyboardListener(
       focusNode: _keyboardFocus,
       autofocus: true,
       onKeyEvent: _handleKeyEvent,
-      child: SizedBox(
-        width: 330,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(widget.message),
-            const SizedBox(height: 18),
-            Semantics(
-              label: '${_pin.length} of 6 PIN digits entered',
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(
-                  6,
-                  (index) => Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 7),
-                    child: Icon(
-                      index < _pin.length
-                          ? Icons.circle
-                          : Icons.circle_outlined,
-                      size: 17,
-                    ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          DefaultTextStyle(
+            style: compact
+                ? Theme.of(context).textTheme.titleLarge!
+                : Theme.of(context).textTheme.headlineSmall!,
+            child: widget.title,
+          ),
+          SizedBox(height: gap),
+          Text(widget.message),
+          SizedBox(height: gap),
+          Semantics(
+            label: '${_pin.length} of 6 PIN digits entered',
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(
+                6,
+                (index) => Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 5),
+                  child: Icon(
+                    index < _pin.length ? Icons.circle : Icons.circle_outlined,
+                    size: compact ? 12 : 15,
                   ),
                 ),
               ),
             ),
-            const SizedBox(height: 18),
-            GridView.count(
-              crossAxisCount: 3,
-              shrinkWrap: true,
+          ),
+          SizedBox(height: gap),
+          SizedBox(
+            height: (keyHeight * 4) + (keySpacing * 3),
+            child: GridView.builder(
+              itemCount: 12,
               physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: 8,
-              crossAxisSpacing: 8,
-              childAspectRatio: 1.65,
-              children: [
-                for (final digit in const [
-                  '1',
-                  '2',
-                  '3',
-                  '4',
-                  '5',
-                  '6',
-                  '7',
-                  '8',
-                  '9',
-                ])
-                  FilledButton.tonal(
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                mainAxisExtent: keyHeight,
+                mainAxisSpacing: keySpacing,
+                crossAxisSpacing: keySpacing,
+              ),
+              itemBuilder: (context, index) {
+                if (index < 9) {
+                  final digit = '${index + 1}';
+                  return FilledButton.tonal(
+                    style: keyStyle,
                     onPressed: () => _digit(digit),
                     child: Text(
                       digit,
-                      style: Theme.of(context).textTheme.headlineSmall,
+                      style: compact
+                          ? Theme.of(context).textTheme.titleMedium
+                          : Theme.of(context).textTheme.titleLarge,
                     ),
-                  ),
-                OutlinedButton(
-                  onPressed: _pin.isEmpty
-                      ? null
-                      : () {
-                          setState(() => _pin = '');
-                          _keyboardFocus.requestFocus();
-                        },
-                  child: const Text('Clear'),
-                ),
-                FilledButton.tonal(
-                  onPressed: () => _digit('0'),
-                  child: Text(
-                    '0',
-                    style: Theme.of(context).textTheme.headlineSmall,
-                  ),
-                ),
-                IconButton.filledTonal(
+                  );
+                }
+                if (index == 9) {
+                  return OutlinedButton(
+                    style: keyStyle,
+                    onPressed: _pin.isEmpty
+                        ? null
+                        : () {
+                            setState(() => _pin = '');
+                            _keyboardFocus.requestFocus();
+                          },
+                    child: const Text('Clear'),
+                  );
+                }
+                if (index == 10) {
+                  return FilledButton.tonal(
+                    style: keyStyle,
+                    onPressed: () => _digit('0'),
+                    child: Text(
+                      '0',
+                      style: compact
+                          ? Theme.of(context).textTheme.titleMedium
+                          : Theme.of(context).textTheme.titleLarge,
+                    ),
+                  );
+                }
+                return IconButton.filledTonal(
+                  style: keyStyle,
                   tooltip: 'Delete last digit',
                   onPressed: _pin.isEmpty ? null : _backspace,
                   icon: const Icon(Icons.backspace_rounded),
-                ),
-              ],
+                );
+              },
             ),
-          ],
-        ),
+          ),
+          SizedBox(height: compact ? 4 : 8),
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              TextButton(
+                onPressed: widget.enabled ? widget.onCancel : null,
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: widget.enabled && _pin.length == 6 && !_submitted
+                    ? _submit
+                    : null,
+                child: widget.enabled
+                    ? Text(widget.confirmLabel)
+                    : const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+              ),
+            ],
+          ),
+        ],
       ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.of(context).pop(),
-        child: const Text('Cancel'),
-      ),
-      FilledButton(
-        onPressed: _pin.length == 6 && !_submitted ? _submit : null,
-        child: Text(widget.confirmLabel),
-      ),
-    ],
-  );
+    );
+  }
 }

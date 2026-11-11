@@ -218,8 +218,7 @@ class VenueHubReplayGuard {
     final expectedBodyHash = _base64UrlWithoutPadding(
       (await Sha256().hash(utf8.encode(_canonicalJson(body)))).bytes,
     );
-    final suppliedBodyHash = envelope.bodyHash.replaceAll('=', '');
-    if (!_constantTimeEquals(expectedBodyHash, suppliedBodyHash)) {
+    if (!_constantTimeEquals(expectedBodyHash, envelope.bodyHash)) {
       throw const VenueHubProtocolException(
         'The signed request body has been modified.',
       );

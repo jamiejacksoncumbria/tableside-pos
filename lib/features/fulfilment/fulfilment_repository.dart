@@ -6,6 +6,7 @@ import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_offline_view.dart';
+import '../auth/staff_pin_gate.dart';
 import '../pos/domain.dart';
 import 'fulfilment_domain.dart';
 
@@ -19,6 +20,9 @@ final fulfilmentRepositoryProvider = Provider<FulfilmentRepository>(
 final venueCoursesProvider = StreamProvider<List<MenuCourse>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <MenuCourse>[]);
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+    return VenueHubOfflineView.instance.courseStream;
+  }
   return ref.watch(fulfilmentRepositoryProvider).watchCourses(scope);
 });
 
@@ -34,25 +38,89 @@ final venueCustomersProvider = StreamProvider<List<VenueCustomer>>((ref) {
 final fulfilmentOrdersProvider = StreamProvider<List<PosOrder>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <PosOrder>[]);
+  final session = ref.watch(activeStaffPinSessionProvider);
+  final driverOnly =
+      session != null &&
+      session.roles.contains('driver') &&
+      !session.roles.any((role) => role == 'owner' || role == 'manager');
   if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     return VenueHubOfflineView.instance.orderStream.map(
       (orders) => orders
-          .where(
-            (order) =>
-                order.channel != OrderChannel.dineIn &&
-                order.status != OrderStatus.closed,
-          )
+          .where((order) => order.channel != OrderChannel.dineIn)
           .toList(growable: false),
     );
   }
-  return ref.watch(fulfilmentRepositoryProvider).watchFulfilmentOrders(scope);
+  return ref
+      .watch(fulfilmentRepositoryProvider)
+      .watchFulfilmentOrders(
+        scope,
+        assignedDriverId: driverOnly ? session.userId : null,
+      );
 });
+
+/// Value object used by Riverpod to keep a date-bounded fulfilment listener.
+/// The operational POS uses [fulfilmentOrdersProvider]; only the management
+/// history screen opens this wider query, and only for its selected dates.
+@immutable
+class FulfilmentHistoryQuery {
+  const FulfilmentHistoryQuery({
+    required this.scope,
+    required this.startMillis,
+    required this.endExclusiveMillis,
+    this.assignedDriverId,
+  });
+
+  final VenueScope scope;
+  final int startMillis;
+  final int endExclusiveMillis;
+  final String? assignedDriverId;
+
+  @override
+  bool operator ==(Object other) =>
+      other is FulfilmentHistoryQuery &&
+      other.scope == scope &&
+      other.startMillis == startMillis &&
+      other.endExclusiveMillis == endExclusiveMillis &&
+      other.assignedDriverId == assignedDriverId;
+
+  @override
+  int get hashCode =>
+      Object.hash(scope, startMillis, endExclusiveMillis, assignedDriverId);
+}
+
+final fulfilmentOrderHistoryProvider = StreamProvider.autoDispose
+    .family<List<PosOrder>, FulfilmentHistoryQuery>((ref, request) {
+      final scope = request.scope;
+      if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+        return VenueHubOfflineView.instance.orderStream.map(
+          (orders) => orders
+              .where((order) {
+                if (order.channel == OrderChannel.dineIn) return false;
+                if (request.assignedDriverId != null &&
+                    order.assignedDriverId != request.assignedDriverId) {
+                  return false;
+                }
+                final time = (order.scheduledFor ?? order.openedAt)
+                    .millisecondsSinceEpoch;
+                return time >= request.startMillis &&
+                    time < request.endExclusiveMillis;
+              })
+              .toList(growable: false),
+        );
+      }
+      return ref
+          .watch(fulfilmentRepositoryProvider)
+          .watchFulfilmentOrderHistory(request);
+    });
 
 final fulfilmentStaffProvider = StreamProvider<List<FulfilmentStaffMember>>((
   ref,
 ) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(const <FulfilmentStaffMember>[]);
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+    return VenueHubOfflineView.instance.staffStream;
+  }
   return ref.watch(fulfilmentRepositoryProvider).watchStaff(scope);
 });
 
@@ -82,6 +150,10 @@ class FulfilmentRepository {
           collectionEnabled: data['collectionEnabled'] as bool? ?? false,
           deliveryEnabled: data['deliveryEnabled'] as bool? ?? false,
           courseControlEnabled: data['courseControlEnabled'] as bool? ?? false,
+          collectionLeadMinutes:
+              (data['collectionLeadMinutes'] as num?)?.toInt() ?? 20,
+          deliveryLeadMinutes:
+              (data['deliveryLeadMinutes'] as num?)?.toInt() ?? 20,
           collectionWindows: _windows(data['collectionWindows']),
           deliveryWindows: _windows(data['deliveryWindows']),
           serviceAreas: _areas(data['serviceAreas']),
@@ -144,6 +216,9 @@ class FulfilmentRepository {
                     area: item['area'] as String? ?? '',
                     addressLines: item['addressLines'] as String? ?? '',
                     notes: item['notes'] as String? ?? '',
+                    isDefault: item['isDefault'] as bool? ?? false,
+                    latitude: (item['latitude'] as num?)?.toDouble(),
+                    longitude: (item['longitude'] as num?)?.toDouble(),
                   );
                 })
                 .toList(growable: false),
@@ -157,27 +232,108 @@ class FulfilmentRepository {
         return customers;
       });
 
-  Stream<List<PosOrder>> watchFulfilmentOrders(VenueScope scope) => _firestore
-      .collection('tenants/${scope.tenantId}/orders')
-      .where('venueId', isEqualTo: scope.venueId)
-      .snapshots()
-      .map((snapshot) {
-        final orders = snapshot.docs
-            .map(_fulfilmentOrder)
-            .whereType<PosOrder>()
-            .where(
-              (order) =>
-                  order.channel != OrderChannel.dineIn &&
-                  order.status != OrderStatus.closed,
-            )
-            .toList();
-        orders.sort((left, right) {
-          final leftTime = left.scheduledFor ?? left.openedAt;
-          final rightTime = right.scheduledFor ?? right.openedAt;
-          return leftTime.compareTo(rightTime);
-        });
-        return orders;
+  Stream<List<PosOrder>> watchFulfilmentOrders(
+    VenueScope scope, {
+    String? assignedDriverId,
+  }) {
+    Query<Map<String, dynamic>> query = _firestore
+        .collection('tenants/${scope.tenantId}/orders')
+        .where('venueId', isEqualTo: scope.venueId)
+        .where('status', whereIn: const <String>['open', 'sent']);
+    if (assignedDriverId != null) {
+      query = query.where('assignedDriverId', isEqualTo: assignedDriverId);
+    }
+    return query.snapshots().map((snapshot) {
+      final orders = snapshot.docs
+          .map(_fulfilmentOrder)
+          .whereType<PosOrder>()
+          .where((order) => order.channel != OrderChannel.dineIn)
+          .toList();
+      orders.sort((left, right) {
+        final leftTime = left.scheduledFor ?? left.openedAt;
+        final rightTime = right.scheduledFor ?? right.openedAt;
+        return leftTime.compareTo(rightTime);
       });
+      return orders;
+    });
+  }
+
+  /// Loads only the selected delivery/collection interval. New EPOS 3 orders
+  /// always carry scheduledForMillis; the bounded openedAt fallback is merged
+  /// for older ASAP records created before that field was introduced.
+  Stream<List<PosOrder>> watchFulfilmentOrderHistory(
+    FulfilmentHistoryQuery request,
+  ) {
+    final collection = _firestore.collection(
+      'tenants/${request.scope.tenantId}/orders',
+    );
+    final scheduled = collection
+        .where('venueId', isEqualTo: request.scope.venueId)
+        .where('channel', whereIn: const <String>['collection', 'delivery'])
+        .where(
+          'scheduledForMillis',
+          isGreaterThanOrEqualTo: request.startMillis,
+        )
+        .where('scheduledForMillis', isLessThan: request.endExclusiveMillis)
+        .snapshots();
+    final opened = collection
+        .where('venueId', isEqualTo: request.scope.venueId)
+        .where('channel', whereIn: const <String>['collection', 'delivery'])
+        .where('scheduledForMillis', isNull: true)
+        .where(
+          'openedAt',
+          isGreaterThanOrEqualTo: Timestamp.fromMillisecondsSinceEpoch(
+            request.startMillis,
+          ),
+        )
+        .where(
+          'openedAt',
+          isLessThan: Timestamp.fromMillisecondsSinceEpoch(
+            request.endExclusiveMillis,
+          ),
+        )
+        .snapshots();
+
+    return Stream<List<PosOrder>>.multi((controller) {
+      var scheduledDocs = const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+      var openedDocs = const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+      void emit() {
+        final documents = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{
+          for (final document in scheduledDocs) document.id: document,
+          for (final document in openedDocs) document.id: document,
+        };
+        final orders =
+            documents.values
+                .map(_fulfilmentOrder)
+                .whereType<PosOrder>()
+                .where(
+                  (order) =>
+                      request.assignedDriverId == null ||
+                      order.assignedDriverId == request.assignedDriverId,
+                )
+                .toList(growable: false)
+              ..sort((left, right) {
+                final leftTime = left.scheduledFor ?? left.openedAt;
+                final rightTime = right.scheduledFor ?? right.openedAt;
+                return leftTime.compareTo(rightTime);
+              });
+        controller.add(orders);
+      }
+
+      final scheduledSubscription = scheduled.listen((snapshot) {
+        scheduledDocs = snapshot.docs;
+        emit();
+      }, onError: controller.addError);
+      final openedSubscription = opened.listen((snapshot) {
+        openedDocs = snapshot.docs;
+        emit();
+      }, onError: controller.addError);
+      controller.onCancel = () async {
+        await scheduledSubscription.cancel();
+        await openedSubscription.cancel();
+      };
+    });
+  }
 
   Stream<List<FulfilmentStaffMember>> watchStaff(VenueScope scope) => _firestore
       .collection('tenants/${scope.tenantId}/members')
@@ -227,6 +383,7 @@ class FulfilmentRepository {
       'readyForCollection' => FulfilmentStatus.readyForCollection,
       'awaitingDriver' => FulfilmentStatus.awaitingDriver,
       'assigned' => FulfilmentStatus.assigned,
+      'driverDeclined' => FulfilmentStatus.driverDeclined,
       'outForDelivery' => FulfilmentStatus.outForDelivery,
       'collected' => FulfilmentStatus.collected,
       'delivered' => FulfilmentStatus.delivered,
@@ -249,10 +406,20 @@ class FulfilmentRepository {
       customerName: data['customerName'] as String?,
       customerPhone: data['customerPhone'] as String?,
       deliveryAddress: data['deliveryAddress'] as String?,
+      deliveryAddressLabel: data['deliveryAddressLabel'] as String?,
+      deliveryLatitude: (data['deliveryLatitude'] as num?)?.toDouble(),
+      deliveryLongitude: (data['deliveryLongitude'] as num?)?.toDouble(),
+      serviceAreaId: data['serviceAreaId'] as String?,
+      serviceAreaName: data['serviceAreaName'] as String?,
+      deliveryFeeMinor: (data['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
       scheduledFor: scheduledFor is Timestamp
           ? scheduledFor.toDate()
           : scheduledFor is String
           ? DateTime.tryParse(scheduledFor)
+          : data['scheduledForMillis'] is num
+          ? DateTime.fromMillisecondsSinceEpoch(
+              (data['scheduledForMillis'] as num).toInt(),
+            )
           : null,
       assignedDriverId: data['assignedDriverId'] as String?,
       assignedDriverName: data['assignedDriverName'] as String?,
@@ -266,11 +433,13 @@ class FulfilmentRepository {
     required String orderId,
     required FulfilmentStatus status,
     String? driverId,
+    bool background = false,
   }) => _commands.manageFulfilment(
     scope: scope,
     operation: 'updateOrderFulfilment',
     documentId: orderId,
     values: {'status': status.name, if (driverId != null) 'driverId': driverId},
+    background: background,
   );
 
   Future<void> saveSettings({
@@ -283,6 +452,8 @@ class FulfilmentRepository {
       'collectionEnabled': settings.collectionEnabled,
       'deliveryEnabled': settings.deliveryEnabled,
       'courseControlEnabled': settings.courseControlEnabled,
+      'collectionLeadMinutes': settings.collectionLeadMinutes,
+      'deliveryLeadMinutes': settings.deliveryLeadMinutes,
       'collectionWindows': settings.collectionWindows.map(_windowMap).toList(),
       'deliveryWindows': settings.deliveryWindows.map(_windowMap).toList(),
       'serviceAreas': settings.serviceAreas.map(_areaMap).toList(),
@@ -349,6 +520,9 @@ class FulfilmentRepository {
   Map<String, Object?> _areaMap(ServiceArea value) => {
     'id': value.id,
     'name': value.name,
+    'country': value.country,
+    'district': value.district,
+    'town': value.town,
     'deliveryFeeMinor': value.deliveryFeeMinor,
     'minimumOrderMinor': value.minimumOrderMinor,
     'estimatedMinutes': value.estimatedMinutes,
@@ -363,6 +537,9 @@ class FulfilmentRepository {
     'area': value.area,
     'addressLines': value.addressLines,
     'notes': value.notes,
+    'isDefault': value.isDefault,
+    'latitude': value.latitude,
+    'longitude': value.longitude,
   };
 
   List<ServiceWindow> _windows(Object? raw) => (raw as List? ?? const [])
@@ -385,6 +562,10 @@ class FulfilmentRepository {
         return ServiceArea(
           id: value['id'] as String? ?? '',
           name: value['name'] as String? ?? 'Area',
+          country:
+              value['country'] as String? ?? 'Kuzey Kıbrıs Türk Cumhuriyeti',
+          district: value['district'] as String? ?? '',
+          town: value['town'] as String? ?? value['name'] as String? ?? '',
           deliveryFeeMinor: (value['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
           minimumOrderMinor: (value['minimumOrderMinor'] as num?)?.toInt() ?? 0,
           estimatedMinutes: (value['estimatedMinutes'] as num?)?.toInt() ?? 45,

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -44,8 +46,10 @@ final allMenuProductsProvider = StreamProvider<List<MenuProduct>>((ref) {
 });
 
 final diningTablesProvider = StreamProvider<List<DiningTable>>((ref) {
+  List<DiningTable> ordered(List<DiningTable> tables) =>
+      List<DiningTable>.of(tables)..sort(compareDiningTables);
   final scope = ref.watch(activeVenueScopeProvider);
-  if (scope == null) return Stream.value(demoTables);
+  if (scope == null) return Stream.value(ordered(demoTables));
   if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
     final view = VenueHubOfflineView.instance;
     return view.orderStream.map((orders) {
@@ -61,14 +65,19 @@ final diningTablesProvider = StreamProvider<List<DiningTable>>((ref) {
               id: table.id,
               label: table.label,
               seats: table.seats,
+              sortOrder: table.sortOrder,
               hasOpenOrder: order != null,
               currentOrderId: order?.id,
             );
           })
-          .toList(growable: false);
+          .toList(growable: false)
+        ..sort(compareDiningTables);
     });
   }
-  return ref.watch(firestorePosRepositoryProvider).watchTables(scope);
+  return ref
+      .watch(firestorePosRepositoryProvider)
+      .watchTables(scope)
+      .map(ordered);
 });
 
 final openNamedTabsProvider = StreamProvider<List<OpenNamedTab>>((ref) {
@@ -100,6 +109,17 @@ final openSplitOrdersProvider = StreamProvider.autoDispose
       final scope = ref.watch(activeVenueScopeProvider);
       if (scope == null || sourceOrderId.trim().isEmpty) {
         return Stream.value(const <PosOrder>[]);
+      }
+      if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+        return VenueHubOfflineView.instance.orderStream.map(
+          (orders) => orders
+              .where(
+                (order) =>
+                    order.status != OrderStatus.closed &&
+                    order.splitFromOrderId == sourceOrderId,
+              )
+              .toList(growable: false),
+        );
       }
       return ref
           .watch(firestorePosRepositoryProvider)
@@ -234,6 +254,25 @@ class PosCompactTabController extends Notifier<int> {
   void select(int index) => state = index.clamp(0, 2);
 }
 
+/// Device-local quick search shared by the POS shell and menu panel.
+///
+/// The field is rendered in the current-order header, but filtering remains
+/// inside the menu. Keeping only the text in Riverpod lets those two widgets
+/// stay synchronized without persisting a transient search to Firebase.
+final posMenuSearchQueryProvider =
+    NotifierProvider<PosMenuSearchQueryController, String>(
+      PosMenuSearchQueryController.new,
+    );
+
+class PosMenuSearchQueryController extends Notifier<String> {
+  @override
+  String build() => '';
+
+  void update(String value) => state = value;
+
+  void clear() => state = '';
+}
+
 final activeOrderProvider = NotifierProvider<ActiveOrderController, PosOrder>(
   ActiveOrderController.new,
 );
@@ -260,9 +299,23 @@ class TrainingOpenOrdersController extends Notifier<Map<String, PosOrder>> {
   void clear() => state = const {};
 }
 
+class _PendingDraftAddition {
+  const _PendingDraftAddition({
+    required this.line,
+    required this.channelAvailabilityOverride,
+  });
+
+  final OrderLine line;
+  final bool channelAvailabilityOverride;
+}
+
 class ActiveOrderController extends Notifier<PosOrder> {
   var _pendingDraftMutations = 0;
   final _pendingDraftQuantities = <String, int>{};
+  final _pendingDraftAdditions = <_PendingDraftAddition>[];
+  Timer? _draftBatchTimer;
+  Future<void>? _draftBatchFlush;
+  bool _disposed = false;
   String? _pendingPaymentRequestId;
   String? _pendingPaymentFingerprint;
   String? _locallyClosingOrderId;
@@ -271,6 +324,10 @@ class ActiveOrderController extends Notifier<PosOrder> {
 
   @override
   PosOrder build() {
+    ref.onDispose(() {
+      _disposed = true;
+      _draftBatchTimer?.cancel();
+    });
     final scope = ref.watch(activeVenueScopeProvider);
     final trainingSession = ref.watch(trainingModeProvider);
     ref.listen<VenueScope?>(activeVenueScopeProvider, (previous, next) {
@@ -295,8 +352,8 @@ class ActiveOrderController extends Notifier<PosOrder> {
     final now = DateTime.now();
     return PosOrder(
       id: trainingSession == null
-          ? 'order-1024'
-          : 'training-${DateTime.now().microsecondsSinceEpoch}',
+          ? 'order-${now.microsecondsSinceEpoch}'
+          : 'training-${now.microsecondsSinceEpoch}',
       tenantId: scope?.tenantId ?? demoTenant.id,
       venueId: scope?.venueId ?? demoVenue.id,
       tableId: tableId.isEmpty ? null : tableId,
@@ -311,9 +368,11 @@ class ActiveOrderController extends Notifier<PosOrder> {
     MenuProduct product, {
     ProductConfigurationSelection selection =
         const ProductConfigurationSelection(),
+    bool channelAvailabilityOverride = false,
   }) async {
     if (!state.canAddProduct(product) ||
-        !product.isAvailableFor(state.channel)) {
+        (!product.isAvailableFor(state.channel) &&
+            !channelAvailabilityOverride)) {
       AppLogger.info(
         'Stock prevented adding ${product.id} to active order ${state.id}.',
       );
@@ -397,33 +456,161 @@ class ActiveOrderController extends Notifier<PosOrder> {
     }
     if (scope == null) return;
 
-    _pendingDraftMutations++;
-    try {
-      await ref
-          .read(productionCommandRepositoryProvider)
-          .addDraftLine(scope: scope, order: state, line: line);
-      // From the very first item, the Firestore order is the shared source of
-      // truth. It remains a draft until the waiter presses Send.
-      _selectPersistedOrder(state.id);
-      AppLogger.info('Draft line saved: ${line.id} on order ${state.id}.');
-    } on Object catch (error, stackTrace) {
-      state = state.copyWith(
-        lines: state.lines
-            .where((existing) => existing.id != line.id)
-            .toList(growable: false),
-      );
-      await _reloadCurrentTableOrderIfPresent(scope);
-      AppLogger.error('Save draft order line', error, stackTrace);
-      rethrow;
-    } finally {
-      _pendingDraftMutations--;
+    _pendingDraftQuantities[line.id] = line.quantity;
+    _pendingDraftAdditions.add(
+      _PendingDraftAddition(
+        line: line,
+        channelAvailabilityOverride: channelAvailabilityOverride,
+      ),
+    );
+    _draftBatchTimer?.cancel();
+    _draftBatchTimer = Timer(const Duration(milliseconds: 350), () {
+      if (_disposed) return;
+      unawaited(_flushPendingDraftAdditions().catchError((_) {}));
+    });
+    AppLogger.info(
+      'Draft line queued for background confirmation: ${line.id} on order ${state.id}.',
+    );
+  }
+
+  Future<void> _flushPendingDraftAdditions() {
+    _draftBatchTimer?.cancel();
+    _draftBatchTimer = null;
+    final active = _draftBatchFlush;
+    if (active != null) {
+      return active.then((_) => _flushPendingDraftAdditions());
     }
+    if (_pendingDraftAdditions.isEmpty) return Future<void>.value();
+
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null || ref.read(trainingModeProvider) != null) {
+      _pendingDraftAdditions.clear();
+      return Future<void>.value();
+    }
+    final orderId = state.id;
+    final orderSnapshot = state;
+    // Bound each signed command below the cloud relay's 64 KiB safety limit;
+    // any remaining rapid taps are sent as the next background batch.
+    final batch = _pendingDraftAdditions.take(25).toList(growable: false);
+    _pendingDraftAdditions.removeRange(0, batch.length);
+    _pendingDraftMutations++;
+
+    late final Future<void> operation;
+    operation = ref
+        .read(productionCommandRepositoryProvider)
+        .addDraftLines(
+          scope: scope,
+          order: orderSnapshot,
+          additions: [
+            for (final addition in batch)
+              (
+                line: addition.line,
+                channelAvailabilityOverride:
+                    addition.channelAvailabilityOverride,
+              ),
+          ],
+        )
+        .then((_) {
+          if (_disposed || state.id != orderId) return;
+          // The live order stream becomes authoritative only after the hub
+          // durably accepts the complete batch.
+          _selectPersistedOrder(orderId);
+          AppLogger.info(
+            'Basket batch confirmed: ${batch.length} line(s) on order $orderId.',
+          );
+        })
+        .catchError((Object error, StackTrace stackTrace) {
+          if (!_disposed && state.id == orderId) {
+            final failedIds = batch.map((item) => item.line.id).toSet();
+            state = state.copyWith(
+              lines: state.lines
+                  .where((line) => !failedIds.contains(line.id))
+                  .toList(growable: false),
+            );
+            for (final lineId in failedIds) {
+              _pendingDraftQuantities.remove(lineId);
+            }
+            ref
+                .read(appNotificationsProvider.notifier)
+                .add(
+                  title: 'Basket items were not saved',
+                  message: _draftFailureMessage(error),
+                  level: AppNotificationLevel.error,
+                  retentionSeconds: 12,
+                );
+          }
+          AppLogger.error('Save draft basket batch', error, stackTrace);
+          throw error;
+        })
+        .whenComplete(() {
+          _pendingDraftMutations--;
+          if (identical(_draftBatchFlush, operation)) {
+            _draftBatchFlush = null;
+          }
+          if (!_disposed && _pendingDraftAdditions.isNotEmpty) {
+            _draftBatchTimer = Timer(const Duration(milliseconds: 100), () {
+              if (!_disposed) {
+                unawaited(_flushPendingDraftAdditions().catchError((_) {}));
+              }
+            });
+          }
+        });
+    _draftBatchFlush = operation;
+    return operation;
+  }
+
+  String _draftFailureMessage(Object error) {
+    var message = error.toString().trim();
+    for (final prefix in const ['Bad state: ', 'StateError: ']) {
+      if (message.startsWith(prefix)) {
+        message = message.substring(prefix.length);
+      }
+    }
+    return message.isEmpty
+        ? 'The venue hub rejected the basket. Please retry.'
+        : message;
   }
 
   void _applyLiveOrder(PosOrder? remoteOrder) {
     if (remoteOrder == null) {
+      // A hub acknowledgement can precede the cloud projection by a fraction
+      // of a second. Do not let that temporary empty Firestore snapshot erase
+      // locally visible lines which the authoritative hub is confirming.
+      if (_isSavingDraft ||
+          _pendingDraftAdditions.isNotEmpty ||
+          _pendingDraftQuantities.values.any((quantity) => quantity > 0)) {
+        AppLogger.info(
+          'Ignored an empty live-order snapshot while basket confirmation is pending.',
+        );
+        return;
+      }
       _pendingDraftQuantities.clear();
       AppLogger.info('Live active order is no longer open.');
+      final selectedOrderId = ref.read(activePersistedOrderIdProvider);
+      if (selectedOrderId != state.id || _locallyClosingOrderId == state.id) {
+        return;
+      }
+      final scope = ref.read(activeVenueScopeProvider);
+      if (scope == null) return;
+      final location = state.customerName?.trim().isNotEmpty == true
+          ? state.customerName!.trim()
+          : state.tabName?.trim().isNotEmpty == true
+          ? state.tabName!.trim()
+          : _tableLabelFor(state);
+      final closedOrderId = state.id;
+      _resetOrder(scope);
+      ref
+          .read(appNotificationsProvider.notifier)
+          .add(
+            title: 'Order finished on another device',
+            message: location.trim().isEmpty
+                ? 'The finished order was removed from this terminal.'
+                : '$location was finished and removed from this terminal.',
+            level: AppNotificationLevel.information,
+          );
+      AppLogger.info(
+        'Missing live order $closedOrderId was cleared from this terminal.',
+      );
       return;
     }
     if (remoteOrder.id != state.id) return;
@@ -492,11 +679,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
   }
 
   Future<void> reduceLine(String lineId) async {
-    if (_isSavingDraft) {
-      throw StateError(
-        'Please wait for the previous basket change to finish saving.',
-      );
-    }
+    await _flushPendingDraftAdditions();
     final original = state.lines.where((line) => line.id == lineId).firstOrNull;
     if (original == null || original.isSentToProduction) return;
     final updatedLines = <OrderLine>[];
@@ -562,6 +745,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
     required String reason,
     int? valueMinor,
   }) async {
+    await _flushPendingDraftAdditions();
     final scope = ref.read(activeVenueScopeProvider);
     if (scope == null) throw StateError('Select a venue first.');
     _requireValidLiveOrderLocation();
@@ -758,13 +942,49 @@ class ActiveOrderController extends Notifier<PosOrder> {
     _selectPersistedOrder(order.id);
   }
 
+  /// Reopens an already-reserved named tab by its authoritative order ID.
+  /// Selecting an existing tile must never call [openNamedTab], because that
+  /// method deliberately creates a new reservation and the hub rejects a
+  /// duplicate name.
+  void openExistingNamedTab(OpenNamedTab tab) {
+    if (_hasUnsavedLocalDraft()) {
+      throw StateError(
+        'Send or remove the unsent items before opening another tab.',
+      );
+    }
+    final scope = ref.read(activeVenueScopeProvider);
+    final now = DateTime.now();
+    state = PosOrder(
+      id: tab.orderId,
+      tenantId: scope?.tenantId ?? demoTenant.id,
+      venueId: scope?.venueId ?? demoVenue.id,
+      tabName: tab.name,
+      businessDate: DateTime(now.year, now.month, now.day),
+      openedAt: tab.openedAt ?? now,
+      status: OrderStatus.open,
+      lines: const [],
+    );
+    ref.read(selectedTableProvider.notifier).select('');
+    if (ref.read(trainingModeProvider) == null) {
+      _selectPersistedOrder(tab.orderId);
+    }
+  }
+
   void startFulfilmentOrder({
     required OrderChannel channel,
     required String customerId,
     required String customerName,
     required String customerPhone,
     String? deliveryAddress,
+    String? deliveryAddressLabel,
+    double? deliveryLatitude,
+    double? deliveryLongitude,
+    String? serviceAreaId,
+    String? serviceAreaName,
+    int deliveryFeeMinor = 0,
     DateTime? scheduledFor,
+    String? assignedDriverId,
+    String? assignedDriverName,
   }) {
     if (channel == OrderChannel.dineIn) {
       throw ArgumentError('Use a table or named tab for dine-in orders.');
@@ -802,7 +1022,15 @@ class ActiveOrderController extends Notifier<PosOrder> {
       customerName: customerName.trim(),
       customerPhone: customerPhone.trim(),
       deliveryAddress: deliveryAddress?.trim(),
+      deliveryAddressLabel: deliveryAddressLabel?.trim(),
+      deliveryLatitude: deliveryLatitude,
+      deliveryLongitude: deliveryLongitude,
+      serviceAreaId: serviceAreaId,
+      serviceAreaName: serviceAreaName,
+      deliveryFeeMinor: channel == OrderChannel.delivery ? deliveryFeeMinor : 0,
       scheduledFor: scheduledFor,
+      assignedDriverId: assignedDriverId,
+      assignedDriverName: assignedDriverName,
       primaryWaiterId: ref.read(activeStaffPinSessionProvider)?.userId,
       primaryWaiterName: ref.read(activeStaffPinSessionProvider)?.displayName,
     );
@@ -813,11 +1041,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
   Future<BluetoothProductionPrintResult> sendToProduction({
     required bool printRequired,
   }) async {
-    if (_isSavingDraft) {
-      throw StateError(
-        'The basket is still saving. Please retry Send in a moment.',
-      );
-    }
+    await _flushPendingDraftAdditions();
     final scope = ref.read(activeVenueScopeProvider);
     if (scope != null) _requireValidLiveOrderLocation();
     final unsentLines = state.lines
@@ -933,6 +1157,42 @@ class ActiveOrderController extends Notifier<PosOrder> {
     );
   }
 
+  /// Leaves the selected table, tab, collection or delivery without changing
+  /// its durable hub order. Draft lines are persisted before this is offered,
+  /// so the order can safely be reopened on any POS device.
+  void clearCurrentSelection() {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) return;
+    if (ref.read(trainingModeProvider) != null && state.lines.isNotEmpty) {
+      ref.read(trainingOpenOrdersProvider.notifier).save(state);
+    }
+    _resetOrder(scope);
+  }
+
+  /// Cancels a persisted basket after every item has been removed. The
+  /// authoritative hub/cloud operation completes before local selection is
+  /// cleared, so a failed cancellation remains visible for a safe retry.
+  Future<void> cancelEmptyOrder({required String reason}) async {
+    await _flushPendingDraftAdditions();
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) throw StateError('Select a venue first.');
+    if (state.lines.isNotEmpty || state.payments.isNotEmpty) {
+      throw StateError('Only an empty, unpaid order can be cancelled.');
+    }
+    if (ref.read(activePersistedOrderIdProvider) != state.id) {
+      throw StateError('This empty basket has not created a live order.');
+    }
+    if (ref.read(trainingModeProvider) != null) {
+      ref.read(trainingOpenOrdersProvider.notifier).remove(state.id);
+      _resetOrder(scope);
+      return;
+    }
+    await ref
+        .read(productionCommandRepositoryProvider)
+        .cancelEmptyOrder(scope: scope, order: state, reason: reason);
+    _resetOrder(scope);
+  }
+
   /// Records verified payment allocations after the server atomically creates
   /// an immutable bill. Closing a split returns to its still-open parent,
   /// whereas closing a main bill releases its table or named-tab reservation.
@@ -940,9 +1200,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
     required List<BillPaymentInput> payments,
     required bool printReceipt,
   }) async {
-    if (_isSavingDraft) {
-      throw StateError('The basket is still saving. Please wait a moment.');
-    }
+    await _flushPendingDraftAdditions();
     final scope = ref.read(activeVenueScopeProvider);
     if (scope == null) {
       throw StateError('Sign in to close a live restaurant bill.');
@@ -1027,35 +1285,87 @@ class ActiveOrderController extends Notifier<PosOrder> {
             scope: scope,
             order: order,
             payments: payments,
+            baseCurrencyCode: ref.read(tenantProfileProvider).currencyCode,
             printReceipt: printReceipt,
             requestId: _pendingPaymentRequestId!,
           );
-    } on Object {
+    } on Object catch (error, stackTrace) {
       _locallyClosingOrderId = null;
+      final message = error.toString().toLowerCase();
+      if (message.contains('payment exceeds the outstanding balance') ||
+          message.contains('payment batch exceeds the outstanding balance') ||
+          message.contains('payment batch exceeds the bill balance')) {
+        // A remote till can briefly hold an older Firestore projection after
+        // the hub has already committed a payment. Never reduce or repeat the
+        // payment automatically. Wait for the signed hub event to project,
+        // reload the authoritative bill, and require staff to review it.
+        PosOrder? refreshed;
+        for (var attempt = 0; attempt < 6; attempt++) {
+          try {
+            refreshed = await ref
+                .read(firestorePosRepositoryProvider)
+                .fetchOrder(scope: scope, orderId: order.id);
+          } catch (refreshError, refreshStackTrace) {
+            AppLogger.error(
+              'Refresh bill after hub balance conflict',
+              refreshError,
+              refreshStackTrace,
+            );
+          }
+          if (refreshed != null &&
+              (refreshed.paidMinor != order.paidMinor ||
+                  refreshed.balanceDueMinor != order.balanceDueMinor)) {
+            state = refreshed;
+            break;
+          }
+          if (attempt < 5) {
+            await Future<void>.delayed(const Duration(milliseconds: 500));
+          }
+        }
+        _pendingPaymentRequestId = null;
+        _pendingPaymentFingerprint = null;
+        AppLogger.error('Hub payment balance conflict', error, stackTrace);
+        if (refreshed != null &&
+            (refreshed.paidMinor != order.paidMinor ||
+                refreshed.balanceDueMinor != order.balanceDueMinor)) {
+          throw StateError(
+            'The bill balance changed on another device. The latest balance has been loaded; review it before taking another payment.',
+          );
+        }
+        throw StateError(
+          'The venue hub has a newer bill balance that has not synchronised yet. No payment was recorded; wait a moment and reopen the order.',
+        );
+      }
       rethrow;
     }
+    final completedPaymentRequestId = _pendingPaymentRequestId!;
     _pendingPaymentRequestId = null;
     _pendingPaymentFingerprint = null;
     _pendingDraftQuantities.clear();
     if (!result.orderClosed) {
       if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
-        final first = payments.first;
         state = state.copyWith(
           payments: <OrderPayment>[
             ...state.payments,
-            OrderPayment(
-              id:
-                  _pendingPaymentRequestId ??
-                  'offline-payment-${DateTime.now().microsecondsSinceEpoch}',
-              method: first.method.name,
-              tenderedAmountMinor: first.tenderedAmountMinor,
-              tenderedCurrencyCode: first.tenderedCurrencyCode,
-              baseAmountMinor: result.paidThisTimeMinor,
-              exchangeRateToBase: first.exchangeRateToBase,
-              recordedAt: DateTime.now(),
-              terminalLabel: first.terminalLabel,
-              cashChangeBaseMinor: first.cashChangeBaseMinor,
-            ),
+            for (var index = 0; index < payments.length; index++)
+              OrderPayment(
+                id: '$completedPaymentRequestId-$index',
+                method: payments[index].method.name,
+                tenderedAmountMinor: payments[index].tenderedAmountMinor,
+                tenderedCurrencyCode: payments[index].tenderedCurrencyCode,
+                baseAmountMinor:
+                    (payments[index].tenderedAmountMinor *
+                            (double.tryParse(
+                                  payments[index].exchangeRateToBase,
+                                ) ??
+                                1))
+                        .round() -
+                    payments[index].cashChangeBaseMinor,
+                exchangeRateToBase: payments[index].exchangeRateToBase,
+                recordedAt: DateTime.now(),
+                terminalLabel: payments[index].terminalLabel,
+                cashChangeBaseMinor: payments[index].cashChangeBaseMinor,
+              ),
           ],
         );
       } else {
@@ -1071,9 +1381,14 @@ class ActiveOrderController extends Notifier<PosOrder> {
       return result;
     }
     if (order.isSplitOrder && order.splitFromOrderId != null) {
-      final parentOrder = await ref
-          .read(firestorePosRepositoryProvider)
-          .fetchOrder(scope: scope, orderId: order.splitFromOrderId!);
+      final parentOrder =
+          (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope))
+          ? VenueHubOfflineView.instance.currentOrders
+                .where((item) => item.id == order.splitFromOrderId)
+                .firstOrNull
+          : await ref
+                .read(firestorePosRepositoryProvider)
+                .fetchOrder(scope: scope, orderId: order.splitFromOrderId!);
       if (parentOrder != null) {
         state = parentOrder;
         _selectPersistedOrder(parentOrder.id);
@@ -1107,6 +1422,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
   }
 
   Future<bool> printPreReceipt() async {
+    await _flushPendingDraftAdditions();
     final scope = ref.read(activeVenueScopeProvider);
     if (scope == null) throw StateError('Select a venue first.');
     _requireValidLiveOrderLocation();
@@ -1132,9 +1448,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
   Future<OrderSplitResult> splitBillByItems(
     Map<String, int> lineQuantities,
   ) async {
-    if (_isSavingDraft) {
-      throw StateError('The basket is still saving. Please wait a moment.');
-    }
+    await _flushPendingDraftAdditions();
     final scope = ref.read(activeVenueScopeProvider);
     if (scope == null) {
       throw StateError('Sign in to split a live restaurant bill.');
@@ -1245,6 +1559,29 @@ class ActiveOrderController extends Notifier<PosOrder> {
     AppLogger.info('Opened unpaid split bill ${order.id}.');
   }
 
+  /// Opens an existing collection or delivery order in the normal POS.
+  ///
+  /// The lightweight fulfilment list may not contain its lines, so selecting
+  /// the persisted ID immediately attaches the normal live order stream. This
+  /// keeps edits and later cash/card settlement identical on every device.
+  void openFulfilmentOrder(PosOrder order) {
+    if (order.channel == OrderChannel.dineIn ||
+        order.status == OrderStatus.closed) {
+      return;
+    }
+    if (_hasUnsavedLocalDraft()) {
+      throw StateError(
+        'Send or remove the current draft before changing orders.',
+      );
+    }
+    state = order;
+    ref.read(selectedTableProvider.notifier).select('');
+    if (ref.read(trainingModeProvider) == null) {
+      _selectPersistedOrder(order.id);
+    }
+    AppLogger.info('Opened ${order.channel.name} order ${order.id}.');
+  }
+
   void _requireValidLiveOrderLocation() {
     if (state.channel != OrderChannel.dineIn) {
       if (state.customerId?.trim().isEmpty != false ||
@@ -1292,31 +1629,6 @@ class ActiveOrderController extends Notifier<PosOrder> {
         ref.read(activePersistedOrderIdProvider) != state.id;
   }
 
-  /// Resolves a race where another device opens the same table between this
-  /// device selecting it and adding its first item. The server rejects the
-  /// competing draft; immediately showing the winning live order lets the
-  /// waiter continue without hunting for the table again.
-  Future<void> _reloadCurrentTableOrderIfPresent(VenueScope scope) async {
-    final tableId = state.tableId;
-    if (tableId == null || state.tabName != null) return;
-    try {
-      final existing = await ref
-          .read(firestorePosRepositoryProvider)
-          .fetchOpenOrder(scope: scope, tableId: tableId);
-      if (existing != null) {
-        state = existing;
-        _selectPersistedOrder(existing.id);
-        AppLogger.info('Reloaded live order after draft save conflict.');
-      }
-    } on Object catch (error, stackTrace) {
-      AppLogger.error(
-        'Reload current table order after draft save error',
-        error,
-        stackTrace,
-      );
-    }
-  }
-
   String _tableLabelFor(PosOrder order) {
     final tableId = order.tableId;
     if (tableId == null) return '';
@@ -1340,6 +1652,9 @@ class ActiveOrderController extends Notifier<PosOrder> {
   );
 
   void _resetOrder(VenueScope scope) {
+    _draftBatchTimer?.cancel();
+    _draftBatchTimer = null;
+    _pendingDraftAdditions.clear();
     _pendingDraftQuantities.clear();
     _selectPersistedOrder(null);
     ref.read(selectedTableProvider.notifier).select('');

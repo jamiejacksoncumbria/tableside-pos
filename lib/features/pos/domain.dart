@@ -15,6 +15,7 @@ enum FulfilmentStatus {
   readyForCollection,
   awaitingDriver,
   assigned,
+  driverDeclined,
   outForDelivery,
   collected,
   delivered,
@@ -116,7 +117,12 @@ class OrderFlowOrder {
     this.isDelayed = false,
     this.note = '',
     this.channel = OrderChannel.dineIn,
+    this.customerName,
+    this.scheduledFor,
     this.courseName = 'Standard',
+    this.orderId,
+    this.assignedDriverName,
+    this.driverDeclined = false,
   });
 
   final String id;
@@ -134,27 +140,41 @@ class OrderFlowOrder {
   final bool isDelayed;
   final String note;
   final OrderChannel channel;
+  final String? customerName;
+  final DateTime? scheduledFor;
   final String courseName;
+  final String? orderId;
+  final String? assignedDriverName;
+  final bool driverDeclined;
 
-  OrderFlowOrder copyWith({OrderFlowStatus? status, bool? isDelayed}) =>
-      OrderFlowOrder(
-        id: id,
-        tenantId: tenantId,
-        venueId: venueId,
-        reference: reference,
-        productionArea: productionArea,
-        status: status ?? this.status,
-        ticketReleasedAt: ticketReleasedAt,
-        itemSummary: itemSummary,
-        tableLabel: tableLabel,
-        tabName: tabName,
-        createdByName: createdByName,
-        hasAllergyAlert: hasAllergyAlert,
-        isDelayed: isDelayed ?? this.isDelayed,
-        note: note,
-        channel: channel,
-        courseName: courseName,
-      );
+  OrderFlowOrder copyWith({
+    OrderFlowStatus? status,
+    bool? isDelayed,
+    String? assignedDriverName,
+    bool? driverDeclined,
+  }) => OrderFlowOrder(
+    id: id,
+    tenantId: tenantId,
+    venueId: venueId,
+    reference: reference,
+    productionArea: productionArea,
+    status: status ?? this.status,
+    ticketReleasedAt: ticketReleasedAt,
+    itemSummary: itemSummary,
+    tableLabel: tableLabel,
+    tabName: tabName,
+    createdByName: createdByName,
+    hasAllergyAlert: hasAllergyAlert,
+    isDelayed: isDelayed ?? this.isDelayed,
+    note: note,
+    channel: channel,
+    customerName: customerName,
+    scheduledFor: scheduledFor,
+    courseName: courseName,
+    orderId: orderId,
+    assignedDriverName: assignedDriverName ?? this.assignedDriverName,
+    driverDeclined: driverDeclined ?? this.driverDeclined,
+  );
 }
 
 enum PrintJobStatus { queued, claimed, printed, failed, cancelled }
@@ -228,6 +248,8 @@ class Venue {
     required this.tenantId,
     required this.name,
     required this.timeZone,
+    this.country = 'Kuzey Kıbrıs Türk Cumhuriyeti',
+    this.deliveryLocations = const <String, List<String>>{},
     this.notificationRetentionSeconds = 5,
     this.backgroundLockSeconds = 120,
     int orderFlowAmberMinutes = 15,
@@ -253,6 +275,8 @@ class Venue {
   final String tenantId;
   final String name;
   final String timeZone;
+  final String country;
+  final Map<String, List<String>> deliveryLocations;
   final int notificationRetentionSeconds;
   final int backgroundLockSeconds;
   final String defaultThemeMode;
@@ -773,6 +797,7 @@ class DiningTable {
     required this.id,
     required this.label,
     required this.seats,
+    this.sortOrder,
     this.hasOpenOrder = false,
     this.currentOrderId,
   });
@@ -780,11 +805,56 @@ class DiningTable {
   final String id;
   final String label;
   final int seats;
+
+  /// Optional manager-defined position. Older table documents do not contain
+  /// this value and are ordered naturally by their visible label instead.
+  final int? sortOrder;
   final bool hasOpenOrder;
 
   /// The server-owned open order for this table, if one exists.  The POS uses
   /// this identifier to stream the live total directly on the table tile.
   final String? currentOrderId;
+}
+
+/// Sorts table labels as staff read them rather than as raw strings.
+///
+/// This keeps `Table 2` before `Table 10` and produces the same deterministic
+/// order from Firestore and an offline-hub snapshot. A configured sort order
+/// wins when present; the ID is the final stable tie-breaker.
+int compareDiningTables(DiningTable left, DiningTable right) {
+  final leftOrder = left.sortOrder;
+  final rightOrder = right.sortOrder;
+  if (leftOrder != null || rightOrder != null) {
+    final byConfiguredOrder = (leftOrder ?? 0x7fffffff).compareTo(
+      rightOrder ?? 0x7fffffff,
+    );
+    if (byConfiguredOrder != 0) return byConfiguredOrder;
+  }
+  final byLabel = _compareNaturalText(left.label, right.label);
+  if (byLabel != 0) return byLabel;
+  return left.id.compareTo(right.id);
+}
+
+int _compareNaturalText(String left, String right) {
+  final chunks = RegExp(r'\d+|\D+');
+  final leftChunks = chunks.allMatches(left.trim().toLowerCase()).toList();
+  final rightChunks = chunks.allMatches(right.trim().toLowerCase()).toList();
+  final sharedLength = leftChunks.length < rightChunks.length
+      ? leftChunks.length
+      : rightChunks.length;
+  for (var index = 0; index < sharedLength; index++) {
+    final leftChunk = leftChunks[index].group(0)!;
+    final rightChunk = rightChunks[index].group(0)!;
+    final leftNumber = int.tryParse(leftChunk);
+    final rightNumber = int.tryParse(rightChunk);
+    final comparison = leftNumber != null && rightNumber != null
+        ? leftNumber.compareTo(rightNumber)
+        : leftChunk.compareTo(rightChunk);
+    if (comparison != 0) return comparison;
+  }
+  final byChunkCount = leftChunks.length.compareTo(rightChunks.length);
+  if (byChunkCount != 0) return byChunkCount;
+  return left.toLowerCase().compareTo(right.toLowerCase());
 }
 
 /// A venue-local customer-name tab. Its server-created registry is what makes
@@ -825,6 +895,7 @@ class OrderLine {
     this.stockComponents = const <ProductStockComponent>[],
     this.addedAt,
     this.sentAt,
+    this.productionBatchId,
     this.addedLocalDate,
     this.addedLocalDateTime,
     this.venueTimeZone,
@@ -832,6 +903,7 @@ class OrderLine {
     this.courseName = 'Standard',
     this.courseSequence = 0,
     this.courseReleasePolicy = CourseReleasePolicy.immediate,
+    this.persistedProductionDetails = const <String>[],
   });
 
   final String id;
@@ -854,6 +926,11 @@ class OrderLine {
   final List<ProductStockComponent> stockComponents;
   final DateTime? addedAt;
   final DateTime? sentAt;
+
+  /// Immutable hub event which released this line to production. Local KDS
+  /// tickets use the same ID as the later Firestore projection, so status
+  /// changes never target a guessed/reconstructed document identifier.
+  final String? productionBatchId;
   final String? addedLocalDate;
   final String? addedLocalDateTime;
   final String? venueTimeZone;
@@ -861,16 +938,19 @@ class OrderLine {
   final String courseName;
   final int courseSequence;
   final CourseReleasePolicy courseReleasePolicy;
+  final List<String> persistedProductionDetails;
 
   int get totalMinor => quantity * unitPriceMinor;
 
   /// Kitchen-safe detail lines, excluding any money. These are also used in
   /// the POS basket so a waiter can verify a guest's choices before sending.
-  List<String> get productionDetails => [
-    if (variantName?.trim().isNotEmpty == true) variantName!.trim(),
-    ...modifiers.map((modifier) => modifier.displayLabel),
-    if (itemNote.trim().isNotEmpty) 'NOTE: ${itemNote.trim()}',
-  ];
+  List<String> get productionDetails => persistedProductionDetails.isNotEmpty
+      ? persistedProductionDetails
+      : [
+          if (variantName?.trim().isNotEmpty == true) variantName!.trim(),
+          ...modifiers.map((modifier) => modifier.displayLabel),
+          if (itemNote.trim().isNotEmpty) 'NOTE: ${itemNote.trim()}',
+        ];
 
   String get receiptDescription =>
       [productName, ...productionDetails].join('\n');
@@ -896,6 +976,7 @@ class OrderLine {
     stockComponents: stockComponents,
     addedAt: addedAt,
     sentAt: sentAt,
+    productionBatchId: productionBatchId,
     addedLocalDate: addedLocalDate,
     addedLocalDateTime: addedLocalDateTime,
     venueTimeZone: venueTimeZone,
@@ -903,6 +984,7 @@ class OrderLine {
     courseName: courseName,
     courseSequence: courseSequence,
     courseReleasePolicy: courseReleasePolicy,
+    persistedProductionDetails: persistedProductionDetails,
   );
 }
 
@@ -959,6 +1041,12 @@ class PosOrder {
     this.customerName,
     this.customerPhone,
     this.deliveryAddress,
+    this.deliveryAddressLabel,
+    this.deliveryLatitude,
+    this.deliveryLongitude,
+    this.serviceAreaId,
+    this.serviceAreaName,
+    this.deliveryFeeMinor = 0,
     this.scheduledFor,
     this.assignedDriverId,
     this.assignedDriverName,
@@ -992,6 +1080,12 @@ class PosOrder {
   final String? customerName;
   final String? customerPhone;
   final String? deliveryAddress;
+  final String? deliveryAddressLabel;
+  final double? deliveryLatitude;
+  final double? deliveryLongitude;
+  final String? serviceAreaId;
+  final String? serviceAreaName;
+  final int deliveryFeeMinor;
   final DateTime? scheduledFor;
   final String? assignedDriverId;
   final String? assignedDriverName;
@@ -1000,7 +1094,15 @@ class PosOrder {
 
   bool get isSplitOrder => splitFromOrderId?.trim().isNotEmpty == true;
 
-  int get totalMinor => lines.fold(0, (total, line) => total + line.totalMinor);
+  /// Unsent lines are still a draft: they have not reached production and can
+  /// be forgotten if staff switch tables. POS location labels render these
+  /// orders in orange until every line is confirmed as sent.
+  bool get hasPendingProductionLines =>
+      lines.any((line) => !line.isSentToProduction);
+
+  int get totalMinor =>
+      lines.fold(0, (total, line) => total + line.totalMinor) +
+      (channel == OrderChannel.delivery ? deliveryFeeMinor : 0);
   int get paidMinor =>
       payments.fold(0, (total, payment) => total + payment.baseAmountMinor);
   int get balanceDueMinor => (totalMinor - paidMinor).clamp(0, totalMinor);
@@ -1068,6 +1170,12 @@ class PosOrder {
     String? customerName,
     String? customerPhone,
     String? deliveryAddress,
+    String? deliveryAddressLabel,
+    double? deliveryLatitude,
+    double? deliveryLongitude,
+    String? serviceAreaId,
+    String? serviceAreaName,
+    int? deliveryFeeMinor,
     DateTime? scheduledFor,
     String? assignedDriverId,
     String? assignedDriverName,
@@ -1095,6 +1203,12 @@ class PosOrder {
       customerName: customerName ?? this.customerName,
       customerPhone: customerPhone ?? this.customerPhone,
       deliveryAddress: deliveryAddress ?? this.deliveryAddress,
+      deliveryAddressLabel: deliveryAddressLabel ?? this.deliveryAddressLabel,
+      deliveryLatitude: deliveryLatitude ?? this.deliveryLatitude,
+      deliveryLongitude: deliveryLongitude ?? this.deliveryLongitude,
+      serviceAreaId: serviceAreaId ?? this.serviceAreaId,
+      serviceAreaName: serviceAreaName ?? this.serviceAreaName,
+      deliveryFeeMinor: deliveryFeeMinor ?? this.deliveryFeeMinor,
       scheduledFor: scheduledFor ?? this.scheduledFor,
       assignedDriverId: assignedDriverId ?? this.assignedDriverId,
       assignedDriverName: assignedDriverName ?? this.assignedDriverName,
@@ -1187,6 +1301,12 @@ List<String> checkoutTenderCurrencies(String baseCurrencyCode) => <String>{
   'GBP',
   'USD',
 }.toList(growable: false);
+
+/// Produces the locale-independent decimal snapshot stored with a foreign
+/// payment. Touch keyboards may emit either `,` or `.`, while the hub and
+/// cloud validators deliberately accept one canonical audited representation.
+String normalizeExchangeRateInput(String raw) =>
+    raw.trim().replaceAll(',', '.');
 
 /// Restaurants normally issue a paid receipt. A user may opt out for an
 /// individual payment, but every newly opened checkout starts selected.

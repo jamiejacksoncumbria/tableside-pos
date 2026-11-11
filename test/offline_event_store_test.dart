@@ -127,4 +127,51 @@ void main() {
       isNull,
     );
   });
+
+  test('restores only the obsolete cloud-baseline quarantine', () async {
+    final database = sqlite3.openInMemory();
+    final store = NativeOfflineEventStore(
+      database: database,
+      crypto: OfflineEventCrypto.forTesting(Uint8List(64)),
+    );
+    addTearDown(store.close);
+    await store.initialize();
+    final baseline = await store.append(
+      OfflineEventDraft(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'hub-cloud-migration',
+        staffId: 'cloud-verified-baseline',
+        type: 'order.cloudBaseline',
+        payload: const {'orderId': 'order-a'},
+      ),
+      hubEpoch: 2,
+    );
+    final unrelated = await store.append(
+      OfflineEventDraft(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'device-a',
+        staffId: 'staff-a',
+        type: 'order.created',
+        payload: const {'orderId': 'order-b'},
+      ),
+      hubEpoch: 2,
+    );
+    await store.quarantine(
+      baseline.id,
+      'Redundant cloud baseline for a reconstructable local order.',
+    );
+    await store.quarantine(unrelated.id, 'Security validation failed.');
+
+    expect(
+      await store.restoreQuarantinedCloudBaselines(
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        hubEpoch: 2,
+      ),
+      1,
+    );
+    expect((await store.pending()).map((event) => event.id), [baseline.id]);
+  });
 }

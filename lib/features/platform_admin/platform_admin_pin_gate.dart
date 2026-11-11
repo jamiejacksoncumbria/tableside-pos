@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/platform_admin_pin_session_store.dart';
 import '../../data/platform_admin_repository.dart';
@@ -192,7 +193,7 @@ Future<String?> _showPlatformPinDialog(
   required String title,
   required String message,
 }) {
-  return showDialog<String>(
+  return showAppDialog<String>(
     context: context,
     barrierDismissible: false,
     builder: (context) => _PlatformPinDialog(title: title, message: message),

@@ -2,18 +2,24 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/production_command_repository.dart';
 import '../../offline/venue_hub_bootstrap.dart';
+import '../../offline/venue_hub_backup_monitor.dart';
+import '../../offline/hub_port_diagnostic.dart';
+import '../../offline/local_network_address.dart';
 import '../../offline/venue_hub_device_credential.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_runtime.dart';
 import '../../offline/venue_hub_platform.dart';
+import '../../offline/venue_hub_realtime_client.dart';
 import '../printing/local_printer_device_identity.dart';
 
 class VenueOfflineHubPage extends StatefulWidget {
@@ -35,7 +41,9 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
   String? _deviceId;
   VenueHubDeviceCredential? _credential;
   VenueHubBootstrap? _bootstrap;
-  late final StreamSubscription<VenueHubRuntimeStatus> _runtimeSubscription;
+  StreamSubscription<VenueHubRuntimeStatus>? _runtimeSubscription;
+  StreamSubscription<VenueHubAuthorityChange>? _authoritySubscription;
+  VoidCallback? _takeoverListener;
   bool _busy = false;
   bool _hasCertificate = false;
   bool _hasPrivateKey = false;
@@ -46,7 +54,14 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
 
   @override
   void dispose() {
-    _runtimeSubscription.cancel();
+    unawaited(_runtimeSubscription?.cancel());
+    unawaited(_authoritySubscription?.cancel());
+    final takeoverListener = _takeoverListener;
+    if (takeoverListener != null) {
+      VenueHubManualTakeoverCoordinator.instance.pending.removeListener(
+        takeoverListener,
+      );
+    }
     _host.dispose();
     _port.dispose();
     super.dispose();
@@ -58,6 +73,20 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     _runtimeSubscription = VenueHubRuntime.instance.statuses.listen((_) {
       if (mounted) setState(() {});
     });
+    _authoritySubscription = VenueHubRealtimeClient.instance.authorityChanges
+        .listen((change) {
+          if (mounted && change.scope == widget.scope && !_busy) {
+            unawaited(_refresh());
+          }
+        });
+    void takeoverListener() {
+      if (mounted) setState(() {});
+    }
+
+    _takeoverListener = takeoverListener;
+    VenueHubManualTakeoverCoordinator.instance.pending.addListener(
+      takeoverListener,
+    );
     _refresh();
   }
 
@@ -70,25 +99,50 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       venueId: widget.scope.venueId,
       deviceId: deviceId,
     );
-    final raw = await _repository.fetchOfflineHubBootstrap(scope: widget.scope);
-    if (!mounted) return;
-    final bootstrap = VenueHubBootstrap.fromJson(raw);
-    await VenueHubPrinterClientRegistry.instance.configure(
-      scope: widget.scope,
-      bootstrap: bootstrap,
-      deviceId: deviceId,
-      credential: credential,
-    );
-    if (_host.text.trim().isEmpty && bootstrap.endpoint != null) {
-      _host.text = bootstrap.endpoint!.host;
-      _port.text = '${bootstrap.endpoint!.port}';
+    VenueHubBootstrap? bootstrap;
+    if (Firebase.apps.isNotEmpty) {
+      final raw = await _repository.fetchOfflineHubBootstrap(
+        scope: widget.scope,
+      );
+      bootstrap = VenueHubBootstrap.fromJson(raw);
+      await VenueHubPrinterClientRegistry.instance.configure(
+        scope: widget.scope,
+        bootstrap: bootstrap,
+        deviceId: deviceId,
+        credential: credential,
+      );
+    } else {
+      // Windows can intentionally start from the encrypted venue snapshot
+      // without creating Firebase. Reuse the verified bootstrap already held
+      // by the running hub/client rather than producing a core/no-app error.
+      bootstrap =
+          VenueHubRuntime.instance.activeBootstrap ??
+          VenueHubClientRegistry.instance.bootstrapFor(widget.scope);
     }
+    if (!mounted) return;
+    if (bootstrap == null) {
+      setState(() {
+        _deviceId = deviceId;
+        _credential = credential;
+        _hasCertificate = certificate?.isNotEmpty == true;
+        _hasPrivateKey = privateKey?.isNotEmpty == true;
+        _message =
+            'Cloud setup is unavailable while offline. The saved local hub configuration is unchanged.';
+      });
+      return;
+    }
+    _applyEndpointEditors(bootstrap, deviceId);
+    await _prefillLanAddressIfEmpty();
     setState(() {
       _deviceId = deviceId;
       _credential = credential;
       _bootstrap = bootstrap;
       _hasCertificate = certificate?.isNotEmpty == true;
       _hasPrivateKey = privateKey?.isNotEmpty == true;
+      if (Firebase.apps.isEmpty) {
+        _message =
+            'Showing the saved local hub configuration. Cloud enrolment changes require internet.';
+      }
     });
   });
 
@@ -112,6 +166,12 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       deviceId: deviceId,
       credential: credential,
     );
+    VenueHubClientRegistry.instance.rememberEnrolledDevice(
+      scope: widget.scope,
+      bootstrap: bootstrap,
+      deviceId: deviceId,
+      credentialId: credential.credentialId,
+    );
     if (mounted) {
       setState(() {
         _bootstrap = bootstrap;
@@ -128,8 +188,22 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       });
       return;
     }
+    if (!await _ensureHubSecurityFiles(
+      purpose: 'make this device the venue hub',
+    )) {
+      return;
+    }
+    final isAlreadyActive =
+        _bootstrap?.hubDeviceId == _deviceId &&
+        _bootstrap?.hubCredentialId == _credential?.credentialId;
+    if (!isAlreadyActive &&
+        !await _confirmStableLanAddress(role: 'primary hub')) {
+      return;
+    }
     String? takeoverReason;
-    if (_bootstrap?.enabled == true && _bootstrap?.hubDeviceId != _deviceId) {
+    if (_bootstrap?.enabled == true &&
+        (_bootstrap?.hubDeviceId != _deviceId ||
+            _bootstrap?.hubCredentialId != _credential?.credentialId)) {
       takeoverReason = await _requestReason(
         title: 'Replace the active hub?',
         message:
@@ -162,7 +236,10 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
         scope: widget.scope,
       );
       final bootstrap = VenueHubBootstrap.fromJson(raw);
-      if (mounted) setState(() => _bootstrap = bootstrap);
+      if (mounted) {
+        _applyEndpointEditors(bootstrap, deviceId);
+        setState(() => _bootstrap = bootstrap);
+      }
       final snapshot = await _repository.fetchOfflineHubSnapshot(
         scope: widget.scope,
         deviceId: deviceId,
@@ -203,12 +280,343 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
         scope: widget.scope,
       );
       if (mounted) {
+        final bootstrap = VenueHubBootstrap.fromJson(raw);
+        _applyEndpointEditors(bootstrap, _deviceId);
         setState(() {
-          _bootstrap = VenueHubBootstrap.fromJson(raw);
+          _bootstrap = bootstrap;
           _message = 'Venue offline routing is disabled.';
         });
       }
     });
+  }
+
+  Future<void> _configureBackup() async {
+    if (!await _ensureHubSecurityFiles(
+      purpose: 'make this device the backup hub',
+    )) {
+      return;
+    }
+    final isAlreadyBackup =
+        _bootstrap?.backupDeviceId == _deviceId &&
+        _bootstrap?.backupCredentialId == _credential?.credentialId;
+    if (!isAlreadyBackup &&
+        !await _confirmStableLanAddress(role: 'backup hub')) {
+      return;
+    }
+    await _run('Configure backup hub', () async {
+      final deviceId = _deviceId;
+      final credential = _credential;
+      if (deviceId == null || credential == null) {
+        throw StateError('The device identity is not ready.');
+      }
+      if (_bootstrap?.enabled != true || _bootstrap?.hubDeviceId == deviceId) {
+        throw StateError(
+          'Configure the primary hub first, then use a different Android or Windows device as its backup.',
+        );
+      }
+      await _repository.enrollOfflineHubDeviceCredential(
+        scope: widget.scope,
+        deviceId: deviceId,
+        credentialId: credential.credentialId,
+        publicKeyBase64: credential.publicKeyBase64,
+      );
+      await _repository.configureOfflineVenueBackupHub(
+        scope: widget.scope,
+        deviceId: deviceId,
+        credentialId: credential.credentialId,
+        endpointHost: _host.text.trim(),
+        endpointPort: int.tryParse(_port.text.trim()) ?? 8443,
+      );
+      final raw = await _repository.fetchOfflineHubBootstrap(
+        scope: widget.scope,
+      );
+      if (mounted) {
+        final bootstrap = VenueHubBootstrap.fromJson(raw);
+        _applyEndpointEditors(bootstrap, deviceId);
+        setState(() {
+          _bootstrap = bootstrap;
+          _message =
+              'This device is armed as the passive backup hub. It cannot accept orders until secure failover completes.';
+        });
+      }
+    });
+  }
+
+  /// A primary or backup hub terminates HTTPS locally and therefore requires
+  /// both halves of the venue TLS identity. Ordinary POS clients intentionally
+  /// receive only the public certificate and must never receive the private
+  /// key. This guided check runs before any cloud mutation so setup cannot end
+  /// half-configured or fail with a message hidden below the current viewport.
+  Future<bool> _ensureHubSecurityFiles({required String purpose}) async {
+    if (_hasCertificate && _hasPrivateKey) return true;
+    final importNow = await showAppDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.security_rounded),
+        title: const Text('Hub security files required'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'To $purpose, import this venue\'s certificate and matching '
+              'private key on this device first.',
+            ),
+            const SizedBox(height: 12),
+            _SecurityFileRequirement(
+              label: 'Venue certificate (.pem)',
+              installed: _hasCertificate,
+            ),
+            const SizedBox(height: 6),
+            _SecurityFileRequirement(
+              label: 'Hub private key (.pem)',
+              installed: _hasPrivateKey,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Android will open its file picker for each missing file. Keep '
+              'the private key only on approved primary or backup hub devices.',
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.file_open_outlined),
+            label: const Text('Import missing files'),
+          ),
+        ],
+      ),
+    );
+    if (importNow != true || !mounted) return false;
+    if (!_hasCertificate && !await _chooseTlsFile('certificate')) return false;
+    if (!_hasPrivateKey && !await _chooseTlsFile('privateKey')) return false;
+    return _hasCertificate && _hasPrivateKey;
+  }
+
+  /// Confirms that the manager has reserved the advertised LAN address. Hub
+  /// discovery intentionally trusts a signed endpoint rather than scanning
+  /// the network, so silently changing DHCP addresses would make local tills
+  /// fail closed during an internet outage.
+  Future<bool> _confirmStableLanAddress({required String role}) async {
+    final host = _host.text.trim();
+    final port = int.tryParse(_port.text.trim()) ?? 8443;
+    if (host.isEmpty) {
+      await showAppDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.error_outline_rounded),
+          title: const Text('LAN address required'),
+          content: Text(
+            'TableSide could not detect this device\'s private LAN address. '
+            'Enter its fixed LAN IP or reserved host name before configuring '
+            'it as the $role.',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Enter address'),
+            ),
+          ],
+        ),
+      );
+      return false;
+    }
+    return await showAppDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => AlertDialog(
+            icon: const Icon(Icons.router_outlined),
+            title: const Text('Reserve this hub address'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('This $role will be saved as https://$host:$port.'),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'TableSide has filled the most likely current LAN address. '
+                    'Check it, then give this device a DHCP reservation or static LAN IP in '
+                    'the router first. The primary and backup must use '
+                    'different stable addresses. If either address changes, '
+                    'local terminals cannot find that hub until a manager '
+                    'updates this setup while online.',
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Go back'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Address is reserved'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  Future<void> _removeBackup() => _run('Remove backup hub', () async {
+    await _repository.removeOfflineVenueBackupHub(scope: widget.scope);
+    final raw = await _repository.fetchOfflineHubBootstrap(scope: widget.scope);
+    if (mounted) {
+      final bootstrap = VenueHubBootstrap.fromJson(raw);
+      _applyEndpointEditors(bootstrap, _deviceId);
+      setState(() {
+        _bootstrap = bootstrap;
+        _message = 'The backup hub assignment was removed.';
+      });
+    }
+  });
+
+  Future<void> _confirmBackupTakeover() async {
+    final request = VenueHubManualTakeoverCoordinator.instance.pending.value;
+    if (request == null || request.scope != widget.scope) {
+      setState(() {
+        _message =
+            'The primary hub is responding or has not yet reached the secure takeover threshold.';
+      });
+      return;
+    }
+    final pinController = TextEditingController();
+    final reasonController = TextEditingController();
+    var acknowledged = false;
+    final approval = await showAppDialog<({String pin, String reason})>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.warning_amber_rounded),
+          title: const Text('Take over as the main hub?'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'The primary hub has stopped renewing its authority lease. '
+                  'Taking over revokes that hub and requires tills to reconnect. '
+                  'Only continue after checking that the original hub is stopped '
+                  'or cannot be recovered.',
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: pinController,
+                  obscureText: true,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  onChanged: (_) => setDialogState(() {}),
+                  decoration: const InputDecoration(
+                    labelText: 'Fresh manager PIN',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: reasonController,
+                  maxLength: 200,
+                  onChanged: (_) => setDialogState(() {}),
+                  decoration: const InputDecoration(
+                    labelText: 'Required takeover reason',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: acknowledged,
+                  onChanged: (value) =>
+                      setDialogState(() => acknowledged = value == true),
+                  title: const Text(
+                    'I confirm the original hub is unavailable and authorise this backup to replace it.',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton.icon(
+              onPressed:
+                  acknowledged &&
+                      RegExp(r'^\d{6}$').hasMatch(pinController.text.trim()) &&
+                      reasonController.text.trim().isNotEmpty
+                  ? () => Navigator.pop(dialogContext, (
+                      pin: pinController.text.trim(),
+                      reason: reasonController.text.trim(),
+                    ))
+                  : null,
+              icon: const Icon(Icons.swap_horiz_rounded),
+              label: const Text('Confirm takeover'),
+            ),
+          ],
+        ),
+      ),
+    );
+    pinController.dispose();
+    reasonController.dispose();
+    if (approval == null) return;
+    await _run('Confirm backup hub takeover', () async {
+      await VenueHubManualTakeoverCoordinator.instance.confirm(
+        managerPin: approval.pin,
+        reason: approval.reason,
+      );
+      if (mounted) {
+        final raw = await _repository.fetchOfflineHubBootstrap(
+          scope: widget.scope,
+        );
+        if (!mounted) return;
+        final bootstrap = VenueHubBootstrap.fromJson(raw);
+        _applyEndpointEditors(bootstrap, _deviceId);
+        setState(() {
+          _bootstrap = bootstrap;
+          _message =
+              'Takeover was approved. This device is starting as the authoritative venue hub.';
+        });
+      }
+    });
+  }
+
+  /// Keeps the editable endpoint tied to this physical installation rather
+  /// than whichever hub happened to be active when the page first opened.
+  /// Former hubs are deliberately cleared after a transfer so a stale primary
+  /// IP cannot be mistaken for this device's current configuration.
+  void _applyEndpointEditors(VenueHubBootstrap bootstrap, String? deviceId) {
+    final savedEndpoint = bootstrap.endpointForHostDevice(deviceId);
+    if (savedEndpoint == null) {
+      _host.clear();
+      _port.text = '8443';
+      return;
+    }
+    _host.text = savedEndpoint.host;
+    _port.text = '${savedEndpoint.port}';
+  }
+
+  /// Prefills first-time hub setup with the device's likely private IPv4
+  /// address. Existing signed primary/backup endpoints always win and the
+  /// manager must still confirm a router reservation before activation.
+  Future<void> _prefillLanAddressIfEmpty() async {
+    if (!canHostVenueHub || _host.text.trim().isNotEmpty) return;
+    try {
+      final detected = await preferredPrivateLanAddress();
+      if (!mounted || detected == null || _host.text.trim().isNotEmpty) return;
+      _host.text = detected;
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Detect venue hub LAN address', error, stackTrace);
+    }
   }
 
   Future<String?> _requestReason({
@@ -217,25 +625,27 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     required String actionLabel,
   }) async {
     final controller = TextEditingController();
-    final result = await showDialog<String>(
+    final result = await showAppDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(title),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(message),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              maxLength: 200,
-              decoration: const InputDecoration(
-                labelText: 'Required reason',
-                border: OutlineInputBorder(),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(message),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                maxLength: 200,
+                decoration: const InputDecoration(
+                  labelText: 'Required reason',
+                  border: OutlineInputBorder(),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -278,34 +688,38 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     await _startRuntime(snapshot: snapshot);
   });
 
-  Future<void> _chooseTlsFile(String kind) =>
-      _run('Choose TLS $kind', () async {
-        final result = await FilePicker.pickFiles(
-          type: FileType.custom,
-          allowedExtensions: const ['pem'],
-        );
-        final file = result?.files.single;
-        if (file == null) return;
-        final bytes = await file.readAsBytes();
-        final value = utf8.decode(bytes);
-        final expected = kind == 'certificate'
-            ? 'BEGIN CERTIFICATE'
-            : 'BEGIN PRIVATE KEY';
-        if (!value.contains(expected)) {
-          throw FormatException('The selected PEM file is not a valid $kind.');
-        }
-        await _secrets.write(key: '$_storagePrefix.$kind', value: value);
-        if (mounted) {
-          setState(() {
-            if (kind == 'certificate') {
-              _hasCertificate = true;
-            } else {
-              _hasPrivateKey = true;
-            }
-            _message = 'TLS $kind saved securely.';
-          });
-        }
-      });
+  Future<bool> _chooseTlsFile(String kind) async {
+    var saved = false;
+    await _run('Choose TLS $kind', () async {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['pem'],
+      );
+      final file = result?.files.single;
+      if (file == null) return;
+      final bytes = await file.readAsBytes();
+      final value = utf8.decode(bytes);
+      final expected = kind == 'certificate'
+          ? 'BEGIN CERTIFICATE'
+          : 'BEGIN PRIVATE KEY';
+      if (!value.contains(expected)) {
+        throw FormatException('The selected PEM file is not a valid $kind.');
+      }
+      await _secrets.write(key: '$_storagePrefix.$kind', value: value);
+      saved = true;
+      if (mounted) {
+        setState(() {
+          if (kind == 'certificate') {
+            _hasCertificate = true;
+          } else {
+            _hasPrivateKey = true;
+          }
+          _message = 'TLS $kind saved securely.';
+        });
+      }
+    });
+    return saved;
+  }
 
   Future<void> _startRuntime({
     Map<String, Object?>? snapshot,
@@ -346,6 +760,13 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     if (mounted) setState(() => _message = 'Venue hub stopped.');
   });
 
+  Future<void> _diagnosePort() => _run('Diagnose venue hub port', () async {
+    final port = int.tryParse(_port.text.trim()) ?? 8443;
+    final host = _host.text.trim();
+    final result = await diagnoseVenueHubPort(host, port);
+    if (mounted) setState(() => _message = result);
+  });
+
   Future<void> _run(String action, Future<void> Function() operation) async {
     if (_busy) return;
     if (mounted) setState(() => _busy = true);
@@ -364,7 +785,17 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
     final bootstrap = _bootstrap;
     final deviceId = _deviceId;
     final isThisHub =
-        bootstrap?.enabled == true && bootstrap?.hubDeviceId == deviceId;
+        bootstrap?.enabled == true &&
+        bootstrap?.hubDeviceId == deviceId &&
+        bootstrap?.hubCredentialId == _credential?.credentialId;
+    final isThisBackup =
+        bootstrap?.enabled == true &&
+        bootstrap?.backupDeviceId == deviceId &&
+        bootstrap?.backupCredentialId == _credential?.credentialId;
+    final takeoverRequest =
+        VenueHubManualTakeoverCoordinator.instance.pending.value;
+    final takeoverRequired =
+        isThisBackup && takeoverRequest?.scope == widget.scope;
     final runtime = VenueHubRuntime.instance.status;
     return Scaffold(
       appBar: AppBar(title: const Text('Venue offline hub')),
@@ -381,6 +812,33 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                     'Authority',
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
+                  if (bootstrap != null && !bootstrap.enabled) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.errorContainer,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.cloud_outlined),
+                          SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Cloud-only mode: internet is required for every '
+                              'order, payment and print job. If the connection '
+                              'or Firebase is unavailable, transactions are '
+                              'blocked. Configure a venue hub and backup before '
+                              'relying on LAN/offline operation.',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 8),
                   Text(
                     bootstrap == null
@@ -400,7 +858,79 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                         : 'This device is POS-client only. Android or Windows must host the venue hub.',
                   ),
                   const SizedBox(height: 8),
-                  SelectableText('Device: ${deviceId ?? 'loading'}'),
+                  SelectableText('This device ID: ${deviceId ?? 'loading'}'),
+                  if (_credential != null)
+                    SelectableText(
+                      'This device key: ${_credential!.credentialId}',
+                    ),
+                  if (bootstrap?.enabled == true) ...[
+                    const SizedBox(height: 4),
+                    SelectableText(
+                      'Active hub ID: ${bootstrap!.hubDeviceId ?? 'missing'}',
+                    ),
+                    SelectableText(
+                      'Active hub key: ${bootstrap.hubCredentialId ?? 'missing'}',
+                    ),
+                    SelectableText(
+                      'Active hub endpoint: ${bootstrap.endpoint ?? 'missing'}',
+                    ),
+                    if (bootstrap.backupDeviceId != null) ...[
+                      const SizedBox(height: 4),
+                      SelectableText(
+                        'Backup hub ID: ${bootstrap.backupDeviceId}',
+                      ),
+                      SelectableText(
+                        'Backup hub endpoint: ${bootstrap.backupEndpoint ?? 'missing'}',
+                      ),
+                      Text(
+                        isThisBackup
+                            ? 'This device is the passive backup hub.'
+                            : 'A separate passive backup hub is configured.',
+                      ),
+                      if (isThisBackup) ...[
+                        const SizedBox(height: 8),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: takeoverRequired
+                                ? Theme.of(context).colorScheme.errorContainer
+                                : Theme.of(
+                                    context,
+                                  ).colorScheme.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                takeoverRequired
+                                    ? 'Primary hub needs attention'
+                                    : 'Manual takeover only',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                takeoverRequired
+                                    ? 'The primary lease has stopped. Orders remain blocked until a manager confirms takeover or the primary returns.'
+                                    : 'This backup will never promote itself. If the primary stops, a manager must confirm the transfer here.',
+                              ),
+                              if (takeoverRequired) ...[
+                                const SizedBox(height: 10),
+                                FilledButton.icon(
+                                  onPressed: _busy
+                                      ? null
+                                      : _confirmBackupTakeover,
+                                  icon: const Icon(Icons.swap_horiz_rounded),
+                                  label: const Text('Take over as main hub'),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
+                  ],
                   if (canHostVenueHub) ...[
                     const SizedBox(height: 12),
                     Row(
@@ -429,6 +959,31 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.secondaryContainer,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.info_outline_rounded),
+                          SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Network requirement: reserve a different fixed '
+                              'LAN address for each primary and backup hub. '
+                              'TableSide switches terminals to the saved backup '
+                              'endpoint after an approved takeover; it does not '
+                              'move the primary device\'s IP address.',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ],
                   const SizedBox(height: 12),
                   Wrap(
@@ -444,6 +999,24 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                                 ? 'Restart this hub'
                                 : 'Make this the hub',
                           ),
+                        ),
+                      if (canHostVenueHub &&
+                          bootstrap?.enabled == true &&
+                          !isThisHub)
+                        FilledButton.tonalIcon(
+                          onPressed: _busy ? null : _configureBackup,
+                          icon: const Icon(Icons.backup_outlined),
+                          label: Text(
+                            isThisBackup
+                                ? 'Refresh backup setup'
+                                : 'Make this the backup hub',
+                          ),
+                        ),
+                      if (bootstrap?.backupDeviceId != null)
+                        OutlinedButton.icon(
+                          onPressed: _busy ? null : _removeBackup,
+                          icon: const Icon(Icons.remove_circle_outline),
+                          label: const Text('Remove backup hub'),
                         ),
                       if (canJoinVenueHubAsNativeClient)
                         OutlinedButton.icon(
@@ -482,7 +1055,7 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                   const SizedBox(height: 8),
                   Text(
                     canHostVenueHub
-                        ? 'Import the venue certificate and its private key on the active hub. Other native POS devices import only the certificate. Plain HTTP is never allowed.'
+                        ? 'Every primary or backup hub must import the venue certificate and its private key. Ordinary native POS devices import only the certificate. Plain HTTP is never allowed.'
                         : 'Import only the public venue certificate on this POS device. The hub private key must never be copied to an ordinary till.',
                   ),
                   const SizedBox(height: 8),
@@ -560,6 +1133,12 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                             icon: const Icon(Icons.battery_saver_outlined),
                             label: const Text('Battery settings'),
                           ),
+                        if (defaultTargetPlatform == TargetPlatform.windows)
+                          OutlinedButton.icon(
+                            onPressed: _busy ? null : _diagnosePort,
+                            icon: const Icon(Icons.security_rounded),
+                            label: const Text('Check port / firewall'),
+                          ),
                       ],
                     ],
                   ),
@@ -574,6 +1153,41 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
                   const SizedBox(height: 12),
                   Text('State: ${runtime.state.name}'),
                   Text('Pending cloud events: ${runtime.pendingEvents}'),
+                  if (runtime.message != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.errorContainer,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            Icons.report_problem_rounded,
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              runtime.message!,
+                              style: TextStyle(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onErrorContainer,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   if (runtime.endpoint != null)
                     SelectableText('Local endpoint: ${runtime.endpoint}'),
                 ],
@@ -593,4 +1207,28 @@ class _VenueOfflineHubPageState extends State<VenueOfflineHubPage> {
       ),
     );
   }
+}
+
+class _SecurityFileRequirement extends StatelessWidget {
+  const _SecurityFileRequirement({
+    required this.label,
+    required this.installed,
+  });
+
+  final String label;
+  final bool installed;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Icon(
+        installed ? Icons.check_circle_rounded : Icons.warning_amber_rounded,
+        color: installed
+            ? Theme.of(context).colorScheme.primary
+            : Theme.of(context).colorScheme.error,
+      ),
+      const SizedBox(width: 8),
+      Expanded(child: Text('$label — ${installed ? 'installed' : 'required'}')),
+    ],
+  );
 }

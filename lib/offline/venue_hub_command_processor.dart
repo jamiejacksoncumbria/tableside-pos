@@ -84,11 +84,20 @@ class VenueHubCommandProcessor {
   static const _permissionByEvent = <String, String>{
     'order.opened': 'order',
     'order.itemAdded': 'order',
+    'order.itemsAdded': 'order',
     'order.itemQuantityChanged': 'order',
+    'order.lineAdjusted': 'manager',
     'order.sent': 'order',
+    'order.productionTicketUpdated': 'production',
+    'order.splitCreated': 'payment',
     'order.fulfilmentChanged': 'delivery',
     'payment.recorded': 'payment',
+    'payment.batchRecorded': 'payment',
     'order.closed': 'payment',
+    // An empty order contains no financial transaction. Staff with normal
+    // order permission may cancel it, while the projection still rejects any
+    // order containing items or payments.
+    'order.cancelled': 'order',
     'receipt.requested': 'order',
   };
 
@@ -153,12 +162,11 @@ class VenueHubCommandProcessor {
     return _validateAndCommit(
       eventType: eventType,
       body: <String, Object?>{
-        'payload': <String, Object?>{
-          ...payload,
-          'remoteCommandId': commandId,
-        },
+        'payload': <String, Object?>{...payload, 'remoteCommandId': commandId},
         if (businessTimestampUtc != null)
-          'businessTimestampUtc': businessTimestampUtc.toUtc().toIso8601String(),
+          'businessTimestampUtc': businessTimestampUtc
+              .toUtc()
+              .toIso8601String(),
       },
       grant: grant,
       deviceId: deviceId,
@@ -267,6 +275,7 @@ class VenueHubCommandProcessor {
         sessionToken.length > 256) {
       throw const VenueHubCommandException(
         'A valid local staff session is required.',
+        code: 'staff_session_required',
       );
     }
     final grant = await _authorizeStaff(
@@ -282,6 +291,7 @@ class VenueHubCommandProcessor {
         grant.membershipVersion < 1) {
       throw const VenueHubCommandException(
         'The staff session is unavailable, expired, or revoked.',
+        code: 'staff_session_invalid',
       );
     }
     if (!grant.permissions.contains(requiredPermission)) {
@@ -316,9 +326,10 @@ class VenueHubCommandProcessor {
 }
 
 class VenueHubCommandException implements Exception {
-  const VenueHubCommandException(this.message);
+  const VenueHubCommandException(this.message, {this.code = 'forbidden'});
 
   final String message;
+  final String code;
 
   @override
   String toString() => 'VenueHubCommandException: $message';

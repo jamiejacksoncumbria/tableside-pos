@@ -12,7 +12,17 @@ abstract interface class VenueHubSecretStore {
 
 class SecureVenueHubSecretStore implements VenueHubSecretStore {
   const SecureVenueHubSecretStore([
-    this._storage = const FlutterSecureStorage(),
+    this._storage = const FlutterSecureStorage(
+      // Hub signing keys and TLS pins are installation-bound. Apple backup
+      // must not migrate them to another physical device and silently clone
+      // that device's enrolment authority.
+      iOptions: IOSOptions(
+        accessibility: KeychainAccessibility.first_unlock_this_device,
+      ),
+      mOptions: MacOsOptions(
+        accessibility: KeychainAccessibility.first_unlock_this_device,
+      ),
+    ),
   ]);
 
   final FlutterSecureStorage _storage;

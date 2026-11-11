@@ -180,6 +180,73 @@ class NativeVenueHubServer implements VenueHubServer {
         }
         return;
       }
+      if (request.uri.path == '/v1/print/manage' && request.method == 'POST') {
+        _requireAllowedOrigin(request, allowNoOrigin: true);
+        final payload = await _readJson(request);
+        final envelope = _envelope(payload['envelope']);
+        final body = _map(payload['body'], 'The print action is invalid.');
+        if (envelope.path != '/v1/print/manage' || envelope.method != 'POST') {
+          throw const VenueHubProtocolException('Invalid print endpoint.');
+        }
+        await _configuration!.processor.authenticate(
+          envelope: envelope,
+          body: body,
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+          requiredPermission: 'manager',
+        );
+        final action = body['action'];
+        final jobId = body['jobId'];
+        final reason = body['reason'];
+        if (action is! String ||
+            jobId is! String ||
+            jobId.isEmpty ||
+            (reason != null && reason is! String)) {
+          throw const FormatException('The print action is invalid.');
+        }
+        _json(
+          response,
+          HttpStatus.ok,
+          await _configuration!.managePrintJob(
+            action,
+            jobId,
+            reason as String?,
+            envelope.deviceId,
+            envelope.staffId,
+          ),
+        );
+        return;
+      }
+      if (request.uri.path == '/v1/print/jobs' && request.method == 'POST') {
+        _requireAllowedOrigin(request, allowNoOrigin: true);
+        final payload = await _readJson(request);
+        final envelope = _envelope(payload['envelope']);
+        final body = _map(
+          payload['body'],
+          'The print list request is invalid.',
+        );
+        if (envelope.path != '/v1/print/jobs' || envelope.method != 'POST') {
+          throw const VenueHubProtocolException('Invalid print endpoint.');
+        }
+        await _configuration!.processor.authenticate(
+          envelope: envelope,
+          body: body,
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+          requiredPermission: 'order',
+        );
+        final statuses = (body['statuses'] as List? ?? const <Object?>[])
+            .whereType<String>()
+            .toSet();
+        final sinceUtc = DateTime.tryParse(body['sinceUtc'] as String? ?? '');
+        final requestedLimit = (body['limit'] as num?)?.toInt();
+        _json(response, HttpStatus.ok, {
+          'jobs': await _configuration!.readPrintJobs(
+            statuses.isEmpty ? null : statuses,
+            sinceUtc,
+            requestedLimit == null ? null : requestedLimit.clamp(1, 500),
+          ),
+        });
+        return;
+      }
       if (request.uri.path == '/v1/catalogue' && request.method == 'POST') {
         _requireAllowedOrigin(request, allowNoOrigin: true);
         final payload = await _readJson(request);
@@ -198,6 +265,26 @@ class NativeVenueHubServer implements VenueHubServer {
           HttpStatus.ok,
           await _configuration!.readClientSnapshot(),
         );
+        return;
+      }
+      if (request.uri.path == '/v1/catalogue/refresh' &&
+          request.method == 'POST') {
+        _requireAllowedOrigin(request, allowNoOrigin: true);
+        final payload = await _readJson(request);
+        final envelope = _envelope(payload['envelope']);
+        final body = _map(payload['body'], 'The catalogue request is invalid.');
+        if (envelope.path != '/v1/catalogue/refresh' ||
+            envelope.method != 'POST') {
+          throw const VenueHubProtocolException('Invalid catalogue endpoint.');
+        }
+        await _configuration!.processor.authenticate(
+          envelope: envelope,
+          body: body,
+          trustedNowUtc: TrustedClock.instance.nowUtc(),
+          requiredPermission: 'manager',
+        );
+        await _configuration!.refreshSnapshot();
+        _json(response, HttpStatus.ok, {'refreshed': true});
         return;
       }
       if (request.uri.path == '/v1/orders' && request.method == 'POST') {
@@ -250,7 +337,10 @@ class NativeVenueHubServer implements VenueHubServer {
       _json(response, HttpStatus.unauthorized, {'error': 'unauthorized'});
     } on VenueHubCommandException catch (error, stackTrace) {
       AppLogger.error('Reject venue hub command', error, stackTrace);
-      _json(response, HttpStatus.forbidden, {'error': 'forbidden'});
+      _json(response, HttpStatus.forbidden, {
+        'error': error.code,
+        'message': error.message,
+      });
     } on VenueOfflineCatalogueException catch (error, stackTrace) {
       AppLogger.error(
         'Reject venue hub catalogue operation',

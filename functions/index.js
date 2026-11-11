@@ -6,14 +6,15 @@ import {getApps, initializeApp} from "firebase-admin/app";
 import {getAppCheck} from "firebase-admin/app-check";
 import {getAuth} from "firebase-admin/auth";
 import {getMessaging} from "firebase-admin/messaging";
+import {getDatabase, ServerValue} from "firebase-admin/database";
 import {getStorage} from "firebase-admin/storage";
 import {FieldValue, getFirestore} from "firebase-admin/firestore";
 import {
-  onDocumentCreated, onDocumentUpdated, onDocumentWritten,
+  onDocumentCreated, onDocumentDeleted, onDocumentUpdated, onDocumentWritten,
 } from "firebase-functions/v2/firestore";
 import {HttpsError, onRequest} from "firebase-functions/v2/https";
 import {onSchedule} from "firebase-functions/v2/scheduler";
-import {defineBoolean, defineString} from "firebase-functions/params";
+import {databaseURL, defineBoolean, defineString} from "firebase-functions/params";
 import {setGlobalOptions} from "firebase-functions/v2";
 
 if (getApps().length === 0) {
@@ -24,7 +25,13 @@ const auth = getAuth();
 const appCheck = getAppCheck();
 const db = getFirestore();
 const region = "europe-west2";
-const initialPlatformAdminEmail = defineString("INITIAL_PLATFORM_ADMIN_EMAIL");
+// An unset bootstrap email must fail closed. The explicit empty default also
+// lets non-interactive emulator and CI runs load the Functions module without
+// pausing for a deployment parameter that the security tests never use.
+const initialPlatformAdminEmail = defineString(
+  "INITIAL_PLATFORM_ADMIN_EMAIL",
+  {default: ""},
+);
 // Monitor first: old Windows/web clients must not be locked out while their
 // attestation provider is being registered and verified.
 const requireAppCheck = defineBoolean("REQUIRE_APP_CHECK", {default: false});
@@ -121,6 +128,23 @@ function requiredDocumentId(data, name) {
   if (Buffer.byteLength(value, "utf8") > 1500 ||
       value.includes("/") || value === "." || value === "..") {
     throw new HttpsError("invalid-argument", `${name} is invalid.`);
+  }
+  return value;
+}
+
+// Native hub/till identities created before v2 lived in ordinary preferences
+// and could be copied by Android backup or emulator cloning. They are no
+// longer security principals. The final eight hexadecimal characters scope a
+// physical installation ID to one tenant/venue without exposing those IDs.
+const currentVenueDeviceIdPattern =
+  /^device-v2-[0-9a-f]{32}-[0-9a-f]{8}$/u;
+
+function requireCurrentVenueDeviceId(value, label = "deviceId") {
+  if (!currentVenueDeviceIdPattern.test(value)) {
+    throw new HttpsError(
+      "failed-precondition",
+      `The ${label} uses a retired device identity. Re-enrol this device.`,
+    );
   }
   return value;
 }
@@ -620,6 +644,7 @@ async function manageMenuConfigurationFor(caller, rawData) {
   const collection = db.collection(`tenants/${tenantId}/${collectionName}`);
   const reference = documentId == null ? collection.doc() : collection.doc(documentId);
   const actor = actorSnapshot(await auth.getUser(caller.uid));
+  let componentSnapshotsToEnable = [];
 
   if (operation === "reorder") {
     if (resource !== "section" || documentId != null) {
@@ -735,9 +760,55 @@ async function manageMenuConfigurationFor(caller, rawData) {
         values.targetMarginBasisPoints, "targetMarginBasisPoints", 10000,
       );
     }
-    if (values.variants != null) {
+    if (values.variantSetId != null) {
+      if (values.variants != null) {
+        throw new HttpsError(
+          "invalid-argument",
+          "Choose either a reusable variant set or explicit variants, not both.",
+        );
+      }
+      const variantSetId = requiredDocumentId(values, "variantSetId");
+      const variantSet = await db.doc(
+        `tenants/${tenantId}/variantSets/${variantSetId}`,
+      ).get();
+      if (!variantSet.exists || variantSet.data().venueId !== venueId) {
+        throw new HttpsError(
+          "failed-precondition",
+          "The selected reusable variant set is unavailable at this venue.",
+        );
+      }
+      requestedBulkVariants = validatedVariants(variantSet.data().variants ?? []);
+      updates.variants = requestedBulkVariants;
+      updates.variantSetId = variantSetId;
+      updates.variantSetName = requiredText(variantSet.data(), "name", 120);
+    } else if (values.variants != null) {
       requestedBulkVariants = validatedVariants(values.variants);
       updates.variants = requestedBulkVariants;
+    }
+    if (values.changeTaxRate === true) {
+      if (values.taxRateId == null) {
+        updates.taxRateId = FieldValue.delete();
+        updates.taxRateName = "Zero rate";
+        updates.taxRateBasisPoints = 0;
+      } else {
+        const taxRateId = requiredDocumentId(values, "taxRateId");
+        const taxRate = await db.doc(
+          `tenants/${tenantId}/taxRates/${taxRateId}`,
+        ).get();
+        if (!taxRate.exists || taxRate.data().venueId !== venueId) {
+          throw new HttpsError(
+            "failed-precondition",
+            "The selected tax rate is unavailable at this venue.",
+          );
+        }
+        updates.taxRateId = taxRateId;
+        updates.taxRateName = requiredText(taxRate.data(), "name", 120);
+        updates.taxRateBasisPoints = requiredNonNegativeInteger(
+          taxRate.data().basisPoints,
+          "basisPoints",
+          100000,
+        );
+      }
     }
     const changeKeys = Object.keys(updates);
     if (changeKeys.length === 0) {
@@ -1093,13 +1164,18 @@ async function manageMenuConfigurationFor(caller, rawData) {
       : await db.getAll(...componentIds.map((id) =>
           db.doc(`tenants/${tenantId}/products/${id}`)));
     if (componentSnapshots.some((item) => !item.exists ||
-        item.data().venueId !== venueId || item.data().trackStock !== true ||
-        item.data().archived === true)) {
+        item.data().venueId !== venueId || item.data().archived === true)) {
       throw new HttpsError(
         "failed-precondition",
-        "Every ingredient must be a stock-tracked product at this venue.",
+        "Every ingredient must be an active product at this venue.",
       );
     }
+    // Choosing a product as an ingredient opts it into stock tracking. A zero
+    // opening balance is deliberate: normal sales fail closed until stock is
+    // entered, while an audited manager override can permit a genuine negative.
+    componentSnapshotsToEnable = componentSnapshots.filter(
+      (item) => item.data().trackStock !== true,
+    );
     const componentById = new Map(componentSnapshots.map((item) => [item.id, item.data()]));
     const hydrateComponents = (components) => components.map((item) => ({
       ...item,
@@ -1248,6 +1324,21 @@ async function manageMenuConfigurationFor(caller, rawData) {
   };
   try {
     await reference.set(writeData, {merge: documentId != null});
+    await Promise.all(componentSnapshotsToEnable.map((component) =>
+      component.ref.set({
+        trackStock: true,
+        stockOnHand: Number.isFinite(Number(component.data().stockOnHand))
+          ? Number(component.data().stockOnHand) : 0,
+        stockUnit: typeof component.data().stockUnit === "string" &&
+          component.data().stockUnit.trim().length > 0
+          ? component.data().stockUnit : "each",
+        stockPerSale: Number.isFinite(Number(component.data().stockPerSale)) &&
+          Number(component.data().stockPerSale) > 0
+          ? Number(component.data().stockPerSale) : 1,
+        updatedAt: FieldValue.serverTimestamp(),
+        updatedByActor: actor,
+      }, {merge: true}),
+    ));
   } catch (error) {
     if (uploadedImagePath != null) {
       try {
@@ -1284,7 +1375,14 @@ async function manageMenuConfigurationFor(caller, rawData) {
     await writer.close();
   }
   await writeAudit(caller.uid, "saveMenuConfiguration", reference.id, {
-    tenantId, venueId, resource, operation: documentId == null ? "create" : "update", actor,
+    tenantId,
+    venueId,
+    resource,
+    operation: documentId == null ? "create" : "update",
+    actor,
+    autoEnabledStockProductIds: componentSnapshotsToEnable.map(
+      (component) => component.id,
+    ),
   });
   return {documentId: reference.id, saved: true};
 }
@@ -1338,6 +1436,15 @@ async function manageVenueConfigurationFor(caller, rawData) {
     const collectionEnabled = values.collectionEnabled === true;
     const deliveryEnabled = values.deliveryEnabled === true;
     const courseControlEnabled = values.courseControlEnabled === true;
+    const collectionLeadMinutes = requiredNonNegativeInteger(
+      values.collectionLeadMinutes ?? 20, "collectionLeadMinutes", 240,
+    );
+    const deliveryLeadMinutes = requiredNonNegativeInteger(
+      values.deliveryLeadMinutes ?? 20, "deliveryLeadMinutes", 240,
+    );
+    if (collectionLeadMinutes < 1 || deliveryLeadMinutes < 1) {
+      throw new HttpsError("invalid-argument", "Lead times must be at least one minute.");
+    }
     const validateWindows = (raw, field) => {
       if (!Array.isArray(raw) || raw.length > 28) {
         throw new HttpsError("invalid-argument", `${field} is invalid.`);
@@ -1359,6 +1466,13 @@ async function manageVenueConfigurationFor(caller, rawData) {
           return {
             id: requiredDocumentId(area, "id"),
             name: catalogueTitleCase(requiredText(area, "name", 100)),
+            country: catalogueTitleCase(
+              optionalText(area, "country", 100) || "Kuzey Kıbrıs Türk Cumhuriyeti",
+            ),
+            district: catalogueTitleCase(optionalText(area, "district", 100) || ""),
+            town: catalogueTitleCase(
+              optionalText(area, "town", 100) || requiredText(area, "name", 100),
+            ),
             deliveryFeeMinor: requiredNonNegativeInteger(
               area.deliveryFeeMinor ?? 0, "deliveryFeeMinor", 100000000,
             ),
@@ -1405,6 +1519,8 @@ async function manageVenueConfigurationFor(caller, rawData) {
       collectionEnabled,
       deliveryEnabled,
       courseControlEnabled,
+      collectionLeadMinutes,
+      deliveryLeadMinutes,
       collectionWindows: validateWindows(values.collectionWindows ?? [], "collectionWindows"),
       deliveryWindows: validateWindows(values.deliveryWindows ?? [], "deliveryWindows"),
       serviceAreas,
@@ -1415,6 +1531,8 @@ async function manageVenueConfigurationFor(caller, rawData) {
   } else if (resource === "printerDevice") {
     const deviceId = requiredDocumentId(values, "deviceId");
     const deviceName = requiredText(values, "name", 120);
+    const platform = requiredText(values, "platform", 32);
+    const replaceExistingNamedDevice = values.replaceExistingNamedDevice === true;
     const productionAreas = requiredStringArray(
       values.productionAreas, "productionAreas", 4, 32,
     );
@@ -1428,25 +1546,91 @@ async function manageVenueConfigurationFor(caller, rawData) {
     const venueDevices = await db.collection(`tenants/${tenantId}/devices`)
       .where("venueId", "==", venueId)
       .get();
-    if (venueDevices.docs.some((item) => item.id !== deviceId &&
-        item.data().active === true &&
-        String(item.data().name ?? "").trim().toLowerCase() === deviceName.toLowerCase())) {
+    const priorNamedDevice = venueDevices.docs.find((item) => item.id !== deviceId &&
+      item.data().active === true &&
+      String(item.data().name ?? "").trim().toLowerCase() === deviceName.toLowerCase());
+    if (priorNamedDevice && !replaceExistingNamedDevice) {
       throw new HttpsError("already-exists", "An active printer device already uses this name.");
     }
+    if (priorNamedDevice && String(priorNamedDevice.data().platform ?? "") !== platform) {
+      throw new HttpsError(
+        "failed-precondition",
+        "A printer registration can only replace the same platform type.",
+      );
+    }
     const deviceCredential = randomBytes(32).toString("base64url");
-    await db.doc(`tenants/${tenantId}/devices/${deviceId}`).set({
+    const tenantRef = db.doc(`tenants/${tenantId}`);
+    const deviceRef = tenantRef.collection("devices").doc(deviceId);
+    const batch = db.batch();
+    batch.set(deviceRef, {
       venueId,
       name: deviceName,
-      platform: requiredText(values, "platform", 32),
+      platform,
       productionAreas,
       transports,
       credentialHash: createHash("sha256").update(deviceCredential).digest("base64"),
       credentialVersion: FieldValue.increment(1),
       active: values.active !== false,
       registeredAt: FieldValue.serverTimestamp(),
-      lastHeartbeatAt: FieldValue.serverTimestamp(),
       registeredByActor: actor,
     }, {merge: true});
+    if (priorNamedDevice) {
+      const [routes, queuedJobs] = await Promise.all([
+        tenantRef.collection("printerRoutes").where("venueId", "==", venueId).get(),
+        tenantRef.collection("printJobs")
+          .where("venueId", "==", venueId)
+          .where("targetDeviceId", "==", priorNamedDevice.id)
+          .where("status", "==", "queued")
+          .limit(400)
+          .get(),
+      ]);
+      batch.update(priorNamedDevice.ref, {
+        active: false,
+        credentialHash: FieldValue.delete(),
+        replacedByDeviceId: deviceId,
+        removedAt: FieldValue.serverTimestamp(),
+        removedByActor: actor,
+      });
+      for (const route of routes.docs) {
+        const routeData = route.data();
+        const updates = {};
+        if (routeData.primaryDeviceId === priorNamedDevice.id) {
+          updates.primaryDeviceId = deviceId;
+        }
+        if (routeData.fallbackDeviceId === priorNamedDevice.id) {
+          updates.fallbackDeviceId = deviceId;
+        }
+        if (Object.keys(updates).length > 0) {
+          batch.update(route.ref, {
+            ...updates,
+            updatedAt: FieldValue.serverTimestamp(),
+            updatedByActor: actor,
+          });
+        }
+      }
+      for (const job of queuedJobs.docs) {
+        batch.update(job.ref, {
+          targetDeviceId: deviceId,
+          failureReason: "Printer device was reconnected; ticket safely reassigned.",
+        });
+      }
+      batch.create(tenantRef.collection("auditEvents").doc(), {
+        action: "replacePrinterDevice",
+        venueId,
+        oldDeviceId: priorNamedDevice.id,
+        newDeviceId: deviceId,
+        deviceName,
+        actor,
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    }
+    await batch.commit();
+    await syncRealtimePrinterAuthority(tenantId, venueId, deviceId, true);
+    if (priorNamedDevice) {
+      await syncRealtimePrinterAuthority(
+        tenantId, venueId, priorNamedDevice.id, false,
+      );
+    }
     result = {saved: true, deviceCredential};
   } else if (resource === "printerDeviceRemoval") {
     const deviceId = requiredDocumentId(values, "deviceId");
@@ -1507,6 +1691,7 @@ async function manageVenueConfigurationFor(caller, rawData) {
       createdAt: FieldValue.serverTimestamp(),
     });
     await batch.commit();
+    await syncRealtimePrinterAuthority(tenantId, venueId, deviceId, false);
     result = {saved: true, removed: true};
   } else if (resource === "printerRoute") {
     const productionArea = requiredText(values, "productionArea", 32);
@@ -1549,7 +1734,9 @@ async function manageVenueConfigurationFor(caller, rawData) {
       updatedByActor: actor,
     });
   } else if (resource === "offlineHubDeviceCredential") {
-    const deviceId = requiredDocumentId(values, "deviceId");
+    const deviceId = requireCurrentVenueDeviceId(
+      requiredDocumentId(values, "deviceId"),
+    );
     const credentialId = requiredDocumentId(values, "credentialId");
     const suppliedPublicKeyBase64 = requiredText(
       values, "publicKeyBase64", 128,
@@ -1569,6 +1756,18 @@ async function manageVenueConfigurationFor(caller, rawData) {
       .get();
     const credentialRef = credentials.doc(credentialId);
     const existingCredential = await credentialRef.get();
+    const activeIdentityCollision = existingForDevice.docs.find((current) =>
+      current.id !== credentialId && current.data().active === true);
+    if (activeIdentityCollision) {
+      // Never rotate another key merely because it presented the same text
+      // device ID. That behaviour allowed a cloned/colliding installation to
+      // displace the real till or hub. Recovery now requires the manager to
+      // revoke the old credential explicitly, which leaves an audit trail.
+      throw new HttpsError(
+        "already-exists",
+        "Another signing key already owns this device identity. Revoke the old device credential or reset this installation.",
+      );
+    }
     if (existingCredential.exists &&
         (existingCredential.data().venueId !== venueId ||
           existingCredential.data().deviceId !== deviceId ||
@@ -1577,16 +1776,6 @@ async function manageVenueConfigurationFor(caller, rawData) {
       throw new HttpsError("already-exists", "That device credential ID is already in use.");
     }
     const batch = db.batch();
-    for (const current of existingForDevice.docs) {
-      if (current.id !== credentialId && current.data().active === true) {
-        batch.update(current.ref, {
-          active: false,
-          revokedAt: FieldValue.serverTimestamp(),
-          revokedByActor: actor,
-          revokeReason: "rotated",
-        });
-      }
-    }
     batch.set(credentialRef, {
       venueId,
       deviceId,
@@ -1636,7 +1825,9 @@ async function manageVenueConfigurationFor(caller, rawData) {
     await batch.commit();
     result = {saved: true, revoked: true};
   } else if (resource === "offlineHubActivation") {
-    const deviceId = requiredDocumentId(values, "deviceId");
+    const deviceId = requireCurrentVenueDeviceId(
+      requiredDocumentId(values, "deviceId"),
+    );
     const credentialId = requiredDocumentId(values, "credentialId");
     const endpointHost = requiredText(values, "endpointHost", 253).toLowerCase();
     const endpointPort = Number(values.endpointPort ?? 8443);
@@ -1652,19 +1843,28 @@ async function manageVenueConfigurationFor(caller, rawData) {
     if (currentHub?.enabled === true && currentHub.deviceId === deviceId &&
         currentHub.credentialId === credentialId && currentHub.endpoint === hubEndpoint &&
         Number.isSafeInteger(Number(currentHub.epoch)) && Number(currentHub.epoch) > 0) {
+      await syncRealtimeHubAuthority(tenantId, venueId, {
+        enabled: true, deviceId, hubEpoch: Number(currentHub.epoch),
+      });
       result = {saved: true, enabled: true, hubEpoch: Number(currentHub.epoch)};
     } else {
     const takeoverReason = currentHub?.enabled === true
       ? requiredText(values, "takeoverReason", 200) : null;
-    const existingOpenOrders = await db.collection(`tenants/${tenantId}/orders`)
-      .where("venueId", "==", venueId)
-      .get();
-    if (existingOpenOrders.docs.some((order) =>
-      ["open", "sent"].includes(order.data().status))) {
-      throw new HttpsError(
-        "failed-precondition",
-        "Close all current tables and named tabs before first activating the offline hub.",
-      );
+    // Open orders prevent a *first* activation because two authorities may
+    // otherwise have created them. During an explicit, audited takeover the
+    // existing Firebase orders are included in the new hub snapshot and must
+    // remain open so a failed/replaced hub does not deadlock the venue.
+    if (currentHub?.enabled !== true) {
+      const existingOpenOrders = await db.collection(`tenants/${tenantId}/orders`)
+        .where("venueId", "==", venueId)
+        .get();
+      if (existingOpenOrders.docs.some((order) =>
+        ["open", "sent"].includes(order.data().status))) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Close all current tables and named tabs before first activating the offline hub.",
+        );
+      }
     }
     const credential = await db.doc(
       `tenants/${tenantId}/offlineDeviceCredentials/${credentialId}`,
@@ -1690,6 +1890,17 @@ async function manageVenueConfigurationFor(caller, rawData) {
           credentialId,
           endpoint: hubEndpoint,
           epoch,
+          ...(current.data()?.offlineHub?.backupDeviceId !== deviceId &&
+              current.data()?.offlineHub?.backupCredentialId
+            ? {
+              backupDeviceId: current.data().offlineHub.backupDeviceId,
+              backupCredentialId: current.data().offlineHub.backupCredentialId,
+              backupEndpoint: current.data().offlineHub.backupEndpoint,
+              backupConfiguredAt: current.data().offlineHub.backupConfiguredAt,
+              backupConfiguredByActor:
+                current.data().offlineHub.backupConfiguredByActor,
+            }
+            : {}),
           activatedAt: FieldValue.serverTimestamp(),
           activatedByActor: actor,
         },
@@ -1706,8 +1917,74 @@ async function manageVenueConfigurationFor(caller, rawData) {
       });
       return {epoch};
     });
+    await syncRealtimeHubAuthority(tenantId, venueId, {
+      enabled: true, deviceId, hubEpoch: activation.epoch,
+    });
     result = {saved: true, enabled: true, hubEpoch: activation.epoch};
     }
+  } else if (resource === "offlineHubBackup") {
+    const deviceId = requireCurrentVenueDeviceId(
+      requiredDocumentId(values, "deviceId"),
+    );
+    const credentialId = requiredDocumentId(values, "credentialId");
+    const endpointHost = requiredText(values, "endpointHost", 253).toLowerCase();
+    const endpointPort = Number(values.endpointPort ?? 8443);
+    if (!/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|(?:\d{1,3}\.){3}\d{1,3})$/u
+      .test(endpointHost) || !Number.isInteger(endpointPort) ||
+      endpointPort < 1024 || endpointPort > 65535) {
+      throw new HttpsError("invalid-argument", "Enter a valid backup hub host and port.");
+    }
+    const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
+    const [venue, credential] = await Promise.all([
+      venueRef.get(),
+      db.doc(`tenants/${tenantId}/offlineDeviceCredentials/${credentialId}`).get(),
+    ]);
+    const hub = venue.data()?.offlineHub;
+    if (!venue.exists || hub?.enabled !== true || hub.deviceId === deviceId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "An active primary hub on another device is required before configuring a backup.",
+      );
+    }
+    if (!credential.exists || credential.data().active !== true ||
+        credential.data().venueId !== venueId ||
+        credential.data().deviceId !== deviceId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The backup device does not have an active offline credential.",
+      );
+    }
+    const backupEndpoint = `https://${endpointHost}:${endpointPort}`;
+    if (backupEndpoint === hub.endpoint) {
+      throw new HttpsError(
+        "invalid-argument",
+        "The backup hub must use a different reserved LAN address from the primary hub.",
+      );
+    }
+    await venueRef.update({
+      "offlineHub.backupDeviceId": deviceId,
+      "offlineHub.backupCredentialId": credentialId,
+      "offlineHub.backupEndpoint": backupEndpoint,
+      "offlineHub.backupConfiguredAt": FieldValue.serverTimestamp(),
+      "offlineHub.backupConfiguredByActor": actor,
+    });
+    await writeAudit(caller.uid, "configureOfflineVenueBackupHub", venueId, {
+      tenantId, venueId, deviceId, credentialId, actor,
+    });
+    result = {saved: true, backupDeviceId: deviceId};
+  } else if (resource === "offlineHubBackupRemoval") {
+    const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
+    await venueRef.update({
+      "offlineHub.backupDeviceId": FieldValue.delete(),
+      "offlineHub.backupCredentialId": FieldValue.delete(),
+      "offlineHub.backupEndpoint": FieldValue.delete(),
+      "offlineHub.backupConfiguredAt": FieldValue.delete(),
+      "offlineHub.backupConfiguredByActor": FieldValue.delete(),
+    });
+    await writeAudit(caller.uid, "removeOfflineVenueBackupHub", venueId, {
+      tenantId, venueId, actor,
+    });
+    result = {saved: true, removed: true};
   } else if (resource === "offlineHubDeactivation") {
     const reason = requiredText(values, "reason", 200);
     const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
@@ -1735,6 +2012,9 @@ async function manageVenueConfigurationFor(caller, rawData) {
         createdAt: FieldValue.serverTimestamp(),
       });
       return {epoch};
+    });
+    await syncRealtimeHubAuthority(tenantId, venueId, {
+      enabled: false, hubEpoch: deactivation.epoch,
     });
     result = {saved: true, enabled: false, hubEpoch: deactivation.epoch};
   } else {
@@ -1772,10 +2052,25 @@ async function authenticatedPrinterDevice(caller, rawData) {
   return {data, tenantId, venueId, deviceId, deviceRef, deviceData};
 }
 
-async function heartbeatPrinterDeviceFor(caller, rawData) {
+async function issueRealtimePrinterSessionFor(caller, rawData) {
   const device = await authenticatedPrinterDevice(caller, rawData);
-  await device.deviceRef.update({lastHeartbeatAt: FieldValue.serverTimestamp()});
-  return {online: true};
+  const configured = configuredRealtimeDatabase();
+  // Backfill authority for printers enrolled before the RTDB migration.
+  // Removal flips this server-owned record immediately, invalidating an
+  // already-issued realtime identity at the rules layer.
+  await syncRealtimePrinterAuthority(
+    device.tenantId, device.venueId, device.deviceId, true,
+  );
+  const scopedUid = `printer_${createHash("sha256")
+    .update(`${device.tenantId}:${device.venueId}:${device.deviceId}`)
+    .digest("hex").slice(0, 48)}`;
+  const customToken = await auth.createCustomToken(scopedUid, {
+    tablesidePrinter: true,
+    tenantId: device.tenantId,
+    venueId: device.venueId,
+    deviceId: device.deviceId,
+  });
+  return {customToken, databaseUrl: configured.url};
 }
 
 function normalisedPhone(value) {
@@ -1953,9 +2248,19 @@ async function manageFulfilmentFor(caller, rawData) {
       query.docs.some((item) => item.id !== reference.id))) {
       throw new HttpsError("already-exists", "A customer already uses one of these phone numbers.");
     }
+    let defaultAddressCount = 0;
     const addresses = Array.isArray(values.addresses)
       ? values.addresses.slice(0, 10).map((raw) => {
           const address = requireObject(raw);
+          const isDefault = address.isDefault === true;
+          if (isDefault) defaultAddressCount += 1;
+          const latitude = address.latitude == null ? null : Number(address.latitude);
+          const longitude = address.longitude == null ? null : Number(address.longitude);
+          if ((latitude != null && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)) ||
+              (longitude != null && (!Number.isFinite(longitude) || longitude < -180 || longitude > 180)) ||
+              ((latitude == null) !== (longitude == null))) {
+            throw new HttpsError("invalid-argument", "Address map coordinates are invalid.");
+          }
           return {
             id: requiredDocumentId(address, "id"),
             label: catalogueTitleCase(requiredText(address, "label", 60)),
@@ -1964,9 +2269,16 @@ async function manageFulfilmentFor(caller, rawData) {
             area: catalogueTitleCase(requiredText(address, "area", 100)),
             addressLines: requiredText(address, "addressLines", 500),
             notes: optionalText(address, "notes", 300),
+            isDefault,
+            latitude,
+            longitude,
           };
         })
       : [];
+    if (defaultAddressCount > 1) {
+      throw new HttpsError("invalid-argument", "Only one customer address can be the default.");
+    }
+    if (addresses.length > 0 && defaultAddressCount === 0) addresses[0].isDefault = true;
     await reference.set({
       venueId,
       displayName: catalogueTitleCase(requiredText(values, "displayName", 120)),
@@ -1990,10 +2302,14 @@ async function manageFulfilmentFor(caller, rawData) {
     if (documentId == null) throw new HttpsError("invalid-argument", "An order is required.");
     const status = requiredText(values, "status", 40);
     const transitions = {
-      awaitingPreparation: ["awaitingPreparation", "readyForCollection", "awaitingDriver", "cancelled"],
+      // Production flow and fulfilment flow are intentionally separate. A
+      // manager may assign a driver while the kitchen ticket is preparing,
+      // before the fulfilment state has moved to awaitingDriver.
+      awaitingPreparation: ["awaitingPreparation", "readyForCollection", "awaitingDriver", "assigned", "cancelled"],
       awaitingDriver: ["awaitingDriver", "assigned", "readyForCollection", "cancelled"],
-      assigned: ["assigned", "readyForCollection", "outForDelivery", "cancelled"],
-      readyForCollection: ["readyForCollection", "collected", "outForDelivery", "cancelled"],
+      assigned: ["assigned", "driverDeclined", "readyForCollection", "outForDelivery", "cancelled"],
+      driverDeclined: ["driverDeclined", "assigned", "cancelled"],
+      readyForCollection: ["readyForCollection", "assigned", "collected", "outForDelivery", "cancelled"],
       outForDelivery: ["outForDelivery", "delivered", "cancelled"],
       collected: ["collected"], delivered: ["delivered"], cancelled: ["cancelled"],
     };
@@ -2014,7 +2330,7 @@ async function manageFulfilmentFor(caller, rawData) {
     const driverId = optionalText(values, "driverId", 128) || null;
     if (isDriver && !canManage &&
         (order.data().assignedDriverId !== caller.uid ||
-         !["outForDelivery", "delivered"].includes(status))) {
+         !["driverDeclined", "outForDelivery", "delivered"].includes(status))) {
       throw new HttpsError(
         "permission-denied",
         "A driver may update only their own assigned delivery.",
@@ -2033,12 +2349,39 @@ async function manageFulfilmentFor(caller, rawData) {
       driverName = driver.data().displayName ?? driver.data().email ?? "Driver";
     }
     const batch = db.batch();
+    const driverDeclined = status === "driverDeclined";
     batch.update(orderRef, {
       fulfilmentStatus: status,
       fulfilmentUpdatedAt: FieldValue.serverTimestamp(),
       fulfilmentUpdatedByActor: actor,
+      ...(driverDeclined ? {
+        assignedDriverId: FieldValue.delete(),
+        assignedDriverName: FieldValue.delete(),
+        driverDeclinedAt: FieldValue.serverTimestamp(),
+        driverDeclinedBy: caller.uid,
+      } : {}),
       ...(driverId == null ? {} : {assignedDriverId: driverId, assignedDriverName: driverName}),
     });
+    // Mirror delivery assignment state onto live production tickets so every
+    // KDS receives the decline/assignment alert through its existing stream.
+    const ticketSnapshot = await tenantRef.collection("productionTickets")
+      .where("orderId", "==", documentId).get();
+    for (const ticket of ticketSnapshot.docs) {
+      if (ticket.data().venueId !== venueId) continue;
+      batch.update(ticket.ref, {
+        fulfilmentStatus: status,
+        driverDeclined,
+        ...(driverDeclined ? {
+          assignedDriverId: FieldValue.delete(),
+          assignedDriverName: FieldValue.delete(),
+        } : {}),
+        ...(driverId == null ? {} : {
+          assignedDriverId: driverId,
+          assignedDriverName: driverName,
+          driverDeclined: false,
+        }),
+      });
+    }
     batch.set(tenantRef.collection("notificationEvents").doc(), {
       venueId, type: driverId != null ? "delivery.assigned" : `order.${status}`,
       orderId: documentId,
@@ -2046,8 +2389,10 @@ async function manageFulfilmentFor(caller, rawData) {
         ...(driverId == null ? [] : [driverId]),
         ...(typeof order.data().primaryWaiterId === "string" ? [order.data().primaryWaiterId] : []),
       ],
-      recipientRoles: status === "readyForCollection" ? ["waiter", "cashier", "manager"] : [],
-      title: driverId != null ? "Delivery assigned" : "Order status updated",
+      recipientRoles: driverDeclined ? ["manager", "owner"] :
+        (status === "readyForCollection" ? ["waiter", "cashier", "manager"] : []),
+      title: driverDeclined ? "Driver declined delivery" :
+        (driverId != null ? "Delivery assigned" : "Order status updated"),
       body: `${order.data().customerName ?? "Customer order"}: ${status}`,
       status: "pending", createdAt: FieldValue.serverTimestamp(), createdByActor: actor,
     });
@@ -2085,32 +2430,108 @@ async function getOfflineHubBootstrapFor(caller, rawData) {
     hubDeviceId: typeof hub.deviceId === "string" ? hub.deviceId : null,
     hubCredentialId: typeof hub.credentialId === "string" ? hub.credentialId : null,
     hubEndpoint: typeof hub.endpoint === "string" ? hub.endpoint : null,
+    backupDeviceId: typeof hub.backupDeviceId === "string" ? hub.backupDeviceId : null,
+    backupCredentialId: typeof hub.backupCredentialId === "string" ?
+      hub.backupCredentialId : null,
+    backupEndpoint: typeof hub.backupEndpoint === "string" ? hub.backupEndpoint : null,
     hubEpoch: Number.isSafeInteger(Number(hub.epoch)) ? Number(hub.epoch) : 0,
-    credentials: credentialSnapshot.docs.map((credential) => ({
+    credentials: credentialSnapshot.docs
+      .filter((credential) => currentVenueDeviceIdPattern.test(
+        String(credential.data().deviceId ?? ""),
+      ))
+      .map((credential) => ({
       credentialId: credential.id,
       deviceId: credential.data().deviceId,
       algorithm: credential.data().algorithm,
       publicKeyBase64: credential.data().publicKeyBase64,
-    })),
+      })),
     serverTimeMillis: Date.now(),
   };
 }
 
-const remoteHubCommandTtlMs = 25 * 1000;
+async function uploadDeviceDiagnosticsFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const deviceId = requireCurrentVenueDeviceId(requiredDocumentId(data, "deviceId"));
+  if (data.environment !== "staging") {
+    throw new HttpsError("failed-precondition", "Cloud diagnostics are disabled outside staging.");
+  }
+  await requireTenantHostMember(caller, tenantId);
+  const membership = await db.doc(`tenants/${tenantId}/members/${caller.uid}`).get();
+  const venueIds = Array.isArray(membership.data()?.venueIds)
+    ? membership.data().venueIds : [];
+  if (!membership.exists || membership.data()?.status === "retired" ||
+      (venueIds.length > 0 && !venueIds.includes(venueId))) {
+    throw new HttpsError("permission-denied", "This account cannot upload diagnostics for that venue.");
+  }
+  if (!Array.isArray(data.entries) || data.entries.length < 1 ||
+      data.entries.length > 50) {
+    throw new HttpsError("invalid-argument", "Upload between 1 and 50 diagnostic entries.");
+  }
+  const entries = data.entries.map((raw) => {
+    const entry = requireObject(raw);
+    const level = requiredText(entry, "level", 8);
+    const timestamp = requiredText(entry, "timestamp", 40);
+    if (!["ERROR", "STACK"].includes(level) ||
+        !/^\d{4}-\d{2}-\d{2}T[0-9:.+-]+$/u.test(timestamp)) {
+      throw new HttpsError("invalid-argument", "A diagnostic entry is invalid.");
+    }
+    if (level === "ERROR") {
+      const action = requiredText(entry, "action", 100);
+      const errorType = requiredText(entry, "errorType", 100);
+      if (!/^[ A-Za-z0-9_.()/-]+$/u.test(action) ||
+          !/^[A-Za-z0-9_.]+$/u.test(errorType)) {
+        throw new HttpsError("invalid-argument", "An error diagnostic is invalid.");
+      }
+      return {timestamp, level, action, errorType};
+    }
+    const location = requiredText(entry, "location", 240);
+    if (!/^package:tableside_pos\/[A-Za-z0-9_./-]+\.dart:\d+:\d+$/u.test(location)) {
+      throw new HttpsError("invalid-argument", "A stack diagnostic is invalid.");
+    }
+    return {timestamp, level, location};
+  });
+  const throttleRef = db.doc(
+    `tenants/${tenantId}/deviceDiagnosticUploadLimits/${createHash("sha256")
+      .update(`${caller.hostUid}:${deviceId}`).digest("hex")}`,
+  );
+  await db.runTransaction(async (transaction) => {
+    const current = await transaction.get(throttleRef);
+    const lastAcceptedAt = current.data()?.lastAcceptedAt?.toMillis?.() ?? 0;
+    if (Date.now() - lastAcceptedAt < 30000) {
+      throw new HttpsError("resource-exhausted", "Diagnostics were uploaded recently.");
+    }
+    transaction.set(throttleRef, {
+      lastAcceptedAt: FieldValue.serverTimestamp(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    });
+  });
+  console.log("TABLESIDE_DEVICE_DIAGNOSTICS", JSON.stringify({
+    tenantId,
+    venueId,
+    deviceId,
+    platform: optionalText(data, "platform", 32) || "unknown",
+    hostUidHash: createHash("sha256").update(caller.hostUid).digest("hex").slice(0, 16),
+    entries,
+  }));
+  return {accepted: true, entryCount: entries.length};
+}
+
+// Remote commands remain recoverable long enough for a hub restart or a short
+// broadband interruption. This is not an acceptance timeout: the POS only
+// reports success after the hub's signed durable event reaches one of the two
+// acknowledgement paths below.
+const remoteHubCommandTtlMs = 2 * 60 * 1000;
 const remoteHubClaimLeaseMs = 15 * 1000;
-const remoteHubHeartbeatTtlMs = 15 * 1000;
 const remoteHubEventTypes = new Set([
-  "order.opened", "order.itemAdded", "order.itemQuantityChanged",
-  "order.sent", "order.fulfilmentChanged", "payment.recorded",
-  "order.closed", "receipt.requested",
+  "order.opened", "order.itemAdded", "order.itemsAdded", "order.itemQuantityChanged", "order.lineAdjusted",
+  "order.sent", "order.splitCreated", "order.fulfilmentChanged", "payment.recorded", "payment.batchRecorded",
+  "order.productionTicketUpdated", "order.closed", "order.cancelled", "receipt.requested",
 ]);
 
 function remoteHubQueue(tenantId, venueId) {
   return db.collection(`tenants/${tenantId}/venues/${venueId}/remoteHubCommands`);
-}
-
-function remoteHubStateRef(tenantId, venueId) {
-  return db.doc(`tenants/${tenantId}/venues/${venueId}/remoteHubState/status`);
 }
 
 async function submitRemoteHubCommandFor(caller, rawData) {
@@ -2130,22 +2551,48 @@ async function submitRemoteHubCommandFor(caller, rawData) {
   if (Buffer.byteLength(encodedPayload, "utf8") > 64 * 1024) {
     throw new HttpsError("invalid-argument", "The remote venue command is too large.");
   }
-  const [{membership}, venue, state, pin] = await Promise.all([
+  const [{membership}, venue, pin] = await Promise.all([
     requireTenantOperationalMember(caller, tenantId),
     db.doc(`tenants/${tenantId}/venues/${venueId}`).get(),
-    remoteHubStateRef(tenantId, venueId).get(),
     db.doc(`tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`).get(),
   ]);
   const hub = venue.data()?.offlineHub;
-  const heartbeatExpiresAt = state.data()?.heartbeatExpiresAt?.toDate?.();
+  // Do not use the advisory heartbeat document as an admission lock. Mobile
+  // networks, suspended timers and a busy Functions instance can delay an
+  // otherwise healthy hub heartbeat beyond its display lease. The command
+  // queue itself is the authoritative liveness check: a command has a short
+  // expiry and is reported as successful only after the enrolled hub claims,
+  // validates and durably commits it. If the hub is genuinely unreachable the
+  // command expires and the POS never presents the operation as saved.
   if (!venue.exists || venue.data()?.status === "deleting" ||
       hub?.enabled !== true || hub.epoch !== hubEpoch ||
-      state.data()?.hubEpoch !== hubEpoch ||
-      state.data()?.hubDeviceId !== hub.deviceId ||
-      heartbeatExpiresAt == null || heartbeatExpiresAt.getTime() <= Date.now()) {
+      typeof hub.deviceId !== "string" || hub.deviceId.length === 0) {
     throw new HttpsError(
       "unavailable",
-      "The venue hub is offline. Join the venue network or wait for the hub to reconnect.",
+      "The venue hub is not enrolled for remote commands at this venue.",
+    );
+  }
+  const realtime = configuredRealtimeDatabase();
+  try {
+    const presence = await realtime.database
+      .ref(`hubPresence/${tenantId}/${venueId}/${hub.deviceId}`).get();
+    const presenceValue = presence.val();
+    const lastReadyAt = Number(presenceValue?.lastReadyAt ?? 0);
+    if (presenceValue?.online !== true || presenceValue?.hubEpoch !== hubEpoch ||
+        !Number.isSafeInteger(lastReadyAt) || Date.now() - lastReadyAt > 20 * 1000) {
+      throw new HttpsError(
+        "unavailable",
+        "The venue hub is offline. Join the venue network or wait for it to reconnect.",
+      );
+    }
+  } catch (error) {
+    if (error instanceof HttpsError) throw error;
+    console.error("Could not read realtime venue hub presence", {
+      tenantId, venueId, error: String(error),
+    });
+    throw new HttpsError(
+      "unavailable",
+      "The venue hub presence service is unavailable. Nothing was accepted.",
     );
   }
   if (!pin.exists || pin.data()?.locked === true) {
@@ -2174,26 +2621,450 @@ async function submitRemoteHubCommandFor(caller, rawData) {
       hostUid: caller.hostUid, staffId: caller.uid,
       pinVersion: Number(pin.data()?.pinVersion ?? 0),
       membershipVersion: Number(membership.membershipVersion ?? 1),
-      status: "pending", createdAt: FieldValue.serverTimestamp(), expiresAt,
+      status: "pending", stage: "queued",
+      protocolVersion: 2,
+      createdAt: FieldValue.serverTimestamp(), expiresAt,
       businessTimestampUtc: typeof data.businessTimestampUtc === "string"
         ? data.businessTimestampUtc : null,
     });
   });
+  try {
+    await realtime.database
+      .ref(`remoteCommandStatus/${tenantId}/${venueId}/${commandId}`)
+      .transaction((current) => current ?? ({
+        commandId,
+        hostUid: caller.hostUid,
+        staffId: caller.uid,
+        status: "pending",
+        stage: "queued",
+        hubEpoch,
+        updatedAt: ServerValue.TIMESTAMP,
+      }));
+    await realtime.database
+      .ref(`hubSignals/${tenantId}/${venueId}`)
+      .set({commandId, hubEpoch, signaledAt: ServerValue.TIMESTAMP});
+  } catch (error) {
+    // The Firestore command is idempotent and remains safe to signal again
+    // when the client retries this same command ID. Never claim success if
+    // the authoritative hub was not actually woken.
+    console.error("Could not signal realtime venue hub command", {
+      tenantId, venueId, commandId, error: String(error),
+    });
+    throw new HttpsError(
+      "unavailable",
+      "The venue hub command channel is unavailable. Nothing was confirmed.",
+    );
+  }
   return {commandId, expiresAt: expiresAt.toISOString(), documentPath: commandRef.path};
 }
 
-async function heartbeatRemoteHubFor(caller, rawData) {
-  const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/remote-heartbeat");
-  const expiresAt = new Date(Date.now() + remoteHubHeartbeatTtlMs);
-  await remoteHubStateRef(upload.tenantId, upload.venueId).set({
-    hubDeviceId: upload.body.deviceId,
+/// Waits on the server-owned command document for the authoritative hub's
+/// terminal acknowledgement. Remote clients previously listened to this
+/// document directly; that introduced a second security/cache path which
+/// could miss an accepted update even though the hub completed it. Keeping
+/// both submission and acknowledgement behind the PIN-protected POS API makes
+/// the result deterministic without allowing the API itself to accept work.
+async function waitForRemoteHubCommandFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const commandId = requiredDocumentId(data, "commandId");
+  const [{membership}, initial] = await Promise.all([
+    requireTenantOperationalMember(caller, tenantId),
+    remoteHubQueue(tenantId, venueId).doc(commandId).get(),
+  ]);
+  const venueIds = Array.isArray(membership.venueIds) ? membership.venueIds : [];
+  if (venueIds.length > 0 && !venueIds.includes(venueId)) {
+    throw new HttpsError("permission-denied", "This staff member is not assigned to this venue.");
+  }
+  if (!initial.exists || initial.data().hostUid !== caller.hostUid ||
+      initial.data().staffId !== caller.uid) {
+    throw new HttpsError("not-found", "The remote venue command was not found.");
+  }
+  const commandRef = initial.ref;
+  const responseFor = (snapshot) => {
+    const value = snapshot.data() ?? {};
+    return {
+      commandId: snapshot.id,
+      status: String(value.status ?? "pending"),
+      stage: String(value.stage ?? value.status ?? "pending"),
+      claimedByDeviceId: typeof value.claimedByDeviceId === "string"
+        ? value.claimedByDeviceId : null,
+      result: value.status === "accepted" && value.result != null ? value.result : null,
+      rejectionMessage: value.status === "rejected"
+        ? String(value.rejectionMessage ?? "The venue hub rejected this command.") : null,
+    };
+  };
+  if (["accepted", "rejected", "expired"].includes(initial.data().status)) {
+    return responseFor(initial);
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let latest = initial;
+    let unsubscribe = () => {};
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      unsubscribe();
+      callback();
+    };
+    const timer = setTimeout(() => {
+      finish(() => resolve(responseFor(latest)));
+    }, 8000);
+    unsubscribe = commandRef.onSnapshot(
+      (snapshot) => {
+        if (!snapshot.exists) {
+          finish(() => reject(new HttpsError("not-found", "The remote venue command disappeared.")));
+          return;
+        }
+        latest = snapshot;
+        const value = snapshot.data();
+        if (value.hostUid !== caller.hostUid || value.staffId !== caller.uid) {
+          finish(() => reject(new HttpsError("permission-denied", "The remote venue command owner changed.")));
+          return;
+        }
+        if (["accepted", "rejected", "expired"].includes(value.status)) {
+          finish(() => resolve(responseFor(snapshot)));
+        }
+      },
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
+function resolvedRealtimeDatabaseUrl() {
+  const configuredUrl = databaseURL.value().trim();
+  if (/^https:\/\/[a-z0-9.-]+\/?$/u.test(configuredUrl)) return configuredUrl;
+
+  const testUrl = (process.env.TABLESIDE_REALTIME_DATABASE_EMULATOR_URL || "").trim();
+  if (/^https:\/\/demo-[a-z0-9-]+-default-rtdb\.firebaseio\.com\/?$/u
+    .test(testUrl)) {
+    return testUrl;
+  }
+
+  // The Firebase Functions emulator does not always include databaseURL in
+  // FIREBASE_CONFIG, even when the Realtime Database emulator is running.
+  // Derive only the namespace URL in that emulator-specific situation; the
+  // Admin SDK still routes the connection exclusively through the configured
+  // local emulator host. Production remains fail-closed when no RTDB URL is
+  // configured and never falls back to a guessed live database.
+  const emulatorHost = (process.env.FIREBASE_DATABASE_EMULATOR_HOST || "").trim();
+  const projectId = (process.env.GCLOUD_PROJECT ||
+    process.env.GOOGLE_CLOUD_PROJECT || "").trim();
+  if (emulatorHost.length > 0 && /^[a-z0-9-]+$/u.test(projectId)) {
+    return `https://${projectId}-default-rtdb.firebaseio.com`;
+  }
+  return "";
+}
+
+function configuredRealtimeDatabase() {
+  const url = resolvedRealtimeDatabaseUrl();
+  if (url.length === 0 || !/^https:\/\/[a-z0-9.-]+\/?$/u.test(url)) {
+    throw new HttpsError(
+      "failed-precondition",
+      "Realtime hub presence is not configured for this Firebase environment.",
+    );
+  }
+  return {database: getDatabase(undefined, url), url: url.replace(/\/$/u, "")};
+}
+
+async function syncRealtimeHubAuthority(tenantId, venueId, authority) {
+  const url = resolvedRealtimeDatabaseUrl();
+  if (url.length === 0) return;
+  const configured = configuredRealtimeDatabase();
+  await configured.database
+    .ref(`hubAuthorities/${tenantId}/${venueId}`)
+    .set(authority);
+}
+
+async function syncRealtimePrinterAuthority(
+  tenantId, venueId, deviceId, active,
+) {
+  const url = resolvedRealtimeDatabaseUrl();
+  if (url.length === 0) return;
+  await configuredRealtimeDatabase().database
+    .ref(`printerAuthorities/${tenantId}/${venueId}/${deviceId}`)
+    .set({active: active === true});
+}
+
+async function publishRealtimeCommandStatus(
+  tenantId, venueId, commandId, value,
+) {
+  const url = resolvedRealtimeDatabaseUrl();
+  if (url.length === 0) return;
+  try {
+    await configuredRealtimeDatabase().database
+      .ref(`remoteCommandStatus/${tenantId}/${venueId}/${commandId}`)
+      .update({...value, updatedAt: ServerValue.TIMESTAMP});
+  } catch (error) {
+    // Firestore remains durable. The client uses one protected HTTPS fallback
+    // if acknowledgement metadata cannot reach the realtime channel.
+    console.error("Could not publish realtime command acknowledgement", {
+      tenantId, venueId, commandId, error: String(error),
+    });
+  }
+}
+
+async function issueRealtimePosSessionFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const {membership} = await requireTenantOperationalMember(caller, tenantId);
+  const venueIds = Array.isArray(membership.venueIds) ? membership.venueIds : [];
+  if (venueIds.length > 0 && !venueIds.includes(venueId)) {
+    throw new HttpsError("permission-denied", "This staff member is not assigned to this venue.");
+  }
+  const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
+  const hub = venue.data()?.offlineHub;
+  if (!venue.exists || venue.data()?.status === "deleting" ||
+      hub?.enabled !== true || !Number.isSafeInteger(hub.epoch) ||
+      typeof hub.deviceId !== "string" || hub.deviceId.length === 0) {
+    throw new HttpsError("failed-precondition", "The venue hub is not active.");
+  }
+  const configured = configuredRealtimeDatabase();
+  const scopedUid = `pos_${createHash("sha256")
+    .update(`${tenantId}:${venueId}:${caller.hostUid}:${caller.uid}`)
+    .digest("hex").slice(0, 48)}`;
+  const customToken = await auth.createCustomToken(scopedUid, {
+    tablesidePos: true,
+    tenantId,
+    venueId,
+    hostUid: caller.hostUid,
+    staffId: caller.uid,
+    hubEpoch: hub.epoch,
+  });
+  return {
+    customToken,
+    databaseUrl: configured.url,
+    hubEpoch: hub.epoch,
+    hubDeviceId: hub.deviceId,
+  };
+}
+
+async function issueRealtimeHubSessionFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/realtime-session");
+  const configured = configuredRealtimeDatabase();
+  // Backfill the server-owned authority record for hubs activated before the
+  // realtime-presence rollout. Rules consult this record on every write, so a
+  // replaced hub cannot keep publishing presence with a still-valid token.
+  await syncRealtimeHubAuthority(upload.tenantId, upload.venueId, {
+    enabled: true,
+    deviceId: upload.deviceId,
     hubEpoch: upload.hubEpoch,
-    status: "online",
-    pendingLocalEvents: Number(upload.body.pendingLocalEvents ?? 0),
-    lastHeartbeatAt: FieldValue.serverTimestamp(),
-    heartbeatExpiresAt: expiresAt,
-  }, {merge: true});
-  return {heartbeatExpiresAt: expiresAt.toISOString()};
+  });
+  const scopedUid = `hub_${createHash("sha256")
+    .update(`${upload.tenantId}:${upload.venueId}:${upload.deviceId}`)
+    .digest("hex").slice(0, 48)}`;
+  const customToken = await auth.createCustomToken(scopedUid, {
+    tablesideHub: true,
+    tenantId: upload.tenantId,
+    venueId: upload.venueId,
+    deviceId: upload.deviceId,
+    hubEpoch: upload.hubEpoch,
+  });
+  return {customToken, databaseUrl: configured.url, hubEpoch: upload.hubEpoch};
+}
+
+// A standby token can observe authority/presence only. RTDB rules grant it no
+// write access, so a backup cannot impersonate the active hub before the
+// server completes an audited, atomic authority transfer.
+async function issueRealtimeBackupHubSessionFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(
+    caller, rawData, "/v1/backup-realtime-session", {allowBackup: true},
+  );
+  if (upload.role !== "backup") {
+    throw new HttpsError("failed-precondition", "This device is not the configured backup hub.");
+  }
+  const configured = configuredRealtimeDatabase();
+  const scopedUid = `backup_${createHash("sha256")
+    .update(`${upload.tenantId}:${upload.venueId}:${upload.deviceId}`)
+    .digest("hex").slice(0, 48)}`;
+  const customToken = await auth.createCustomToken(scopedUid, {
+    tablesideHubStandby: true,
+    tenantId: upload.tenantId,
+    venueId: upload.venueId,
+    deviceId: upload.deviceId,
+    hubEpoch: upload.hubEpoch,
+  });
+  return {customToken, databaseUrl: configured.url, hubEpoch: upload.hubEpoch};
+}
+
+// RTDB is the live authority source. This transaction both checks the primary
+// lease and revokes the old hub atomically. Firestore is updated afterwards;
+// signed hub APIs also verify RTDB, so the old hub cannot mutate cloud state in
+// the short propagation interval.
+async function promoteOfflineBackupHubFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(
+    caller, rawData, "/v1/backup-promote", {allowBackup: true},
+  );
+  if (upload.role !== "backup") {
+    throw new HttpsError("failed-precondition", "Only the configured backup hub can fail over.");
+  }
+  if (upload.body.confirmAuthorityTransfer !== true) {
+    throw new HttpsError(
+      "failed-precondition",
+      "A manager must explicitly confirm the hub authority transfer.",
+    );
+  }
+  const takeoverReason = requiredText(upload.body, "reason", 200);
+  await requireFreshManagerPin(
+    caller,
+    upload.tenantId,
+    upload.venueId,
+    upload.body.managerPin,
+    "promoteOfflineVenueBackupHub",
+  );
+  const approvingManager = actorSnapshot(await auth.getUser(caller.uid));
+  const venueRef = db.doc(`tenants/${upload.tenantId}/venues/${upload.venueId}`);
+  const venue = await venueRef.get();
+  const hub = venue.data()?.offlineHub;
+  if (hub?.enabled !== true || hub.epoch !== upload.hubEpoch ||
+      hub.backupDeviceId !== upload.deviceId ||
+      hub.backupCredentialId !== upload.credentialId) {
+    throw new HttpsError("aborted", "The backup hub assignment changed.");
+  }
+  const authorityRef = configuredRealtimeDatabase().database
+    .ref(`hubAuthorities/${upload.tenantId}/${upload.venueId}`);
+  const nextEpoch = upload.hubEpoch + 1;
+  let primaryWasFresh = false;
+  let authorityMismatch = null;
+  // Validate the server record before opening the atomic transaction. The
+  // compat client still needs an active listener below to retain this value in
+  // its synchronous transaction cache.
+  const authorityBefore = (await authorityRef.get()).val();
+  if (authorityBefore?.enabled !== true ||
+      authorityBefore.deviceId !== hub.deviceId ||
+      Number(authorityBefore.hubEpoch) !== upload.hubEpoch) {
+    console.error("Backup promotion found mismatched server authority", {
+      tenantId: upload.tenantId,
+      venueId: upload.venueId,
+      backupDeviceId: upload.deviceId,
+      expectedDeviceId: hub.deviceId,
+      expectedHubEpoch: upload.hubEpoch,
+      observedEnabled: authorityBefore?.enabled === true,
+      observedDeviceId: authorityBefore?.deviceId ?? null,
+      observedHubEpoch: Number.isSafeInteger(Number(authorityBefore?.hubEpoch)) ?
+        Number(authorityBefore.hubEpoch) : null,
+    });
+    throw new HttpsError(
+      "failed-precondition",
+      "The live hub authority changed; refresh before retrying.",
+    );
+  }
+  const initialLastReadyAt = Number(authorityBefore.lastReadyAt ?? 0);
+  if (Number.isSafeInteger(initialLastReadyAt) &&
+      Date.now() - initialLastReadyAt < 30000) {
+    throw new HttpsError(
+      "failed-precondition",
+      "The primary venue hub is still online.",
+    );
+  }
+  // The Admin SDK transaction signature is
+  // transaction(updateFunction, onComplete?, applyLocally?). Passing the
+  // client-SDK `{applyLocally: false}` options object as argument two makes
+  // Admin interpret it as a callback and reject every failover request.
+  const keepAuthorityCacheWarm = () => {};
+  authorityRef.on("value", keepAuthorityCacheWarm);
+  let authorityResult;
+  try {
+    // Wait until the active listener has populated the local cache. Keeping it
+    // attached prevents compat from pruning that cache before transaction().
+    await authorityRef.once("value");
+    authorityResult = await authorityRef.transaction((current) => {
+      if (current?.enabled !== true || current.deviceId !== hub.deviceId ||
+          Number(current.hubEpoch) !== upload.hubEpoch) {
+        authorityMismatch = {
+          expectedDeviceId: hub.deviceId,
+          expectedHubEpoch: upload.hubEpoch,
+          observedEnabled: current?.enabled === true,
+          observedDeviceId: typeof current?.deviceId === "string" ?
+            current.deviceId : null,
+          observedHubEpoch: Number.isSafeInteger(Number(current?.hubEpoch)) ?
+            Number(current.hubEpoch) : null,
+          observedLastReadyAt: Number.isSafeInteger(Number(current?.lastReadyAt)) ?
+            Number(current.lastReadyAt) : null,
+        };
+        return;
+      }
+      const lastReadyAt = Number(current.lastReadyAt ?? 0);
+      if (Number.isSafeInteger(lastReadyAt) && Date.now() - lastReadyAt < 30000) {
+        primaryWasFresh = true;
+        return;
+      }
+      return {
+        enabled: true,
+        deviceId: upload.deviceId,
+        hubEpoch: nextEpoch,
+        lastReadyAt: ServerValue.TIMESTAMP,
+        promotedFromDeviceId: hub.deviceId,
+        promotedAutomatically: false,
+        promotedByManagerId: caller.uid,
+      };
+    }, undefined, false);
+  } finally {
+    authorityRef.off("value", keepAuthorityCacheWarm);
+  }
+  if (!authorityResult.committed) {
+    if (authorityMismatch != null) {
+      console.error("Backup promotion found mismatched live authority", {
+        tenantId: upload.tenantId,
+        venueId: upload.venueId,
+        backupDeviceId: upload.deviceId,
+        ...authorityMismatch,
+      });
+    }
+    throw new HttpsError(
+      "failed-precondition",
+      primaryWasFresh ? "The primary venue hub is still online." :
+        "The live hub authority changed; refresh before retrying.",
+    );
+  }
+  try {
+    await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(venueRef);
+      const currentHub = current.data()?.offlineHub;
+      if (currentHub?.enabled !== true || currentHub.epoch !== upload.hubEpoch ||
+          currentHub.backupDeviceId !== upload.deviceId ||
+          currentHub.backupCredentialId !== upload.credentialId) {
+        throw new HttpsError("aborted", "The backup hub assignment changed.");
+      }
+      transaction.update(venueRef, {
+        offlineHub: {
+          enabled: true,
+          deviceId: currentHub.backupDeviceId,
+          credentialId: currentHub.backupCredentialId,
+          endpoint: currentHub.backupEndpoint,
+          epoch: nextEpoch,
+          activatedAt: FieldValue.serverTimestamp(),
+          activatedByActor: caller.uid,
+          previousDeviceId: currentHub.deviceId,
+        },
+      });
+      transaction.create(
+        db.collection(`tenants/${upload.tenantId}/auditEvents`).doc(),
+        {
+          action: "promoteOfflineVenueBackupHub",
+          venueId: upload.venueId,
+          previousDeviceId: currentHub.deviceId,
+          deviceId: upload.deviceId,
+          credentialId: upload.credentialId,
+          previousHubEpoch: upload.hubEpoch,
+          hubEpoch: nextEpoch,
+          actor: approvingManager,
+          reason: takeoverReason,
+          confirmation: "manualManagerTakeover",
+          createdAt: FieldValue.serverTimestamp(),
+        },
+      );
+    });
+  } catch (error) {
+    // Fail closed if the durable authority update cannot complete. The old hub
+    // stays revoked and the backup will retry recovery; two hubs never run.
+    await authorityRef.set({enabled: false, hubEpoch: nextEpoch});
+    throw error;
+  }
+  return {promoted: true, hubEpoch: nextEpoch};
 }
 
 async function claimRemoteHubCommandsFor(caller, rawData) {
@@ -2221,7 +3092,8 @@ async function claimRemoteHubCommandsFor(caller, rawData) {
           (claimExpiresAt == null || claimExpiresAt.getTime() > Date.now())) return null;
       const claimToken = randomBytes(24).toString("base64url");
       transaction.update(candidate.ref, {
-        status: "claimed", claimedByDeviceId: upload.body.deviceId,
+        status: "claimed", stage: "claimed",
+        claimedByDeviceId: upload.body.deviceId,
         claimTokenHash: createHash("sha256").update(claimToken).digest("base64"),
         claimedAt: FieldValue.serverTimestamp(),
         claimExpiresAt: new Date(Date.now() + remoteHubClaimLeaseMs),
@@ -2237,6 +3109,19 @@ async function claimRemoteHubCommandsFor(caller, rawData) {
       };
     });
     if (result != null) claimed.push(result);
+  }
+  // Keep this diagnostic deliberately free of signed envelopes, claim tokens,
+  // command payloads and staff data. It lets support distinguish a live hub
+  // polling an empty queue from a hub process that has stopped polling.
+  if (candidates.size > 0) {
+    console.info("Remote hub claim poll found work", {
+      tenantId: upload.tenantId,
+      venueId: upload.venueId,
+      deviceId: upload.body.deviceId,
+      hubEpoch: upload.hubEpoch,
+      candidateCount: candidates.size,
+      claimedCount: claimed.length,
+    });
   }
   return {commands: claimed};
 }
@@ -2262,11 +3147,24 @@ async function completeRemoteHubCommandFor(caller, rawData) {
     }
     transaction.update(commandRef, {
       status: accepted ? "accepted" : "rejected",
+      stage: accepted ? "hubCommitted" : "hubRejected",
       completedAt: FieldValue.serverTimestamp(),
       result: accepted ? result : null,
       rejectionMessage: accepted ? null : String(upload.body.rejectionMessage ?? "The venue hub rejected this command.").slice(0, 500),
       claimTokenHash: FieldValue.delete(), claimExpiresAt: FieldValue.delete(),
     });
+  });
+  const command = await commandRef.get();
+  const value = command.data() ?? {};
+  await publishRealtimeCommandStatus(upload.tenantId, upload.venueId, commandId, {
+    commandId,
+    hostUid: value.hostUid ?? null,
+    staffId: value.staffId ?? null,
+    status: accepted ? "accepted" : "rejected",
+    stage: accepted ? "hubCommitted" : "hubRejected",
+    result: accepted ? result : null,
+    rejectionMessage: accepted ? null :
+      String(upload.body.rejectionMessage ?? "The venue hub rejected this command.").slice(0, 500),
   });
   return {commandId, accepted};
 }
@@ -2300,7 +3198,7 @@ function verifyEd25519RawPublicKey(publicKeyBase64, message, signatureBase64) {
 }
 
 async function verifiedOfflineHubUpload(
-  caller, rawData, expectedPath = "/v1/cloud-sync",
+  caller, rawData, expectedPath = "/v1/cloud-sync", options = {},
 ) {
   const data = requireObject(rawData);
   const envelope = requireObject(data.envelope);
@@ -2308,7 +3206,9 @@ async function verifiedOfflineHubUpload(
   const tenantId = requiredText(envelope, "tenantId", 128);
   const venueId = requiredText(envelope, "venueId", 128);
   const credentialId = requiredDocumentId(envelope, "credentialId");
-  const deviceId = requiredDocumentId(envelope, "deviceId");
+  const deviceId = requireCurrentVenueDeviceId(
+    requiredDocumentId(envelope, "deviceId"),
+  );
   const staffId = requiredText(envelope, "staffId", 160);
   const method = requiredText(envelope, "method", 12).toUpperCase();
   const path = requiredText(envelope, "path", 128);
@@ -2330,12 +3230,23 @@ async function verifiedOfflineHubUpload(
   ]);
   const hub = venue.data()?.offlineHub;
   const credentialData = credential.data();
+  const activeMatch = hub?.deviceId === deviceId && hub?.credentialId === credentialId;
+  const backupMatch = options.allowBackup === true &&
+    hub?.backupDeviceId === deviceId && hub?.backupCredentialId === credentialId;
   if (!venue.exists || hub?.enabled !== true || hub?.epoch !== hubEpoch ||
-      hub?.deviceId !== deviceId || hub?.credentialId !== credentialId ||
+      (!activeMatch && !backupMatch) ||
       !credential.exists || credentialData.active !== true ||
       credentialData.venueId !== venueId || credentialData.deviceId !== deviceId ||
       credentialData.algorithm !== "Ed25519") {
     throw new HttpsError("permission-denied", "This device is not the active venue hub.");
+  }
+  if (activeMatch) {
+    const authority = (await configuredRealtimeDatabase().database
+      .ref(`hubAuthorities/${tenantId}/${venueId}`).get()).val();
+    if (authority?.enabled !== true || authority.deviceId !== deviceId ||
+        Number(authority.hubEpoch) !== hubEpoch) {
+      throw new HttpsError("permission-denied", "This device no longer owns live hub authority.");
+    }
   }
   const encodedBody = JSON.stringify(canonicalJsonValue(body));
   const expectedHash = createHash("sha256").update(encodedBody).digest("base64url");
@@ -2354,7 +3265,10 @@ async function verifiedOfflineHubUpload(
   )) {
     throw new HttpsError("unauthenticated", "The hub upload signature is invalid.");
   }
-  return {body, tenantId, venueId, hubEpoch, credentialId, nonce};
+  return {
+    body, tenantId, venueId, deviceId, hubEpoch, credentialId, nonce,
+    role: activeMatch ? "active" : "backup",
+  };
 }
 
 function offlinePermissionsForRoles(roles) {
@@ -2400,7 +3314,9 @@ function timeZoneOffsetMinutes(timeZone, now = new Date()) {
 }
 
 async function getOfflineHubSnapshotFor(caller, rawData) {
-  const upload = await verifiedOfflineHubUpload(caller, rawData, "/v1/snapshot");
+  const upload = await verifiedOfflineHubUpload(
+    caller, rawData, "/v1/snapshot", {allowBackup: true},
+  );
   const knownSnapshotDigest = upload.body.knownSnapshotDigest;
   if (knownSnapshotDigest != null &&
       (typeof knownSnapshotDigest !== "string" ||
@@ -2410,53 +3326,128 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   const tenantRef = db.doc(`tenants/${upload.tenantId}`);
   const snapshotVersionRef = tenantRef.collection("offlineHubSnapshotVersions")
     .doc(upload.venueId);
-  let snapshotVersion = await snapshotVersionRef.get();
-  if (!snapshotVersion.exists) {
-    try {
-      await snapshotVersionRef.create({
-        generation: 1,
+  // Schema 3 includes same-epoch active-order baselines. They recover a hub
+  // whose encrypted local ledger was replaced while its epoch stayed active.
+  // Bumping generation makes every enrolled hub fetch the repair once even
+  // when its menu/catalogue data has not otherwise changed.
+  // Schema 4 adds independently versioned snapshot sections. A catalogue
+  // edit no longer forces the hub to redownload customers, staff, printers,
+  // tables and open orders.
+  const snapshotSchemaVersion = 5;
+  await db.runTransaction(async (transaction) => {
+    const current = await transaction.get(snapshotVersionRef);
+    if (!current.exists) {
+      transaction.create(snapshotVersionRef, {
+        generation: 1, schemaVersion: snapshotSchemaVersion,
+        venueGeneration: 0,
+        catalogueGeneration: 0,
+        operationsGeneration: 0,
+        staffGeneration: 0,
+        printingGeneration: 0,
+        customersGeneration: 0,
         updatedAt: FieldValue.serverTimestamp(),
       });
-    } catch (error) {
-      // Another request or a Firestore trigger may initialise it first.
-      if (error?.code !== 6 && error?.code !== "already-exists") throw error;
+      return;
     }
-    snapshotVersion = await snapshotVersionRef.get();
-  }
+    if (Number(current.data()?.schemaVersion ?? 1) < snapshotSchemaVersion) {
+      transaction.update(snapshotVersionRef, {
+        generation: Number(current.data()?.generation ?? 1) + 1,
+        schemaVersion: snapshotSchemaVersion,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+  });
+  const snapshotVersion = await snapshotVersionRef.get();
   const snapshotGeneration = Number(snapshotVersion.data()?.generation ?? 1);
+  const snapshotSections = {
+    venue: Number(snapshotVersion.data()?.venueGeneration ?? 0),
+    catalogue: Number(snapshotVersion.data()?.catalogueGeneration ?? 0),
+    operations: Number(snapshotVersion.data()?.operationsGeneration ?? 0),
+    staff: Number(snapshotVersion.data()?.staffGeneration ?? 0),
+    printing: Number(snapshotVersion.data()?.printingGeneration ?? 0),
+    customers: Number(snapshotVersion.data()?.customersGeneration ?? 0),
+  };
+  const rawKnownSections = upload.body.knownSnapshotSections;
+  const knownSnapshotSections = rawKnownSections != null &&
+      typeof rawKnownSections === "object" && !Array.isArray(rawKnownSections)
+    ? rawKnownSections : null;
+  if (rawKnownSections != null && knownSnapshotSections == null) {
+    throw new HttpsError("invalid-argument", "The known snapshot sections are invalid.");
+  }
+  if (knownSnapshotSections != null && Object.entries(knownSnapshotSections)
+    .some(([key, value]) => !Object.hasOwn(snapshotSections, key) ||
+      !Number.isSafeInteger(Number(value)) || Number(value) < 0)) {
+    throw new HttpsError("invalid-argument", "A known snapshot section version is invalid.");
+  }
+  const changed = (section) => knownSnapshotSections == null ||
+    Number(knownSnapshotSections[section] ?? 0) !== snapshotSections[section];
   const knownSnapshotGeneration = Number(upload.body.knownSnapshotGeneration ?? 0);
   if (Number.isSafeInteger(knownSnapshotGeneration) &&
       knownSnapshotGeneration > 0 && knownSnapshotGeneration === snapshotGeneration) {
     return {
       unchanged: true,
       snapshotGeneration,
+      snapshotSections,
       snapshotDigest: knownSnapshotDigest ?? null,
     };
   }
-  const [tenant, venue, sections, products, modifierGroups, tables, members, pins, routes, syncState, courses, customers] =
+  const venueChanged = changed("venue");
+  const catalogueChanged = changed("catalogue");
+  const operationsChanged = changed("operations");
+  const staffChanged = changed("staff");
+  const printingChanged = changed("printing");
+  const customersChanged = changed("customers");
+  const partial = knownSnapshotSections != null;
+  const [tenant, venue, sections, products, modifierGroups, tables, members, pins, routes, syncState, courses, customers, orders] =
     await Promise.all([
-      tenantRef.get(),
-      tenantRef.collection("venues").doc(upload.venueId).get(),
-      tenantRef.collection("menuSections").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("products").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("modifierGroups").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("tables").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("members").where("active", "!=", false).get(),
-      tenantRef.collection("staffPins").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("printerRoutes").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("offlineHubSyncState").doc(upload.venueId).get(),
-      tenantRef.collection("courses").where("venueId", "==", upload.venueId).get(),
-      tenantRef.collection("venueCustomers").where("venueId", "==", upload.venueId).get(),
+      venueChanged ? tenantRef.get() : null,
+      venueChanged ? tenantRef.collection("venues").doc(upload.venueId).get() : null,
+      catalogueChanged ? tenantRef.collection("menuSections").where("venueId", "==", upload.venueId).get() : null,
+      catalogueChanged ? tenantRef.collection("products").where("venueId", "==", upload.venueId).get() : null,
+      catalogueChanged ? tenantRef.collection("modifierGroups").where("venueId", "==", upload.venueId).get() : null,
+      operationsChanged ? tenantRef.collection("tables").where("venueId", "==", upload.venueId).get() : null,
+      staffChanged ? tenantRef.collection("members").where("active", "!=", false).get() : null,
+      staffChanged ? tenantRef.collection("staffPins").where("venueId", "==", upload.venueId).get() : null,
+      printingChanged ? tenantRef.collection("printerRoutes").where("venueId", "==", upload.venueId).get() : null,
+      operationsChanged ? tenantRef.collection("offlineHubSyncState").doc(upload.venueId).get() : null,
+      catalogueChanged ? tenantRef.collection("courses").where("venueId", "==", upload.venueId).get() : null,
+      customersChanged ? tenantRef.collection("venueCustomers").where("venueId", "==", upload.venueId).get() : null,
+      // The hub needs only orders that can still change. Reading the complete
+      // financial history here made every catalogue/settings refresh grow
+      // slower over the lifetime of a venue even though closed orders were
+      // discarded immediately below.
+      operationsChanged ? tenantRef.collection("orders")
+        .where("venueId", "==", upload.venueId)
+        .where("status", "in", ["open", "sent"])
+        .get() : null,
     ]);
-  const pinByUser = new Map(pins.docs.map((pin) => [pin.data().userId, pin.data()]));
-  const staff = members.docs.map((member) => {
+  const pinByUser = new Map((pins?.docs ?? []).map((pin) => [pin.data().userId, pin.data()]));
+  const memberUsers = await Promise.all((members?.docs ?? []).map((member) =>
+    auth.getUser(member.id).catch(() => null)));
+  const memberNameById = new Map(memberUsers.filter(Boolean).map((user) => [
+    user.uid, user.displayName || user.email || user.uid,
+  ]));
+  const staff = (members?.docs ?? []).map((member) => {
     const roles = Array.isArray(member.data().roles) ? member.data().roles : [];
+    const venueIds = Array.isArray(member.data().venueIds)
+      ? member.data().venueIds.filter((value) => typeof value === "string") : [];
+    if (venueIds.length > 0 && !venueIds.includes(upload.venueId)) return null;
     const pin = pinByUser.get(member.id);
-    if (pin == null || pin.locked === true || !offlinePinVerifierReady(pin)) return null;
-    return {
+    const base = {
       staffId: member.id,
-      displayName: member.data().displayName ?? member.id,
+      displayName: member.data().displayName ?? memberNameById.get(member.id) ?? member.id,
       roles,
+      venueIds,
+    };
+    if (pin == null || pin.locked === true || !offlinePinVerifierReady(pin)) {
+      // Drivers and other assignable staff remain in the operational roster
+      // even when they cannot authenticate offline. The native PIN authority
+      // deliberately ignores these roster-only records.
+      return {...base, offlinePinReady: false};
+    }
+    return {
+      ...base,
+      offlinePinReady: true,
       permissions: offlinePermissionsForRoles(roles),
       pinVersion: Number(pin.pinVersion ?? 0),
       membershipVersion: Number(member.data().membershipVersion ?? 1),
@@ -2468,7 +3459,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       offlinePinHash: pin.offlinePinHash,
     };
   }).filter(Boolean);
-  const productValues = products.docs.map((document) => {
+  const productValues = (products?.docs ?? []).map((document) => {
     const item = document.data();
     return {
       id: document.id,
@@ -2508,7 +3499,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       courseReleasePolicy: item.courseReleasePolicy ?? "immediate",
     };
   });
-  const groupValues = modifierGroups.docs.map((document) => {
+  const groupValues = (modifierGroups?.docs ?? []).map((document) => {
     const group = document.data();
     return {
       id: document.id, name: group.name,
@@ -2523,84 +3514,182 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       })),
     };
   });
+  const isoDate = (value) => {
+    const date = value?.toDate instanceof Function ? value.toDate() :
+      value instanceof Date ? value :
+        typeof value === "string" || typeof value === "number" ? new Date(value) : null;
+    return date != null && Number.isFinite(date.getTime()) ? date.toISOString() : null;
+  };
+  const openOrders = (orders?.docs ?? []).filter((document) => {
+    const value = document.data();
+    return ["open", "sent"].includes(value.status) &&
+      Number(value.offlineHubEpoch ?? 0) <= upload.hubEpoch;
+  }).map((document) => {
+    const value = document.data();
+    const lines = Array.isArray(value.lines) ? value.lines : [];
+    const payments = Array.isArray(value.payments) ? value.payments : [];
+    return {
+      orderId: document.id,
+      sourceOfflineHubEpoch: Number(value.offlineHubEpoch ?? 0),
+      openedAtUtc: isoDate(value.openedAt) ?? new Date().toISOString(),
+      tableId: typeof value.tableId === "string" ? value.tableId : null,
+      tabName: typeof value.tabName === "string" ? value.tabName : null,
+      channel: value.channel ?? "dineIn",
+      customerId: value.customerId ?? null,
+      customerName: value.customerName ?? null,
+      customerPhone: value.customerPhone ?? null,
+      deliveryAddress: value.deliveryAddress ?? null,
+      deliveryAddressLabel: value.deliveryAddressLabel ?? null,
+      deliveryLatitude: value.deliveryLatitude ?? null,
+      deliveryLongitude: value.deliveryLongitude ?? null,
+      serviceAreaId: value.serviceAreaId ?? null,
+      serviceAreaName: value.serviceAreaName ?? null,
+      deliveryFeeMinor: Number(value.deliveryFeeMinor ?? 0),
+      scheduledForUtc: isoDate(value.scheduledForUtc) ??
+        (typeof value.scheduledForUtc === "string" ? value.scheduledForUtc : null),
+      fulfilmentStatus: value.fulfilmentStatus ??
+        (value.channel === "delivery" ? "awaitingDriver" : "awaitingPreparation"),
+      assignedDriverId: value.assignedDriverId ?? null,
+      splitFromOrderId: value.splitFromOrderId ?? null,
+      splitSequence: Number(value.splitSequence ?? 0),
+      openSplitOrderIds: Array.isArray(value.openSplitOrderIds)
+        ? value.openSplitOrderIds : [],
+      lines: lines.map((line) => ({
+        id: line.id,
+        productId: line.productId,
+        name: line.productName,
+        quantity: Number(line.quantity),
+        unitPriceMinor: Number(line.unitPriceMinor),
+        productionArea: line.productionArea ?? "kitchen",
+        details: [
+          ...(typeof line.variantName === "string" && line.variantName.trim() ?
+            [line.variantName.trim()] : []),
+          ...(Array.isArray(line.modifierSelections) ? line.modifierSelections
+            .map((modifier) => modifier?.optionName).filter((name) =>
+              typeof name === "string" && name.trim()).map((name) => name.trim()) : []),
+          ...(typeof line.itemNote === "string" && line.itemNote.trim() ?
+            [`NOTE: ${line.itemNote.trim()}`] : []),
+        ],
+        taxRateBasisPoints: Number(line.taxRateBasisPoints ?? 0),
+        taxRateName: line.taxRateName ?? "Zero Rate",
+        sent: line.isSentToProduction === true,
+        addedAtUtc: isoDate(line.addedAt),
+        sentAtUtc: isoDate(line.sentAt),
+      })),
+      payments: payments.map((payment) => ({
+        id: payment.id,
+        baseAmountMinor: Number(payment.baseAmountMinor),
+        tenderedAmountMinor: Number(
+          payment.tenderedAmountMinor ?? payment.baseAmountMinor,
+        ),
+        method: payment.method,
+        currencyCode: payment.tenderedCurrencyCode ?? payment.currencyCode,
+        exchangeRateToBase: payment.exchangeRateToBase ?? "1",
+        recordedAtUtc: isoDate(payment.recordedAt) ?? new Date().toISOString(),
+        terminalLabel: payment.terminalLabel ?? null,
+        cashChangeBaseMinor: Number(payment.cashChangeBaseMinor ?? 0),
+      })),
+    };
+  });
+  const tenantData = tenant?.data() ?? {};
+  const venueData = venue?.data() ?? {};
   const snapshot = {
     version: Date.now(),
     snapshotGeneration,
+    snapshotSections,
     generatedAtUtc: new Date().toISOString(),
     hubEpoch: upload.hubEpoch,
-    cloudLastSequence: syncState.exists && syncState.data().hubEpoch === upload.hubEpoch
-      ? Number(syncState.data().lastSequence ?? 0) : 0,
-    currencyCode: String(
-      venue.data()?.currencyCode ?? tenant.data()?.currencyCode ?? "GBP",
-    ).toUpperCase(),
-    tenantName: tenant.data()?.displayName ?? tenant.data()?.legalName ?? "",
-    venueName: venue.data()?.name ?? tenant.data()?.displayName ?? "",
-    venueTimeZone: venue.data()?.timeZone ?? "Europe/London",
-    venueUtcOffsetMinutes: timeZoneOffsetMinutes(
-      venue.data()?.timeZone ?? "Europe/London",
-    ),
-    businessDayCutoffMinutes: Number(venue.data()?.businessDayCutoffMinutes ?? 240),
-    tenantAddress: tenant.data()?.address ?? "",
-    tenantPhoneNumbers: Array.isArray(tenant.data()?.phoneNumbers)
-      ? tenant.data().phoneNumbers : [],
-    venueAddress: venue.data()?.address ?? "",
-    venuePhoneNumbers: Array.isArray(venue.data()?.phoneNumbers)
-      ? venue.data().phoneNumbers : [],
-    receiptFooter: venue.data()?.receiptFooter ?? tenant.data()?.receiptFooter ?? "",
-    collectionEnabled: venue.data()?.collectionEnabled === true,
-    deliveryEnabled: venue.data()?.deliveryEnabled === true,
-    courseControlEnabled: venue.data()?.courseControlEnabled === true,
-    collectionWindows: Array.isArray(venue.data()?.collectionWindows)
-      ? venue.data().collectionWindows : [],
-    deliveryWindows: Array.isArray(venue.data()?.deliveryWindows)
-      ? venue.data().deliveryWindows : [],
-    serviceAreas: Array.isArray(venue.data()?.serviceAreas)
-      ? venue.data().serviceAreas : [],
-    fulfilmentDateOverrides: Array.isArray(venue.data()?.fulfilmentDateOverrides)
-      ? venue.data().fulfilmentDateOverrides : [],
-    sections: sections.docs.map((document) => ({
+    ...(operationsChanged ? {
+      cloudLastSequence: syncState?.exists && syncState.data().hubEpoch === upload.hubEpoch
+        ? Number(syncState.data().lastSequence ?? 0) : 0,
+      openOrders,
+      tables: (tables?.docs ?? []).map((table) => ({
+        id: table.id, label: table.data().label ?? table.id,
+        seats: Number(table.data().seats ?? 0), active: table.data().active !== false,
+        sortOrder: Number.isSafeInteger(table.data().sortOrder)
+          ? table.data().sortOrder : null,
+      })),
+    } : {}),
+    ...(venueChanged ? {
+      currencyCode: String(
+        venueData.currencyCode ?? tenantData.currencyCode ?? "GBP",
+      ).toUpperCase(),
+      tenantName: tenantData.displayName ?? tenantData.legalName ?? "",
+      venueName: venueData.name ?? tenantData.displayName ?? "",
+      venueCountry: venueData.country ?? "Kuzey Kıbrıs Türk Cumhuriyeti",
+      deliveryLocations: venueData.deliveryLocations ?? {},
+      venueTimeZone: venueData.timeZone ?? "Europe/London",
+      venueUtcOffsetMinutes: timeZoneOffsetMinutes(
+        venueData.timeZone ?? "Europe/London",
+      ),
+      businessDayCutoffMinutes: Number(venueData.businessDayCutoffMinutes ?? 240),
+      tenantAddress: tenantData.address ?? "",
+      tenantPhoneNumbers: Array.isArray(tenantData.phoneNumbers)
+        ? tenantData.phoneNumbers : [],
+      venueAddress: venueData.address ?? "",
+      venuePhoneNumbers: Array.isArray(venueData.phoneNumbers)
+        ? venueData.phoneNumbers : [],
+      receiptFooter: venueData.receiptFooter ?? tenantData.receiptFooter ?? "",
+      collectionEnabled: venueData.collectionEnabled === true,
+      deliveryEnabled: venueData.deliveryEnabled === true,
+      courseControlEnabled: venueData.courseControlEnabled === true,
+      collectionWindows: Array.isArray(venueData.collectionWindows)
+        ? venueData.collectionWindows : [],
+      deliveryWindows: Array.isArray(venueData.deliveryWindows)
+        ? venueData.deliveryWindows : [],
+      serviceAreas: Array.isArray(venueData.serviceAreas)
+        ? venueData.serviceAreas : [],
+      fulfilmentDateOverrides: Array.isArray(venueData.fulfilmentDateOverrides)
+        ? venueData.fulfilmentDateOverrides : [],
+    } : {}),
+    ...(catalogueChanged ? {
+      sections: (sections?.docs ?? []).map((document) => ({
       id: document.id,
       name: document.data().name ?? "Menu section",
       icon: document.data().icon ?? "🍽️",
       parentSectionId: document.data().parentSectionId ?? null,
       sortOrder: Number(document.data().sortOrder ?? 0),
-    })),
-    products: productValues,
-    modifierGroups: groupValues,
-    courses: courses.docs.filter((course) => course.data().active !== false).map((course) => ({
-      id: course.id,
-      name: course.data().name,
-      sequence: Number(course.data().sequence ?? 0),
-      releasePolicy: course.data().releasePolicy ?? "immediate",
-      amberMinutes: Number(course.data().amberMinutes ?? 15),
-      redMinutes: Number(course.data().redMinutes ?? 25),
-      productionAreas: Array.isArray(course.data().productionAreas)
-        ? course.data().productionAreas : [],
-    })),
-    venueCustomers: customers.docs.map((customer) => ({
-      id: customer.id,
-      displayName: customer.data().displayName ?? "Customer",
-      phoneNumbers: Array.isArray(customer.data().phoneNumbers)
-        ? customer.data().phoneNumbers : [],
-      email: customer.data().email ?? null,
-      addresses: Array.isArray(customer.data().addresses)
-        ? customer.data().addresses : [],
-      claimStatus: customer.data().claimStatus ?? "unclaimed",
-      globalCustomerId: customer.data().globalCustomerId ?? null,
-      createdAtUtc: customer.data().createdAt?.toDate instanceof Function
-        ? customer.data().createdAt.toDate().toISOString() : null,
-    })),
-    tables: tables.docs.map((table) => ({
-      id: table.id, label: table.data().label ?? table.id,
-      seats: Number(table.data().seats ?? 0), active: table.data().active !== false,
-    })),
-    printerRoutes: routes.docs.map((route) => ({
-      productionArea: route.data().productionArea ?? "kitchen",
-      primaryDeviceId: route.data().primaryDeviceId ?? null,
-      fallbackDeviceId: route.data().fallbackDeviceId ?? null,
-    })).filter((route) => typeof route.primaryDeviceId === "string"),
-    staff,
+      })),
+      products: productValues,
+      modifierGroups: groupValues,
+      courses: (courses?.docs ?? []).filter((course) => course.data().active !== false).map((course) => ({
+        id: course.id,
+        name: course.data().name,
+        sequence: Number(course.data().sequence ?? 0),
+        releasePolicy: course.data().releasePolicy ?? "immediate",
+        amberMinutes: Number(course.data().amberMinutes ?? 15),
+        redMinutes: Number(course.data().redMinutes ?? 25),
+        productionAreas: Array.isArray(course.data().productionAreas)
+          ? course.data().productionAreas : [],
+      })),
+    } : {}),
+    ...(customersChanged ? {
+      venueCustomers: (customers?.docs ?? []).map((customer) => ({
+        id: customer.id,
+        displayName: customer.data().displayName ?? "Customer",
+        phoneNumbers: Array.isArray(customer.data().phoneNumbers)
+          ? customer.data().phoneNumbers : [],
+        email: customer.data().email ?? null,
+        addresses: Array.isArray(customer.data().addresses)
+          ? customer.data().addresses : [],
+        claimStatus: customer.data().claimStatus ?? "unclaimed",
+        globalCustomerId: customer.data().globalCustomerId ?? null,
+        createdAtUtc: customer.data().createdAt?.toDate instanceof Function
+          ? customer.data().createdAt.toDate().toISOString() : null,
+      })),
+    } : {}),
+    ...(printingChanged ? {
+      printerRoutes: (routes?.docs ?? []).map((route) => ({
+        productionArea: route.data().productionArea ?? "kitchen",
+        primaryDeviceId: route.data().primaryDeviceId ?? null,
+        fallbackDeviceId: route.data().fallbackDeviceId ?? null,
+      })).filter((route) => typeof route.primaryDeviceId === "string"),
+    } : {}),
+    ...(staffChanged ? {staff} : {}),
   };
+  if (partial) {
+    return {...snapshot, partial: true, unchanged: false, snapshotDigest: null};
+  }
   const digestValue = {...snapshot};
   delete digestValue.version;
   delete digestValue.generatedAtUtc;
@@ -2609,13 +3698,18 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
     .update(JSON.stringify(canonicalJsonValue(digestValue)))
     .digest("base64url");
   if (knownSnapshotDigest === snapshotDigest) {
-    return {unchanged: true, snapshotGeneration, snapshotDigest};
+    return {unchanged: true, snapshotGeneration, snapshotSections, snapshotDigest};
   }
   return {...snapshot, unchanged: false, snapshotDigest};
 }
 
 async function ingestOfflineHubEventsFor(caller, rawData) {
   const upload = await verifiedOfflineHubUpload(caller, rawData);
+  const projectionRecovery = upload.body.projectionRecovery === true;
+  if (upload.body.projectionRecovery != null &&
+      typeof upload.body.projectionRecovery !== "boolean") {
+    throw new HttpsError("invalid-argument", "Projection recovery mode is invalid.");
+  }
   const rawEvents = upload.body.events;
   if (!Array.isArray(rawEvents) || rawEvents.length < 1 || rawEvents.length > 25) {
     throw new HttpsError("invalid-argument", "Upload between 1 and 25 hub events.");
@@ -2634,6 +3728,30 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
     }
     return {...event, id, sequence};
   }).sort((a, b) => a.sequence - b.sequence);
+  const rawRecoveryBaselines = upload.body.recoveryBaselines ?? [];
+  if (!Array.isArray(rawRecoveryBaselines) || rawRecoveryBaselines.length > 25) {
+    throw new HttpsError("invalid-argument", "Recovery baseline context is invalid.");
+  }
+  if (!projectionRecovery && rawRecoveryBaselines.length > 0) {
+    throw new HttpsError(
+      "invalid-argument", "Recovery baselines require projection recovery mode.",
+    );
+  }
+  const recoveryBaselineContext = rawRecoveryBaselines.map((raw) => {
+    const event = requireObject(raw);
+    const id = requiredDocumentId(event, "id");
+    const sequence = Number(event.sequence);
+    if (event.type !== "order.cloudBaseline" ||
+        event.tenantId !== upload.tenantId || event.venueId !== upload.venueId ||
+        event.hubEpoch !== upload.hubEpoch || !Number.isSafeInteger(sequence) || sequence < 1 ||
+        typeof event.previousHash !== "string" || event.previousHash.length > 256 ||
+        typeof event.eventHash !== "string" || event.eventHash.length > 256 ||
+        event.payload == null || typeof event.payload !== "object" ||
+        Array.isArray(event.payload) || typeof event.payload.orderId !== "string") {
+      throw new HttpsError("invalid-argument", "A recovery baseline is invalid or out of scope.");
+    }
+    return {...event, id, sequence};
+  });
   const tenantRef = db.doc(`tenants/${upload.tenantId}`);
   const stateRef = tenantRef.collection("offlineHubSyncState").doc(upload.venueId);
   const venueRef = tenantRef.collection("venues").doc(upload.venueId);
@@ -2642,9 +3760,29 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
   const nonceRef = tenantRef.collection("offlineHubUploadNonces").doc(nonceId);
   const eventRefs = events.map((event) =>
     tenantRef.collection("offlineHubEvents").doc(event.id));
-  const securityEventTypes = new Set(["security.pinAttempt"]);
+  // Every remotely submitted command is also embedded in the immutable hub
+  // event that represents its durable local commit. Reading those command
+  // documents in the same transaction lets cloud ingestion acknowledge a
+  // committed command even when the hub's immediate completion HTTP request
+  // was interrupted. This removes the dangerous commit/acknowledgement gap.
+  const remoteCommandIds = [...new Set(events.map((event) =>
+    event.payload.remoteCommandId).filter((id) => typeof id === "string"))];
+  for (const commandId of remoteCommandIds) requiredDocumentId({commandId}, "commandId");
+  const remoteCommandRefs = remoteCommandIds.map((commandId) =>
+    remoteHubQueue(upload.tenantId, upload.venueId).doc(commandId));
+  const securityEventTypes = new Set([
+    "security.pinAttempt", "security.printQueueManaged",
+  ]);
   const orderEvents = events.filter((event) => !securityEventTypes.has(event.type));
-  const orderIds = [...new Set(orderEvents.map((event) => event.payload.orderId))];
+  // Split creation mutates the parent and creates a payable child atomically.
+  // Settling that child also removes it from the parent's outstanding split
+  // list, so every affected document must be read before the transaction.
+  const orderIds = [...new Set(orderEvents.flatMap((event) => [
+    event.payload.orderId,
+    event.type === "order.splitCreated" ? event.payload.splitOrderId : null,
+    typeof event.payload.splitFromOrderId === "string"
+      ? event.payload.splitFromOrderId : null,
+  ]).filter((id) => id != null))];
   if (orderIds.some((id) => typeof id !== "string" || id.length < 1 || id.length > 180)) {
     throw new HttpsError("invalid-argument", "An offline event order ID is invalid.");
   }
@@ -2654,12 +3792,15 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
       transaction.get(stateRef), transaction.get(nonceRef), transaction.get(venueRef),
       ...eventRefs.map((ref) => transaction.get(ref)),
       ...orderRefs.map((ref) => transaction.get(ref)),
+      ...remoteCommandRefs.map((ref) => transaction.get(ref)),
     ]);
     const state = reads[0];
     const priorNonce = reads[1];
     const venue = reads[2];
     const existing = reads.slice(3, 3 + eventRefs.length);
-    const orderSnapshots = reads.slice(3 + eventRefs.length);
+    const orderStart = 3 + eventRefs.length;
+    const orderSnapshots = reads.slice(orderStart, orderStart + orderRefs.length);
+    const remoteCommandSnapshots = reads.slice(orderStart + orderRefs.length);
     if (priorNonce.exists) {
       throw new HttpsError("already-exists", "This signed upload was already used.");
     }
@@ -2680,7 +3821,42 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
     const orderState = new Map(orderSnapshots.map((snapshot) => [
       snapshot.id, snapshot.exists ? {...snapshot.data()} : null,
     ]));
+    const recoveryBaselines = new Map();
+    for (const baseline of [
+      ...recoveryBaselineContext,
+      ...events.filter((event) => event.type === "order.cloudBaseline"),
+    ]) {
+      const prior = recoveryBaselines.get(baseline.payload.orderId);
+      if (prior != null &&
+          (prior.id !== baseline.id || prior.eventHash !== baseline.eventHash)) {
+        throw new HttpsError(
+          "data-loss", "Conflicting recovery baselines were supplied for an order.",
+        );
+      }
+      recoveryBaselines.set(baseline.payload.orderId, baseline);
+    }
+    const batchOrderIds = new Set(orderIds);
+    if ([...recoveryBaselines.keys()].some((orderId) => !batchOrderIds.has(orderId))) {
+      throw new HttpsError(
+        "invalid-argument", "Recovery baseline context contains an unrelated order.",
+      );
+    }
     const dirtyOrderIds = new Set();
+    const newEventIds = [];
+    if (projectionRecovery) {
+      console.info("Offline projection recovery batch", {
+        hubEpoch: upload.hubEpoch,
+        cloudCursorBefore: lastSequence,
+        firstSequence: events[0]?.sequence ?? null,
+        lastSequence: events.at(-1)?.sequence ?? null,
+        eventTypes: events.map((event) => `${event.sequence}:${event.type}`),
+        baselineContext: [...recoveryBaselines.values()].map((baseline) => ({
+          orderId: baseline.payload.orderId,
+          sequence: baseline.sequence,
+          eventId: baseline.id,
+        })),
+      });
+    }
     for (let index = 0; index < events.length; index += 1) {
       const event = events[index];
       const current = existing[index];
@@ -2689,6 +3865,146 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
             current.data().hubEpoch !== event.hubEpoch ||
             current.data().sequence !== event.sequence) {
           throw new HttpsError("data-loss", "An event ID conflicts with cloud history.");
+        }
+        // Repair a lagging cursor only by walking the exact next immutable
+        // event in its verified hash chain. This can occur after an older
+        // deployment or staging reset retained event documents but lost the
+        // small cursor document. Older replays stay idempotent and cannot move
+        // the cursor backwards.
+        if (event.sequence > lastSequence) {
+          const expectedPrevious = lastSequence === 0
+            ? event.previousHash : lastEventHash;
+          if (event.sequence !== lastSequence + 1 ||
+              event.previousHash !== expectedPrevious) {
+            throw new HttpsError(
+              "failed-precondition", "The hub event chain has a gap or conflict.",
+            );
+          }
+          lastSequence = event.sequence;
+          lastEventHash = event.eventHash;
+        }
+        // Immutable events can outlive their materialized order projection
+        // (for example after a staging restore or an interrupted legacy
+        // migration). Explicit recovery replays only a missing projection from
+        // its signed order.opened event. Healthy orders are never replayed,
+        // because quantity/payment events are authoritative state changes and
+        // blindly applying them twice would be unsafe.
+        if (projectionRecovery && !securityEventTypes.has(event.type)) {
+          const orderId = event.payload.orderId;
+          const currentCloudOrder = orderState.get(orderId);
+          const recoveryActive = currentCloudOrder != null &&
+            currentCloudOrder.offlineProjectionRecoveryEpoch === upload.hubEpoch;
+          const recoveredThrough = recoveryActive
+            ? Number(currentCloudOrder.offlineProjectionRecoveredThroughSequence ?? 0)
+            : 0;
+          const recoveryBaseline = recoveryBaselines.get(orderId) ?? null;
+          // A legacy/interrupted upload can leave a fully materialised closed
+          // order while its immutable ledger cursor still stops before later
+          // events from the same hub epoch. In explicit, signed recovery mode
+          // the immutable order.opened event is the only safe place to restart
+          // that projection. Never restart a different venue or an order from
+          // a newer hub epoch.
+          const restartClosedProjection = event.type === "order.opened" &&
+            currentCloudOrder != null && currentCloudOrder.status === "closed" &&
+            currentCloudOrder.venueId === upload.venueId &&
+            Number(currentCloudOrder.offlineHubEpoch ?? 0) <= upload.hubEpoch;
+          const beginRecovery = (currentCloudOrder == null &&
+            (event.type === "order.opened" || recoveryBaseline != null)) ||
+            restartClosedProjection;
+          const continueRecovery = recoveryActive && event.sequence > recoveredThrough;
+          console.info("Offline projection recovery event decision", {
+            sequence: event.sequence,
+            eventType: event.type,
+            orderId,
+            immutableEventAlreadyStored: true,
+            cloudOrderExists: currentCloudOrder != null,
+            recoveryActive,
+            recoveredThrough,
+            recoveryBaselineSequence: recoveryBaseline?.sequence ?? null,
+            currentOrderStatus: currentCloudOrder?.status ?? null,
+            currentOrderVenueMatches:
+              currentCloudOrder?.venueId === upload.venueId,
+            currentOrderHubEpoch:
+              Number(currentCloudOrder?.offlineHubEpoch ?? 0),
+            restartClosedProjection,
+            beginRecovery,
+            continueRecovery,
+          });
+          if (beginRecovery || continueRecovery) {
+            try {
+              // A replacement hub's signed baseline can be later in the global
+              // ledger than the first event for this order. Seed only a
+              // missing projection from that request-signed context, then
+              // replay immutable events in sequence. Duplicate line/payment
+              // IDs are handled idempotently by the normal projector.
+              const recoveryCurrent = restartClosedProjection
+                ? null
+                : currentCloudOrder == null && recoveryBaseline != null
+                  ? cloudOrderFromRecoveryBaseline(recoveryBaseline, upload.venueId)
+                  : currentCloudOrder;
+              if (event.type === "order.splitCreated") {
+                const splitOrderId = event.payload.splitOrderId;
+                const split = applyOfflineSplitEvent(
+                  recoveryCurrent, event, upload.venueId,
+                  orderState.get(splitOrderId),
+                  recoveryActive || restartClosedProjection,
+                );
+                orderState.set(orderId, {
+                  ...split.parent,
+                  offlineProjectionRecoveryEpoch: upload.hubEpoch,
+                  offlineProjectionRecoveredThroughSequence: event.sequence,
+                });
+                orderState.set(splitOrderId, {
+                  ...split.child,
+                  offlineProjectionRecoveryEpoch: upload.hubEpoch,
+                  offlineProjectionRecoveredThroughSequence: event.sequence,
+                });
+                dirtyOrderIds.add(splitOrderId);
+              } else {
+                const projected = applyOfflineEventToCloudOrder(
+                  recoveryCurrent, event, upload.venueId,
+                  recoveryBaseline,
+                );
+                orderState.set(orderId, {
+                  ...projected,
+                  offlineProjectionRecoveryEpoch: upload.hubEpoch,
+                  offlineProjectionRecoveredThroughSequence: event.sequence,
+                });
+                if (projected.status === "closed" &&
+                    typeof event.payload.splitFromOrderId === "string") {
+                  const parentId = event.payload.splitFromOrderId;
+                  const parent = orderState.get(parentId);
+                  if (parent == null || parent.venueId !== upload.venueId) {
+                    throw new HttpsError(
+                      "failed-precondition", "The split bill parent is unavailable.",
+                    );
+                  }
+                  orderState.set(parentId, {
+                    ...parent,
+                    openSplitOrderIds: (Array.isArray(parent.openSplitOrderIds)
+                      ? parent.openSplitOrderIds : [])
+                      .filter((id) => id !== orderId),
+                  });
+                  dirtyOrderIds.add(parentId);
+                }
+              }
+              dirtyOrderIds.add(orderId);
+            } catch (error) {
+              if (error instanceof HttpsError) {
+                throw new HttpsError(
+                  error.code,
+                  `Offline projection recovery failed at event ${event.sequence} ` +
+                    `(${event.type}): ${error.message}`,
+                );
+              }
+              throw error;
+            }
+          } else if (currentCloudOrder == null && event.type !== "order.opened") {
+            throw new HttpsError(
+              "failed-precondition",
+              "Projection recovery requires the complete immutable order history.",
+            );
+          }
         }
         accepted.push(event.id);
         continue;
@@ -2701,6 +4017,7 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
         ...event,
         receivedAt: FieldValue.serverTimestamp(), source: "venueHub",
       });
+      newEventIds.push(event.id);
       if (event.type === "security.pinAttempt") {
         if (typeof event.payload.successful !== "boolean" ||
             (event.payload.locked != null && typeof event.payload.locked !== "boolean")) {
@@ -2721,11 +4038,243 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
             createdAt: FieldValue.serverTimestamp(),
           },
         );
+      } else if (event.type === "security.printQueueManaged") {
+        if (typeof event.payload.action !== "string" ||
+            typeof event.payload.jobId !== "string" ||
+            (event.payload.reason != null && typeof event.payload.reason !== "string")) {
+          throw new HttpsError("invalid-argument", "An offline print audit event is invalid.");
+        }
+        transaction.create(
+          tenantRef.collection("auditEvents").doc(`offline_${event.id}`),
+          {
+            action: "offlinePrintQueueManaged",
+            venueId: upload.venueId,
+            staffId: event.staffId,
+            deviceId: event.deviceId,
+            printAction: event.payload.action,
+            printJobId: event.payload.jobId,
+            reason: event.payload.reason ?? null,
+            hubEpoch: upload.hubEpoch,
+            sourceEventId: event.id,
+            occurredAt: new Date(event.createdAtUtc),
+            createdAt: FieldValue.serverTimestamp(),
+          },
+        );
       } else {
-        orderState.set(event.payload.orderId, applyOfflineEventToCloudOrder(
-          orderState.get(event.payload.orderId), event, upload.venueId,
-        ));
+        const orderId = event.payload.orderId;
+        const currentCloudOrder = orderState.get(orderId);
+        const recoveryBaseline = projectionRecovery
+          ? recoveryBaselines.get(orderId) ?? null : null;
+        const recoveryWasActive = currentCloudOrder != null &&
+          currentCloudOrder.offlineProjectionRecoveryEpoch === upload.hubEpoch;
+        const seededFromBaseline = currentCloudOrder == null && recoveryBaseline != null;
+        const projectionCurrent = seededFromBaseline
+          ? cloudOrderFromRecoveryBaseline(recoveryBaseline, upload.venueId)
+          : currentCloudOrder;
+        if (projectionRecovery) {
+          console.info("Offline projection recovery event decision", {
+            sequence: event.sequence,
+            eventType: event.type,
+            orderId,
+            immutableEventAlreadyStored: false,
+            cloudOrderExists: currentCloudOrder != null,
+            recoveryWasActive,
+            recoveryBaselineSequence: recoveryBaseline?.sequence ?? null,
+            currentOrderStatus: currentCloudOrder?.status ?? null,
+            currentOrderVenueMatches:
+              currentCloudOrder?.venueId === upload.venueId,
+            currentOrderHubEpoch:
+              Number(currentCloudOrder?.offlineHubEpoch ?? 0),
+            seededFromBaseline,
+          });
+        }
+        try {
+          if (event.type === "order.splitCreated") {
+            const splitOrderId = event.payload.splitOrderId;
+            const split = applyOfflineSplitEvent(
+              projectionCurrent, event, upload.venueId,
+              orderState.get(splitOrderId),
+              projectionRecovery && (recoveryWasActive || seededFromBaseline),
+            );
+            orderState.set(orderId,
+              seededFromBaseline || recoveryWasActive ? {
+                ...split.parent,
+                offlineProjectionRecoveryEpoch: upload.hubEpoch,
+                offlineProjectionRecoveredThroughSequence: event.sequence,
+              } : split.parent);
+            orderState.set(splitOrderId, split.child);
+            dirtyOrderIds.add(splitOrderId);
+          } else {
+            const projected = applyOfflineEventToCloudOrder(
+              projectionCurrent, event, upload.venueId,
+              recoveryBaseline,
+            );
+            orderState.set(orderId,
+              seededFromBaseline || recoveryWasActive ? {
+                ...projected,
+                offlineProjectionRecoveryEpoch: upload.hubEpoch,
+                offlineProjectionRecoveredThroughSequence: event.sequence,
+              } : projected);
+            if (projected.status === "closed" &&
+                typeof event.payload.splitFromOrderId === "string") {
+              const parentId = event.payload.splitFromOrderId;
+              const parent = orderState.get(parentId);
+              if (parent == null || parent.venueId !== upload.venueId) {
+                throw new HttpsError(
+                  "failed-precondition", "The split bill parent is unavailable.",
+                );
+              }
+              orderState.set(parentId, {
+                ...parent,
+                openSplitOrderIds: (Array.isArray(parent.openSplitOrderIds)
+                  ? parent.openSplitOrderIds : [])
+                  .filter((id) => id !== orderId),
+              });
+              dirtyOrderIds.add(parentId);
+            }
+          }
+        } catch (error) {
+          const recoveryBaseline = recoveryBaselines.get(orderId);
+          if (error instanceof HttpsError &&
+              error.message === "The offline bill is not fully paid." &&
+              event.type === "order.closed" &&
+              recoveryBaseline != null && currentCloudOrder != null) {
+            // A stale cloud snapshot can contain lines which the durable local
+            // order never accepted. Verify that snapshot identity against the
+            // live cloud order, then replay only the signed local chain through
+            // its close. Cloud table/tab/channel identity is preserved.
+            applyOfflineEventToCloudOrder(
+              currentCloudOrder, recoveryBaseline, upload.venueId,
+            );
+            const localCandidates = events.filter((candidate) =>
+              candidate.payload.orderId === orderId &&
+              candidate.sequence <= event.sequence &&
+              candidate.type !== "order.cloudBaseline");
+            if (!localCandidates.some((candidate) =>
+              candidate.type === "order.opened")) {
+              throw error;
+            }
+            // The local order.opened event can intentionally be a locationless
+            // recovery shell. Its later signed baseline has just proved the
+            // existing cloud identity, so retain that identity while rebuilding
+            // only the financial state from the immutable local chain.
+            let localClose = {
+              ...currentCloudOrder,
+              status: "open",
+              lines: [],
+              payments: [],
+            };
+            for (const candidate of localCandidates) {
+              if (candidate.type === "order.opened") continue;
+              localClose = applyOfflineEventToCloudOrder(
+                localClose, candidate, upload.venueId,
+              );
+            }
+            const recoveredLines = Array.isArray(localClose?.lines)
+              ? localClose.lines : [];
+            const recoveredPayments = Array.isArray(localClose?.payments)
+              ? localClose.payments : [];
+            const recoveredTotal = recoveredLines.reduce((sum, line) =>
+              sum + Number(line.quantity) * Number(line.unitPriceMinor), 0) +
+              ((currentCloudOrder.channel ?? "dineIn") === "delivery"
+                ? Number(currentCloudOrder.deliveryFeeMinor ?? 0) : 0);
+            const recoveredPaid = recoveredPayments.reduce((sum, payment) =>
+              sum + Number(payment.baseAmountMinor), 0);
+            if (localClose?.status === "closed" && recoveredLines.length > 0 &&
+                recoveredTotal === recoveredPaid) {
+              orderState.set(orderId, {
+                ...currentCloudOrder,
+                lines: recoveredLines,
+                payments: recoveredPayments,
+                status: "closed",
+                closedAt: new Date(event.createdAtUtc),
+                closedOffline: true,
+                receiptNumber: typeof event.payload.receiptNumber === "string"
+                  ? event.payload.receiptNumber : null,
+                // This exact signed baseline was validated against the live
+                // cloud order above. Retain its ID so its later event sequence
+                // is an idempotent acknowledgement after financial recovery.
+                offlineRecoveryBaselineEventId: recoveryBaseline.id,
+              });
+              dirtyOrderIds.add(orderId);
+              lastSequence = event.sequence;
+              lastEventHash = event.eventHash;
+              accepted.push(event.id);
+              continue;
+            }
+          }
+          if (error instanceof HttpsError) {
+            const recoveryDiagnostic = projectionRecovery
+              ? ` [recovery cloudOrder=${currentCloudOrder == null ? "missing" : "present"}, ` +
+                `status=${currentCloudOrder?.status ?? "missing"}, ` +
+                `venueMatch=${currentCloudOrder?.venueId === upload.venueId}, ` +
+                `orderEpoch=${Number(currentCloudOrder?.offlineHubEpoch ?? 0)}, ` +
+                `baselineSequence=${recoveryBaseline?.sequence ?? "none"}, ` +
+                `seeded=${seededFromBaseline}]`
+              : "";
+            throw new HttpsError(
+              error.code,
+              `Offline event ${event.sequence} (${event.type}) was rejected: ` +
+                `${error.message}${recoveryDiagnostic}`,
+            );
+          }
+          throw error;
+        }
         dirtyOrderIds.add(event.payload.orderId);
+        if (event.type === "order.splitCreated") {
+          transaction.create(
+            tenantRef.collection("auditEvents").doc(`offline_${event.id}`),
+            {
+              action: "splitOrder",
+              venueId: upload.venueId,
+              orderId: event.payload.orderId,
+              splitOrderId: event.payload.splitOrderId,
+              splitLines: event.payload.splitLines,
+              staffId: event.staffId,
+              deviceId: event.deviceId,
+              hubEpoch: upload.hubEpoch,
+              sourceEventId: event.id,
+              occurredAt: new Date(event.createdAtUtc),
+              createdAt: FieldValue.serverTimestamp(),
+            },
+          );
+        } else if (event.type === "order.lineAdjusted") {
+          transaction.create(
+            tenantRef.collection("auditEvents").doc(`offline_${event.id}`),
+            {
+              action: event.payload.operation === "remove"
+                ? "removeSaleItem" : "adjustSaleItemPrice",
+              venueId: upload.venueId,
+              orderId: event.payload.orderId,
+              lineId: event.payload.lineId,
+              operation: event.payload.operation,
+              valueMinor: event.payload.valueMinor ?? null,
+              reason: event.payload.reason,
+              staffId: event.staffId,
+              deviceId: event.deviceId,
+              hubEpoch: upload.hubEpoch,
+              sourceEventId: event.id,
+              occurredAt: new Date(event.createdAtUtc),
+              createdAt: FieldValue.serverTimestamp(),
+            },
+          );
+        } else if (event.type === "order.cancelled") {
+          transaction.create(
+            tenantRef.collection("auditEvents").doc(`offline_${event.id}`),
+            {
+              action: "cancelEmptyOrder",
+              venueId: upload.venueId,
+              orderId: event.payload.orderId,
+              reason: event.payload.reason,
+              staffId: event.staffId,
+              deviceId: event.deviceId,
+              hubEpoch: upload.hubEpoch,
+              sourceEventId: event.id,
+              occurredAt: new Date(event.createdAtUtc),
+              createdAt: FieldValue.serverTimestamp(),
+            },
+          );
+        }
       }
       lastSequence = event.sequence;
       lastEventHash = event.eventHash;
@@ -2742,14 +4291,16 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
         updatedAt: FieldValue.serverTimestamp(),
         offlineHubEpoch: upload.hubEpoch,
       }, {merge: false});
-      if (typeof projected.tableId === "string") {
+      if (typeof projected.tableId === "string" &&
+          typeof projected.splitFromOrderId !== "string") {
         transaction.set(tenantRef.collection("tables").doc(projected.tableId), {
           currentOrderId: projected.status === "closed" ? null : orderId,
           hasOpenOrder: projected.status !== "closed",
           updatedAt: FieldValue.serverTimestamp(),
         }, {merge: true});
       }
-      if (typeof projected.tabName === "string") {
+      if (typeof projected.tabName === "string" &&
+          typeof projected.splitFromOrderId !== "string") {
         const tabRef = openTabRegistryRef(
           upload.tenantId, upload.venueId, projected.tabName,
         );
@@ -2760,23 +4311,382 @@ async function ingestOfflineHubEventsFor(caller, rawData) {
           createdAt: projected.openedAt,
         }, {merge: true});
       }
-      if (projected.status === "closed") {
+      if (projected.status === "closed" && projected.cancelled !== true) {
         transaction.set(tenantRef.collection("bills").doc(`offline-${orderId}`),
           offlineBillFromProjectedOrder(
             projected, orderId, upload, venueTimeZone, businessDayCutoffMinutes,
           ), {merge: false});
       }
     }
+    for (let index = 0; index < remoteCommandIds.length; index += 1) {
+      const commandId = remoteCommandIds[index];
+      const command = remoteCommandSnapshots[index];
+      const event = events.find((candidate) =>
+        candidate.payload.remoteCommandId === commandId);
+      if (event == null) {
+        throw new HttpsError("data-loss", "A committed remote command has no signed hub event.");
+      }
+      if (!command.exists) {
+        // Remote command documents are intentionally short-lived. A hub can
+        // durably commit a command immediately, then remain unable to upload
+        // its signed event chain until after Firestore TTL removes the queue
+        // document. The active hub signature, epoch, nonce and hash chain are
+        // still authoritative for cloud convergence. Do not manufacture a
+        // late client acknowledgement; simply project the signed event.
+        console.warn("Remote command expired before signed event ingestion", {
+          hubEpoch: upload.hubEpoch,
+          eventType: event.type,
+          sequence: event.sequence,
+        });
+        continue;
+      }
+      const commandData = command.data();
+      if (commandData.hubEpoch !== upload.hubEpoch ||
+          commandData.eventType !== event.type || commandData.staffId !== event.staffId) {
+        throw new HttpsError("data-loss", "A committed remote command does not match its signed hub event.");
+      }
+      if (commandData.status === "rejected") {
+        throw new HttpsError("data-loss", "A rejected remote command was later committed by the hub.");
+      }
+      const result = {
+        eventId: event.id,
+        sequence: event.sequence,
+        eventHash: event.eventHash,
+        committedAtUtc: event.createdAtUtc,
+      };
+      if (commandData.status === "accepted" &&
+          commandData.result?.eventId !== result.eventId) {
+        throw new HttpsError("data-loss", "A remote command conflicts with an earlier acknowledgement.");
+      }
+      transaction.set(remoteCommandRefs[index], {
+        status: "accepted",
+        stage: "cloudProjected",
+        result,
+        completedAt: FieldValue.serverTimestamp(),
+        acknowledgedByEventUpload: true,
+        claimTokenHash: FieldValue.delete(),
+        claimExpiresAt: FieldValue.delete(),
+      }, {merge: true});
+    }
     transaction.create(nonceRef, {
       credentialId: upload.credentialId,
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
       createdAt: FieldValue.serverTimestamp(),
     });
-    return accepted;
+    return {acknowledgedEventIds: accepted, newEventIds};
   });
-  await applyOfflineStockForEvents(tenantRef, upload.venueId, events);
-  await materializeOfflineProductionTickets(tenantRef, upload.venueId, events);
-  return {acknowledgedEventIds, serverTimeMillis: Date.now()};
+  // Projection recovery deliberately excludes historic events from all
+  // external side effects. Their deterministic IDs make most paths
+  // idempotent, but keeping recovery projection-only is the stronger safety
+  // boundary: it cannot deduct stock, print, alert, or audit a sale twice.
+  const newEvents = events.filter((event) =>
+    acknowledgedEventIds.newEventIds.includes(event.id));
+  // Ordinary retries retain their established idempotent side-effect repair:
+  // a process can fail after committing the event transaction but before
+  // creating its deterministic stock/ticket document. Projection recovery is
+  // different and deliberately limits side effects to events first accepted
+  // during that recovery upload.
+  const sideEffectEvents = projectionRecovery ? newEvents : events;
+  await applyOfflineStockForEvents(tenantRef, upload.venueId, sideEffectEvents);
+  await materializeOfflineProductionTickets(tenantRef, upload.venueId, sideEffectEvents);
+  await materializeOfflineFulfilmentChanges(tenantRef, upload.venueId, sideEffectEvents);
+  // Mirror only acknowledgement metadata to RTDB after the Firestore
+  // projection transaction commits. Remote POS clients can then finish on a
+  // persistent socket without repeatedly invoking a long-poll Function.
+  for (const commandId of remoteCommandIds) {
+    const command = await remoteHubQueue(upload.tenantId, upload.venueId)
+      .doc(commandId).get();
+    const value = command.data();
+    if (!command.exists || value?.status !== "accepted") continue;
+    await publishRealtimeCommandStatus(
+      upload.tenantId, upload.venueId, commandId,
+      {
+        commandId,
+        hostUid: value.hostUid,
+        staffId: value.staffId,
+        status: "accepted",
+        stage: "cloudProjected",
+        result: value.result ?? null,
+      },
+    );
+  }
+  return {
+    acknowledgedEventIds: acknowledgedEventIds.acknowledgedEventIds,
+    serverTimeMillis: Date.now(),
+  };
+}
+
+/// Reads the server-owned cursor for the currently enrolled hub generation.
+/// The signed request exposes no business data and cannot mutate the chain.
+/// It is used only to choose the immutable local suffix that needs replaying.
+async function getOfflineHubSyncCursorFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(
+    caller, rawData, "/v1/cloud-sync-cursor",
+  );
+  const state = await db.doc(
+    `tenants/${upload.tenantId}/offlineHubSyncState/${upload.venueId}`,
+  ).get();
+  const value = state.data() ?? {};
+  if (value.hubEpoch !== upload.hubEpoch) {
+    return {hubEpoch: upload.hubEpoch, lastSequence: 0, lastEventHash: ""};
+  }
+  const lastSequence = Number(value.lastSequence ?? 0);
+  const lastEventHash = String(value.lastEventHash ?? "");
+  if (!Number.isSafeInteger(lastSequence) || lastSequence < 0 ||
+      (lastSequence > 0 && lastEventHash.length === 0)) {
+    throw new HttpsError("data-loss", "The cloud hub event cursor is invalid.");
+  }
+  return {hubEpoch: upload.hubEpoch, lastSequence, lastEventHash};
+}
+
+function verifiedClosedHubProjection(raw, upload, currencyCode) {
+  const value = requireObject(raw);
+  const orderId = requiredDocumentId(value, "orderId");
+  if (value.isClosed !== true || value.hubEpoch !== upload.hubEpoch ||
+      !Number.isSafeInteger(value.lastSequence) || value.lastSequence < 1) {
+    throw new HttpsError("invalid-argument", "A reconciled hub order is invalid.");
+  }
+  const channel = value.channel ?? "dineIn";
+  const rawTableId = typeof value.tableId === "string" ? value.tableId.trim() : "";
+  const tableId = rawTableId.length > 0
+    ? requiredDocumentId({tableId: rawTableId}, "tableId") : null;
+  const tabName = value.tabName == null ? null : optionalText(value, "tabName", 160) || null;
+  // Historical orders can pre-date the one-location-only invariant and may
+  // contain both, or neither, of tableId/tabName. Reconciliation never trusts
+  // those values to choose a target: the transaction below requires an exact
+  // match with the existing venue-scoped cloud order before closing it.
+  if (!["dineIn", "collection", "delivery"].includes(channel)) {
+    throw new HttpsError("invalid-argument", "A reconciled order location is invalid.");
+  }
+  if (!Array.isArray(value.lines) || value.lines.length < 1 || value.lines.length > 250 ||
+      !Array.isArray(value.payments) || value.payments.length > 100) {
+    throw new HttpsError("invalid-argument", "A reconciled order has invalid lines or payments.");
+  }
+  const lineIds = new Set();
+  const lines = value.lines.map((rawLine, index) => {
+    const line = requireObject(rawLine);
+    const id = requiredDocumentId(line, "id");
+    if (lineIds.has(id)) {
+      throw new HttpsError("invalid-argument", "A reconciled order line is duplicated.");
+    }
+    lineIds.add(id);
+    const quantity = Number(line.quantity);
+    const unitPriceMinor = Number(line.unitPriceMinor);
+    const taxRateBasisPoints = Number(line.taxRateBasisPoints ?? 0);
+    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 10000 ||
+        !Number.isSafeInteger(unitPriceMinor) || unitPriceMinor < 0 ||
+        unitPriceMinor > 1000000000 || !Number.isSafeInteger(taxRateBasisPoints) ||
+        taxRateBasisPoints < 0 || taxRateBasisPoints > 100000) {
+      throw new HttpsError("invalid-argument", `Reconciled line ${index} is invalid.`);
+    }
+    const details = Array.isArray(line.details)
+      ? line.details.slice(0, 50).map((detail) => String(detail).trim().slice(0, 300))
+        .filter((detail) => detail.length > 0)
+      : [];
+    return {
+      id,
+      productId: requiredDocumentId(line, "productId"),
+      productName: requiredText(line, "name", 300),
+      quantity,
+      unitPriceMinor,
+      currencyCode,
+      productionArea: optionalText(line, "productionArea", 80) || "kitchen",
+      details,
+      taxRateBasisPoints,
+      taxRateName: optionalText(line, "taxRateName", 120) || "Zero Rate",
+      isSentToProduction: line.sent === true,
+    };
+  });
+  const paymentIds = new Set();
+  const payments = value.payments.map((rawPayment, index) => {
+    const payment = requireObject(rawPayment);
+    const id = requiredDocumentId(payment, "id");
+    const baseAmountMinor = Number(payment.baseAmountMinor);
+    const tenderedAmountMinor = Number(payment.tenderedAmountMinor ?? baseAmountMinor);
+    const recordedAt = new Date(payment.recordedAtUtc);
+    const tenderedCurrencyCode = requiredText(payment, "currencyCode", 3).toUpperCase();
+    const exchangeRateToBase = optionalText(payment, "exchangeRateToBase", 80) || "1";
+    const exchangeRate = Number(exchangeRateToBase);
+    if (paymentIds.has(id) || !Number.isSafeInteger(baseAmountMinor) ||
+        baseAmountMinor <= 0 || !Number.isSafeInteger(tenderedAmountMinor) ||
+        tenderedAmountMinor <= 0 || !Number.isFinite(recordedAt.getTime()) ||
+        recordedAt.getTime() < Date.UTC(2000, 0, 1) ||
+        recordedAt.getTime() > Date.now() + 5 * 60 * 1000 ||
+        !/^[A-Z]{3}$/.test(tenderedCurrencyCode) ||
+        !Number.isFinite(exchangeRate) || exchangeRate <= 0) {
+      throw new HttpsError("invalid-argument", `Reconciled payment ${index} is invalid.`);
+    }
+    paymentIds.add(id);
+    return {
+      id,
+      method: requiredText(payment, "method", 80),
+      baseAmountMinor,
+      tenderedAmountMinor,
+      tenderedCurrencyCode,
+      exchangeRateToBase,
+      terminalLabel: optionalText(payment, "terminalLabel", 160) || null,
+      cashChangeBaseMinor: Number(payment.cashChangeBaseMinor ?? 0),
+      recordedAt,
+      recordedAtMillis: recordedAt.getTime(),
+    };
+  });
+  const deliveryFeeMinor = channel === "delivery" ? Number(value.deliveryFeeMinor ?? 0) : 0;
+  if (!Number.isSafeInteger(deliveryFeeMinor) || deliveryFeeMinor < 0 ||
+      !payments.every((payment) => Number.isSafeInteger(payment.cashChangeBaseMinor) &&
+        payment.cashChangeBaseMinor >= 0)) {
+    throw new HttpsError("invalid-argument", "The reconciled payment totals are invalid.");
+  }
+  const totalMinor = lines.reduce((sum, line) =>
+    sum + line.quantity * line.unitPriceMinor, deliveryFeeMinor);
+  const paidMinor = payments.reduce((sum, payment) => sum + payment.baseAmountMinor, 0);
+  if (totalMinor !== paidMinor) {
+    throw new HttpsError("failed-precondition", "The reconciled order balance is not zero.");
+  }
+  const closedAt = new Date(value.closedAtUtc);
+  const earliestClose = Date.UTC(2000, 0, 1);
+  if (!Number.isFinite(closedAt.getTime()) || closedAt.getTime() < earliestClose ||
+      closedAt.getTime() > Date.now() + 5 * 60 * 1000) {
+    throw new HttpsError("invalid-argument", "The reconciled close time is invalid.");
+  }
+  return {
+    orderId, tableId, tabName, channel, lines, payments, deliveryFeeMinor,
+    totalMinor, paidMinor, closedAt,
+    receiptNumber: optionalText(value, "receiptNumber", 160) || null,
+    lastSequence: value.lastSequence,
+    customerId: typeof value.customerId === "string"
+      ? requiredDocumentId(value, "customerId") : null,
+    customerName: optionalText(value, "customerName", 300) || null,
+    customerPhone: optionalText(value, "customerPhone", 100) || null,
+    deliveryAddress: optionalText(value, "deliveryAddress", 800) || null,
+    deliveryAddressLabel: optionalText(value, "deliveryAddressLabel", 200) || null,
+    serviceAreaId: typeof value.serviceAreaId === "string"
+      ? requiredDocumentId(value, "serviceAreaId") : null,
+    serviceAreaName: optionalText(value, "serviceAreaName", 200) || null,
+  };
+}
+
+/// Repairs a cloud order that remained open after the active hub durably
+/// closed it. The request is signed by the current hub credential and carries
+/// a complete zero-balance projection; location identity must still match the
+/// cloud document. This never reopens an order or edits an already-closed bill.
+async function reconcileOfflineHubClosedOrdersFor(caller, rawData) {
+  const upload = await verifiedOfflineHubUpload(
+    caller, rawData, "/v1/reconcile-closed-orders",
+  );
+  const rawOrders = upload.body.orders;
+  if (!Array.isArray(rawOrders) || rawOrders.length < 1 || rawOrders.length > 25) {
+    throw new HttpsError("invalid-argument", "Reconcile between 1 and 25 closed orders.");
+  }
+  const tenantRef = db.doc(`tenants/${upload.tenantId}`);
+  const [tenant, venue] = await Promise.all([
+    tenantRef.get(), tenantRef.collection("venues").doc(upload.venueId).get(),
+  ]);
+  if (!tenant.exists || !venue.exists) {
+    throw new HttpsError("failed-precondition", "The venue is unavailable.");
+  }
+  const currencyCode = String(tenant.data().currencyCode ?? "GBP").toUpperCase();
+  const orders = rawOrders.map((order) =>
+    verifiedClosedHubProjection(order, upload, currencyCode));
+  if (new Set(orders.map((order) => order.orderId)).size !== orders.length) {
+    throw new HttpsError("invalid-argument", "A reconciled order is duplicated.");
+  }
+  const nonceId = createHash("sha256")
+    .update(`${upload.credentialId}\0${upload.nonce}`).digest("hex");
+  const nonceRef = tenantRef.collection("offlineHubUploadNonces").doc(nonceId);
+  const orderRefs = orders.map((order) => tenantRef.collection("orders").doc(order.orderId));
+  const billRefs = orders.map((order) => tenantRef.collection("bills").doc(`offline-${order.orderId}`));
+  const reconciledOrderIds = await db.runTransaction(async (transaction) => {
+    const reads = await Promise.all([
+      transaction.get(nonceRef),
+      transaction.get(tenantRef.collection("venues").doc(upload.venueId)),
+      ...orderRefs.map((ref) => transaction.get(ref)),
+      ...billRefs.map((ref) => transaction.get(ref)),
+    ]);
+    if (reads[0].exists) {
+      throw new HttpsError("already-exists", "This signed reconciliation was already used.");
+    }
+    const liveVenue = reads[1];
+    const hub = liveVenue.data()?.offlineHub;
+    if (!liveVenue.exists || hub?.enabled !== true || hub?.epoch !== upload.hubEpoch ||
+        hub?.deviceId !== upload.deviceId || hub?.credentialId !== upload.credentialId) {
+      throw new HttpsError("permission-denied", "This device is not the active venue hub.");
+    }
+    const orderSnapshots = reads.slice(2, 2 + orders.length);
+    const billSnapshots = reads.slice(2 + orders.length);
+    const result = [];
+    for (let index = 0; index < orders.length; index += 1) {
+      const local = orders[index];
+      const cloud = orderSnapshots[index];
+      if (!cloud.exists || cloud.data().venueId !== upload.venueId) continue;
+      const current = cloud.data();
+      if (current.status === "closed") {
+        result.push(local.orderId);
+        continue;
+      }
+      if (!["open", "sent"].includes(current.status) ||
+          (current.tableId ?? null) !== local.tableId ||
+          (current.tabName ?? null) !== local.tabName ||
+          (current.channel ?? "dineIn") !== local.channel ||
+          Number(current.offlineHubEpoch ?? 0) > upload.hubEpoch) {
+        throw new HttpsError("failed-precondition", "A cloud order identity changed.");
+      }
+      const projected = {
+        ...current,
+        lines: local.lines,
+        payments: local.payments,
+        deliveryFeeMinor: local.deliveryFeeMinor,
+        status: "closed",
+        receiptNumber: local.receiptNumber,
+        closedAt: local.closedAt,
+        closedOffline: true,
+        closureReconciledByHub: true,
+        offlineHubEpoch: upload.hubEpoch,
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+      transaction.set(orderRefs[index], projected, {merge: false});
+      if (local.tableId != null) {
+        transaction.set(tenantRef.collection("tables").doc(local.tableId), {
+          currentOrderId: null, hasOpenOrder: false,
+          updatedAt: FieldValue.serverTimestamp(),
+        }, {merge: true});
+      }
+      if (local.tabName != null) {
+        transaction.delete(openTabRegistryRef(
+          upload.tenantId, upload.venueId, local.tabName,
+        ));
+      }
+      if (!billSnapshots[index].exists) {
+        const rawCutoff = Number(liveVenue.data().businessDayCutoffMinutes ?? 240);
+        const cutoff = Number.isInteger(rawCutoff) && rawCutoff >= 0 && rawCutoff < 1440
+          ? rawCutoff : 240;
+        transaction.set(billRefs[index], offlineBillFromProjectedOrder(
+          projected, local.orderId, upload,
+          liveVenue.data().timeZone ?? "Europe/London", cutoff,
+        ), {merge: false});
+      }
+      const auditId = createHash("sha256")
+        .update(`${upload.hubEpoch}\0${local.orderId}\0${local.lastSequence}`)
+        .digest("hex");
+      transaction.set(tenantRef.collection("auditEvents").doc(`hub_close_${auditId}`), {
+        action: "offlineHubClosedOrderReconciled",
+        venueId: upload.venueId,
+        orderId: local.orderId,
+        deviceId: upload.deviceId,
+        hubEpoch: upload.hubEpoch,
+        localLastSequence: local.lastSequence,
+        totalMinor: local.totalMinor,
+        createdAt: FieldValue.serverTimestamp(),
+      }, {merge: false});
+      result.push(local.orderId);
+    }
+    transaction.create(nonceRef, {
+      credentialId: upload.credentialId,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return result;
+  });
+  return {reconciledOrderIds, serverTimeMillis: Date.now()};
 }
 
 async function applyOfflineStockForEvents(tenantRef, venueId, events) {
@@ -2839,9 +4749,36 @@ async function applyOfflineStockForEvents(tenantRef, venueId, events) {
 }
 
 async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
+  // The cloud projection must preserve the fulfilment timing chosen at the
+  // venue hub. Otherwise a future delivery ingested after an outage would
+  // incorrectly appear as an immediately-due dine-in ticket on every KDS.
+  const venue = await tenantRef.collection("venues").doc(venueId).get();
+  const venueData = venue.exists ? venue.data() : {};
   for (const event of events.filter((item) => item.type === "order.sent")) {
     const order = await tenantRef.collection("orders").doc(event.payload.orderId).get();
     if (!order.exists || order.data().venueId !== venueId) continue;
+    const orderData = order.data();
+    let tableLabel = typeof orderData.tableLabel === "string" &&
+      orderData.tableLabel.trim().length > 0 ? orderData.tableLabel.trim() : null;
+    if (tableLabel == null && typeof orderData.tableId === "string" &&
+        orderData.tableId.length > 0) {
+      const table = await tenantRef.collection("tables").doc(orderData.tableId).get();
+      const candidate = table.exists ? table.data().label : null;
+      // Preserve the ID as a last-resort diagnostic, but normally materialise
+      // the human table number/name so Windows KDS and reprints never display
+      // an opaque Firestore document identifier.
+      tableLabel = typeof candidate === "string" && candidate.trim().length > 0
+        ? candidate.trim() : orderData.tableId;
+    }
+    const channel = ["delivery", "collection"].includes(orderData.channel)
+      ? orderData.channel : "dineIn";
+    const scheduledForMillis = Date.parse(orderData.scheduledForUtc ?? "");
+    const leadMinutes = channel === "delivery"
+      ? Number(venueData.deliveryLeadMinutes ?? 20)
+      : Number(venueData.collectionLeadMinutes ?? 20);
+    const productionStartMillis = channel === "dineIn" || !Number.isFinite(scheduledForMillis)
+      ? null : scheduledForMillis - Math.max(1, leadMinutes) * 60000;
+    const held = productionStartMillis != null && productionStartMillis > Date.now();
     const ids = new Set(Array.isArray(event.payload.lineIds) ? event.payload.lineIds : []);
     const grouped = new Map();
     for (const line of (Array.isArray(order.data().lines) ? order.data().lines : [])) {
@@ -2859,11 +4796,17 @@ async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
       await ticketRef.create({
         venueId, orderId: event.payload.orderId,
         reference: String(event.payload.orderId).split("-").at(-1),
-        tableLabel: order.data().tableLabel ?? order.data().tableId ?? null,
-        tabName: order.data().tabName ?? null,
+        tableLabel,
+        tabName: orderData.tabName ?? null,
+        channel,
+        customerName: orderData.customerName ?? null,
+        deliveryAddress: channel === "delivery" ? orderData.deliveryAddress ?? null : null,
+        scheduledForMillis: Number.isFinite(scheduledForMillis) ? scheduledForMillis : null,
+        productionStartMillis,
         productionArea: area,
         printRequired: event.payload.printRequired === true,
-        flowStatus: "newOrder", ticketReleasedAt: new Date(event.createdAtUtc),
+        flowStatus: held ? "held" : "newOrder",
+        ticketReleasedAt: held ? null : new Date(event.createdAtUtc),
         productionItems: lines.map((line) => ({
           name: line.productName ?? "Menu item", quantity: Number(line.quantity),
           details: productionLineDetails(line),
@@ -2881,6 +4824,40 @@ async function materializeOfflineProductionTickets(tenantRef, venueId, events) {
       });
     }
   }
+  for (const event of events.filter(
+    (item) => item.type === "order.productionTicketUpdated",
+  )) {
+    const ticketId = typeof event.payload.ticketId === "string"
+      ? event.payload.ticketId : "";
+    const flowStatus = typeof event.payload.flowStatus === "string"
+      ? event.payload.flowStatus : "";
+    if (!ticketId.startsWith("offline_") ||
+        !["held", "newOrder", "preparing", "ready", "collected", "served",
+          "cancelled", "voided"].includes(flowStatus)) {
+      throw new HttpsError(
+        "invalid-argument",
+        "The offline production update is invalid.",
+      );
+    }
+    const ticketRef = tenantRef.collection("productionTickets").doc(ticketId);
+    const ticket = await ticketRef.get();
+    if (!ticket.exists || ticket.data().venueId !== venueId ||
+        ticket.data().orderId !== event.payload.orderId) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The offline production ticket was not found.",
+      );
+    }
+    await ticketRef.update({
+      flowStatus,
+      isDelayed: event.payload.isDelayed === true,
+      ...(flowStatus === "newOrder" && ticket.data().ticketReleasedAt == null
+        ? {ticketReleasedAt: new Date(event.createdAtUtc)} : {}),
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByStaffId: event.staffId,
+      sourceStatusEventId: event.id,
+    });
+  }
 }
 
 function offlineBillFromProjectedOrder(
@@ -2892,8 +4869,12 @@ function offlineBillFromProjectedOrder(
     const net = Math.round(gross * 10000 / (10000 + basisPoints));
     return {...line, lineTotalMinor: gross, netMinor: net, taxMinor: gross - net};
   });
-  const grossTotalMinor = lines.reduce((sum, line) => sum + line.lineTotalMinor, 0);
-  const netTotalMinor = lines.reduce((sum, line) => sum + line.netMinor, 0);
+  const deliveryFeeMinor = order.channel === "delivery"
+    ? Number(order.deliveryFeeMinor ?? 0) : 0;
+  const lineGrossMinor = lines.reduce((sum, line) => sum + line.lineTotalMinor, 0);
+  const grossTotalMinor = lineGrossMinor + deliveryFeeMinor;
+  const netTotalMinor = lines.reduce((sum, line) => sum + line.netMinor, 0) +
+    deliveryFeeMinor;
   const closedAt = order.closedAt instanceof Date ? order.closedAt : new Date();
   return {
     venueId: upload.venueId, orderId,
@@ -2902,6 +4883,12 @@ function offlineBillFromProjectedOrder(
     currencyCode: lines[0]?.currencyCode ?? "GBP",
     tableId: order.tableId ?? null, tableLabel: order.tableLabel ?? null,
     tabName: order.tabName ?? null, lines, payments: order.payments,
+    channel: order.channel ?? "dineIn",
+    customerName: order.customerName ?? null,
+    deliveryAddress: order.deliveryAddress ?? null,
+    serviceAreaId: order.serviceAreaId ?? null,
+    serviceAreaName: order.serviceAreaName ?? null,
+    deliveryFeeMinor,
     grossTotalMinor, totalMinor: grossTotalMinor, netTotalMinor,
     taxTotalMinor: grossTotalMinor - netTotalMinor,
     businessDate: billBusinessDate(
@@ -2914,7 +4901,193 @@ function offlineBillFromProjectedOrder(
   };
 }
 
-function applyOfflineEventToCloudOrder(current, event, venueId) {
+function applyOfflineSplitEvent(
+  current, event, venueId, existingChild, rebuildExistingChild = false,
+) {
+  const payload = event.payload;
+  const splitOrderId = typeof payload.splitOrderId === "string"
+    ? payload.splitOrderId : "";
+  const allocations = Array.isArray(payload.splitLines) ? payload.splitLines : [];
+  if (current == null || current.venueId !== venueId ||
+      !["open", "sent"].includes(current.status) ||
+      typeof current.splitFromOrderId === "string" ||
+      (Array.isArray(current.payments) && current.payments.length > 0) ||
+      splitOrderId.length < 1 || splitOrderId.length > 180 ||
+      allocations.length < 1 || allocations.length > 100) {
+    throw new HttpsError("failed-precondition", "Only an unpaid main bill can be split.");
+  }
+  if (existingChild != null) {
+    if (existingChild.splitFromOrderId === payload.orderId) {
+      // During explicit projection recovery the existing child may be a stale
+      // closed materialisation while its signed parent history is being rebuilt
+      // from order.opened. Reusing that closed child makes the following signed
+      // payment event fail as "order unavailable" and permanently strands the
+      // durable suffix. The caller may request a rebuild only after validating
+      // the immutable chain and putting the parent into recovery mode. Identity
+      // still has to match, so an unrelated child remains fail-closed.
+      if (!rebuildExistingChild) {
+        return {parent: current, child: existingChild, alreadySplit: true};
+      }
+    } else {
+      throw new HttpsError("already-exists", "The split bill identity is already in use.");
+    }
+  }
+  const sourceLines = Array.isArray(current.lines)
+    ? current.lines.map((line) => ({...line})) : [];
+  const selectedIds = new Set();
+  const childLines = [];
+  let selectedQuantity = 0;
+  for (let index = 0; index < allocations.length; index += 1) {
+    const allocation = allocations[index];
+    const lineId = typeof allocation?.lineId === "string" ? allocation.lineId : "";
+    const quantity = Number(allocation?.quantity);
+    const sourceIndex = sourceLines.findIndex((line) => line.id === lineId);
+    const line = sourceLines[sourceIndex];
+    if (line == null || line.isSentToProduction !== true ||
+        !Number.isSafeInteger(quantity) || quantity < 1 ||
+        quantity > Number(line.quantity) || selectedIds.has(lineId)) {
+      throw new HttpsError("failed-precondition", "A selected split item is no longer available.");
+    }
+    selectedIds.add(lineId);
+    selectedQuantity += quantity;
+    const suffix = splitOrderId.slice(-18);
+    const sourceSuffix = lineId.slice(-18);
+    childLines.push({
+      ...line,
+      id: `split-${suffix}-${index}-${sourceSuffix}`,
+      quantity,
+      isSentToProduction: true,
+    });
+    const remaining = Number(line.quantity) - quantity;
+    if (remaining === 0) sourceLines.splice(sourceIndex, 1);
+    else sourceLines[sourceIndex].quantity = remaining;
+  }
+  const originalQuantity = (Array.isArray(current.lines) ? current.lines : [])
+    .reduce((sum, line) => sum + Number(line.quantity), 0);
+  if (selectedQuantity >= originalQuantity || sourceLines.length === 0) {
+    throw new HttpsError(
+      "failed-precondition", "The split must leave at least one item on the main bill.",
+    );
+  }
+  const splitSequence = Number(current.splitSequence ?? 0) + 1;
+  const openSplitOrderIds = Array.isArray(current.openSplitOrderIds)
+    ? [...current.openSplitOrderIds] : [];
+  if (!openSplitOrderIds.includes(splitOrderId)) openSplitOrderIds.push(splitOrderId);
+  const parent = {...current, lines: sourceLines, splitSequence, openSplitOrderIds};
+  const child = {
+    ...current,
+    status: "sent",
+    lines: childLines,
+    payments: [],
+    deliveryFeeMinor: 0,
+    openedAt: new Date(event.createdAtUtc),
+    openedOffline: true,
+    createdByStaffId: event.staffId,
+    splitFromOrderId: payload.orderId,
+    splitSequence,
+    openSplitOrderIds: [],
+    // A split child is not a second table/tab owner and must never replace the
+    // main bill in the location registry during cloud projection.
+    isSplitPaymentOrder: true,
+  };
+  return {parent, child, alreadySplit: false};
+}
+
+function cloudOrderFromRecoveryBaseline(baseline, venueId) {
+  const payload = baseline.payload;
+  const sourceEpoch = Number(payload.sourceOfflineHubEpoch);
+  const openedAt = new Date(payload.openedAtUtc ?? baseline.createdAtUtc);
+  const channel = typeof payload.channel === "string" ? payload.channel : "dineIn";
+  const tableId = typeof payload.tableId === "string" ? payload.tableId : null;
+  const tabName = typeof payload.tabName === "string" ? payload.tabName : null;
+  const rawLines = Array.isArray(payload.lines) ? payload.lines : null;
+  const rawPayments = Array.isArray(payload.payments) ? payload.payments : null;
+  if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch > baseline.hubEpoch ||
+      !Number.isFinite(openedAt.getTime()) ||
+      !["dineIn", "collection", "delivery"].includes(channel) ||
+      (channel === "dineIn" && (tableId == null) === (tabName == null)) ||
+      (channel !== "dineIn" && (tableId != null || tabName != null)) ||
+      rawLines == null || rawPayments == null) {
+    throw new HttpsError("failed-precondition", "The recovery baseline identity is invalid.");
+  }
+  const lines = rawLines.map((raw) => {
+    const line = requireObject(raw);
+    if (typeof line.id !== "string" || typeof line.productId !== "string" ||
+        typeof line.name !== "string" || !Number.isSafeInteger(Number(line.quantity)) ||
+        Number(line.quantity) < 1 || !Number.isSafeInteger(Number(line.unitPriceMinor)) ||
+        Number(line.unitPriceMinor) < 0) {
+      throw new HttpsError("failed-precondition", "A recovery baseline line is invalid.");
+    }
+    return {
+      ...line,
+      productName: line.name,
+      quantity: Number(line.quantity),
+      unitPriceMinor: Number(line.unitPriceMinor),
+      isSentToProduction: line.sent === true,
+      addedAt: typeof line.addedAtUtc === "string" ? new Date(line.addedAtUtc) : openedAt,
+      sentAt: typeof line.sentAtUtc === "string" ? new Date(line.sentAtUtc) : null,
+    };
+  });
+  if (new Set(lines.map((line) => line.id)).size !== lines.length) {
+    throw new HttpsError("failed-precondition", "A recovery baseline line ID is duplicated.");
+  }
+  const payments = rawPayments.map((raw) => {
+    const payment = requireObject(raw);
+    if (typeof payment.id !== "string" ||
+        !Number.isSafeInteger(Number(payment.baseAmountMinor)) ||
+        Number(payment.baseAmountMinor) < 1 || typeof payment.method !== "string" ||
+        typeof payment.currencyCode !== "string") {
+      throw new HttpsError("failed-precondition", "A recovery baseline payment is invalid.");
+    }
+    return {
+      ...payment,
+      baseAmountMinor: Number(payment.baseAmountMinor),
+      tenderedAmountMinor: Number(
+        payment.tenderedAmountMinor ?? payment.baseAmountMinor,
+      ),
+      tenderedCurrencyCode: payment.currencyCode,
+      recordedAt: typeof payment.recordedAtUtc === "string"
+        ? new Date(payment.recordedAtUtc) : openedAt,
+    };
+  });
+  if (new Set(payments.map((payment) => payment.id)).size !== payments.length) {
+    throw new HttpsError("failed-precondition", "A recovery baseline payment ID is duplicated.");
+  }
+  const deliveryFeeMinor = channel === "delivery"
+    ? Number(payload.deliveryFeeMinor ?? 0) : 0;
+  const total = lines.reduce((sum, line) =>
+    sum + line.quantity * line.unitPriceMinor, 0) + deliveryFeeMinor;
+  const paid = payments.reduce((sum, payment) => sum + payment.baseAmountMinor, 0);
+  if (!Number.isSafeInteger(deliveryFeeMinor) || deliveryFeeMinor < 0 || paid > total) {
+    throw new HttpsError("failed-precondition", "The recovery baseline balance is invalid.");
+  }
+  const status = lines.some((line) => line.isSentToProduction) ? "sent" : "open";
+  return {
+    venueId, tableId, tabName, channel, status, lines, payments,
+    customerId: channel === "dineIn" ? null : payload.customerId ?? null,
+    customerName: channel === "dineIn" ? null : payload.customerName ?? null,
+    customerPhone: channel === "dineIn" ? null : payload.customerPhone ?? null,
+    deliveryAddress: channel === "delivery" ? payload.deliveryAddress ?? null : null,
+    deliveryAddressLabel: channel === "delivery"
+      ? payload.deliveryAddressLabel ?? null : null,
+    deliveryLatitude: channel === "delivery" ? payload.deliveryLatitude ?? null : null,
+    deliveryLongitude: channel === "delivery" ? payload.deliveryLongitude ?? null : null,
+    serviceAreaId: channel === "delivery" ? payload.serviceAreaId ?? null : null,
+    serviceAreaName: channel === "delivery" ? payload.serviceAreaName ?? null : null,
+    deliveryFeeMinor,
+    scheduledForUtc: payload.scheduledForUtc ?? null,
+    fulfilmentStatus: payload.fulfilmentStatus ??
+      (channel === "delivery" ? "awaitingDriver" : "awaitingPreparation"),
+    assignedDriverId: channel === "delivery" ? payload.assignedDriverId ?? null : null,
+    splitFromOrderId: payload.splitFromOrderId ?? null,
+    splitSequence: Number(payload.splitSequence ?? 0),
+    openSplitOrderIds: Array.isArray(payload.openSplitOrderIds)
+      ? payload.openSplitOrderIds : [],
+    openedAt, openedOffline: true, createdByStaffId: baseline.staffId,
+  };
+}
+
+function applyOfflineEventToCloudOrder(current, event, venueId, recoveryBaseline = null) {
   const payload = event.payload;
   const eventTime = new Date(event.createdAtUtc);
   if (!Number.isFinite(eventTime.getTime())) {
@@ -2922,6 +5095,28 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
   }
   if (event.type === "order.opened") {
     if (current != null) {
+      // A replacement hub can create a local shell for an existing open order.
+      // The same epoch can also replay this event after cloud projection won
+      // the race but its acknowledgement never reached the hub. Treat only an
+      // exact open identity as idempotent; mismatched/future orders fail closed.
+      const currentEpoch = Number(current.offlineHubEpoch ?? 0);
+      const sameIdentity = current.venueId === venueId &&
+        (current.tableId ?? null) === (payload.tableId ?? null) &&
+        (current.tabName ?? null) === (payload.tabName ?? null) &&
+        (current.channel ?? "dineIn") === (payload.channel ?? "dineIn") &&
+        ["open", "sent"].includes(current.status);
+      const baselinePayload = recoveryBaseline?.payload;
+      const baselineEpoch = Number(baselinePayload?.sourceOfflineHubEpoch);
+      const sameBaselineIdentity = recoveryBaseline?.hubEpoch === event.hubEpoch &&
+        recoveryBaseline?.sequence > event.sequence &&
+        Number.isSafeInteger(baselineEpoch) && baselineEpoch <= event.hubEpoch &&
+        current.venueId === venueId &&
+        (current.tableId ?? null) === (baselinePayload?.tableId ?? null) &&
+        (current.tabName ?? null) === (baselinePayload?.tabName ?? null) &&
+        (current.channel ?? "dineIn") === (baselinePayload?.channel ?? "dineIn") &&
+        ["open", "sent"].includes(current.status);
+      if (currentEpoch <= event.hubEpoch &&
+          (sameIdentity || sameBaselineIdentity)) return current;
       throw new HttpsError("already-exists", "The offline order already exists in cloud data.");
     }
     const tableId = typeof payload.tableId === "string" ? payload.tableId : null;
@@ -2940,19 +5135,72 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
       customerName: channel === "dineIn" ? null : payload.customerName,
       customerPhone: channel === "dineIn" ? null : payload.customerPhone,
       deliveryAddress: channel === "delivery" ? payload.deliveryAddress : null,
+      deliveryAddressLabel: channel === "delivery"
+        ? payload.deliveryAddressLabel ?? null : null,
+      deliveryLatitude: channel === "delivery"
+        ? payload.deliveryLatitude ?? null : null,
+      deliveryLongitude: channel === "delivery"
+        ? payload.deliveryLongitude ?? null : null,
+      serviceAreaId: channel === "delivery" ? payload.serviceAreaId ?? null : null,
+      serviceAreaName: channel === "delivery" ? payload.serviceAreaName ?? null : null,
+      deliveryFeeMinor: channel === "delivery"
+        ? Number(payload.deliveryFeeMinor ?? 0) : 0,
       scheduledForUtc: payload.scheduledForUtc ?? null,
+      assignedDriverId: channel === "delivery"
+        ? payload.assignedDriverId ?? null : null,
+      assignedDriverName: channel === "delivery"
+        ? payload.assignedDriverName ?? null : null,
+      ...(channel === "delivery" && typeof payload.assignedDriverId === "string"
+        ? {fulfilmentStatus: "assigned"} : {}),
       openedAt: eventTime, openedOffline: true, createdByStaffId: event.staffId,
     };
   }
-  if (current == null || current.venueId !== venueId || current.status === "closed") {
+  const allowedAfterFinancialClose = new Set([
+    "order.cloudBaseline",
+    "order.fulfilmentChanged",
+    "order.productionTicketUpdated",
+    "receipt.requested",
+  ]);
+  if (current == null || current.venueId !== venueId ||
+      (current.status === "closed" && !allowedAfterFinancialClose.has(event.type))) {
     throw new HttpsError("failed-precondition", "The offline order is unavailable in cloud data.");
   }
   const next = {...current};
   const lines = Array.isArray(next.lines) ? next.lines.map((line) => ({...line})) : [];
   const payments = Array.isArray(next.payments)
     ? next.payments.map((payment) => ({...payment})) : [];
+  if (event.type === "order.cloudBaseline") {
+    if (next.offlineRecoveryBaselineEventId === event.id) return next;
+    const sourceEpoch = Number(payload.sourceOfflineHubEpoch);
+    if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch > event.hubEpoch ||
+        !["open", "sent", "closed"].includes(next.status) ||
+        (next.tableId ?? null) !== (payload.tableId ?? null) ||
+        (next.tabName ?? null) !== (payload.tabName ?? null) ||
+        (next.channel ?? "dineIn") !== (payload.channel ?? "dineIn")) {
+      throw new HttpsError("failed-precondition", "The cloud order baseline identity changed.");
+    }
+    const baselineLines = Array.isArray(payload.lines) ? payload.lines : [];
+    const baselinePayments = Array.isArray(payload.payments) ? payload.payments : [];
+    const lineMatches = baselineLines.every((baseline) => lines.some((line) =>
+      line.id === baseline.id && line.productId === baseline.productId &&
+      line.productName === baseline.name && Number(line.quantity) === Number(baseline.quantity) &&
+      Number(line.unitPriceMinor) === Number(baseline.unitPriceMinor)));
+    const paymentMatches = baselinePayments.every((baseline) => payments.some((payment) =>
+      payment.id === baseline.id &&
+      Number(payment.baseAmountMinor) === Number(baseline.baseAmountMinor)));
+    if (!lineMatches || !paymentMatches) {
+      throw new HttpsError("failed-precondition", "The cloud order baseline no longer matches.");
+    }
+    return next;
+  }
   if (event.type === "order.itemAdded") {
-    if (lines.some((line) => line.id === payload.lineId)) {
+    const existingLine = lines.find((line) => line.id === payload.lineId);
+    if (existingLine != null) {
+      if (existingLine.productId === payload.productId &&
+          existingLine.productName === payload.productName &&
+          Number(existingLine.unitPriceMinor) === Number(payload.unitPriceMinor)) {
+        return next;
+      }
       throw new HttpsError("already-exists", "The offline order line already exists.");
     }
     lines.push({
@@ -2962,14 +5210,82 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
     next.lines = lines;
     return next;
   }
+  if (event.type === "order.itemsAdded") {
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (items.length < 1 || items.length > 25) {
+      throw new HttpsError("failed-precondition", "The offline basket batch is invalid.");
+    }
+    const batchIds = new Set();
+    for (const item of items) {
+      const lineId = typeof item?.lineId === "string" ? item.lineId : "";
+      if (lineId.length === 0 || batchIds.has(lineId)) {
+        throw new HttpsError("failed-precondition", "The offline basket contains a duplicate line.");
+      }
+      batchIds.add(lineId);
+      const existingLine = lines.find((line) => line.id === lineId);
+      if (existingLine != null) {
+        if (existingLine.productId === item.productId &&
+            existingLine.productName === item.productName &&
+            Number(existingLine.unitPriceMinor) === Number(item.unitPriceMinor)) {
+          continue;
+        }
+        throw new HttpsError("already-exists", "An offline basket line already exists.");
+      }
+      lines.push({
+        ...item, id: lineId, isSentToProduction: false,
+        addedAt: eventTime, addedAtMillis: eventTime.getTime(),
+      });
+    }
+    next.lines = lines;
+    return next;
+  }
   if (event.type === "order.itemQuantityChanged") {
     const index = lines.findIndex((line) => line.id === payload.lineId &&
-      line.isSentToProduction !== true);
+      (line.isSentToProduction !== true ||
+        (recoveryBaseline != null && event.sequence < recoveryBaseline.sequence)));
     if (index < 0 || !Number.isInteger(payload.quantity) || payload.quantity < 0) {
       throw new HttpsError("failed-precondition", "The offline line cannot be changed.");
     }
     if (payload.quantity === 0) lines.splice(index, 1);
     else lines[index].quantity = payload.quantity;
+    next.lines = lines;
+    return next;
+  }
+  if (event.type === "order.lineAdjusted") {
+    const index = lines.findIndex((line) => line.id === payload.lineId);
+    const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
+    const operation = payload.operation;
+    if (index < 0 || reason.length === 0 ||
+        !["remove", "setUnitPrice", "discountUnitAmount"].includes(operation)) {
+      throw new HttpsError("failed-precondition", "The offline sale adjustment is invalid.");
+    }
+    if (operation === "remove") {
+      lines.splice(index, 1);
+    } else {
+      const valueMinor = Number(payload.valueMinor);
+      const nextPrice = operation === "setUnitPrice"
+        ? valueMinor : Number(lines[index].unitPriceMinor) - valueMinor;
+      if (!Number.isSafeInteger(valueMinor) || valueMinor < 0 ||
+          !Number.isSafeInteger(nextPrice) || nextPrice < 0) {
+        throw new HttpsError("failed-precondition", "The offline sale price is invalid.");
+      }
+      lines[index].unitPriceMinor = nextPrice;
+      lines[index].priceAdjustment = {
+        operation, valueMinor, reason, actor: event.staffId,
+        adjustedAt: eventTime.toISOString(),
+      };
+    }
+    const adjustedTotal = lines.reduce((sum, line) =>
+      sum + Number(line.quantity) * Number(line.unitPriceMinor), 0) +
+      ((next.channel ?? "dineIn") === "delivery" ? Number(next.deliveryFeeMinor ?? 0) : 0);
+    const alreadyPaid = payments.reduce((sum, payment) =>
+      sum + Number(payment.baseAmountMinor), 0);
+    if (adjustedTotal < alreadyPaid) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This adjustment would invalidate payments already recorded.",
+      );
+    }
     next.lines = lines;
     return next;
   }
@@ -2987,17 +5303,32 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
   if (event.type === "order.fulfilmentChanged") {
     const status = payload.status;
     if (!["awaitingPreparation", "readyForCollection", "awaitingDriver", "assigned",
-      "outForDelivery", "collected", "delivered", "cancelled"].includes(status)) {
+      "driverDeclined", "outForDelivery", "collected", "delivered", "cancelled"].includes(status)) {
       throw new HttpsError("invalid-argument", "The offline fulfilment status is invalid.");
     }
     next.fulfilmentStatus = status;
-    if (typeof payload.driverId === "string") next.assignedDriverId = payload.driverId;
+    if (status === "driverDeclined") {
+      next.assignedDriverId = null;
+      next.assignedDriverName = null;
+      next.driverDeclinedAt = eventTime;
+      next.driverDeclinedBy = event.staffId;
+    } else if (typeof payload.driverId === "string") {
+      next.assignedDriverId = payload.driverId;
+    }
     next.fulfilmentUpdatedAt = eventTime;
     next.fulfilmentUpdatedByStaffId = event.staffId;
     return next;
   }
+  if (event.type === "order.productionTicketUpdated") return next;
   if (event.type === "payment.recorded") {
-    if (payments.some((payment) => payment.id === payload.paymentId)) {
+    const existingPayment = payments.find((payment) => payment.id === payload.paymentId);
+    if (existingPayment != null) {
+      if (Number(existingPayment.baseAmountMinor) === Number(payload.baseAmountMinor) &&
+          existingPayment.method === payload.method &&
+          (existingPayment.tenderedCurrencyCode ?? existingPayment.currencyCode) ===
+            payload.currencyCode) {
+        return next;
+      }
       throw new HttpsError("already-exists", "The offline payment already exists.");
     }
     payments.push({
@@ -3013,9 +5344,76 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
     next.payments = payments;
     return next;
   }
+  if (event.type === "payment.batchRecorded") {
+    if (typeof payload.batchId !== "string" || payload.batchId.length === 0 ||
+        !Array.isArray(payload.payments)) {
+      throw new HttpsError("invalid-argument", "The offline payment batch is invalid.");
+    }
+    const total = lines.reduce((sum, line) =>
+      sum + Number(line.quantity) * Number(line.unitPriceMinor), 0) +
+      ((next.channel ?? "dineIn") === "delivery" ?
+        Number(next.deliveryFeeMinor ?? 0) : 0);
+    let paid = payments.reduce((sum, payment) =>
+      sum + Number(payment.baseAmountMinor), 0);
+    for (const value of payload.payments) {
+      if (value == null || typeof value !== "object" || Array.isArray(value) ||
+          typeof value.paymentId !== "string" || value.paymentId.length === 0 ||
+          typeof value.method !== "string" || value.method.length === 0 ||
+          typeof value.currencyCode !== "string" || value.currencyCode.length === 0 ||
+          !Number.isSafeInteger(value.baseAmountMinor) || value.baseAmountMinor <= 0) {
+        throw new HttpsError("invalid-argument", "An offline payment is invalid.");
+      }
+      const existingPayment = payments.find((payment) => payment.id === value.paymentId);
+      if (existingPayment != null) {
+        if (Number(existingPayment.baseAmountMinor) === value.baseAmountMinor &&
+            existingPayment.method === value.method &&
+            (existingPayment.tenderedCurrencyCode ?? existingPayment.currencyCode) ===
+              value.currencyCode) {
+          continue;
+        }
+        throw new HttpsError("already-exists", "The offline payment already exists.");
+      }
+      if (paid + value.baseAmountMinor > total) {
+        throw new HttpsError("failed-precondition", "The payment batch exceeds the bill balance.");
+      }
+      payments.push({
+        id: value.paymentId,
+        method: value.method,
+        tenderedAmountMinor: value.tenderedAmountMinor ?? value.baseAmountMinor,
+        tenderedCurrencyCode: value.currencyCode,
+        baseAmountMinor: value.baseAmountMinor,
+        exchangeRateToBase: value.exchangeRateToBase ?? "1",
+        terminalLabel: value.terminalLabel ?? null,
+        cashChangeBaseMinor: value.cashChangeBaseMinor ?? 0,
+        recordedAt: eventTime,
+        recordedAtMillis: eventTime.getTime(),
+      });
+      paid += value.baseAmountMinor;
+    }
+    next.payments = payments;
+    if (payload.closeIfSettled === true) {
+      if (lines.length === 0 || paid !== total) {
+        throw new HttpsError("failed-precondition", "The offline bill is not fully paid.");
+      }
+      next.status = "closed";
+      next.closedAt = eventTime;
+      next.closedOffline = true;
+      next.receiptNumber = typeof payload.receiptNumber === "string"
+        ? payload.receiptNumber : null;
+      // A paid collection has physically left the collection queue in the
+      // normal till workflow. Keep it visible in history but do not require a
+      // second screen/action merely to mark the same handover again.
+      if ((next.channel ?? "dineIn") === "collection") {
+        next.fulfilmentStatus = "collected";
+      }
+    }
+    return next;
+  }
   if (event.type === "order.closed") {
     const total = lines.reduce((sum, line) =>
-      sum + Number(line.quantity) * Number(line.unitPriceMinor), 0);
+      sum + Number(line.quantity) * Number(line.unitPriceMinor), 0) +
+      ((next.channel ?? "dineIn") === "delivery" ?
+        Number(next.deliveryFeeMinor ?? 0) : 0);
     const paid = payments.reduce((sum, payment) =>
       sum + Number(payment.baseAmountMinor), 0);
     if (lines.length === 0 || total !== paid) {
@@ -3026,6 +5424,27 @@ function applyOfflineEventToCloudOrder(current, event, venueId) {
     next.closedOffline = true;
     next.receiptNumber = typeof payload.receiptNumber === "string"
       ? payload.receiptNumber : null;
+    if ((next.channel ?? "dineIn") === "collection") {
+      next.fulfilmentStatus = "collected";
+    }
+    return next;
+  }
+  if (event.type === "order.cancelled") {
+    const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
+    if (lines.length !== 0 || payments.length !== 0 || reason.length < 3) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Only an empty, unpaid order can be cancelled.",
+      );
+    }
+    next.status = "closed";
+    next.cancelled = true;
+    next.cancelledAt = eventTime;
+    next.cancellationReason = reason;
+    next.cancelledByStaffId = event.staffId;
+    next.closedAt = eventTime;
+    next.closedOffline = true;
+    next.receiptNumber = null;
     return next;
   }
   if (event.type === "receipt.requested") return next;
@@ -3059,6 +5478,37 @@ async function getTrustedTimeFor(caller, rawData) {
 async function claimDevicePrintJobFor(caller, rawData) {
   const device = await authenticatedPrinterDevice(caller, rawData);
   const jobs = db.collection(`tenants/${device.tenantId}/printJobs`);
+  // Resume a claim already owned by this device before claiming another job.
+  // This covers the ambiguous network case where Firestore committed the
+  // transaction but the HTTPS response was closed before reaching the app.
+  const ownedClaims = await jobs
+    .where("venueId", "==", device.venueId)
+    .where("targetDeviceId", "==", device.deviceId)
+    .where("status", "==", "claimed")
+    .limit(10)
+    .get();
+  const owned = ownedClaims.docs
+    .filter((document) => document.data().claimedByDeviceId === device.deviceId)
+    .sort((left, right) => {
+      const leftTime = left.data().claimedAt?.toMillis?.() ?? 0;
+      const rightTime = right.data().claimedAt?.toMillis?.() ?? 0;
+      return leftTime - rightTime;
+    })[0];
+  if (owned != null) {
+    const value = owned.data();
+    return {job: {
+      id: owned.id,
+      venueId: value.venueId,
+      targetDeviceId: value.targetDeviceId,
+      orderId: value.orderId,
+      ticketId: value.ticketId ?? null,
+      productionArea: value.productionArea ?? null,
+      idempotencyKey: value.idempotencyKey,
+      createdAt: value.createdAt?.toDate?.()?.toISOString?.() ?? new Date().toISOString(),
+      attempts: Number.isInteger(value.attempts) ? value.attempts : 1,
+      payload: value.payload ?? {},
+    }};
+  }
   const candidates = await jobs
     .where("venueId", "==", device.venueId)
     .where("targetDeviceId", "==", device.deviceId)
@@ -3107,10 +5557,35 @@ async function completeDevicePrintJobFor(caller, rawData) {
   await db.runTransaction(async (transaction) => {
     const job = await transaction.get(jobRef);
     const value = job.data();
-    if (!job.exists || value.venueId !== device.venueId ||
-        value.targetDeviceId !== device.deviceId || value.status !== "claimed" ||
-        value.claimedByDeviceId !== device.deviceId) {
+    const belongsToDevice = job.exists && value.venueId === device.venueId &&
+      value.targetDeviceId === device.deviceId &&
+      value.claimedByDeviceId === device.deviceId;
+    // A network failure can hide the original successful response after the
+    // transaction commits. Accept an exact repeat from the device that owned
+    // the claim so the worker does not raise a false failure or try to recover
+    // a ticket that is already durably terminal. The job itself is unchanged.
+    const repeatsTerminalResult = belongsToDevice &&
+      ((printed && value.status === "printed") ||
+       (!printed && value.status === "failed"));
+    if (repeatsTerminalResult) return;
+    if (!belongsToDevice || value.status !== "claimed") {
       throw new HttpsError("failed-precondition", "This printer no longer owns the queued ticket.");
+    }
+    let linkedPrimaryRef = null;
+    let linkedPrimary = null;
+    if (printed && typeof value.fallbackFromJobId === "string" &&
+        value.fallbackFromJobId.length > 0) {
+      linkedPrimaryRef = db.doc(
+        `tenants/${device.tenantId}/printJobs/${value.fallbackFromJobId}`,
+      );
+      linkedPrimary = await transaction.get(linkedPrimaryRef);
+      if (linkedPrimary.exists &&
+          linkedPrimary.data().venueId !== device.venueId) {
+        throw new HttpsError(
+          "failed-precondition",
+          "The linked printer job belongs to another venue.",
+        );
+      }
     }
     const attempts = Number.isInteger(value.attempts) ? value.attempts : 1;
     if (printed) {
@@ -3120,6 +5595,15 @@ async function completeDevicePrintJobFor(caller, rawData) {
         failureReason: FieldValue.delete(),
         nextAttemptAt: FieldValue.delete(),
       });
+      // Clear the primary failure alarm atomically with fallback completion.
+      // The document trigger below remains a repair path for legacy clients,
+      // but normal printing no longer waits for an asynchronous cold start.
+      if (linkedPrimaryRef != null && linkedPrimary?.exists) {
+        transaction.update(linkedPrimaryRef, {
+          fallbackDeliveryStatus: "printed",
+          fallbackPrintedAt: FieldValue.serverTimestamp(),
+        });
+      }
     } else if (attempts < 3) {
       transaction.update(jobRef, {
         status: "queued",
@@ -3129,11 +5613,68 @@ async function completeDevicePrintJobFor(caller, rawData) {
         claimedAt: FieldValue.delete(),
       });
     } else {
+      // Hand the ticket to its configured fallback in the same transaction
+      // that marks the primary failed. Relying only on an asynchronous
+      // Firestore trigger leaves a cold-start window where no printer owns an
+      // urgent kitchen ticket. The existing trigger remains a repair path for
+      // legacy/manual failed-job writes and observes this deterministic job as
+      // already created.
+      const fallbackDeviceId = typeof value.fallbackDeviceId === "string"
+        ? value.fallbackDeviceId : "";
+      const productionArea = typeof value.productionArea === "string"
+        ? value.productionArea : "";
+      let fallbackQueued = false;
+      if (fallbackDeviceId.length > 0 &&
+          fallbackDeviceId !== device.deviceId && productionArea.length > 0) {
+        const tenantRef = db.doc(`tenants/${device.tenantId}`);
+        const fallbackDeviceRef = tenantRef.collection("devices").doc(fallbackDeviceId);
+        const fallbackJobRef = tenantRef.collection("printJobs").doc(`${jobId}_fallback`);
+        const [fallbackDevice, existingFallback] = await Promise.all([
+          transaction.get(fallbackDeviceRef),
+          transaction.get(fallbackJobRef),
+        ]);
+        if (activeRouteDevice(fallbackDevice, device.venueId, productionArea) &&
+            !existingFallback.exists) {
+          transaction.create(fallbackJobRef, {
+            venueId: device.venueId,
+            targetDeviceId: fallbackDeviceId,
+            fallbackDeviceId: null,
+            orderId: value.orderId ?? "",
+            ticketId: value.ticketId ?? null,
+            productionArea,
+            status: "queued",
+            attempts: 0,
+            idempotencyKey: `${jobId}_fallback`,
+            payload: value.payload ?? {},
+            fallbackFromJobId: jobId,
+            createdAt: FieldValue.serverTimestamp(),
+          });
+          transaction.create(
+            tenantRef.collection("auditEvents").doc(`printFallback_${jobId}`),
+            {
+              action: "queueFallbackPrintJob",
+              venueId: device.venueId,
+              orderId: value.orderId ?? null,
+              ticketId: value.ticketId ?? null,
+              productionArea,
+              failedJobId: jobId,
+              fallbackJobId: `${jobId}_fallback`,
+              primaryDeviceId: device.deviceId,
+              fallbackDeviceId,
+              createdAt: FieldValue.serverTimestamp(),
+            },
+          );
+          fallbackQueued = true;
+        }
+      }
       transaction.update(jobRef, {
         status: "failed",
         completedAt: FieldValue.serverTimestamp(),
         failureReason: failureReason || "The printer failed after three attempts.",
         nextAttemptAt: FieldValue.delete(),
+        ...(fallbackQueued ? {
+          fallbackQueuedAt: FieldValue.serverTimestamp(),
+        } : {}),
       });
     }
   });
@@ -3214,11 +5755,32 @@ function requiredSixDigitPin(data) {
   return pin;
 }
 
+// Six digits are retained for fast shared-terminal entry, so newly selected
+// PINs must not come from the small set an attacker will try first. Existing
+// weak PINs remain verifiable long enough for staff to sign in and rotate them.
+function requiredNewSixDigitPin(data) {
+  const pin = requiredSixDigitPin(data);
+  const predictableSequences = new Set([
+    "012345", "123456", "234567", "345678", "456789",
+    "987654", "876543", "765432", "654321", "543210",
+    "121212", "112233", "123123",
+  ]);
+  if (/^(\d)\1{5}$/.test(pin) || predictableSequences.has(pin)) {
+    throw new HttpsError(
+      "invalid-argument",
+      "Choose a less predictable six-digit PIN. Avoid repeated digits and number sequences.",
+    );
+  }
+  return pin;
+}
+
 function staffPinDocumentId(venueId, userId) {
   return `${venueId}_${userId}`;
 }
 
-async function queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId}) {
+async function queueManagerSecurityAlert({
+  tenantId, venueId, userId, hostUserId, deviceId = "unknown",
+}) {
   const managers = await db.collection(`tenants/${tenantId}/members`).get();
   const recipientIds = managers.docs
     .filter((member) => member.data().active !== false &&
@@ -3233,7 +5795,8 @@ async function queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId}
   const staff = await auth.getUser(userId).catch(() => null);
   const subject = "TableSideCY security alert: staff PIN locked";
   const text = `A staff PIN was locked after three failed attempts. Venue: ${venueId}. ` +
-    `Staff: ${staff?.displayName || staff?.email || userId}. Device account: ${hostUserId}. ` +
+    `Staff: ${staff?.displayName || staff?.email || userId}. ` +
+    `Device account: ${hostUserId}. Device: ${deviceId}. ` +
     "Open TableSideCY and use a manager PIN to review and unlock it if appropriate.";
   // The official Firebase Trigger Email extension watches this collection.
   // Without its one-time installation, the alert remains safely recorded in
@@ -3246,8 +5809,28 @@ async function queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId}
   });
 }
 
-function hashStaffPin(pin, salt) {
-  return scryptSync(pin, salt, 32).toString("base64");
+const staffPinHashProfile = "scrypt-n32768-r8-p1-v2";
+
+// New PIN hashes deliberately cost more than the original Node defaults. The
+// explicit profile lets verification remain backward compatible and upgrade a
+// legacy hash after a successful login without ever storing the plaintext PIN.
+function hashStaffPin(pin, salt, profile = staffPinHashProfile) {
+  if (profile !== staffPinHashProfile) {
+    return scryptSync(pin, salt, 32).toString("base64");
+  }
+  return scryptSync(pin, salt, 32, {
+    N: 32768,
+    r: 8,
+    p: 1,
+    maxmem: 64 * 1024 * 1024,
+  }).toString("base64");
+}
+
+function suppliedStaffPinHash(pin, pinData) {
+  const profile = pinData?.pinHashProfile === staffPinHashProfile
+    ? staffPinHashProfile
+    : "legacy-scrypt-v1";
+  return hashStaffPin(pin, pinData?.salt, profile);
 }
 
 function offlinePinFields(pin) {
@@ -3309,7 +5892,7 @@ async function setOwnStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  const pin = requiredSixDigitPin(data);
+  const pin = requiredNewSixDigitPin(data);
   await requireTenantHostMember(caller, tenantId);
   const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
   if (!venue.exists || venue.data().status === "deleting") {
@@ -3324,6 +5907,7 @@ async function setOwnStaffPinFor(caller, rawData) {
     venueId,
     salt,
     pinHash: hashStaffPin(pin, salt),
+    pinHashProfile: staffPinHashProfile,
     ...offlinePinFields(pin),
     pinVersion: FieldValue.increment(1),
     failedAttempts: 0,
@@ -3342,7 +5926,7 @@ async function changeOwnStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  const pin = requiredSixDigitPin(data);
+  const pin = requiredNewSixDigitPin(data);
   await requireTenantOperationalMember(caller, tenantId);
   const venue = await db.doc(`tenants/${tenantId}/venues/${venueId}`).get();
   if (!venue.exists || venue.data().status === "deleting") {
@@ -3354,6 +5938,7 @@ async function changeOwnStaffPinFor(caller, rawData) {
     venueId,
     salt,
     pinHash: hashStaffPin(pin, salt),
+    pinHashProfile: staffPinHashProfile,
     ...offlinePinFields(pin),
     pinVersion: FieldValue.increment(1),
     failedAttempts: 0,
@@ -3537,7 +6122,7 @@ async function resetStaffPinFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const userId = requiredText(data, "userId", 128);
-  const newPin = requiredSixDigitPin({pin: data.newPin});
+  const newPin = requiredNewSixDigitPin({pin: data.newPin});
   const {roles} = await requireTenantOperationalMember(caller, tenantId);
   if (!roles.some((role) => role === "owner" || role === "manager")) {
     throw new HttpsError("permission-denied", "Only a manager can reset a staff PIN.");
@@ -3567,6 +6152,7 @@ async function resetStaffPinFor(caller, rawData) {
     venueId,
     salt,
     pinHash: hashStaffPin(newPin, salt),
+    pinHashProfile: staffPinHashProfile,
     ...offlinePinFields(newPin),
     pinVersion: FieldValue.increment(1),
     failedAttempts: 0,
@@ -3582,7 +6168,7 @@ async function recoverOwnStaffPinFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  const newPin = requiredSixDigitPin({pin: data.newPin});
+  const newPin = requiredNewSixDigitPin({pin: data.newPin});
   const authTime = Number(caller.token.auth_time);
   const nowSeconds = Math.floor(Date.now() / 1000);
   if (!Number.isFinite(authTime) || authTime > nowSeconds || nowSeconds - authTime > 5 * 60) {
@@ -3614,6 +6200,7 @@ async function recoverOwnStaffPinFor(caller, rawData) {
   const salt = randomBytes(16).toString("base64");
   await pinRef.update({
     pinHash: hashStaffPin(newPin, salt),
+    pinHashProfile: staffPinHashProfile,
     ...offlinePinFields(newPin),
     salt,
     pinVersion: FieldValue.increment(1),
@@ -3640,6 +6227,7 @@ async function verifyStaffPinFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const userId = requiredText(data, "userId", 128);
+  const deviceId = requiredDocumentId(data, "deviceId");
   const pin = requiredSixDigitPin(data);
   const repairOfflineVerifier = data.repairOfflineVerifier === true;
   await requireTenantHostMember(caller, tenantId);
@@ -3668,7 +6256,7 @@ async function verifyStaffPinFor(caller, rawData) {
       throw new HttpsError("resource-exhausted", "This staff PIN is locked. Ask a manager to unlock it.");
     }
     const expected = Buffer.from(pinData.pinHash, "base64");
-    const supplied = Buffer.from(hashStaffPin(pin, pinData.salt), "base64");
+    const supplied = Buffer.from(suppliedStaffPinHash(pin, pinData), "base64");
     const valid = expected.length === supplied.length && timingSafeEqual(expected, supplied);
     if (!valid) {
       const failedAttempts = (Number.isInteger(pinData.failedAttempts)
@@ -3683,9 +6271,17 @@ async function verifyStaffPinFor(caller, rawData) {
     }
     const offlineVerifierReady = offlinePinVerifierReady(pinData);
     const rotateOfflineVerifier = repairOfflineVerifier || !offlineVerifierReady;
+    const upgradePinHash = pinData.pinHashProfile !== staffPinHashProfile;
+    const upgradedSalt = upgradePinHash ? randomBytes(16).toString("base64url") : null;
     transaction.update(pinRef, {
       failedAttempts: 0,
       lastVerifiedAt: FieldValue.serverTimestamp(),
+      ...(upgradePinHash ? {
+        salt: upgradedSalt,
+        pinHash: hashStaffPin(pin, upgradedSalt),
+        pinHashProfile: staffPinHashProfile,
+        pinHashUpgradedAt: FieldValue.serverTimestamp(),
+      } : {}),
       ...(rotateOfflineVerifier ? offlinePinFields(pin) : {}),
     });
     return {
@@ -3702,12 +6298,15 @@ async function verifyStaffPinFor(caller, rawData) {
       venueId,
       userId,
       hostUserId: caller.uid,
+      deviceId,
       failedAttempts: verification.failedAttempts,
       requiresManagerAttention: verification.failedAttempts >= 3,
       createdAt: FieldValue.serverTimestamp(),
     });
     if (verification.failedAttempts >= 3) {
-      await queueManagerSecurityAlert({tenantId, venueId, userId, hostUserId: caller.uid});
+      await queueManagerSecurityAlert({
+        tenantId, venueId, userId, hostUserId: caller.uid, deviceId,
+      });
     }
     throw new HttpsError(
       verification.failedAttempts >= 3 ? "resource-exhausted" : "permission-denied",
@@ -3736,7 +6335,9 @@ async function verifyStaffPinFor(caller, rawData) {
     userId,
     venueId,
     hostUserId: caller.uid,
+    deviceId,
     pinVersion: verification.pinVersion,
+    membershipVersion: Number(verifiedMembership.data()?.membershipVersion ?? 0),
     tokenHash: createHash("sha256").update(token).digest("base64"),
     expiresAt,
     createdAt: FieldValue.serverTimestamp(),
@@ -3748,8 +6349,11 @@ async function verifyStaffPinFor(caller, rawData) {
     userId,
     venueId,
     roles: verifiedRoles,
+    pinVersion: verification.pinVersion,
+    membershipVersion: Number(verifiedMembership.data()?.membershipVersion ?? 0),
     platformAdmin: platformAdmin.exists || user.customClaims?.platformAdmin === true,
     sessionId: sessionRef.id,
+    deviceId,
     expiresAt,
     updatedAt: FieldValue.serverTimestamp(),
   });
@@ -3759,11 +6363,13 @@ async function verifyStaffPinFor(caller, rawData) {
     venueId,
     offlineVerifierUpgraded: verification.offlineVerifierUpgraded === true,
     offlineVerifierRepaired: verification.offlineVerifierRepaired === true,
+    deviceId,
   });
   return {
     sessionId: sessionRef.id,
     sessionToken: token,
     expiresAt: expiresAt.toISOString(),
+    deviceId,
     userId,
     displayName: user.displayName || user.email || "Staff member",
     isPlatformAdmin: platformAdmin.exists || user.customClaims?.platformAdmin === true,
@@ -3783,19 +6389,33 @@ async function verifyStaffPinFor(caller, rawData) {
 async function actingCallerFromStaffSession(hostCaller, data) {
   const sessionId = optionalText(data, "staffPinSessionId", 128);
   const sessionToken = optionalText(data, "staffPinSessionToken", 128);
+  const deviceId = optionalText(data, "staffPinSessionDeviceId", 180);
   if (!sessionId && !sessionToken) {
     throw new HttpsError(
       "unauthenticated",
       "Select your staff name and enter your PIN before using the POS.",
     );
   }
-  if (!sessionId || !sessionToken) {
+  if (!sessionId || !sessionToken || !deviceId) {
     throw new HttpsError("unauthenticated", "The shared-device staff session is incomplete.");
   }
+  const actionTenantId = optionalText(data, "tenantId", 128);
+  const actionVenueId = optionalText(data, "venueId", 128);
   const tenantId = optionalText(data, "staffPinSessionTenantId", 128) ||
     requiredText(data, "tenantId", 128);
   const venueId = optionalText(data, "staffPinSessionVenueId", 128) ||
     requiredText(data, "venueId", 128);
+  // The opaque session fields identify the scope in which the PIN was
+  // verified. Never let a modified client validate that session against one
+  // venue and then send the business command to another venue or tenant.
+  // Central enforcement protects every current and future POS handler.
+  if ((actionTenantId.length > 0 && actionTenantId !== tenantId) ||
+      (actionVenueId.length > 0 && actionVenueId !== venueId)) {
+    throw new HttpsError(
+      "permission-denied",
+      "The staff PIN session does not belong to the selected venue.",
+    );
+  }
   const session = await db.doc(
     `tenants/${tenantId}/staffPinSessions/${sessionId}`,
   ).get();
@@ -3812,6 +6432,7 @@ async function actingCallerFromStaffSession(hostCaller, data) {
   const expiresAt = sessionData.expiresAt?.toDate?.() ?? null;
   if (!hashesMatch ||
       sessionData.hostUserId !== hostCaller.uid ||
+      sessionData.deviceId !== deviceId ||
       sessionData.venueId !== venueId ||
       expiresAt == null ||
       expiresAt.getTime() <= Date.now()) {
@@ -3828,30 +6449,52 @@ async function actingCallerFromStaffSession(hostCaller, data) {
   const currentPinVersion = Number.isInteger(currentPin.data()?.pinVersion)
     ? currentPin.data().pinVersion
     : 0;
+  const currentMembershipVersion = Number.isInteger(
+    membership.data()?.membershipVersion,
+  ) ? membership.data().membershipVersion : 0;
   if (!hostMembership.exists || hostMembership.data().active === false) {
     throw new HttpsError("permission-denied", "This device's Firebase account no longer has restaurant access.");
   }
   if (!membership.exists || membership.data().active === false) {
     throw new HttpsError("permission-denied", "The selected staff account is no longer active.");
   }
+  const staffVenueIds = Array.isArray(membership.data().venueIds)
+    ? membership.data().venueIds
+    : [];
+  const hostVenueIds = Array.isArray(hostMembership.data().venueIds)
+    ? hostMembership.data().venueIds
+    : [];
+  if ((staffVenueIds.length > 0 && !staffVenueIds.includes(venueId)) ||
+      (hostVenueIds.length > 0 && !hostVenueIds.includes(venueId))) {
+    throw new HttpsError(
+      "permission-denied",
+      "This staff member or shared device is not assigned to the selected venue.",
+    );
+  }
   if (!currentPin.exists || currentPin.data().locked === true ||
-      currentPinVersion !== sessionData.pinVersion) {
-    throw new HttpsError("unauthenticated", "The staff PIN changed or was locked. Enter the current PIN again.");
+      currentPinVersion !== sessionData.pinVersion ||
+      currentMembershipVersion !== Number(sessionData.membershipVersion ?? 0)) {
+    throw new HttpsError(
+      "unauthenticated",
+      "The staff PIN or access changed. Enter the current PIN again.",
+    );
   }
   return {...hostCaller, uid: actingUserId, hostUid: hostCaller.uid};
 }
 
-// Sensitive financial corrections must not rely only on the existing
-// 30-minute staff session. The acting manager re-enters their own PIN for
-// every refund; failures use the same three-attempt lock as normal sign-in.
-async function requireFreshManagerPin(caller, tenantId, venueId, rawPin) {
+// Sensitive operations must not rely only on the existing 30-minute staff
+// session. The acting manager re-enters their own PIN for each operation;
+// failures use the same three-attempt lock as normal sign-in.
+async function requireFreshManagerPin(
+  caller, tenantId, venueId, rawPin, action = "sensitiveManagerAction",
+) {
   const pin = typeof rawPin === "string" ? rawPin.trim() : "";
   if (!/^\d{6}$/.test(pin)) {
     throw new HttpsError("invalid-argument", "Enter the manager's six-digit PIN.");
   }
   const {roles} = await requireTenantOperationalMember(caller, tenantId);
   if (!roles.some((role) => role === "owner" || role === "manager")) {
-    throw new HttpsError("permission-denied", "A manager or owner must approve this refund.");
+    throw new HttpsError("permission-denied", "A manager or owner must approve this action.");
   }
   const pinRef = db.doc(
     `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`,
@@ -3866,7 +6509,7 @@ async function requireFreshManagerPin(caller, tenantId, venueId, rawPin) {
       throw new HttpsError("resource-exhausted", "This manager PIN is locked.");
     }
     const expected = Buffer.from(String(pinData.pinHash ?? ""), "base64");
-    const supplied = Buffer.from(hashStaffPin(pin, pinData.salt), "base64");
+    const supplied = Buffer.from(suppliedStaffPinHash(pin, pinData), "base64");
     const valid = expected.length === supplied.length && timingSafeEqual(expected, supplied);
     if (!valid) {
       const failedAttempts = (Number.isInteger(pinData.failedAttempts)
@@ -3879,9 +6522,17 @@ async function requireFreshManagerPin(caller, tenantId, venueId, rawPin) {
       });
       return {valid: false, failedAttempts};
     }
+    const upgradePinHash = pinData.pinHashProfile !== staffPinHashProfile;
+    const upgradedSalt = upgradePinHash ? randomBytes(16).toString("base64url") : null;
     transaction.update(pinRef, {
       failedAttempts: 0,
       lastSensitiveApprovalAt: FieldValue.serverTimestamp(),
+      ...(upgradePinHash ? {
+        salt: upgradedSalt,
+        pinHash: hashStaffPin(pin, upgradedSalt),
+        pinHashProfile: staffPinHashProfile,
+        pinHashUpgradedAt: FieldValue.serverTimestamp(),
+      } : {}),
     });
     return {valid: true, failedAttempts: 0};
   });
@@ -3892,7 +6543,7 @@ async function requireFreshManagerPin(caller, tenantId, venueId, rawPin) {
       userId: caller.uid,
       hostUserId: caller.hostUid ?? caller.uid,
       failedAttempts: result.failedAttempts,
-      action: "refundBill",
+      action,
       requiresManagerAttention: result.failedAttempts >= 3,
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -4150,6 +6801,7 @@ async function revokeMembershipsFor(userUid, actorUid) {
     for (const document of documents.slice(start, start + 450)) {
       batch.set(document.ref, {
         active: false,
+        membershipVersion: FieldValue.increment(1),
         retiredAt: FieldValue.serverTimestamp(),
         retiredBy: actorUid,
       }, {merge: true});
@@ -4221,7 +6873,7 @@ async function platformAdminPinStatusFor(caller) {
 async function setPlatformAdminPinFor(caller, rawData) {
   await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
-  const pin = requiredSixDigitPin(data);
+  const pin = requiredNewSixDigitPin(data);
   const pinRef = db.doc(`platformAdminPins/${caller.uid}`);
   await db.runTransaction(async (transaction) => {
     const existing = await transaction.get(pinRef);
@@ -4236,6 +6888,7 @@ async function setPlatformAdminPinFor(caller, rawData) {
       userId: caller.uid,
       salt,
       pinHash: hashStaffPin(pin, salt),
+      pinHashProfile: staffPinHashProfile,
       pinVersion: 1,
       failedAttempts: 0,
       createdAt: FieldValue.serverTimestamp(),
@@ -4250,6 +6903,7 @@ async function verifyPlatformAdminPinFor(caller, rawData) {
   await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
   const pin = requiredSixDigitPin(data);
+  const deviceId = requiredDocumentId(data, "deviceId");
   const pinRef = db.doc(`platformAdminPins/${caller.uid}`);
   const verification = await db.runTransaction(async (transaction) => {
     const document = await transaction.get(pinRef);
@@ -4268,7 +6922,7 @@ async function verifyPlatformAdminPinFor(caller, rawData) {
       );
     }
     const expected = Buffer.from(pinData.pinHash, "base64");
-    const supplied = Buffer.from(hashStaffPin(pin, pinData.salt), "base64");
+    const supplied = Buffer.from(suppliedStaffPinHash(pin, pinData), "base64");
     const valid = expected.length === supplied.length &&
       timingSafeEqual(expected, supplied);
     if (!valid) {
@@ -4285,10 +6939,18 @@ async function verifyPlatformAdminPinFor(caller, rawData) {
       });
       return {valid: false, failedAttempts};
     }
+    const upgradePinHash = pinData.pinHashProfile !== staffPinHashProfile;
+    const upgradedSalt = upgradePinHash ? randomBytes(16).toString("base64url") : null;
     transaction.update(pinRef, {
       failedAttempts: 0,
       lockedUntil: FieldValue.delete(),
       lastVerifiedAt: FieldValue.serverTimestamp(),
+      ...(upgradePinHash ? {
+        salt: upgradedSalt,
+        pinHash: hashStaffPin(pin, upgradedSalt),
+        pinHashProfile: staffPinHashProfile,
+        pinHashUpgradedAt: FieldValue.serverTimestamp(),
+      } : {}),
     });
     return {
       valid: true,
@@ -4301,6 +6963,8 @@ async function verifyPlatformAdminPinFor(caller, rawData) {
         ? "platformAdminPinLocked"
         : "platformAdminPinFailed",
       userId: caller.uid,
+      hostUserId: caller.uid,
+      deviceId,
       failedAttempts: verification.failedAttempts,
       createdAt: FieldValue.serverTimestamp(),
     });
@@ -4317,22 +6981,25 @@ async function verifyPlatformAdminPinFor(caller, rawData) {
   await sessionRef.set({
     userId: caller.uid,
     hostUserId: caller.uid,
+    deviceId,
     pinVersion: verification.pinVersion,
     tokenHash: createHash("sha256").update(token).digest("base64"),
     expiresAt,
     createdAt: FieldValue.serverTimestamp(),
   });
-  await writeAudit(caller.uid, "verifyPlatformAdminPin", caller.uid, {});
+  await writeAudit(caller.uid, "verifyPlatformAdminPin", caller.uid, {deviceId});
   return {
     sessionId: sessionRef.id,
     sessionToken: token,
     expiresAt: expiresAt.toISOString(),
+    deviceId,
   };
 }
 
 async function requirePlatformAdminPinSession(caller, data) {
   const sessionId = requiredText(data, "platformAdminPinSessionId", 128);
   const sessionToken = requiredText(data, "platformAdminPinSessionToken", 128);
+  const deviceId = requiredDocumentId(data, "platformAdminPinSessionDeviceId");
   const session = await db.doc(`platformAdminPinSessions/${sessionId}`).get();
   if (!session.exists) {
     throw new HttpsError("unauthenticated", "The platform PIN session no longer exists.");
@@ -4352,6 +7019,7 @@ async function requirePlatformAdminPinSession(caller, data) {
   if (!hashesMatch ||
       sessionData.userId !== caller.uid ||
       sessionData.hostUserId !== caller.uid ||
+      sessionData.deviceId !== deviceId ||
       sessionData.pinVersion !== currentPinVersion ||
       expiresAt == null ||
       expiresAt.getTime() <= Date.now()) {
@@ -4403,6 +7071,75 @@ async function listSupportedCurrenciesFor(caller) {
   return {currencyCodes: supportedCurrencyCodes};
 }
 
+// Platform-owned location catalogue. Venues select a country from here and
+// receive an immutable locality snapshot, so ordinary venue managers cannot
+// silently invent countries/regions while an offline hub is authoritative.
+async function listPlatformLocationsFor(caller) {
+  await requirePlatformAdmin(caller);
+  const snapshot = await db.collection("platformLocations").limit(1000).get();
+  const locations = snapshot.docs.map((document) => ({
+    id: document.id,
+    country: document.data().country ?? "",
+    district: document.data().district ?? "",
+    town: document.data().town ?? "",
+  })).filter((value) => value.country && value.district && value.town);
+  locations.sort((a, b) =>
+    `${a.country}\u0000${a.district}\u0000${a.town}`.localeCompare(
+      `${b.country}\u0000${b.district}\u0000${b.town}`,
+    ));
+  return {locations};
+}
+
+async function savePlatformLocationFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const country = catalogueTitleCase(requiredText(data, "country", 100));
+  const district = catalogueTitleCase(requiredText(data, "district", 100));
+  const town = catalogueTitleCase(requiredText(data, "town", 100));
+  const key = `${country}\u0000${district}\u0000${town}`.toLocaleLowerCase("en");
+  const snapshot = await db.collection("platformLocations").limit(1000).get();
+  const duplicate = snapshot.docs.find((document) => {
+    const value = document.data();
+    return `${value.country ?? ""}\u0000${value.district ?? ""}\u0000${value.town ?? ""}`
+      .toLocaleLowerCase("en") === key;
+  });
+  if (duplicate != null) return {id: duplicate.id, country, district, town};
+  const reference = db.collection("platformLocations").doc();
+  await reference.create({
+    country, district, town,
+    createdAt: FieldValue.serverTimestamp(),
+    createdBy: caller.uid,
+  });
+  await writeAudit(caller.uid, "savePlatformLocation", reference.id, {
+    country, district, town,
+  });
+  return {id: reference.id, country, district, town};
+}
+
+async function deletePlatformLocationFor(caller, rawData) {
+  await requirePlatformAdmin(caller);
+  const data = requireObject(rawData);
+  const locationId = requiredDocumentId(data, "locationId");
+  await db.doc(`platformLocations/${locationId}`).delete();
+  await writeAudit(caller.uid, "deletePlatformLocation", locationId);
+  return {deleted: true};
+}
+
+async function locationSnapshotForCountry(country) {
+  const snapshot = await db.collection("platformLocations")
+    .where("country", "==", country).limit(1000).get();
+  const grouped = {};
+  for (const document of snapshot.docs) {
+    const district = document.data().district;
+    const town = document.data().town;
+    if (typeof district !== "string" || typeof town !== "string") continue;
+    grouped[district] ??= [];
+    if (!grouped[district].includes(town)) grouped[district].push(town);
+  }
+  for (const towns of Object.values(grouped)) towns.sort((a, b) => a.localeCompare(b));
+  return grouped;
+}
+
 async function listTenantVenuesFor(caller, rawData) {
   await requirePlatformAdmin(caller);
   const data = requireObject(rawData);
@@ -4418,6 +7155,7 @@ async function listTenantVenuesFor(caller, rawData) {
       id: document.id,
       name: document.data().name ?? "Unnamed venue",
       timeZone: document.data().timeZone ?? "Europe/London",
+      country: document.data().country ?? "Kuzey Kıbrıs Türk Cumhuriyeti",
     })),
   };
 }
@@ -4448,6 +7186,8 @@ async function createTenantFor(caller, rawData) {
   const currencyCode = validCurrencyCode(data);
   const venueName = requiredText(data, "venueName");
   const timeZone = validTimeZone(data);
+  const country = catalogueTitleCase(requiredText(data, "country", 100));
+  const deliveryLocations = await locationSnapshotForCountry(country);
   const ownerUid = requiredText(data, "ownerUid", 128);
   const [owner, creator] = await Promise.all([
     auth.getUser(ownerUid),
@@ -4474,6 +7214,8 @@ async function createTenantFor(caller, rawData) {
       name: venueName,
       nameKey: venueNameKey(venueName),
       timeZone,
+      country,
+      deliveryLocations,
       notificationRetentionSeconds: 5,
       defaultThemeMode: "light",
       backgroundLockSeconds: 120,
@@ -4485,6 +7227,7 @@ async function createTenantFor(caller, rawData) {
     });
     transaction.create(memberRef, {
       userId: owner.uid,
+      membershipVersion: 1,
       roles: ["owner"],
       defaultVenueId: venueRef.id,
       email: owner.email ?? "",
@@ -4542,6 +7285,8 @@ async function createVenueFor(caller, rawData) {
   const name = requiredText(data, "name");
   const nameKey = venueNameKey(name);
   const timeZone = validTimeZone(data);
+  const country = catalogueTitleCase(requiredText(data, "country", 100));
+  const deliveryLocations = await locationSnapshotForCountry(country);
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc();
   await db.runTransaction(async (transaction) => {
@@ -4557,6 +7302,8 @@ async function createVenueFor(caller, rawData) {
       name,
       nameKey,
       timeZone,
+      country,
+      deliveryLocations,
       notificationRetentionSeconds: 5,
       defaultThemeMode: "light",
       backgroundLockSeconds: 120,
@@ -4569,7 +7316,7 @@ async function createVenueFor(caller, rawData) {
     });
   });
   await writeAudit(caller.uid, "createVenue", venueRef.id, {tenantId});
-  return {id: venueRef.id, name, timeZone};
+  return {id: venueRef.id, name, timeZone, country};
 }
 
 async function updateVenueFor(caller, rawData) {
@@ -4580,6 +7327,8 @@ async function updateVenueFor(caller, rawData) {
   const name = requiredText(data, "name");
   const nameKey = venueNameKey(name);
   const timeZone = validTimeZone(data);
+  const country = catalogueTitleCase(requiredText(data, "country", 100));
+  const deliveryLocations = await locationSnapshotForCountry(country);
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = db.doc(`tenants/${tenantId}/venues/${venueId}`);
   await db.runTransaction(async (transaction) => {
@@ -4598,12 +7347,14 @@ async function updateVenueFor(caller, rawData) {
       name,
       nameKey,
       timeZone,
+      country,
+      deliveryLocations,
       updatedAt: FieldValue.serverTimestamp(),
       updatedBy: caller.uid,
     }, {merge: true});
   });
   await writeAudit(caller.uid, "updateVenue", venueId, {tenantId});
-  return {id: venueId, name, timeZone};
+  return {id: venueId, name, timeZone, country};
 }
 
 // Any future tenant-root collection that stores a venueId must be added here
@@ -4752,6 +7503,7 @@ async function assignUserToTenantFor(caller, rawData) {
 
   await db.doc(`tenants/${tenantId}/members/${user.uid}`).set({
     userId: user.uid,
+    membershipVersion: FieldValue.increment(1),
     roles,
     defaultVenueId,
     email: user.email ?? "",
@@ -4940,6 +7692,9 @@ async function addOrderDraftLineFor(caller, rawData) {
   const tableId = optionalText(data, "tableId", 180) || null;
   const tabName = optionalText(data, "tabName", 80) || null;
   const channel = optionalText(data, "channel", 20) || "dineIn";
+  const channelAvailabilityOverride = data.channelAvailabilityOverride === true;
+  const requestedServiceAreaId = channel === "delivery"
+    ? requiredDocumentId(data, "serviceAreaId") : null;
   if (!["dineIn", "collection", "delivery"].includes(channel) ||
       (channel === "dineIn" && (tableId == null) === (tabName == null)) ||
       (channel !== "dineIn" && (tableId != null || tabName != null))) {
@@ -4949,7 +7704,27 @@ async function addOrderDraftLineFor(caller, rawData) {
     );
   }
   const line = validProductionLine(data.line, 0);
-  await requireTenantOperationalMember(caller, tenantId);
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  const assignedDriverId = channel === "delivery"
+    ? optionalText(data, "assignedDriverId", 128) || null
+    : null;
+  const deliveryAddressLabel = channel === "delivery"
+    ? optionalText(data, "deliveryAddressLabel", 60) || null : null;
+  const deliveryLatitude = data.deliveryLatitude == null
+    ? null : Number(data.deliveryLatitude);
+  const deliveryLongitude = data.deliveryLongitude == null
+    ? null : Number(data.deliveryLongitude);
+  if ((deliveryLatitude != null && (!Number.isFinite(deliveryLatitude) ||
+       deliveryLatitude < -90 || deliveryLatitude > 90)) ||
+      (deliveryLongitude != null && (!Number.isFinite(deliveryLongitude) ||
+       deliveryLongitude < -180 || deliveryLongitude > 180)) ||
+      ((deliveryLatitude == null) !== (deliveryLongitude == null))) {
+    throw new HttpsError("invalid-argument", "The delivery map pin is invalid.");
+  }
+  if (assignedDriverId != null &&
+      !roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError("permission-denied", "Only a manager can assign a delivery driver.");
+  }
 
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
@@ -4957,15 +7732,18 @@ async function addOrderDraftLineFor(caller, rawData) {
   const tabRef = tabName == null ? null : openTabRegistryRef(tenantId, venueId, tabName);
   const orderRef = tenantRef.collection("orders").doc(orderId);
   const productRef = tenantRef.collection("products").doc(line.productId);
+  const driverRef = assignedDriverId == null
+    ? null : tenantRef.collection("members").doc(assignedDriverId);
   const actor = actorSnapshot(await auth.getUser(caller.uid));
 
   return db.runTransaction(async (transaction) => {
-    const [venue, table, namedTab, existingOrder, product] = await Promise.all([
+    const [venue, table, namedTab, existingOrder, product, driver] = await Promise.all([
       transaction.get(venueRef),
       tableRef == null ? Promise.resolve(null) : transaction.get(tableRef),
       tabRef == null ? Promise.resolve(null) : transaction.get(tabRef),
       transaction.get(orderRef),
       transaction.get(productRef),
+      driverRef == null ? Promise.resolve(null) : transaction.get(driverRef),
     ]);
     if (!venue.exists || venue.data().status === "deleting") {
       throw new HttpsError("failed-precondition", "The selected venue is not active.");
@@ -4973,6 +7751,42 @@ async function addOrderDraftLineFor(caller, rawData) {
     if ((channel === "collection" && venue.data().collectionEnabled !== true) ||
         (channel === "delivery" && venue.data().deliveryEnabled !== true)) {
       throw new HttpsError("failed-precondition", `${channel} ordering is not enabled at this venue.`);
+    }
+    const serviceArea = channel === "delivery"
+      ? (Array.isArray(venue.data().serviceAreas) ? venue.data().serviceAreas : [])
+          .find((area) => area?.id === requestedServiceAreaId && area?.active !== false)
+      : null;
+    if (channel === "delivery" && serviceArea == null) {
+      throw new HttpsError(
+        "failed-precondition", "Choose an active delivery town or area.",
+      );
+    }
+    const serviceAreaName = serviceArea == null
+      ? null : requiredText(serviceArea, "name", 100);
+    const deliveryFeeMinor = serviceArea == null
+      ? 0 : requiredNonNegativeInteger(
+          serviceArea.deliveryFeeMinor ?? 0, "deliveryFeeMinor", 100000000,
+        );
+    const serviceAreaMinimumOrderMinor = serviceArea == null
+      ? 0 : requiredNonNegativeInteger(
+          serviceArea.minimumOrderMinor ?? 0,
+          "minimumOrderMinor",
+          100000000,
+        );
+    let assignedDriverName = null;
+    if (driver != null) {
+      const driverRoles = driver.exists && Array.isArray(driver.data().roles)
+        ? driver.data().roles : [];
+      const driverVenueIds = driver.exists && Array.isArray(driver.data().venueIds)
+        ? driver.data().venueIds : [];
+      if (!driver.exists || driver.data().active === false ||
+          !driverRoles.includes("driver") ||
+          (driverVenueIds.length > 0 && !driverVenueIds.includes(venueId))) {
+        throw new HttpsError(
+          "failed-precondition", "Select an active driver assigned to this venue.",
+        );
+      }
+      assignedDriverName = driver.data().displayName ?? driver.data().email ?? "Driver";
     }
     if (tableRef != null && (!table.exists || table.data().venueId !== venueId)) {
       throw new HttpsError("failed-precondition", "The selected table is not available at this venue.");
@@ -5004,6 +7818,12 @@ async function addOrderDraftLineFor(caller, rawData) {
       if ((current.channel ?? "dineIn") !== channel) {
         throw new HttpsError("failed-precondition", "This order belongs to another sales channel.");
       }
+      if (channel === "delivery" &&
+          (current.serviceAreaId ?? null) !== requestedServiceAreaId) {
+        throw new HttpsError(
+          "failed-precondition", "This delivery order belongs to another delivery area.",
+        );
+      }
       priorLines = Array.isArray(current.lines) ? current.lines : [];
       // A lost HTTP response must never result in the same tap being added
       // twice. Line IDs are generated once by the client and are idempotent.
@@ -5022,7 +7842,9 @@ async function addOrderDraftLineFor(caller, rawData) {
     const productData = product.data();
     if ((channel === "collection" && productData.availableForCollection === false) ||
         (channel === "delivery" && productData.availableForDelivery === false)) {
-      throw new HttpsError("failed-precondition", `This product is unavailable for ${channel}.`);
+      if (!channelAvailabilityOverride) {
+        throw new HttpsError("failed-precondition", `This product is unavailable for ${channel}.`);
+      }
     }
     const modifierGroupIds = configuredModifierGroupIds(productData);
     const modifierGroups = await Promise.all(
@@ -5167,6 +7989,7 @@ async function addOrderDraftLineFor(caller, rawData) {
       deviceObservedAtMillis: clientObservedAtMillis,
       clockSkewMillis,
       addedByActor: actor,
+      channelAvailabilityOverride,
     };
     const current = existingOrder.exists ? existingOrder.data() : null;
     const tableLabel = tableRef == null
@@ -5184,11 +8007,24 @@ async function addOrderDraftLineFor(caller, rawData) {
       customerPhone: channel === "dineIn" ? null : requiredText(data, "customerPhone", 40),
       deliveryAddress: channel === "delivery"
         ? requiredText(data, "deliveryAddress", 500) : null,
+      deliveryAddressLabel,
+      deliveryLatitude: channel === "delivery" ? deliveryLatitude : null,
+      deliveryLongitude: channel === "delivery" ? deliveryLongitude : null,
+      serviceAreaId: channel === "delivery" ? requestedServiceAreaId : null,
+      serviceAreaName: channel === "delivery" ? serviceAreaName : null,
+      deliveryFeeMinor: channel === "delivery" ? deliveryFeeMinor : 0,
+      serviceAreaMinimumOrderMinor: channel === "delivery"
+        ? serviceAreaMinimumOrderMinor : 0,
       scheduledForMillis: channel === "dineIn" ? null :
         (Number.isSafeInteger(Number(data.scheduledForMillis))
           ? Number(data.scheduledForMillis) : null),
       primaryWaiterId: optionalText(data, "primaryWaiterId", 180) || caller.uid,
       primaryWaiterName: optionalText(data, "primaryWaiterName", 120) || actor.displayName || "",
+      ...(assignedDriverId == null ? {} : {
+        assignedDriverId,
+        assignedDriverName,
+        fulfilmentStatus: "assigned",
+      }),
       tableLabel,
       status: current?.status === "sent" ? "sent" : "open",
       openedAt: current?.openedAt ?? FieldValue.serverTimestamp(),
@@ -5215,10 +8051,28 @@ async function addOrderDraftLineFor(caller, rawData) {
       serverObservedAtMillis: addedAtMillis,
       deviceObservedAtMillis: clientObservedAtMillis,
       clockSkewMillis,
+      channelAvailabilityOverride,
       venueTimeZone,
       actor,
       createdAt: FieldValue.serverTimestamp(),
     });
+    if (!existingOrder.exists && assignedDriverId != null) {
+      transaction.create(
+        tenantRef.collection("notificationEvents").doc(`${orderId}_driverAssigned`),
+        {
+          venueId,
+          type: "delivery.assigned",
+          orderId,
+          recipientUserIds: [assignedDriverId],
+          recipientRoles: [],
+          title: "Delivery assigned",
+          body: `${requiredText(data, "customerName", 120)}: preparing`,
+          status: "pending",
+          createdAt: FieldValue.serverTimestamp(),
+          createdByActor: actor,
+        },
+      );
+    }
     return {orderId, saved: true, alreadyPresent: false};
   });
 }
@@ -6293,6 +9147,14 @@ async function printPreReceiptFor(caller, rawData) {
         business: receiptBusinessSnapshot(tenant.data(), venue.data()), currencyCode,
         tableLabel: typeof order.data().tableLabel === "string" ? order.data().tableLabel : null,
         tabName: typeof order.data().tabName === "string" ? order.data().tabName : null,
+        channel: order.data().channel ?? "dineIn",
+        customerName: order.data().customerName ?? null,
+        customerPhone: order.data().customerPhone ?? null,
+        deliveryAddress: order.data().deliveryAddress ?? null,
+        deliveryAddressLabel: order.data().deliveryAddressLabel ?? null,
+        deliveryLatitude: order.data().deliveryLatitude ?? null,
+        deliveryLongitude: order.data().deliveryLongitude ?? null,
+        scheduledForMillis: order.data().scheduledForMillis ?? null,
         totalMinor, netTotalMinor: totalMinor - taxTotalMinor, taxTotalMinor,
         taxBreakdown: [], lines: receiptLines, payments,
         paidTotalMinor, balanceDueMinor,
@@ -6337,6 +9199,9 @@ async function refreshStaffPinSessionFor(caller, rawData) {
   ));
   const membership = await db.doc(`tenants/${tenantId}/members/${caller.uid}`).get();
   const roles = Array.isArray(membership.data()?.roles) ? membership.data().roles : [];
+  const pin = await db.doc(
+    `tenants/${tenantId}/staffPins/${staffPinDocumentId(venueId, caller.uid)}`,
+  ).get();
   const batch = db.batch();
   batch.update(sessionRef, {
     expiresAt,
@@ -6346,12 +9211,102 @@ async function refreshStaffPinSessionFor(caller, rawData) {
     userId: caller.uid,
     venueId,
     roles,
+    pinVersion: Number(pin.data()?.pinVersion ?? 0),
+    membershipVersion: Number(membership.data()?.membershipVersion ?? 0),
     sessionId,
     expiresAt,
     updatedAt: FieldValue.serverTimestamp(),
   }, {merge: true});
   await batch.commit();
   return {expiresAt: expiresAt.toISOString()};
+}
+
+// Cancels a mistaken order only after all items have been removed. Keeping
+// this separate from checkout prevents zero-value bills, receipts and sales
+// reports while still releasing the table/tab in one audited transaction.
+async function cancelEmptyOrderFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const orderId = requiredText(data, "orderId", 180);
+  const reason = requiredText(data, "reason", 240).trim();
+  requiredDocumentId(data, "requestId");
+  if (reason.length < 3) {
+    throw new HttpsError("invalid-argument", "Enter a reason for closing the empty order.");
+  }
+  await requireTenantOperationalMember(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const orderRef = tenantRef.collection("orders").doc(orderId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const auditRef = tenantRef.collection("auditEvents").doc();
+
+  return db.runTransaction(async (transaction) => {
+    const [venue, order] = await Promise.all([
+      transaction.get(venueRef),
+      transaction.get(orderRef),
+    ]);
+    if (!venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (!order.exists || order.data().venueId !== venueId) {
+      throw new HttpsError("failed-precondition", "The order is not open at this venue.");
+    }
+    const orderData = order.data();
+    if (orderData.status === "closed" && orderData.cancelled === true) {
+      return {cancelled: true, alreadyCancelled: true};
+    }
+    if (orderData.status === "closed") {
+      throw new HttpsError("failed-precondition", "The order has already been completed.");
+    }
+    const lines = Array.isArray(orderData.lines) ? orderData.lines : [];
+    const payments = Array.isArray(orderData.payments) ? orderData.payments : [];
+    if (lines.length !== 0 || payments.length !== 0) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Only an empty, unpaid order can be cancelled.",
+      );
+    }
+    const tableRef = typeof orderData.tableId === "string" && orderData.tableId.length > 0
+      ? tenantRef.collection("tables").doc(orderData.tableId) : null;
+    const tabRef = typeof orderData.tabName === "string" && orderData.tabName.trim().length > 0
+      ? openTabRegistryRef(tenantId, venueId, orderData.tabName) : null;
+    const [table, tab] = await Promise.all([
+      tableRef == null ? Promise.resolve(null) : transaction.get(tableRef),
+      tabRef == null ? Promise.resolve(null) : transaction.get(tabRef),
+    ]);
+
+    transaction.update(orderRef, {
+      status: "closed",
+      fulfilmentStatus: orderData.channel === "dineIn"
+        ? orderData.fulfilmentStatus ?? null : "cancelled",
+      cancelled: true,
+      cancelledAt: FieldValue.serverTimestamp(),
+      cancellationReason: reason,
+      cancelledByStaffId: caller.uid,
+      closedAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    if (tableRef != null && table?.exists && table.data().currentOrderId === orderId) {
+      transaction.set(tableRef, {
+        currentOrderId: null,
+        hasOpenOrder: false,
+        updatedAt: FieldValue.serverTimestamp(),
+      }, {merge: true});
+    }
+    if (tabRef != null && tab?.exists && tab.data().orderId === orderId) {
+      transaction.delete(tabRef);
+    }
+    transaction.create(auditRef, {
+      action: "cancelEmptyOrder",
+      venueId,
+      orderId,
+      reason,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {cancelled: true, alreadyCancelled: false};
+  });
 }
 
 async function closeOrderFor(caller, rawData) {
@@ -6536,7 +9491,28 @@ async function closeOrderFor(caller, rawData) {
           : [],
       };
     });
-    const totalMinor = lines.reduce((total, line) => total + line.lineTotalMinor, 0);
+    const deliveryFeeMinor = orderData.channel === "delivery"
+      ? requiredNonNegativeInteger(
+          orderData.deliveryFeeMinor ?? 0, "deliveryFeeMinor", 100000000,
+        )
+      : 0;
+    const lineTotalMinor = lines.reduce(
+      (total, line) => total + line.lineTotalMinor, 0,
+    );
+    const minimumOrderMinor = orderData.channel === "delivery"
+      ? requiredNonNegativeInteger(
+          orderData.serviceAreaMinimumOrderMinor ?? 0,
+          "minimumOrderMinor",
+          100000000,
+        )
+      : 0;
+    if (lineTotalMinor < minimumOrderMinor) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The food and drink total is below this delivery area's minimum order.",
+      );
+    }
+    const totalMinor = lineTotalMinor + deliveryFeeMinor;
     if (!Number.isSafeInteger(totalMinor) || totalMinor <= 0) {
       throw new HttpsError("failed-precondition", "This order has no payable total.");
     }
@@ -6555,6 +9531,17 @@ async function closeOrderFor(caller, rawData) {
       current.netMinor += line.netMinor;
       current.taxMinor += line.taxMinor;
       taxByRate.set(taxKey, current);
+    }
+    if (deliveryFeeMinor > 0) {
+      const deliveryTaxKey = "delivery_fee_zero_rate";
+      taxByRate.set(deliveryTaxKey, {
+        taxRateId: null,
+        taxRateName: "Delivery fee",
+        taxRateBasisPoints: 0,
+        grossMinor: deliveryFeeMinor,
+        netMinor: deliveryFeeMinor,
+        taxMinor: 0,
+      });
     }
     const taxBreakdown = [...taxByRate.values()].sort(
       (left, right) => left.taxRateBasisPoints - right.taxRateBasisPoints,
@@ -6764,6 +9751,17 @@ async function closeOrderFor(caller, rawData) {
       tableId,
       tableLabel: typeof orderData.tableLabel === "string" ? orderData.tableLabel : null,
       tabName,
+      channel: orderData.channel ?? "dineIn",
+      customerName: orderData.customerName ?? null,
+      customerPhone: orderData.customerPhone ?? null,
+      deliveryAddress: orderData.deliveryAddress ?? null,
+      deliveryAddressLabel: orderData.deliveryAddressLabel ?? null,
+      deliveryLatitude: orderData.deliveryLatitude ?? null,
+      deliveryLongitude: orderData.deliveryLongitude ?? null,
+      serviceAreaId: orderData.serviceAreaId ?? null,
+      serviceAreaName: orderData.serviceAreaName ?? null,
+      deliveryFeeMinor,
+      scheduledForMillis: orderData.scheduledForMillis ?? null,
       splitFromOrderId,
       splitSequence: Number.isInteger(orderData.splitSequence)
         ? orderData.splitSequence
@@ -6833,6 +9831,18 @@ async function closeOrderFor(caller, rawData) {
             ? orderData.tableLabel
             : null,
           tabName,
+          channel: orderData.channel ?? "dineIn",
+          customerName: orderData.customerName ?? null,
+          customerPhone: orderData.customerPhone ?? null,
+          deliveryAddress: orderData.deliveryAddress ?? null,
+          deliveryAddressLabel: orderData.deliveryAddressLabel ?? null,
+          deliveryLatitude: orderData.deliveryLatitude ?? null,
+          deliveryLongitude: orderData.deliveryLongitude ?? null,
+          deliveryChargeMinor: deliveryFeeMinor,
+          serviceAreaId: orderData.serviceAreaId ?? null,
+          serviceAreaName: orderData.serviceAreaName ?? null,
+          deliveryFeeMinor,
+          scheduledForMillis: orderData.scheduledForMillis ?? null,
           totalMinor,
           netTotalMinor,
           taxTotalMinor,
@@ -6849,6 +9859,13 @@ async function closeOrderFor(caller, rawData) {
     if (orderClosed) {
       transaction.update(orderRef, {
         status: "closed",
+        ...(orderData.channel === "collection"
+          ? {
+            fulfilmentStatus: "collected",
+            fulfilmentUpdatedAt: FieldValue.serverTimestamp(),
+            fulfilmentUpdatedByActor: actor,
+          }
+          : {}),
         payments: allPayments,
         paidMinor: paidTotalMinor,
         balanceDueMinor: 0,
@@ -6961,7 +9978,9 @@ async function createRefundFor(caller, rawData) {
   const reason = requiredText(data, "reason", 500);
   const printReceipt = data.printReceipt !== false;
   const cardRefundConfirmed = data.cardRefundConfirmed === true;
-  await requireFreshManagerPin(caller, tenantId, venueId, data.managerPin);
+  await requireFreshManagerPin(
+    caller, tenantId, venueId, data.managerPin, "createRefund",
+  );
 
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
@@ -7332,7 +10351,9 @@ async function startTrainingModeFor(caller, rawData) {
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
   const targetDeviceId = optionalText(data, "targetDeviceId", 1500) || null;
-  await requireFreshManagerPin(caller, tenantId, venueId, data.managerPin);
+  await requireFreshManagerPin(
+    caller, tenantId, venueId, data.managerPin, "startTrainingMode",
+  );
   const tenantRef = db.doc(`tenants/${tenantId}`);
   const venueRef = tenantRef.collection("venues").doc(venueId);
   const deviceRef = targetDeviceId == null
@@ -7519,7 +10540,9 @@ async function clearTrainingDataFor(caller, rawData) {
   const data = requireObject(rawData);
   const tenantId = requiredText(data, "tenantId", 128);
   const venueId = requiredText(data, "venueId", 128);
-  await requireFreshManagerPin(caller, tenantId, venueId, data.managerPin);
+  await requireFreshManagerPin(
+    caller, tenantId, venueId, data.managerPin, "clearTrainingData",
+  );
   // Reserve one write in the batch for the audit event (Firestore permits a
   // maximum of 500 writes per batch).
   const snapshot = await db.collection(`tenants/${tenantId}/trainingOrders`)
@@ -7956,6 +10979,155 @@ async function reprintPrintedJobFor(caller, rawData) {
   });
 }
 
+async function materializeOfflineFulfilmentChanges(tenantRef, venueId, events) {
+  // Fulfilment updates accepted by the authoritative venue hub must reach the
+  // cloud KDS projection too. This keeps remote displays and driver alerts in
+  // step without allowing clients to write production tickets directly.
+  for (const event of events.filter((item) => item.type === "order.fulfilmentChanged")) {
+    const status = event.payload.status;
+    const driverDeclined = status === "driverDeclined";
+    const driverId = typeof event.payload.driverId === "string"
+      ? event.payload.driverId : null;
+    let driverName = null;
+    if (driverId != null) {
+      const driver = await tenantRef.collection("members").doc(driverId).get();
+      driverName = driver.exists
+        ? driver.data().displayName ?? driver.data().email ?? "Driver"
+        : "Driver";
+    }
+    const tickets = await tenantRef.collection("productionTickets")
+      .where("orderId", "==", event.payload.orderId).get();
+    const batch = db.batch();
+    for (const ticket of tickets.docs) {
+      if (ticket.data().venueId !== venueId) continue;
+      batch.update(ticket.ref, {
+        fulfilmentStatus: status,
+        driverDeclined,
+        ...(driverDeclined ? {
+          assignedDriverId: FieldValue.delete(),
+          assignedDriverName: FieldValue.delete(),
+        } : {}),
+        ...(driverId == null ? {} : {
+          assignedDriverId: driverId,
+          assignedDriverName: driverName,
+        }),
+      });
+    }
+    if (driverDeclined) {
+      batch.set(tenantRef.collection("notificationEvents").doc(`offline_driver_declined_${event.id}`), {
+        venueId,
+        type: "order.driverDeclined",
+        orderId: event.payload.orderId,
+        recipientUserIds: [],
+        recipientRoles: ["manager", "owner"],
+        title: "Driver declined delivery",
+        body: "Choose another driver for this delivery.",
+        status: "pending",
+        sourceEventId: event.id,
+        createdAt: FieldValue.serverTimestamp(),
+      }, {merge: false});
+    }
+    await batch.commit();
+  }
+}
+
+// Reprints a live kitchen/bar ticket on a manager-selected printer. The
+// server reconstructs the print payload exclusively from the production
+// ticket and validates the device belongs to this venue and production area,
+// preventing a modified client from printing arbitrary content or leaking a
+// ticket to another restaurant.
+async function reprintProductionTicketFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const ticketId = requiredDocumentId(data, "ticketId");
+  const targetDeviceId = requiredDocumentId(data, "targetDeviceId");
+  const {roles} = await requireTenantOperationalMember(caller, tenantId);
+  if (!roles.some((role) => role === "owner" || role === "manager")) {
+    throw new HttpsError(
+      "permission-denied",
+      "Only a manager can reprint a production ticket.",
+    );
+  }
+
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const venueRef = tenantRef.collection("venues").doc(venueId);
+  const ticketRef = tenantRef.collection("productionTickets").doc(ticketId);
+  const deviceRef = tenantRef.collection("devices").doc(targetDeviceId);
+  const reprintRef = tenantRef.collection("printJobs").doc();
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  return db.runTransaction(async (transaction) => {
+    const [tenant, venue, ticket, device] = await Promise.all([
+      transaction.get(tenantRef),
+      transaction.get(venueRef),
+      transaction.get(ticketRef),
+      transaction.get(deviceRef),
+    ]);
+    if (!tenant.exists || !venue.exists || venue.data().status === "deleting") {
+      throw new HttpsError("failed-precondition", "The selected venue is not active.");
+    }
+    if (!ticket.exists || ticket.data().venueId !== venueId) {
+      throw new HttpsError("not-found", "The production ticket was not found at this venue.");
+    }
+    const ticketData = ticket.data();
+    const productionArea = typeof ticketData.productionArea === "string"
+      ? ticketData.productionArea
+      : "kitchen";
+    if (!activeRouteDevice(device, venueId, productionArea)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The selected printer is not active for this production area.",
+      );
+    }
+    const restaurantName = receiptBusinessSnapshot(
+      tenant.data() ?? {}, venue.data() ?? {},
+    ).name;
+    transaction.create(reprintRef, {
+      venueId,
+      targetDeviceId,
+      fallbackDeviceId: null,
+      orderId: typeof ticketData.orderId === "string" ? ticketData.orderId : "",
+      ticketId,
+      productionArea,
+      status: "queued",
+      attempts: 0,
+      idempotencyKey: reprintRef.id,
+      payload: {
+        type: "production",
+        isReprint: true,
+        reprintOfTicketId: ticketId,
+        ticketId,
+        restaurantName,
+        reference: ticketData.reference ?? ticketId,
+        productionArea,
+        tableLabel: ticketData.tableLabel ?? null,
+        tabName: ticketData.tabName ?? null,
+        courseName: ticketData.courseName ?? "Course",
+        isAddition: ticketData.isAddition === true,
+        createdByName: actor.displayName ?? actor.email ?? "",
+        lines: Array.isArray(ticketData.productionItems)
+          ? ticketData.productionItems
+          : [],
+      },
+      reprintOfTicketId: ticketId,
+      manualReprintRequestedByActor: actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    transaction.create(tenantRef.collection("auditEvents").doc(), {
+      action: "reprintProductionTicket",
+      venueId,
+      ticketId,
+      reprintJobId: reprintRef.id,
+      orderId: typeof ticketData.orderId === "string" ? ticketData.orderId : null,
+      productionArea,
+      targetDeviceId,
+      actor,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    return {jobId: reprintRef.id, queued: true, isReprint: true};
+  });
+}
+
 // Queue jobs are retained for audit, never physically deleted. A manager can
 // cancel work that has not been claimed by a printer yet. A recently claimed
 // job may already be travelling to the printer and remains protected, while a
@@ -8084,6 +11256,42 @@ async function cancelPrintJobFor(caller, rawData) {
 // this server-side trigger create a separate, idempotent fallback job.  That
 // prevents the same ticket printing at both locations while a printer is just
 // temporarily slow to connect.
+export const signalQueuedPrinter = onDocumentWritten(
+  "tenants/{tenantId}/printJobs/{jobId}",
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (after?.status !== "queued" ||
+        (before?.status === "queued" &&
+         before?.targetDeviceId === after.targetDeviceId)) return;
+    const venueId = typeof after.venueId === "string" ? after.venueId : "";
+    const deviceId = typeof after.targetDeviceId === "string"
+      ? after.targetDeviceId : "";
+    if (!venueId || !deviceId) return;
+    const url = resolvedRealtimeDatabaseUrl();
+    if (url.length === 0) return;
+    await configuredRealtimeDatabase().database
+      .ref(`printerSignals/${event.params.tenantId}/${venueId}/${deviceId}`)
+      .set({
+        jobId: event.params.jobId,
+        signaledAt: ServerValue.TIMESTAMP,
+      });
+  },
+);
+
+// Firestore TTL eventually deletes remote commands. Remove the parallel RTDB
+// acknowledgement at the same time so the fast channel stays bounded.
+export const cleanupRealtimeRemoteCommand = onDocumentDeleted(
+  "tenants/{tenantId}/venues/{venueId}/remoteHubCommands/{commandId}",
+  async (event) => {
+    const url = resolvedRealtimeDatabaseUrl();
+    if (url.length === 0) return;
+    await configuredRealtimeDatabase().database.ref(
+      `remoteCommandStatus/${event.params.tenantId}/${event.params.venueId}/${event.params.commandId}`,
+    ).remove();
+  },
+);
+
 export const enqueueFallbackPrintJob = onDocumentUpdated(
   "tenants/{tenantId}/printJobs/{jobId}",
   async (event) => {
@@ -8422,7 +11630,9 @@ async function sendOrderToProductionFor(caller, rawData) {
       }
       if ((channel === "collection" && product.availableForCollection === false) ||
           (channel === "delivery" && product.availableForDelivery === false)) {
-        throw new HttpsError("failed-precondition", `A selected product is unavailable for ${channel}.`);
+        if (line.channelAvailabilityOverride !== true) {
+          throw new HttpsError("failed-precondition", `A selected product is unavailable for ${channel}.`);
+        }
       }
       const configuration = canonicalLineConfiguration({
         productData: product,
@@ -8523,9 +11733,21 @@ async function sendOrderToProductionFor(caller, rawData) {
       const courseName = first.courseName;
       const courseSequence = first.courseSequence;
       const releasePolicy = first.courseReleasePolicy;
-      const held = channel === "dineIn" && releasePolicy !== "immediate";
+      const scheduledForMillis = Number(existingOrder.data()?.scheduledForMillis);
+      const leadMinutes = channel === "delivery"
+        ? Number(venue.data().deliveryLeadMinutes ?? 20)
+        : Number(venue.data().collectionLeadMinutes ?? 20);
+      const productionStartMillis = channel === "dineIn" ||
+          !Number.isSafeInteger(scheduledForMillis)
+        ? null
+        : scheduledForMillis - Math.max(1, leadMinutes) * 60000;
+      const heldForSchedule = productionStartMillis != null && productionStartMillis > Date.now();
+      const held = heldForSchedule ||
+        (channel === "dineIn" && releasePolicy !== "immediate");
       const ticketId = `${orderId}_${area}_${courseId}_${areaLines.map((line) => line.id).join("_")}`;
       return {area, lines: areaLines, courseId, courseName, courseSequence, releasePolicy, held,
+        scheduledForMillis: Number.isSafeInteger(scheduledForMillis) ? scheduledForMillis : null,
+        productionStartMillis,
         ticketId, ref: tenantRef.collection("productionTickets").doc(ticketId)};
     });
     const existingTickets = await Promise.all(
@@ -8649,6 +11871,13 @@ async function sendOrderToProductionFor(caller, rawData) {
         tabName,
         channel,
         customerName: existingOrder.data()?.customerName ?? null,
+        customerPhone: existingOrder.data()?.customerPhone ?? null,
+        deliveryAddress: existingOrder.data()?.deliveryAddress ?? null,
+        deliveryAddressLabel: existingOrder.data()?.deliveryAddressLabel ?? null,
+        deliveryLatitude: existingOrder.data()?.deliveryLatitude ?? null,
+        deliveryLongitude: existingOrder.data()?.deliveryLongitude ?? null,
+        scheduledForMillis: ticket.scheduledForMillis,
+        productionStartMillis: ticket.productionStartMillis,
         productionArea: ticket.area,
         courseId: ticket.courseId,
         courseName: ticket.courseName,
@@ -8705,6 +11934,13 @@ async function sendOrderToProductionFor(caller, rawData) {
               productionArea: ticket.area,
               tableLabel,
               tabName,
+              channel,
+              customerName: existingOrder.data()?.customerName ?? null,
+              deliveryAddress: existingOrder.data()?.deliveryAddress ?? null,
+              deliveryAddressLabel: existingOrder.data()?.deliveryAddressLabel ?? null,
+              deliveryLatitude: existingOrder.data()?.deliveryLatitude ?? null,
+              deliveryLongitude: existingOrder.data()?.deliveryLongitude ?? null,
+              scheduledForMillis: ticket.scheduledForMillis,
               isAddition: hasPriorSentLines,
               courseName: ticket.courseName,
               createdByName: actor.displayName ?? actor.email ?? "",
@@ -8840,6 +12076,7 @@ async function releaseHeldProductionTicket({tenantId, venueId, ticketId, actor})
     if (!current.exists || current.data().flowStatus !== "held") return false;
     transaction.update(ticketRef, {
       flowStatus: "newOrder",
+      isDelayed: false,
       ticketReleasedAt: FieldValue.serverTimestamp(),
       flowUpdatedAt: FieldValue.serverTimestamp(),
       flowUpdatedByActor: actor,
@@ -8858,6 +12095,13 @@ async function releaseHeldProductionTicket({tenantId, venueId, ticketId, actor})
           productionArea: area,
           tableLabel: current.data().tableLabel ?? null,
           tabName: current.data().tabName ?? null,
+          channel: current.data().channel ?? "dineIn",
+          customerName: current.data().customerName ?? null,
+          deliveryAddress: current.data().deliveryAddress ?? null,
+          deliveryAddressLabel: current.data().deliveryAddressLabel ?? null,
+          deliveryLatitude: current.data().deliveryLatitude ?? null,
+          deliveryLongitude: current.data().deliveryLongitude ?? null,
+          scheduledForMillis: current.data().scheduledForMillis ?? null,
           courseName: current.data().courseName ?? "Course",
           isAddition: true,
           createdByName: actor.displayName ?? actor.email ?? "",
@@ -8874,6 +12118,31 @@ async function releaseHeldProductionTicket({tenantId, venueId, ticketId, actor})
     });
     return true;
   });
+}
+
+async function releaseDueFulfilmentTicketsFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  await requireTenantOperationalMember(caller, tenantId);
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  const now = Date.now();
+  // Filter the status and due time in process to avoid making every existing
+  // venue deploy a new composite index before scheduled orders can run.
+  const snapshot = await db.collection(`tenants/${tenantId}/productionTickets`)
+    .where("venueId", "==", venueId).limit(500).get();
+  const due = snapshot.docs.filter((ticket) =>
+    ticket.data().flowStatus === "held" &&
+    ["collection", "delivery"].includes(ticket.data().channel) &&
+    Number.isSafeInteger(Number(ticket.data().productionStartMillis)) &&
+    Number(ticket.data().productionStartMillis) <= now);
+  let released = 0;
+  for (const ticket of due) {
+    if (await releaseHeldProductionTicket({
+      tenantId, venueId, ticketId: ticket.id, actor,
+    })) released += 1;
+  }
+  return {released};
 }
 
 async function releaseEligibleFollowingCourses({tenantId, venueId, orderId, actor}) {
@@ -8994,6 +12263,30 @@ async function updateProductionTicketFor(caller, rawData) {
       tenantId, venueId, orderId: result.orderId, actor,
     });
   }
+  if (flowStatus === "preparing" && typeof result.orderId === "string") {
+    const order = await db.doc(`tenants/${tenantId}/orders/${result.orderId}`).get();
+    if (order.exists && ["collection", "delivery"].includes(order.data().channel)) {
+      await db.doc(
+        `tenants/${tenantId}/notificationEvents/${result.orderId}_preparing`,
+      ).set({
+        venueId,
+        type: "order.preparing",
+        orderId: result.orderId,
+        recipientUserIds: [
+          ...(typeof order.data().assignedDriverId === "string"
+            ? [order.data().assignedDriverId] : []),
+          ...(typeof order.data().primaryWaiterId === "string"
+            ? [order.data().primaryWaiterId] : []),
+        ],
+        recipientRoles: ["manager"],
+        title: `${order.data().channel === "delivery" ? "Delivery" : "Collection"} preparing`,
+        body: order.data().customerName ?? "Customer order",
+        status: "pending",
+        createdAt: FieldValue.serverTimestamp(),
+        createdByActor: actor,
+      }, {merge: true});
+    }
+  }
   if (["ready", "collected", "served"].includes(flowStatus)) {
     await markFulfilmentReadyWhenProductionComplete({
       tenantId, venueId, orderId: result.orderId, actor,
@@ -9061,6 +12354,29 @@ function validatedDraftOrderLines(value) {
     ids.add(lineId);
     return {lineId, orderedPacks};
   });
+}
+
+function inventoryMutationIdentity({tenantRef, data, operation, documentId, values}) {
+  const requestId = requiredDocumentId(data, "requestId");
+  const requestDigest = createHash("sha256").update(JSON.stringify(canonicalJsonValue({
+    operation, documentId, values,
+  }))).digest("base64url");
+  return {
+    requestId,
+    requestDigest,
+    reference: tenantRef.collection("inventoryOperations").doc(requestId),
+  };
+}
+
+function inventoryMutationWasReplayed(snapshot, requestDigest) {
+  if (!snapshot.exists) return false;
+  if (snapshot.data().requestDigest !== requestDigest) {
+    throw new HttpsError(
+      "already-exists",
+      "That inventory request key was already used for different data.",
+    );
+  }
+  return true;
 }
 
 /// Manager-only stock and purchasing surface. All costs, pack conversions,
@@ -9389,8 +12705,17 @@ async function manageInventoryFor(caller, rawData) {
     if (documentId == null) throw new HttpsError("invalid-argument", "documentId is required.");
     const receipts = validatedReceiptLines(values.lines);
     const reference = tenantRef.collection("purchaseOrders").doc(documentId);
-    await db.runTransaction(async (transaction) => {
-      const order = await transaction.get(reference);
+    const mutation = inventoryMutationIdentity({
+      tenantRef, data, operation, documentId, values,
+    });
+    const replayed = await db.runTransaction(async (transaction) => {
+      const [order, existingMutation] = await Promise.all([
+        transaction.get(reference),
+        transaction.get(mutation.reference),
+      ]);
+      if (inventoryMutationWasReplayed(existingMutation, mutation.requestDigest)) {
+        return true;
+      }
       if (!order.exists || order.data().venueId !== venueId) {
         throw new HttpsError("not-found", "That purchase order was not found.");
       }
@@ -9443,9 +12768,17 @@ async function manageInventoryFor(caller, rawData) {
         lastReceivedAt: FieldValue.serverTimestamp(), lastReceivedByActor: actor,
         updatedAt: FieldValue.serverTimestamp(),
       });
+      transaction.create(mutation.reference, {
+        tenantId, venueId, operation, documentId,
+        requestDigest: mutation.requestDigest,
+        actor,
+        createdAt: FieldValue.serverTimestamp(),
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      });
+      return false;
     });
-    await audit(documentId, {resource: "purchaseReceipt"});
-    return {documentId};
+    if (!replayed) await audit(documentId, {resource: "purchaseReceipt"});
+    return {documentId, alreadyApplied: replayed};
   }
 
   if (operation === "adjustStock") {
@@ -9467,9 +12800,18 @@ async function manageInventoryFor(caller, rawData) {
     }
     const reason = requiredText(values, "reason", 500);
     const productRef = tenantRef.collection("products").doc(productId);
+    const mutation = inventoryMutationIdentity({
+      tenantRef, data, operation, documentId: productId, values,
+    });
     let appliedQuantity = requestedQuantity;
-    await db.runTransaction(async (transaction) => {
-      const product = await transaction.get(productRef);
+    const replayed = await db.runTransaction(async (transaction) => {
+      const [product, existingMutation] = await Promise.all([
+        transaction.get(productRef),
+        transaction.get(mutation.reference),
+      ]);
+      if (inventoryMutationWasReplayed(existingMutation, mutation.requestDigest)) {
+        return true;
+      }
       if (!product.exists || product.data().venueId !== venueId || product.data().trackStock !== true) {
         throw new HttpsError("not-found", "That stock-tracked product was not found at this venue.");
       }
@@ -9495,11 +12837,21 @@ async function manageInventoryFor(caller, rawData) {
           : {}),
         actor, createdAt: FieldValue.serverTimestamp(),
       });
+      transaction.create(mutation.reference, {
+        tenantId, venueId, operation, documentId: productId,
+        requestDigest: mutation.requestDigest,
+        actor,
+        createdAt: FieldValue.serverTimestamp(),
+        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      });
+      return false;
     });
-    await audit(productId, {
-      resource: "stockAdjustment", adjustmentType, quantity: appliedQuantity, reason,
-    });
-    return {documentId: productId};
+    if (!replayed) {
+      await audit(productId, {
+        resource: "stockAdjustment", adjustmentType, quantity: appliedQuantity, reason,
+      });
+    }
+    return {documentId: productId, alreadyApplied: replayed};
   }
 
   throw new HttpsError("invalid-argument", "That inventory operation is not supported.");
@@ -9533,7 +12885,7 @@ async function invokePlatformAction(action, caller, data) {
         .get();
       const onboardingActions = new Set([
         "listAuthUsers", "listTenants", "listSupportedTimeZones",
-        "listSupportedCurrencies", "createTenant",
+        "listSupportedCurrencies", "listPlatformLocations", "createTenant",
       ]);
       const configuredInitialEmail = initialPlatformAdminEmail.value().trim().toLowerCase();
       const callerEmail = typeof caller.token.email === "string"
@@ -9571,6 +12923,12 @@ async function invokePlatformAction(action, caller, data) {
       return listSupportedTimeZonesFor(actingCaller);
     case "listSupportedCurrencies":
       return listSupportedCurrenciesFor(actingCaller);
+    case "listPlatformLocations":
+      return listPlatformLocationsFor(actingCaller);
+    case "savePlatformLocation":
+      return savePlatformLocationFor(actingCaller, data);
+    case "deletePlatformLocation":
+      return deletePlatformLocationFor(actingCaller, data);
     case "listTenantVenues":
       return listTenantVenuesFor(actingCaller, data);
     case "listUserMemberships":
@@ -9598,13 +12956,105 @@ async function invokePlatformAction(action, caller, data) {
   }
 }
 
+async function printFulfilmentDeliveryNoteFor(caller, rawData) {
+  const data = requireObject(rawData);
+  const tenantId = requiredText(data, "tenantId", 128);
+  const venueId = requiredText(data, "venueId", 128);
+  const orderId = requiredDocumentId(data, "orderId");
+  const targetDeviceId = requiredDocumentId(data, "targetDeviceId");
+  const requestId = requiredText(data, "requestId", 180);
+  await requireTenantOperationalMember(caller, tenantId);
+  const tenantRef = db.doc(`tenants/${tenantId}`);
+  const [tenant, venue, order, device] = await Promise.all([
+    tenantRef.get(),
+    tenantRef.collection("venues").doc(venueId).get(),
+    tenantRef.collection("orders").doc(orderId).get(),
+    tenantRef.collection("devices").doc(targetDeviceId).get(),
+  ]);
+  if (!venue.exists || !order.exists || order.data().venueId !== venueId ||
+      !["collection", "delivery"].includes(order.data().channel)) {
+    throw new HttpsError("not-found", "That collection or delivery order was not found.");
+  }
+  if (!activeRouteDevice(device, venueId, "receipt")) {
+    throw new HttpsError(
+      "failed-precondition", "Select an active receipt printer at this venue.",
+    );
+  }
+  const lines = Array.isArray(order.data().lines) ? order.data().lines : [];
+  if (lines.length === 0) {
+    throw new HttpsError("failed-precondition", "That order does not contain any items.");
+  }
+  const receiptLines = lines.map((line) => {
+    const quantity = Number(line.quantity);
+    const unitPriceMinor = Number(line.unitPriceMinor);
+    const lineTotalMinor = quantity * unitPriceMinor;
+    return {...line, quantity, unitPriceMinor, lineTotalMinor};
+  });
+  const itemsTotalMinor = receiptLines.reduce(
+    (sum, line) => sum + Number(line.lineTotalMinor), 0,
+  );
+  const deliveryChargeMinor = Number(
+    order.data().deliveryFeeMinor ?? order.data().deliveryChargeMinor ?? 0,
+  );
+  const totalMinor = itemsTotalMinor +
+    (Number.isSafeInteger(deliveryChargeMinor) ? deliveryChargeMinor : 0);
+  const jobId = `deliveryNote_${orderId}_${requestId}_${targetDeviceId}`;
+  const actor = actorSnapshot(await auth.getUser(caller.uid));
+  await tenantRef.collection("printJobs").doc(jobId).create({
+    venueId,
+    targetDeviceId,
+    fallbackDeviceId: null,
+    orderId,
+    ticketId: `deliveryNote_${orderId}`,
+    productionArea: "receipt",
+    status: "queued",
+    attempts: 0,
+    idempotencyKey: jobId,
+    payload: {
+      type: "receipt",
+      isDeliveryNote: true,
+      receiptNumber: `NOTE-${orderId.slice(-6).toUpperCase()}`,
+      restaurantName: receiptBusinessSnapshot(tenant.data() ?? {}, venue.data()).name,
+      business: receiptBusinessSnapshot(tenant.data() ?? {}, venue.data()),
+      currencyCode: String(tenant.data()?.currencyCode ?? "GBP").toUpperCase(),
+      channel: order.data().channel,
+      customerName: order.data().customerName ?? null,
+      customerPhone: order.data().customerPhone ?? null,
+      deliveryAddress: order.data().deliveryAddress ?? null,
+      deliveryAddressLabel: order.data().deliveryAddressLabel ?? null,
+      deliveryLatitude: order.data().deliveryLatitude ?? null,
+      deliveryLongitude: order.data().deliveryLongitude ?? null,
+      scheduledForMillis: order.data().scheduledForMillis ?? null,
+      lines: receiptLines,
+      totalMinor,
+      netTotalMinor: totalMinor,
+      taxTotalMinor: 0,
+      taxBreakdown: [],
+      payments: Array.isArray(order.data().payments) ? order.data().payments : [],
+      deliveryChargeMinor: Number.isSafeInteger(deliveryChargeMinor)
+        ? deliveryChargeMinor : 0,
+    },
+    createdAt: FieldValue.serverTimestamp(),
+  });
+  await writeAudit(caller.uid, "printFulfilmentDeliveryNote", orderId, {
+    tenantId, venueId, targetDeviceId, jobId, actor,
+  });
+  return {queued: true, jobId};
+}
+
 async function invokePosAction(action, caller, data) {
   const sessionBootstrapActions = new Set([
     "listVenuePinStaff", "setOwnStaffPin", "verifyStaffPin",
     "recoverOwnStaffPin",
-    "heartbeatPrinterDevice", "claimDevicePrintJob", "completeDevicePrintJob",
+    "claimDevicePrintJob", "completeDevicePrintJob",
+    "issueRealtimePrinterSession",
     "getTrustedTime", "getOfflineHubBootstrap", "ingestOfflineHubEvents",
-    "getOfflineHubSnapshot", "heartbeatRemoteHub", "claimRemoteHubCommands",
+    "getOfflineHubSyncCursor",
+    "reconcileOfflineHubClosedOrders",
+    "getOfflineHubSnapshot", "claimRemoteHubCommands",
+    "issueRealtimeHubSession",
+    "issueRealtimeBackupHubSession",
+    "uploadDeviceDiagnostics",
     "completeRemoteHubCommand",
   ]);
   const actingCaller = sessionBootstrapActions.has(action)
@@ -9627,8 +13077,8 @@ async function invokePosAction(action, caller, data) {
       return verifyStaffPinFor(caller, data);
     case "refreshStaffPinSession":
       return refreshStaffPinSessionFor(actingCaller, data);
-    case "heartbeatPrinterDevice":
-      return heartbeatPrinterDeviceFor(caller, data);
+    case "issueRealtimePrinterSession":
+      return issueRealtimePrinterSessionFor(caller, data);
     case "claimDevicePrintJob":
       return claimDevicePrintJobFor(caller, data);
     case "completeDevicePrintJob":
@@ -9639,12 +13089,26 @@ async function invokePosAction(action, caller, data) {
       return getOfflineHubBootstrapFor(caller, data);
     case "ingestOfflineHubEvents":
       return ingestOfflineHubEventsFor(caller, data);
+    case "getOfflineHubSyncCursor":
+      return getOfflineHubSyncCursorFor(caller, data);
+    case "reconcileOfflineHubClosedOrders":
+      return reconcileOfflineHubClosedOrdersFor(caller, data);
     case "getOfflineHubSnapshot":
       return getOfflineHubSnapshotFor(caller, data);
     case "submitRemoteHubCommand":
       return submitRemoteHubCommandFor(actingCaller, data);
-    case "heartbeatRemoteHub":
-      return heartbeatRemoteHubFor(caller, data);
+    case "waitForRemoteHubCommand":
+      return waitForRemoteHubCommandFor(actingCaller, data);
+    case "issueRealtimeHubSession":
+      return issueRealtimeHubSessionFor(caller, data);
+    case "issueRealtimeBackupHubSession":
+      return issueRealtimeBackupHubSessionFor(caller, data);
+    case "promoteOfflineBackupHub":
+      return promoteOfflineBackupHubFor(caller, data);
+    case "uploadDeviceDiagnostics":
+      return uploadDeviceDiagnosticsFor(caller, data);
+    case "issueRealtimePosSession":
+      return issueRealtimePosSessionFor(actingCaller, data);
     case "claimRemoteHubCommands":
       return claimRemoteHubCommandsFor(caller, data);
     case "completeRemoteHubCommand":
@@ -9693,6 +13157,8 @@ async function invokePosAction(action, caller, data) {
       return sendOrderToProductionFor(actingCaller, data);
     case "closeOrder":
       return closeOrderFor(actingCaller, data);
+    case "cancelEmptyOrder":
+      return cancelEmptyOrderFor(actingCaller, data);
     case "createRefund":
       return createRefundFor(actingCaller, data);
     case "startTrainingMode":
@@ -9709,10 +13175,16 @@ async function invokePosAction(action, caller, data) {
       return splitOrderFor(actingCaller, data);
     case "updateProductionTicket":
       return updateProductionTicketFor(actingCaller, data);
+    case "releaseDueFulfilmentTickets":
+      return releaseDueFulfilmentTicketsFor(actingCaller, data);
     case "retryFailedPrintJob":
       return retryFailedPrintJobFor(actingCaller, data);
     case "reprintPrintedJob":
       return reprintPrintedJobFor(actingCaller, data);
+    case "reprintProductionTicket":
+      return reprintProductionTicketFor(actingCaller, data);
+    case "printFulfilmentDeliveryNote":
+      return printFulfilmentDeliveryNoteFor(actingCaller, data);
     case "cancelPrintJob":
       return cancelPrintJobFor(actingCaller, data);
     default:
@@ -9739,7 +13211,7 @@ const offlineHubSnapshotCollections = new Set([
   "offlineHubSyncState",
 ]);
 
-async function bumpOfflineHubSnapshotVersions(tenantId, venueIds) {
+async function bumpOfflineHubSnapshotVersions(tenantId, venueIds, section) {
   const values = [...new Set(venueIds.filter((value) =>
     typeof value === "string" && value.length > 0))];
   for (let offset = 0; offset < values.length; offset += 400) {
@@ -9749,6 +13221,7 @@ async function bumpOfflineHubSnapshotVersions(tenantId, venueIds) {
         db.doc(`tenants/${tenantId}/offlineHubSnapshotVersions/${venueId}`),
         {
           generation: FieldValue.increment(1),
+          [`${section}Generation`]: FieldValue.increment(1),
           updatedAt: FieldValue.serverTimestamp(),
         },
         {merge: true},
@@ -9769,8 +13242,23 @@ export const markOfflineHubSnapshotChanged = onDocumentWritten(
     const tenantId = event.params.tenantId;
     const before = event.data?.before.data();
     const after = event.data?.after.data();
+    const section = {
+      venues: "venue",
+      menuSections: "catalogue",
+      products: "catalogue",
+      modifierGroups: "catalogue",
+      courses: "catalogue",
+      tables: "operations",
+      offlineHubSyncState: "operations",
+      members: "staff",
+      staffPins: "staff",
+      printerRoutes: "printing",
+      venueCustomers: "customers",
+    }[collectionId];
     if (collectionId === "venues") {
-      await bumpOfflineHubSnapshotVersions(tenantId, [event.params.documentId]);
+      await bumpOfflineHubSnapshotVersions(
+        tenantId, [event.params.documentId], section,
+      );
       return;
     }
     if (collectionId === "members") {
@@ -9780,13 +13268,14 @@ export const markOfflineHubSnapshotChanged = onDocumentWritten(
       await bumpOfflineHubSnapshotVersions(
         tenantId,
         venues.docs.map((document) => document.id),
+        section,
       );
       return;
     }
     await bumpOfflineHubSnapshotVersions(tenantId, [
       before?.venueId,
       after?.venueId,
-    ]);
+    ], section);
   },
 );
 
@@ -9798,6 +13287,7 @@ export const markTenantOfflineHubSnapshotsChanged = onDocumentUpdated(
     await bumpOfflineHubSnapshotVersions(
       event.params.tenantId,
       venues.docs.map((document) => document.id),
+      "venue",
     );
   },
 );
@@ -9897,6 +13387,15 @@ export const posApi = onRequest({cors: true}, async (request, response) => {
     response.status(200).json({data: result});
   } catch (error) {
     if (error instanceof HttpsError) {
+      // Log only the authenticated action and bounded server-authored error;
+      // never log request bodies, PIN sessions, tokens, or signed envelopes.
+      // This keeps operational hub conflicts diagnosable without exposing POS
+      // or customer data in Cloud Logging.
+      console.warn("Rejected POS command", {
+        action,
+        code: error.code,
+        message: diagnosticErrorMessage(error),
+      });
       response.status(httpStatusFor(error)).json({
         error: {code: error.code, message: error.message},
       });
@@ -9912,7 +13411,10 @@ export const posApi = onRequest({cors: true}, async (request, response) => {
     response.status(500).json({
       error: {
         code: "internal",
-        message: `The POS action could not be completed: ${message}`,
+        // Detailed unexpected exceptions remain in protected Cloud Logging.
+        // Returning them to a client can disclose collection paths, library
+        // versions or implementation details useful to an attacker.
+        message: "The POS action could not be completed. Check the manager diagnostic log and contact support if it continues.",
       },
     });
   }

@@ -32,6 +32,7 @@ void main() {
       qrLine.qrRows!.every((row) => RegExp(r'^[01]+$').hasMatch(row)),
       isTrue,
     );
+    expect(queue.requestedProductionArea, 'receipt');
   });
 }
 
@@ -40,12 +41,13 @@ class _RecordingWindowsPrintQueue implements WindowsPrintQueue {
 
   final ReceiptPaperWidth paperWidth;
   List<WindowsPrintLine> printedLines = const [];
+  String? requestedProductionArea;
 
   @override
   bool get isSupported => true;
 
   @override
-  Future<void> clearSelectedPrinter() async {}
+  Future<void> clearSelectedPrinter({String? productionArea}) async {}
 
   @override
   Future<List<WindowsPrintQueueDevice>> installedPrinters() async => const [];
@@ -66,15 +68,22 @@ class _RecordingWindowsPrintQueue implements WindowsPrintQueue {
   }
 
   @override
-  Future<void> selectPrinter(WindowsPrintQueueDevice printer) async {}
+  Future<void> selectPrinter(
+    WindowsPrintQueueDevice printer, {
+    String? productionArea,
+  }) async {}
 
   @override
-  Future<WindowsPrintQueueDevice?> selectedPrinter() async =>
-      WindowsPrintQueueDevice(
-        name: 'Test printer',
-        driverName: 'Test driver',
-        portName: 'USB001',
-        isDefault: true,
-        paperWidth: paperWidth,
-      );
+  Future<WindowsPrintQueueDevice?> selectedPrinter({
+    String? productionArea,
+  }) async {
+    requestedProductionArea = productionArea;
+    return WindowsPrintQueueDevice(
+      name: 'Test printer',
+      driverName: 'Test driver',
+      portName: 'USB001',
+      isDefault: true,
+      paperWidth: paperWidth,
+    );
+  }
 }

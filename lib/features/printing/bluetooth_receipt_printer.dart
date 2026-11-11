@@ -46,6 +46,12 @@ class BluetoothProductionTicket {
     required this.lines,
     this.tableLabel,
     this.tabName,
+    this.channel = 'dineIn',
+    this.customerName,
+    this.deliveryAddress,
+    this.deliveryLatitude,
+    this.deliveryLongitude,
+    this.scheduledForMillis,
     this.createdByName,
     this.isAddition = false,
     this.isReprint = false,
@@ -58,6 +64,12 @@ class BluetoothProductionTicket {
   final List<BluetoothProductionTicketLine> lines;
   final String? tableLabel;
   final String? tabName;
+  final String channel;
+  final String? customerName;
+  final String? deliveryAddress;
+  final double? deliveryLatitude;
+  final double? deliveryLongitude;
+  final int? scheduledForMillis;
   final String? createdByName;
   final bool isAddition;
   final bool isReprint;
@@ -88,12 +100,20 @@ class BluetoothBillReceipt {
     this.netTotalMinor,
     this.tableLabel,
     this.tabName,
+    this.channel = 'dineIn',
+    this.customerName,
+    this.deliveryAddress,
+    this.deliveryLatitude,
+    this.deliveryLongitude,
+    this.scheduledForMillis,
+    this.deliveryChargeMinor = 0,
     this.businessDate,
     this.businessAddress = '',
     this.businessPhoneNumbers = const <String>[],
     this.receiptFooter = '',
     this.isReprint = false,
     this.isPreReceipt = false,
+    this.isDeliveryNote = false,
     this.isRefund = false,
     this.originalReceiptNumber,
     this.refundReason,
@@ -113,12 +133,20 @@ class BluetoothBillReceipt {
   final int? netTotalMinor;
   final String? tableLabel;
   final String? tabName;
+  final String channel;
+  final String? customerName;
+  final String? deliveryAddress;
+  final double? deliveryLatitude;
+  final double? deliveryLongitude;
+  final int? scheduledForMillis;
+  final int deliveryChargeMinor;
   final String? businessDate;
   final String businessAddress;
   final List<String> businessPhoneNumbers;
   final String receiptFooter;
   final bool isReprint;
   final bool isPreReceipt;
+  final bool isDeliveryNote;
   final bool isRefund;
   final String? originalReceiptNumber;
   final String? refundReason;

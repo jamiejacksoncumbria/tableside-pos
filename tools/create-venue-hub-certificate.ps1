@@ -3,7 +3,12 @@ param(
   [ValidatePattern('^[a-zA-Z0-9.-]+$')]
   [string]$HubHost,
 
-  [string]$OutputDirectory = '.\build\venue-hub-tls'
+  [ValidateRange(1, 30)]
+  [int]$ValidYears = 10,
+
+  [string]$OutputDirectory = '.\local-secrets\venue-hub-tls',
+
+  [switch]$SkipWindowsTrust
 )
 
 $ErrorActionPreference = 'Stop'
@@ -138,7 +143,7 @@ $certificateParameters = @{
     '2.5.29.37={text}1.3.6.1.5.5.7.3.1',
     "2.5.29.17={text}$subjectAlternativeName"
   )
-  NotAfter = (Get-Date).AddYears(3)
+  NotAfter = (Get-Date).AddYears($ValidYears)
   FriendlyName = "TableSideCY venue hub $HubHost"
 }
 $certificate = New-SelfSignedCertificate @certificateParameters
@@ -160,20 +165,25 @@ $privateKeyPath = Join-Path $resolvedOutput 'venue-hub-private-key.pem'
 [System.IO.File]::WriteAllBytes($certificateDerPath, $certificateBytes)
 [System.IO.File]::WriteAllText($privateKeyPath, $privateKeyPem, [System.Text.UTF8Encoding]::new($false))
 
-$rootStore = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-  [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-  [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-)
-try {
-  $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-  $rootStore.Add($certificate)
-} finally {
-  $rootStore.Close()
+if (-not $SkipWindowsTrust) {
+  $rootStore = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+    [System.Security.Cryptography.X509Certificates.StoreName]::Root,
+    [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+  )
+  try {
+    $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+    $rootStore.Add($certificate)
+  } finally {
+    $rootStore.Close()
+  }
 }
 
-Write-Host "Created and trusted the TableSideCY venue certificate for $HubHost."
+Write-Host "Created the TableSideCY venue certificate for $HubHost (valid for $ValidYears years)."
+if (-not $SkipWindowsTrust) {
+  Write-Host 'Trusted the certificate for the current Windows user.'
+}
 Write-Host "Certificate PEM: $certificatePath"
 Write-Host "Android/iOS trust certificate: $certificateDerPath"
 Write-Host "Private key PEM: $privateKeyPath"
-Write-Warning 'Install venue-hub-trust-certificate.cer as a trusted CA on every Android or iOS device that connects to this hub. On iOS, also enable full trust for it.'
+Write-Warning 'TableSideCY clients import venue-hub-certificate.pem inside the app. OS-wide certificate installation is not required.'
 Write-Warning 'Keep venue-hub-private-key.pem only on the hub. Delete the exported copy after importing it into TableSideCY.'

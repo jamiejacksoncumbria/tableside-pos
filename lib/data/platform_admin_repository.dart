@@ -5,10 +5,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/app_logger.dart';
+import '../core/app_busy_state.dart';
 import '../core/firebase_bootstrap.dart';
+import '../core/firebase_environment_options.dart';
 import '../core/platform_admin_pin_session_store.dart';
 import '../core/staff_pin_session_store.dart';
-import '../firebase_options.dart';
+import '../features/printing/local_printer_device_identity.dart';
 
 final platformAdminRepositoryProvider = Provider<PlatformAdminRepository>(
   (ref) => PlatformAdminRepository(),
@@ -37,11 +39,21 @@ class PlatformAdminRepository {
   }
 
   Future<PlatformAdminPinSession> verifyPlatformAdminPin(String pin) async {
-    final data = await _call('verifyPlatformAdminPin', {'pin': pin});
+    final deviceId = await LocalPrinterDeviceIdentity().getOrCreate();
+    final data = await _call('verifyPlatformAdminPin', {
+      'pin': pin,
+      'deviceId': deviceId,
+    });
     final session = PlatformAdminPinSession(
       sessionId: data['sessionId'] as String,
       sessionToken: data['sessionToken'] as String,
       expiresAt: DateTime.parse(data['expiresAt'] as String),
+      // Keep a rolling deployment usable while an older Function is still
+      // returning the pre-device-binding response. Once the updated server is
+      // live it validates this same ID on every privileged request.
+      deviceId: data['deviceId'] is String
+          ? data['deviceId'] as String
+          : deviceId,
     );
     PlatformAdminPinSessionStore.current = session;
     return session;
@@ -116,6 +128,32 @@ class PlatformAdminRepository {
     return _supportedCurrencyCodes!;
   }
 
+  Future<List<PlatformLocationEntry>> listPlatformLocations() async {
+    final data = await _call('listPlatformLocations');
+    return List<Object?>.from(data['locations'] as List? ?? const [])
+        .map(
+          (value) => PlatformLocationEntry.fromMap(
+            Map<String, Object?>.from(value as Map),
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  Future<PlatformLocationEntry> savePlatformLocation({
+    required String country,
+    required String district,
+    required String town,
+  }) async => PlatformLocationEntry.fromMap(
+    await _call('savePlatformLocation', {
+      'country': country,
+      'district': district,
+      'town': town,
+    }),
+  );
+
+  Future<void> deletePlatformLocation(String locationId) =>
+      _call('deletePlatformLocation', {'locationId': locationId});
+
   Future<List<PlatformVenueSummary>> listTenantVenues(String tenantId) async {
     final data = await _call('listTenantVenues', {'tenantId': tenantId});
     final values = List<Object?>.from(data['venues'] as List? ?? const []);
@@ -148,6 +186,7 @@ class PlatformAdminRepository {
     required String venueName,
     required String timeZone,
     required String ownerUid,
+    required String country,
     String currencyCode = 'GBP',
   }) async {
     await _call('createTenant', {
@@ -157,6 +196,7 @@ class PlatformAdminRepository {
       'venueName': venueName,
       'timeZone': timeZone,
       'ownerUid': ownerUid,
+      'country': country,
     });
   }
 
@@ -178,11 +218,13 @@ class PlatformAdminRepository {
     required String tenantId,
     required String name,
     required String timeZone,
+    required String country,
   }) async {
     final data = await _call('createVenue', {
       'tenantId': tenantId,
       'name': name,
       'timeZone': timeZone,
+      'country': country,
     });
     return PlatformVenueSummary.fromMap(data);
   }
@@ -192,12 +234,14 @@ class PlatformAdminRepository {
     required String venueId,
     required String name,
     required String timeZone,
+    required String country,
   }) async {
     final data = await _call('updateVenue', {
       'tenantId': tenantId,
       'venueId': venueId,
       'name': name,
       'timeZone': timeZone,
+      'country': country,
     });
     return PlatformVenueSummary.fromMap(data);
   }
@@ -258,6 +302,13 @@ class PlatformAdminRepository {
     String name, [
     Map<String, Object?> data = const {},
   ]) async {
+    return AppBusyState.guard(() => _callUnblocked(name, data));
+  }
+
+  Future<Map<String, Object?>> _callUnblocked(
+    String name,
+    Map<String, Object?> data,
+  ) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       throw StateError('Sign in before using platform administration.');
@@ -267,7 +318,7 @@ class PlatformAdminRepository {
       throw StateError('Could not obtain a Firebase sign-in token.');
     }
     final appCheckToken = await currentFirebaseAppCheckToken();
-    final projectId = DefaultFirebaseOptions.currentPlatform.projectId;
+    final projectId = FirebaseEnvironmentOptions.currentPlatform.projectId;
     final endpoint = Uri.https(
       'europe-west2-$projectId.cloudfunctions.net',
       'platformAdminApi',
@@ -290,6 +341,7 @@ class PlatformAdminRepository {
       if (staffSession == null && activePlatformSession != null) ...{
         'platformAdminPinSessionId': activePlatformSession.sessionId,
         'platformAdminPinSessionToken': activePlatformSession.sessionToken,
+        'platformAdminPinSessionDeviceId': activePlatformSession.deviceId,
       },
     };
     final response = await http.post(
@@ -399,6 +451,7 @@ class PlatformVenueSummary {
     required this.id,
     required this.name,
     required this.timeZone,
+    required this.country,
   });
 
   factory PlatformVenueSummary.fromMap(Map<String, Object?> data) {
@@ -406,12 +459,36 @@ class PlatformVenueSummary {
       id: data['id'] as String? ?? '',
       name: data['name'] as String? ?? 'Unnamed venue',
       timeZone: data['timeZone'] as String? ?? 'Europe/London',
+      country: data['country'] as String? ?? 'Kuzey Kıbrıs Türk Cumhuriyeti',
     );
   }
 
   final String id;
   final String name;
   final String timeZone;
+  final String country;
+}
+
+class PlatformLocationEntry {
+  const PlatformLocationEntry({
+    required this.id,
+    required this.country,
+    required this.district,
+    required this.town,
+  });
+
+  factory PlatformLocationEntry.fromMap(Map<String, Object?> data) =>
+      PlatformLocationEntry(
+        id: data['id'] as String? ?? '',
+        country: data['country'] as String? ?? '',
+        district: data['district'] as String? ?? '',
+        town: data['town'] as String? ?? '',
+      );
+
+  final String id;
+  final String country;
+  final String district;
+  final String town;
 }
 
 class PlatformStaffMembership {

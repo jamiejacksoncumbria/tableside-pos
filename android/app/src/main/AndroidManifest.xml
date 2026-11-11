@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Required by Firebase and Shorebird for online data and patch delivery. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <!-- Classic Bluetooth is used only for an already-paired receipt printer. -->
     <uses-permission
         android:name="android.permission.BLUETOOTH"
@@ -27,9 +29,13 @@
     <application
         android:label="TableSideCY"
         android:name="${applicationName}"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"
             android:exported="true"

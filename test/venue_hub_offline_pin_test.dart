@@ -68,6 +68,42 @@ void main() {
     expect(pins.staff.single.staffId, 'staff-a');
   });
 
+  test('roster-only drivers cannot authenticate offline', () async {
+    final sessions = VenueHubStaffSessionAuthority(
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+    );
+    final pins = VenueHubOfflinePinAuthority(
+      sessions: sessions,
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+    );
+
+    await pins.installSnapshot(<String, Object?>{
+      'version': 1,
+      'staff': <Object?>[
+        <String, Object?>{
+          'staffId': 'driver-a',
+          'displayName': 'Driver A',
+          'roles': <String>['driver'],
+          'offlinePinReady': false,
+        },
+      ],
+    });
+
+    expect(pins.staff, isEmpty);
+    await expectLater(
+      pins.verify(staffId: 'driver-a', pin: '123456'),
+      throwsA(
+        isA<VenueHubOfflinePinException>().having(
+          (error) => error.code,
+          'code',
+          'offline_verifier_unavailable',
+        ),
+      ),
+    );
+  });
+
   test('derives the same PBKDF2 verifier as Node crypto', () async {
     final salt = base64Url.decode(
       base64Url.normalize('AAECAwQFBgcICQoLDA0ODw'),

@@ -23,6 +23,9 @@ class VenueHubBootstrap {
     this.hubDeviceId,
     this.hubCredentialId,
     this.endpoint,
+    this.backupDeviceId,
+    this.backupCredentialId,
+    this.backupEndpoint,
   });
 
   final bool enabled;
@@ -30,8 +33,21 @@ class VenueHubBootstrap {
   final String? hubDeviceId;
   final String? hubCredentialId;
   final Uri? endpoint;
+  final String? backupDeviceId;
+  final String? backupCredentialId;
+  final Uri? backupEndpoint;
   final Map<String, VenueHubPublicCredential> credentials;
   final int serverTimeMillis;
+
+  /// Returns only the endpoint owned by this physical hub installation.
+  /// An old primary must not continue displaying the new primary's address,
+  /// and an ordinary terminal must not inherit either host address.
+  Uri? endpointForHostDevice(String? deviceId) {
+    if (deviceId == null) return null;
+    if (hubDeviceId == deviceId) return endpoint;
+    if (backupDeviceId == deviceId) return backupEndpoint;
+    return null;
+  }
 
   Map<String, Object?> toJson() => <String, Object?>{
     'enabled': enabled,
@@ -39,6 +55,9 @@ class VenueHubBootstrap {
     'hubDeviceId': hubDeviceId,
     'hubCredentialId': hubCredentialId,
     'hubEndpoint': endpoint?.toString(),
+    'backupDeviceId': backupDeviceId,
+    'backupCredentialId': backupCredentialId,
+    'backupEndpoint': backupEndpoint?.toString(),
     'serverTimeMillis': serverTimeMillis,
     'credentials': credentials.values
         .map(
@@ -105,6 +124,11 @@ class VenueHubBootstrap {
     final endpoint = json['hubEndpoint'] is String
         ? Uri.tryParse(json['hubEndpoint'] as String)
         : null;
+    final backupDeviceId = json['backupDeviceId'] as String?;
+    final backupCredentialId = json['backupCredentialId'] as String?;
+    final backupEndpoint = json['backupEndpoint'] is String
+        ? Uri.tryParse(json['backupEndpoint'] as String)
+        : null;
     if (enabled &&
         (epoch < 1 ||
             hubDeviceId?.isNotEmpty != true ||
@@ -112,6 +136,17 @@ class VenueHubBootstrap {
             !credentials.containsKey(hubCredentialId))) {
       throw const FormatException(
         'The enabled venue hub does not have a valid authority credential.',
+      );
+    }
+    if ((backupDeviceId == null) != (backupCredentialId == null) ||
+        (backupDeviceId != null &&
+            (!credentials.containsKey(backupCredentialId) ||
+                backupEndpoint == null ||
+                backupEndpoint.scheme != 'https' ||
+                backupEndpoint.host.isEmpty ||
+                backupEndpoint.userInfo.isNotEmpty))) {
+      throw const FormatException(
+        'The backup venue hub configuration is invalid.',
       );
     }
     if (enabled &&
@@ -129,6 +164,9 @@ class VenueHubBootstrap {
       hubDeviceId: hubDeviceId,
       hubCredentialId: hubCredentialId,
       endpoint: endpoint,
+      backupDeviceId: backupDeviceId,
+      backupCredentialId: backupCredentialId,
+      backupEndpoint: backupEndpoint,
       credentials: Map.unmodifiable(credentials),
       serverTimeMillis: serverTime,
     );

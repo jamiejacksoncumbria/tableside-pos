@@ -16,6 +16,9 @@ class VenueHubCloudUploadResult {
 
 typedef VenueHubCloudUploader =
     Future<VenueHubCloudUploadResult> Function(List<OfflineEvent> events);
+typedef VenueHubCloudSyncFailureCallback =
+    void Function(Object error, int consecutiveFailures);
+typedef VenueHubCloudSyncRecoveredCallback = void Function();
 
 /// Uploads the durable outbox in sequence order. Network and server outages
 /// leave events pending. Only an explicit permanent rejection quarantines an
@@ -27,6 +30,8 @@ class VenueHubCloudSync {
     this.batchSize = 25,
     this.retryDelay = const Duration(seconds: 10),
     this.maximumRetryDelay = const Duration(minutes: 5),
+    this.onFailure,
+    this.onRecovered,
   }) : _upload = upload,
        _ledger = ledger ?? OfflineEventLedger.instance;
 
@@ -35,14 +40,26 @@ class VenueHubCloudSync {
   final int batchSize;
   final Duration retryDelay;
   final Duration maximumRetryDelay;
+  final VenueHubCloudSyncFailureCallback? onFailure;
+  final VenueHubCloudSyncRecoveredCallback? onRecovered;
   Timer? _retryTimer;
   bool _flushing = false;
+  bool _flushRequested = false;
   bool _disposed = false;
   int _consecutiveFailures = 0;
 
   Future<int> flush() async {
-    if (_disposed || _flushing || _retryTimer?.isActive == true) return 0;
+    if (_disposed) return 0;
+    if (_flushing) {
+      // Do not lose a wake-up when an event is committed after the active
+      // upload read its batch. The current flush cannot see that event, so it
+      // must run once more as soon as it releases the serial upload lock.
+      _flushRequested = true;
+      return 0;
+    }
+    if (_retryTimer?.isActive == true) return 0;
     _flushing = true;
+    _flushRequested = false;
     var synced = 0;
     try {
       while (!_disposed) {
@@ -54,16 +71,28 @@ class VenueHubCloudSync {
         VenueHubCloudUploadResult result;
         try {
           result = await _upload(pending);
-        } catch (_) {
+        } catch (error, stackTrace) {
           for (final event in pending) {
             await _ledger.markPending(event.id);
           }
           _consecutiveFailures++;
+          onFailure?.call(error, _consecutiveFailures);
           if (_consecutiveFailures == 1) {
-            AppLogger.info(
-              'Venue hub is offline; cloud synchronisation is paused and '
-              'pending events remain safely stored on this device.',
-            );
+            if (error.toString().contains('synchronization conflict')) {
+              AppLogger.error(
+                'Venue hub cloud synchronization conflict; pending events '
+                'remain safely stored and were not discarded',
+                error,
+                stackTrace,
+              );
+            } else {
+              AppLogger.error(
+                'Synchronize venue hub events; cloud may be temporarily '
+                'unavailable and pending events remain safely stored',
+                error,
+                stackTrace,
+              );
+            }
           }
           _scheduleRetry();
           break;
@@ -73,6 +102,7 @@ class VenueHubCloudSync {
             'Venue hub cloud connection restored; synchronising pending events.',
           );
           _consecutiveFailures = 0;
+          onRecovered?.call();
         }
         final now = DateTime.now().toUtc();
         for (final event in pending) {
@@ -99,6 +129,10 @@ class VenueHubCloudSync {
       }
     } finally {
       _flushing = false;
+      if (_flushRequested && !_disposed && _retryTimer?.isActive != true) {
+        _flushRequested = false;
+        unawaited(flush());
+      }
     }
     return synced;
   }

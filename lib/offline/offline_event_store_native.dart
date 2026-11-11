@@ -478,6 +478,35 @@ class NativeOfflineEventStore implements OfflineEventStore {
     _notifyChanged();
   });
 
+  @override
+  Future<int> restoreQuarantinedCloudBaselines({
+    required String tenantId,
+    required String venueId,
+    required int hubEpoch,
+  }) => _serial(() async {
+    if (hubEpoch < 1) {
+      throw ArgumentError.value(hubEpoch, 'hubEpoch', 'Must be positive.');
+    }
+    await _initializeInternal();
+    final venueKey = await _crypto.venueKey(tenantId, venueId);
+    _database!.execute(
+      '''
+        UPDATE offline_events
+        SET sync_state = 0, quarantine_reason = NULL
+        WHERE venue_key = ? AND hub_epoch = ?
+          AND sync_state = 3 AND quarantine_reason = ?
+      ''',
+      [
+        venueKey,
+        hubEpoch,
+        'Redundant cloud baseline for a reconstructable local order.',
+      ],
+    );
+    final restored = _database!.updatedRows;
+    if (restored > 0) _notifyChanged();
+    return restored;
+  });
+
   Future<void> _setState(
     String eventId,
     OfflineEventSyncState state,

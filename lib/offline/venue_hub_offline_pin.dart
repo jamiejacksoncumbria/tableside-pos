@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:isolate';
-
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
+import '../core/app_logger.dart';
 import 'venue_hub_command_processor.dart';
 import 'venue_hub_staff_sessions.dart';
 import 'offline_event_ledger.dart';
@@ -113,12 +115,21 @@ class VenueHubOfflinePinAuthority {
       final json = Map<String, Object?>.from(raw);
       final staffId = json['staffId'];
       final displayName = json['displayName'];
-      final permissions = json['permissions'];
-      final iterations = json['offlinePinIterations'];
       if (staffId is! String ||
           staffId.isEmpty ||
           displayName is! String ||
-          permissions is! List ||
+          displayName.trim().isEmpty) {
+        throw const VenueHubOfflinePinException(
+          'An offline staff record is invalid.',
+        );
+      }
+      // The snapshot also carries assignable drivers and other venue staff
+      // who have not enrolled an offline PIN. They are safe to display in
+      // operational pickers but must never become login-capable here.
+      if (json['offlinePinReady'] == false) continue;
+      final permissions = json['permissions'];
+      final iterations = json['offlinePinIterations'];
+      if (permissions is! List ||
           json['offlinePinAlgorithm'] != 'PBKDF2-HMAC-SHA256' ||
           json['offlinePinSaltEncoding'] != 'base64url-bytes-v1' ||
           json['offlinePinProfile'] != 'interactive-v2' ||
@@ -141,8 +152,9 @@ class VenueHubOfflinePinAuthority {
         // before decoding them in Dart.
         final salt = base64Url.decode(base64Url.normalize(encodedSalt));
         final hash = base64Url.decode(base64Url.normalize(encodedHash));
-        if (salt.length < 16 || hash.length != 32)
+        if (salt.length < 16 || hash.length != 32) {
           throw const FormatException();
+        }
         final verifier = _OfflineStaffVerifier(
           staffId: staffId,
           displayName: displayName,
@@ -209,8 +221,25 @@ class VenueHubOfflinePinAuthority {
         'This PIN is locked until ${lockedUntil.toIso8601String()}.',
       );
     }
-    final supplied = await Isolate.run(
-      () => _deriveOfflinePinHash(pin, verifier.salt, verifier.iterations),
+    final usesAndroidNativePbkdf2 =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+    final derivationTimer = Stopwatch()..start();
+    final supplied = usesAndroidNativePbkdf2
+        // Android's JCA provider performs the same PBKDF2-HMAC-SHA256 work on
+        // a native worker thread. This keeps all 250,000 iterations without the
+        // multi-second pure-Dart cost seen on entry-level hub tablets.
+        ? await _deriveAndroidOfflinePinHash(
+            pin,
+            verifier.salt,
+            verifier.iterations,
+          )
+        : await Isolate.run(
+            () =>
+                _deriveOfflinePinHash(pin, verifier.salt, verifier.iterations),
+          );
+    AppLogger.info(
+      'Offline PIN verifier completed in ${derivationTimer.elapsedMilliseconds} ms '
+      'using ${usesAndroidNativePbkdf2 ? 'Android native' : 'isolated fallback'} PBKDF2.',
     );
     if (!_constantTimeEquals(verifier.hash, supplied)) {
       final failures = (_failures[staffId] ?? 0) + 1;
@@ -266,10 +295,30 @@ Future<List<int>> _deriveOfflinePinHash(
   List<int> salt,
   int iterations,
 ) async {
-  final key = await Pbkdf2(
-    macAlgorithm: Hmac.sha256(),
-    iterations: iterations,
-    bits: 256,
-  ).deriveKeyFromPassword(password: pin, nonce: salt);
+  final key = await Cryptography.instance
+      .pbkdf2(macAlgorithm: Hmac.sha256(), iterations: iterations, bits: 256)
+      .deriveKeyFromPassword(password: pin, nonce: salt);
   return key.extractBytes();
+}
+
+const _androidCryptoChannel = MethodChannel('tableside/android_crypto');
+
+Future<List<int>> _deriveAndroidOfflinePinHash(
+  String pin,
+  List<int> salt,
+  int iterations,
+) async {
+  final result = await _androidCryptoChannel.invokeMethod<Uint8List>(
+    'pbkdf2Sha256',
+    <String, Object?>{
+      'pin': pin,
+      'salt': Uint8List.fromList(salt),
+      'iterations': iterations,
+      'bits': 256,
+    },
+  );
+  if (result == null || result.length != 32) {
+    throw StateError('Android returned an invalid offline PIN verifier.');
+  }
+  return result;
 }

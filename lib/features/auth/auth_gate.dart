@@ -7,13 +7,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/home_shell.dart';
 import '../../core/app_logger.dart';
+import '../../core/cloud_diagnostic_upload_host.dart';
 import '../../core/app_theme_controller.dart';
+import '../../core/firebase_connectivity_probe.dart';
 import '../../core/platform_admin_pin_session_store.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/trusted_clock_host.dart';
 import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
 import '../../offline/venue_hub_auto_start_host.dart';
+import '../../offline/venue_hub_client_cache.dart';
+import '../../offline/venue_hub_offline_workspace.dart';
 import '../platform_admin/platform_admin_page.dart';
 import '../platform_admin/platform_admin_pin_gate.dart';
 import '../printing/queued_print_worker_host.dart';
@@ -49,6 +53,131 @@ class FirebaseAuthGate extends ConsumerWidget {
       data: (user) => user == null
           ? const SignInPage()
           : AuthenticatedWorkspace(userId: user.uid),
+    );
+  }
+}
+
+/// Opens the last authenticated venue only on its designated native hub when
+/// Firebase cannot initialise during a cold start. The loader has already
+/// matched the installation-bound device credential, TLS identity, hub epoch
+/// and encrypted snapshot; staff must still enter and pass their own PIN.
+class OfflineHubWorkspace extends ConsumerStatefulWidget {
+  const OfflineHubWorkspace({
+    super.key,
+    required this.workspace,
+    required this.onRetryOnline,
+    this.autoRecoverOnline = true,
+  });
+
+  final VenueHubOfflineWorkspace workspace;
+  final VoidCallback onRetryOnline;
+  final bool autoRecoverOnline;
+
+  @override
+  ConsumerState<OfflineHubWorkspace> createState() =>
+      _OfflineHubWorkspaceState();
+}
+
+class _OfflineHubWorkspaceState extends ConsumerState<OfflineHubWorkspace> {
+  bool _workspaceInstalled = false;
+  bool _checkingOnline = false;
+  Timer? _onlineRecoveryTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    // Riverpod 3 correctly rejects provider mutations while Flutter is
+    // mounting a widget. The cached LAN fallback can appear for a single frame
+    // while the normal online membership check completes, so defer activation
+    // and abandon it if the fallback was already replaced.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref
+          .read(activeVenueScopeProvider.notifier)
+          .select(widget.workspace.scope);
+      if (widget.workspace.hasVenueTheme) {
+        unawaited(
+          ref
+              .read(appThemeControllerProvider.notifier)
+              .applyVenueDefault(widget.workspace.venue.defaultThemeMode),
+        );
+      }
+      setState(() => _workspaceInstalled = true);
+    });
+    // A hub which cold-started without internet intentionally skipped native
+    // Firebase initialisation. Probe a Firebase endpoint independently so the
+    // app can leave the verified LAN-only workspace as soon as connectivity
+    // returns instead of requiring a restart or manual venue switch.
+    if (widget.autoRecoverOnline) {
+      _onlineRecoveryTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => unawaited(_recoverOnlineIfAvailable()),
+      );
+      unawaited(_recoverOnlineIfAvailable());
+    }
+  }
+
+  Future<void> _recoverOnlineIfAvailable() async {
+    if (!mounted || _checkingOnline) return;
+    _checkingOnline = true;
+    try {
+      if (!await canReachFirebaseNetwork()) return;
+      if (!mounted) return;
+      _onlineRecoveryTimer?.cancel();
+      AppLogger.info(
+        'Firebase network connectivity returned; reopening the online workspace.',
+      );
+      _retryOnline();
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Check Firebase connectivity recovery', error, stackTrace);
+    } finally {
+      _checkingOnline = false;
+    }
+  }
+
+  void _retryOnline() {
+    _onlineRecoveryTimer?.cancel();
+    ref.read(activeStaffPinSessionProvider.notifier).lock();
+    ref.read(activeVenueScopeProvider.notifier).clear();
+    widget.onRetryOnline();
+  }
+
+  @override
+  void dispose() {
+    _onlineRecoveryTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final workspace = widget.workspace;
+    if (!_workspaceInstalled) {
+      return const _LoadingScreen(label: 'Opening saved venue…');
+    }
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const QueuedPrintWorkerHost(),
+        VenueHubAutoStartHost(
+          scope: workspace.scope,
+          cloudRefreshEnabled: false,
+        ),
+        CloudDiagnosticUploadHost(scope: workspace.scope),
+        StaffPinGate(
+          scope: workspace.scope,
+          backgroundLockSeconds: workspace.venue.backgroundLockSeconds,
+          offlineHubOnly: true,
+          onSwitchVenue: _retryOnline,
+          onSignOut: _retryOnline,
+          child: HomeShell(
+            profileOverride: workspace.profile,
+            venueOverride: workspace.venue,
+            persistCompanyProfile: false,
+            onSwitchVenue: _retryOnline,
+            onSignOut: _retryOnline,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -225,22 +354,43 @@ class AuthenticatedWorkspace extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     AppLogger.info('Authenticated workspace: checking restaurant memberships.');
+    final cachedLanWorkspace = ref.watch(cachedLanWorkspaceProvider);
+    Widget? lanFallback() {
+      final workspace = cachedLanWorkspace.value;
+      if (workspace == null) return null;
+      return OfflineHubWorkspace(
+        workspace: workspace,
+        onRetryOnline: () {
+          ref.invalidate(platformAdminProvider);
+          ref.invalidate(membershipsProvider(userId));
+          ref.invalidate(cachedLanWorkspaceProvider);
+        },
+      );
+    }
+
     final platformAdmin = ref.watch(platformAdminProvider);
     if (platformAdmin.isLoading) {
+      final fallback = lanFallback();
+      if (fallback != null) return fallback;
       return const _LoadingScreen(label: 'Checking your access…');
     }
     if (platformAdmin.hasError) {
+      final fallback = lanFallback();
+      if (fallback != null) return fallback;
       return const _ErrorScreen(message: 'Could not verify account access.');
     }
     final isPlatformAdmin = platformAdmin.requireValue;
     final memberships = ref.watch(membershipsProvider(userId));
     return memberships.when(
-      loading: () => isPlatformAdmin
-          ? _PlatformAdminScaffold(
-              onSignOut: () => ref.read(authRepositoryProvider).signOut(),
-            )
-          : const _NoMembershipScreen(checkingMembership: true),
+      loading: () =>
+          lanFallback() ??
+          (isPlatformAdmin
+              ? _PlatformAdminScaffold(
+                  onSignOut: () => ref.read(authRepositoryProvider).signOut(),
+                )
+              : const _NoMembershipScreen(checkingMembership: true)),
       error: (error, _) =>
+          lanFallback() ??
           _ErrorScreen(message: 'Could not load restaurant access: $error'),
       data: (items) {
         AppLogger.info(
@@ -499,6 +649,9 @@ class _TenantWorkspace extends ConsumerWidget {
       );
     }
     AppLogger.info('Venue workspace ready: ${venue.name}.');
+    unawaited(
+      VenueHubClientCache().saveWorkspace(scope, profile.requireValue, venue),
+    );
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -507,6 +660,7 @@ class _TenantWorkspace extends ConsumerWidget {
         // staff session, so unattended kitchen/bar delivery keeps running.
         if (!kIsWeb) const QueuedPrintWorkerHost(),
         if (!kIsWeb) VenueHubAutoStartHost(scope: scope),
+        CloudDiagnosticUploadHost(scope: scope),
         const TrustedClockHost(),
         StaffPinGate(
           scope: scope,

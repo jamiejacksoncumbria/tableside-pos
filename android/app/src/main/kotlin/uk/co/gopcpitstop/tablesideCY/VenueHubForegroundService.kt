@@ -21,18 +21,22 @@ class VenueHubForegroundService : Service() {
         super.onCreate()
         isRunning = true
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, notification(runtimeReady = false))
+        startForeground(
+            NOTIFICATION_ID,
+            notification(runtimeReady = false, standby = false),
+        )
         acquireLocks()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val runtimeReady = intent?.getBooleanExtra(EXTRA_RUNTIME_READY, false) == true
+        val standby = intent?.getBooleanExtra(EXTRA_STANDBY, false) == true
         getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_ENABLED, true)
             .apply()
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, notification(runtimeReady))
+        manager.notify(NOTIFICATION_ID, notification(runtimeReady, standby))
         return START_STICKY
     }
 
@@ -66,15 +70,24 @@ class VenueHubForegroundService : Service() {
         }
     }
 
-    private fun notification(runtimeReady: Boolean) = NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun notification(
+        runtimeReady: Boolean,
+        standby: Boolean,
+    ) = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.mipmap.ic_launcher)
         .setContentTitle(
-            if (runtimeReady) "TableSideCY venue hub is active"
-            else "Open TableSideCY to restore the venue hub",
+            when {
+                standby -> "TableSideCY backup hub is on standby"
+                runtimeReady -> "TableSideCY venue hub is active"
+                else -> "Open TableSideCY to restore the venue hub"
+            },
         )
         .setContentText(
-            if (runtimeReady) "Keeping local ordering and printing available"
-            else "The device restarted; tap here before tills take orders",
+            when {
+                standby -> "Monitoring the primary hub for secure failover"
+                runtimeReady -> "Keeping local ordering and printing available"
+                else -> "The device restarted; tap here before tills take orders"
+            },
         )
         .setContentIntent(
             PendingIntent.getActivity(
@@ -112,14 +125,16 @@ class VenueHubForegroundService : Service() {
         private const val PREFERENCES = "tableside_venue_hub"
         private const val KEY_ENABLED = "enabled"
         private const val EXTRA_RUNTIME_READY = "runtimeReady"
+        private const val EXTRA_STANDBY = "standby"
 
         @Volatile
         var isRunning: Boolean = false
             private set
 
-        fun start(context: Context, runtimeReady: Boolean) {
+        fun start(context: Context, runtimeReady: Boolean, standby: Boolean = false) {
             val intent = Intent(context, VenueHubForegroundService::class.java).apply {
                 putExtra(EXTRA_RUNTIME_READY, runtimeReady)
+                putExtra(EXTRA_STANDBY, standby)
             }
             ContextCompat.startForegroundService(context, intent)
         }

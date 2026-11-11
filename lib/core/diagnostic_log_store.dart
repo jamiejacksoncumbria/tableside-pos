@@ -26,6 +26,41 @@ class DiagnosticLogStore {
 
   String get copyText => _lines.join('\n');
 
+  /// Converts local logs into a deliberately narrow cloud-safe schema. Raw
+  /// messages never leave the device: only the failing action/type and source
+  /// locations inside this app are retained.
+  List<Map<String, Object?>> get cloudDiagnosticEntries {
+    final entries = <Map<String, Object?>>[];
+    final errorPattern = RegExp(
+      r'^(\S+) \[ERROR\] \[([^\]]+)\] ([A-Za-z0-9_.]+)',
+    );
+    final stackPattern = RegExp(
+      r'^(\S+) \[STACK\].*?(package:tableside_pos/[A-Za-z0-9_./-]+\.dart:\d+:\d+)',
+    );
+    for (final line in _lines.reversed) {
+      final error = errorPattern.firstMatch(line);
+      if (error != null) {
+        entries.add(<String, Object?>{
+          'timestamp': error.group(1),
+          'level': 'ERROR',
+          'action': error.group(2),
+          'errorType': error.group(3),
+        });
+      } else {
+        final stack = stackPattern.firstMatch(line);
+        if (stack != null) {
+          entries.add(<String, Object?>{
+            'timestamp': stack.group(1),
+            'level': 'STACK',
+            'location': stack.group(2),
+          });
+        }
+      }
+      if (entries.length == 50) break;
+    }
+    return entries.reversed.toList(growable: false);
+  }
+
   Future<void> initialize() async {
     if (_initialized) return;
     try {
@@ -115,7 +150,10 @@ class DiagnosticLogStore {
       r'$1=<redacted>',
     );
     value = value.replaceAll(
-      RegExp(r'([?&](?:token|key|signature)=)[^&\s]+', caseSensitive: false),
+      RegExp(
+        r'([?&](?:auth|token|key|signature)=)[^&\s]+',
+        caseSensitive: false,
+      ),
       r'$1<redacted>',
     );
     value = value.replaceAll(

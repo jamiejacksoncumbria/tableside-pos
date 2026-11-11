@@ -4,18 +4,71 @@ param(
         'Menu', 'Doctor', 'Dependencies', 'Check', 'Test', 'BuildApk',
         'BuildAppBundle', 'BuildWindows', 'BuildWeb', 'BuildAll',
         'PackageWindows', 'DeployFunctions', 'DeployFirestore',
-        'DeployStorage', 'DeployWeb', 'DeployBackend', 'GitStatus',
-        'GitPull', 'GitCommit', 'GitPush', 'Clean'
+        'DeployStorage', 'DeployDatabase', 'DeployWeb', 'DeployBackend', 'GitStatus',
+        'GitPull', 'GitCommit', 'GitPush', 'ShorebirdDoctor',
+        'ShorebirdReleaseAndroid', 'ShorebirdPatchAndroid',
+        'ShorebirdReleaseWindows', 'ShorebirdPatchWindows',
+        'BlockHubInternet', 'AllowHubInternet',
+        'BlockEmulatorInternet', 'AllowEmulatorInternet', 'Clean'
     )]
     [string]$Action = 'Menu',
-    [string]$ProjectId = 'table-pos',
+    [ValidateSet('Staging', 'Production')]
+    [string]$Environment = 'Staging',
+    [string]$ProjectId = '',
     [switch]$SkipTests
 )
 
 $ErrorActionPreference = 'Stop'
 $script:RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$script:FirebaseDefine = 'TABLESIDE_USE_FIREBASE=true'
 Set-Location -LiteralPath $script:RepoRoot
+
+$environmentName = $Environment.ToLowerInvariant()
+if ($environmentName -eq 'staging') {
+    if ([string]::IsNullOrWhiteSpace($ProjectId)) { $ProjectId = 'table-pos' }
+    if ($ProjectId -ne 'table-pos') {
+        throw "Staging is locked to Firebase project 'table-pos'."
+    }
+    $script:DartDefineFile = Join-Path $script:RepoRoot 'config\firebase-staging.json'
+} else {
+    $script:DartDefineFile = Join-Path $script:RepoRoot 'config\firebase-production.json'
+    if (-not (Test-Path -LiteralPath $script:DartDefineFile)) {
+        throw 'Production is not configured. Copy config/firebase-production.example.json to config/firebase-production.json and add the real production Firebase identifiers.'
+    }
+    $productionConfig = Get-Content -Raw -LiteralPath $script:DartDefineFile | ConvertFrom-Json
+    if ([string]$productionConfig.TABLESIDE_ENVIRONMENT -ne 'production' -or
+        $productionConfig.TABLESIDE_USE_FIREBASE -ne $true) {
+        throw 'Production configuration must enable Firebase and set TABLESIDE_ENVIRONMENT to production.'
+    }
+    $configuredProject = [string]$productionConfig.TABLESIDE_PRODUCTION_FIREBASE_PROJECT_ID
+    if ([string]::IsNullOrWhiteSpace($configuredProject) -or $configuredProject -eq 'table-pos' -or $configuredProject -like 'REPLACE_*') {
+        throw 'The production Firebase project ID is missing or still points at staging.'
+    }
+    if ([string]::IsNullOrWhiteSpace($ProjectId)) { $ProjectId = $configuredProject }
+    if ($ProjectId -ne $configuredProject) {
+        throw "ProjectId '$ProjectId' does not match production configuration '$configuredProject'."
+    }
+    $requiredProductionKeys = @(
+        'TABLESIDE_PRODUCTION_FIREBASE_MESSAGING_SENDER_ID',
+        'TABLESIDE_PRODUCTION_FIREBASE_STORAGE_BUCKET',
+        'TABLESIDE_PRODUCTION_FIREBASE_AUTH_DOMAIN',
+        'TABLESIDE_PRODUCTION_FIREBASE_WEB_API_KEY',
+        'TABLESIDE_PRODUCTION_FIREBASE_WEB_APP_ID',
+        'TABLESIDE_PRODUCTION_FIREBASE_WINDOWS_API_KEY',
+        'TABLESIDE_PRODUCTION_FIREBASE_WINDOWS_APP_ID',
+        'TABLESIDE_PRODUCTION_FIREBASE_ANDROID_API_KEY',
+        'TABLESIDE_PRODUCTION_FIREBASE_ANDROID_APP_ID',
+        'TABLESIDE_PRODUCTION_FIREBASE_IOS_API_KEY',
+        'TABLESIDE_PRODUCTION_FIREBASE_IOS_APP_ID'
+    )
+    foreach ($key in $requiredProductionKeys) {
+        $value = [string]$productionConfig.$key
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            throw "Production Firebase setting '$key' is missing."
+        }
+    }
+}
+$script:EnvironmentName = $environmentName
+$script:FirebaseBuildArgument = "--dart-define-from-file=$($script:DartDefineFile)"
 
 function Write-Heading([string]$Text) {
     Write-Host "`n=== $Text ===" -ForegroundColor Cyan
@@ -32,10 +85,27 @@ function Find-CommandPath([string]$Name, [string[]]$Fallbacks = @()) {
 }
 
 function Flutter {
+    param(
+        [Parameter(ValueFromRemainingArguments)]
+        [string[]]$Arguments
+    )
     $flutter = Find-CommandPath 'flutter' @(
         'C:\Users\User\Tools\flutter\bin\flutter.bat'
     )
-    & $flutter @args
+    # Calling flutter.bat from an already-running PowerShell script can enter
+    # a high-CPU cmd.exe loop with newer Flutter launchers. Invoke the cached
+    # Flutter tool snapshot directly; this is the same final command used by
+    # flutter.bat after its environment/bootstrap checks.
+    $flutterRoot = Split-Path -Parent (Split-Path -Parent $flutter)
+    $dart = Join-Path $flutterRoot 'bin\cache\dart-sdk\bin\dart.exe'
+    $toolPackages = Join-Path $flutterRoot 'packages\flutter_tools\.dart_tool\package_config.json'
+    $toolSnapshot = Join-Path $flutterRoot 'bin\cache\flutter_tools.snapshot'
+    if (-not (Test-Path -LiteralPath $dart -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $toolPackages -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $toolSnapshot -PathType Leaf)) {
+        throw 'The Flutter SDK cache is incomplete. Run flutter doctor once from a terminal.'
+    }
+    & $dart "--packages=$toolPackages" $toolSnapshot @Arguments
     if ($LASTEXITCODE -ne 0) { throw "Flutter command failed ($LASTEXITCODE)." }
 }
 
@@ -58,6 +128,14 @@ function Invoke-Git([Parameter(ValueFromRemainingArguments)] [string[]]$Argument
 }
 
 function Confirm-RemoteAction([string]$Message) {
+    if ($script:EnvironmentName -eq 'production') {
+        Write-Host "PRODUCTION deployment selected: $ProjectId" -ForegroundColor Red
+        $confirmation = (Read-Host "Type the production project ID '$ProjectId' to continue").Trim()
+        if ($confirmation -ne $ProjectId) {
+            Write-Host 'Production operation cancelled; the project ID did not match.' -ForegroundColor Yellow
+            return $false
+        }
+    }
     while ($true) {
         $answer = (Read-Host "$Message [Y]es/[N]o").Trim()
         if ($answer -match '(?i)^(y|yes)$') { return $true }
@@ -122,47 +200,161 @@ function Invoke-Tests {
 }
 
 function Prepare-Build {
-    Flutter pub get
+    Write-Host "Environment: $($script:EnvironmentName.ToUpperInvariant()) | Firebase project: $ProjectId" -ForegroundColor Yellow
+    $packageConfig = Join-Path $script:RepoRoot '.dart_tool\package_config.json'
+    if (-not (Test-Path -LiteralPath $packageConfig -PathType Leaf)) {
+        Write-Host 'Flutter package metadata is missing; resolving dependencies once.' -ForegroundColor Yellow
+        Flutter pub get
+    } else {
+        # Build commands below use --no-pub. Re-running pub get on every menu
+        # build can block on a package/network check even when pubspec files
+        # have not changed, making a healthy Gradle build appear frozen. Use
+        # the explicit Dependencies menu action after changing pubspec.yaml.
+        Write-Host 'Using resolved Flutter dependencies (run Dependencies after pubspec changes).' -ForegroundColor DarkGray
+    }
     if (-not $SkipTests) { Invoke-Tests }
 }
 
+function Invoke-Shorebird([string[]]$Arguments) {
+    $shorebird = Find-CommandPath 'shorebird'
+    $global:LASTEXITCODE = 0
+    & $shorebird @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { throw "Shorebird command failed ($exitCode)." }
+}
+
+function Assert-ShorebirdReady {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'shorebird.yaml'))) {
+        throw 'Shorebird is not initialized. Install/login to Shorebird, run shorebird init once, and commit the generated shorebird.yaml.'
+    }
+    Invoke-Shorebird -Arguments @('doctor')
+}
+
+function Invoke-WithAndroidNativeFirebaseConfig([scriptblock]$Operation) {
+    if ($script:EnvironmentName -eq 'staging') {
+        & $Operation
+        return
+    }
+
+    $productionGoogleServices = Join-Path $script:RepoRoot 'config\firebase-production\google-services.json'
+    if (-not (Test-Path -LiteralPath $productionGoogleServices)) {
+        throw 'Production Android build requires config/firebase-production/google-services.json from the production Firebase project.'
+    }
+    $nativeConfig = Get-Content -Raw -LiteralPath $productionGoogleServices | ConvertFrom-Json
+    if ([string]$nativeConfig.project_info.project_id -ne $ProjectId) {
+        throw 'Production google-services.json does not match the selected production Firebase project.'
+    }
+
+    $androidConfig = Join-Path $script:RepoRoot 'android\app\google-services.json'
+    $backupConfig = Join-Path ([System.IO.Path]::GetTempPath()) "tableside-staging-google-services-$([guid]::NewGuid()).json"
+    Copy-Item -LiteralPath $androidConfig -Destination $backupConfig -Force
+    try {
+        Copy-Item -LiteralPath $productionGoogleServices -Destination $androidConfig -Force
+        & $Operation
+    } finally {
+        Copy-Item -LiteralPath $backupConfig -Destination $androidConfig -Force
+        Remove-Item -LiteralPath $backupConfig -Force
+    }
+}
+
+function Assert-AndroidReleaseSigning {
+    $propertiesPath = Join-Path $script:RepoRoot 'android\key.properties'
+    $properties = @{}
+    if (Test-Path -LiteralPath $propertiesPath) {
+        $properties = Get-Content -Raw -LiteralPath $propertiesPath |
+            ConvertFrom-StringData
+    }
+
+    function Resolve-SigningValue([string]$PropertyName, [string]$EnvironmentName) {
+        $environmentValue = [Environment]::GetEnvironmentVariable($EnvironmentName)
+        if (-not [string]::IsNullOrWhiteSpace($environmentValue)) {
+            return $environmentValue.Trim()
+        }
+        $propertyValue = [string]$properties[$PropertyName]
+        if (-not [string]::IsNullOrWhiteSpace($propertyValue)) {
+            return $propertyValue.Trim()
+        }
+        return $null
+    }
+
+    $storeFile = Resolve-SigningValue 'storeFile' 'TABLESIDECY_ANDROID_KEYSTORE_PATH'
+    $requiredValues = @(
+        @{ Name = 'keystore path'; Value = $storeFile },
+        @{ Name = 'store password'; Value = (Resolve-SigningValue 'storePassword' 'TABLESIDECY_ANDROID_STORE_PASSWORD') },
+        @{ Name = 'key alias'; Value = (Resolve-SigningValue 'keyAlias' 'TABLESIDECY_ANDROID_KEY_ALIAS') },
+        @{ Name = 'key password'; Value = (Resolve-SigningValue 'keyPassword' 'TABLESIDECY_ANDROID_KEY_PASSWORD') }
+    )
+    $missing = @($requiredValues | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Value) })
+    if ($missing.Count -gt 0) {
+        $missingNames = ($missing | ForEach-Object { $_.Name }) -join ', '
+        throw "Android release signing is incomplete ($missingNames). Run tools/create-android-upload-keystore.ps1 and follow docs/android-release-signing.md."
+    }
+    if (-not (Test-Path -LiteralPath $storeFile -PathType Leaf)) {
+        throw "The configured Android release keystore does not exist: $storeFile"
+    }
+}
+
+function Invoke-AndroidBuild(
+    [string]$Target,
+    [ValidateSet('debug', 'release')]
+    [string]$BuildMode = 'release'
+) {
+    if ($BuildMode -eq 'release') {
+        Assert-AndroidReleaseSigning
+    }
+    Invoke-WithAndroidNativeFirebaseConfig {
+        Write-Host 'Compiling Flutter and Android native assets; the first build can take several minutes.' -ForegroundColor DarkGray
+        # Prepare-Build already ran pub get. Avoid resolving packages twice and
+        # keep this phase focused on producing the requested Android artifact.
+        Flutter build $Target "--$BuildMode" --no-pub $script:FirebaseBuildArgument
+    }
+}
+
 function Build-Apk {
-    Write-Heading 'Android APK (release)'
+    # Staging APKs are local test artifacts and must not require the protected
+    # production upload-key passwords. Production APKs remain release-signed;
+    # App Bundles and Shorebird baselines are unchanged and always require the
+    # configured private upload key.
+    $buildMode = if ($script:EnvironmentName -eq 'staging') { 'debug' } else { 'release' }
+    Write-Heading "Android APK ($buildMode)"
+    if ($buildMode -eq 'release') { Assert-AndroidReleaseSigning }
     Prepare-Build
-    Flutter build apk --release --dart-define=$script:FirebaseDefine
-    Write-Host "APK: $script:RepoRoot\build\app\outputs\flutter-apk\app-release.apk" -ForegroundColor Green
+    Invoke-AndroidBuild -Target 'apk' -BuildMode $buildMode
+    Write-Host "APK: $script:RepoRoot\build\app\outputs\flutter-apk\app-$buildMode.apk" -ForegroundColor Green
 }
 
 function Build-AppBundle {
     Write-Heading 'Android App Bundle (release)'
+    Assert-AndroidReleaseSigning
     Prepare-Build
-    Flutter build appbundle --release --dart-define=$script:FirebaseDefine
+    Invoke-AndroidBuild 'appbundle'
     Write-Host "Bundle: $script:RepoRoot\build\app\outputs\bundle\release\app-release.aab" -ForegroundColor Green
 }
 
 function Build-Windows {
     Write-Heading 'Windows application (release)'
     Prepare-Build
-    Flutter build windows --release --dart-define=$script:FirebaseDefine
+    Flutter build windows --release --no-pub $script:FirebaseBuildArgument
     Write-Host "Windows build: $script:RepoRoot\build\windows\x64\runner\Release" -ForegroundColor Green
 }
 
 function Build-Web {
     Write-Heading 'Web application (release)'
     Prepare-Build
-    Flutter build web --release --dart-define=$script:FirebaseDefine
+    Flutter build web --release --no-pub $script:FirebaseBuildArgument
     Write-Host "Web build: $script:RepoRoot\build\web" -ForegroundColor Green
 }
 
 function Build-All {
     Write-Heading 'Prepare all release builds'
+    Assert-AndroidReleaseSigning
     Prepare-Build
     Write-Heading 'Android APK (release)'
-    Flutter build apk --release --dart-define=$script:FirebaseDefine
+    Invoke-AndroidBuild 'apk'
     Write-Heading 'Windows application (release)'
-    Flutter build windows --release --dart-define=$script:FirebaseDefine
+    Flutter build windows --release --no-pub $script:FirebaseBuildArgument
     Write-Heading 'Web application (release)'
-    Flutter build web --release --dart-define=$script:FirebaseDefine
+    Flutter build web --release --no-pub $script:FirebaseBuildArgument
     Write-Host 'APK, Windows, and web release builds completed.' -ForegroundColor Green
 }
 
@@ -179,6 +371,72 @@ function Package-Windows {
     Compress-Archive -Path (Join-Path $script:RepoRoot 'build\windows\x64\runner\Release\*') -DestinationPath $zipPath -CompressionLevel Optimal
     Write-Host "Windows ZIP: $zipPath" -ForegroundColor Green
 }
+
+function Invoke-ShorebirdRelease([string]$Platform, [bool]$Patch) {
+    Assert-ShorebirdReady
+    if ($Platform -eq 'android') {
+        Assert-AndroidReleaseSigning
+    }
+    Prepare-Build
+    $operation = if ($Patch) { 'patch' } else { 'release' }
+    $publicKey = [string]$env:SHOREBIRD_PUBLIC_KEY_PATH
+    if ([string]::IsNullOrWhiteSpace($publicKey) -or -not (Test-Path -LiteralPath $publicKey)) {
+        throw 'Set SHOREBIRD_PUBLIC_KEY_PATH to the secured Shorebird RSA public PEM before creating a release or patch.'
+    }
+    $signingArguments = @('--public-key-path', $publicKey)
+    if ($Patch) {
+        $privateKey = [string]$env:SHOREBIRD_PRIVATE_KEY_PATH
+        if ([string]::IsNullOrWhiteSpace($privateKey) -or -not (Test-Path -LiteralPath $privateKey)) {
+            throw 'Set SHOREBIRD_PRIVATE_KEY_PATH to the secured Shorebird RSA private PEM before creating a patch.'
+        }
+        $signingArguments += @('--private-key-path', $privateKey)
+        if ($script:EnvironmentName -eq 'staging') {
+            $signingArguments += @('--track', 'staging')
+        }
+    }
+    Write-Heading "Shorebird $operation for $Platform"
+    # PowerShell must pass the Flutter argument separator as one literal
+    # argument. Building the complete array first prevents it from being
+    # reinterpreted as a PowerShell or Shorebird short option (for example
+    # `-e`) when this operation runs inside the Android configuration block.
+    $shorebirdArguments = @($operation, $Platform)
+    $shorebirdArguments += $signingArguments
+    $shorebirdArguments += @('--', $script:FirebaseBuildArgument)
+    $startedAtUtc = [DateTime]::UtcNow
+    if ($Platform -eq 'android') {
+        Invoke-WithAndroidNativeFirebaseConfig {
+            Invoke-Shorebird -Arguments $shorebirdArguments
+        }
+    } else {
+        Invoke-Shorebird -Arguments $shorebirdArguments
+    }
+    if (-not $Patch) {
+        $artifact = switch ($Platform) {
+            'android' { Join-Path $script:RepoRoot 'build\app\outputs\bundle\release\app-release.aab' }
+            'windows' { Join-Path $script:RepoRoot 'build\windows\x64\runner\Release\TableSideCY.exe' }
+            default { $null }
+        }
+        if ($null -ne $artifact) {
+            if (-not (Test-Path -LiteralPath $artifact)) {
+                throw "Shorebird returned without creating the expected $Platform release artifact: $artifact"
+            }
+            $artifactInfo = Get-Item -LiteralPath $artifact
+            if ($artifactInfo.LastWriteTimeUtc -lt $startedAtUtc.AddSeconds(-5)) {
+                throw "Shorebird did not refresh the expected $Platform release artifact. Refusing to report a stale build as successful."
+            }
+        }
+    }
+    if ($Patch) {
+        Write-Host 'Patch uploaded. Promote it through a test track before stable production rollout.' -ForegroundColor Green
+    } else {
+        Write-Host 'Shorebird baseline created. Distribute this exact generated build; stock Flutter builds cannot receive its patches.' -ForegroundColor Green
+    }
+}
+
+function Shorebird-ReleaseAndroid { Invoke-ShorebirdRelease 'android' $false }
+function Shorebird-PatchAndroid { Invoke-ShorebirdRelease 'android' $true }
+function Shorebird-ReleaseWindows { Invoke-ShorebirdRelease 'windows' $false }
+function Shorebird-PatchWindows { Invoke-ShorebirdRelease 'windows' $true }
 
 function Check-Functions {
     $npm = Find-CommandPath 'npm'
@@ -233,6 +491,19 @@ function Deploy-Storage {
     }
 }
 
+function Deploy-Database {
+    if (-not (Confirm-RemoteAction "Deploy Realtime Database rules to '$ProjectId'?")) { return }
+    Write-Heading "Deploy Realtime Database rules to $ProjectId"
+    $logPath = Start-OperationLog 'deploy-database'
+    $succeeded = $false
+    try {
+        Firebase deploy --only database --project $ProjectId
+        $succeeded = $true
+    } finally {
+        Stop-OperationLog $logPath $succeeded
+    }
+}
+
 function Deploy-Web {
     if (-not (Confirm-RemoteAction "Build and deploy Firebase Hosting to '$ProjectId'?")) { return }
     Write-Heading "Build and deploy Firebase Hosting to $ProjectId"
@@ -248,13 +519,13 @@ function Deploy-Web {
 }
 
 function Deploy-Backend {
-    if (-not (Confirm-RemoteAction "Deploy Functions, Firestore, and Storage to '$ProjectId'?")) { return }
+    if (-not (Confirm-RemoteAction "Deploy Functions, Firestore, Realtime Database, and Storage to '$ProjectId'?")) { return }
     Write-Heading "Deploy backend to $ProjectId"
     $logPath = Start-OperationLog 'deploy-backend'
     $succeeded = $false
     try {
         Check-Functions
-        Firebase deploy --only 'functions,firestore:rules,firestore:indexes,storage' --project $ProjectId
+        Firebase deploy --only 'functions,firestore:rules,firestore:indexes,database,storage' --project $ProjectId
         $succeeded = $true
     } finally {
         Stop-OperationLog $logPath $succeeded
@@ -297,8 +568,70 @@ function Clean-Build {
     Flutter clean
 }
 
+function Invoke-NetworkControlScript {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ScriptName,
+        [Parameter(Mandatory)]
+        [ValidateSet('Block', 'Allow')]
+        [string]$Mode,
+        [switch]$AsAdministrator
+    )
+
+    $scriptPath = Join-Path $script:RepoRoot $ScriptName
+    if (-not (Test-Path -LiteralPath $scriptPath)) {
+        throw "Network control script is missing: $scriptPath"
+    }
+
+    $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Mode $Mode"
+    if ($AsAdministrator) {
+        Write-Host 'Windows will request administrator permission for the hub firewall change.' -ForegroundColor Yellow
+        $process = Start-Process powershell.exe `
+            -Verb RunAs `
+            -Wait `
+            -PassThru `
+            -ArgumentList $arguments
+        if ($process.ExitCode -ne 0) {
+            throw "$ScriptName failed with exit code $($process.ExitCode)."
+        }
+        return
+    }
+
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode $Mode
+    if ($LASTEXITCODE -ne 0) {
+        throw "$ScriptName failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Block-HubInternet {
+    Invoke-NetworkControlScript `
+        -ScriptName 'tableside-hub-internet.ps1' `
+        -Mode Block `
+        -AsAdministrator
+}
+
+function Allow-HubInternet {
+    Invoke-NetworkControlScript `
+        -ScriptName 'tableside-hub-internet.ps1' `
+        -Mode Allow `
+        -AsAdministrator
+}
+
+function Block-EmulatorInternet {
+    Invoke-NetworkControlScript `
+        -ScriptName 'tableside-emulator-internet.ps1' `
+        -Mode Block
+}
+
+function Allow-EmulatorInternet {
+    Invoke-NetworkControlScript `
+        -ScriptName 'tableside-emulator-internet.ps1' `
+        -Mode Allow
+}
+
 function Show-Menu {
     while ($true) {
+        Write-Host "`nEnvironment: $($script:EnvironmentName.ToUpperInvariant()) | Firebase: $ProjectId" -ForegroundColor Yellow
         Write-Host @'
 
 TableSideCY developer menu
@@ -321,7 +654,17 @@ TableSideCY developer menu
  17  Git pull current branch (fast-forward only)
  18  Git commit tracked changes
  19  Git push current branch
- 20  Flutter clean (troubleshooting only)
+ 20  Shorebird doctor
+ 21  Shorebird Android release baseline
+ 22  Shorebird Android patch
+ 23  Shorebird Windows release baseline
+ 24  Shorebird Windows patch
+ 25  Flutter clean (troubleshooting only)
+ 26  Block Windows hub internet (keep private LAN)
+ 27  Restore Windows hub internet
+ 28  Block Android emulator internet (keep venue LAN)
+ 29  Restore Android emulator internet
+ 30  Deploy Realtime Database rules
   0  Exit
 '@
         $choice = Read-Host 'Choose an option'
@@ -347,7 +690,17 @@ TableSideCY developer menu
                 '17' { Pull-Git }
                 '18' { Commit-Git }
                 '19' { Push-Git }
-                '20' { Clean-Build }
+                '20' { Assert-ShorebirdReady }
+                '21' { Shorebird-ReleaseAndroid }
+                '22' { Shorebird-PatchAndroid }
+                '23' { Shorebird-ReleaseWindows }
+                '24' { Shorebird-PatchWindows }
+                '25' { Clean-Build }
+                '26' { Block-HubInternet }
+                '27' { Allow-HubInternet }
+                '28' { Block-EmulatorInternet }
+                '29' { Allow-EmulatorInternet }
+                '30' { Deploy-Database }
                 '0'  { return }
                 default { Write-Host 'Choose a number shown in the menu.' -ForegroundColor Yellow }
             }
@@ -373,11 +726,21 @@ switch ($Action) {
     'DeployFunctions' { Deploy-Functions }
     'DeployFirestore' { Deploy-Firestore }
     'DeployStorage'   { Deploy-Storage }
+    'DeployDatabase'  { Deploy-Database }
     'DeployWeb'       { Deploy-Web }
     'DeployBackend'   { Deploy-Backend }
     'GitStatus'       { Show-GitStatus }
     'GitPull'         { Pull-Git }
     'GitCommit'       { Commit-Git }
     'GitPush'         { Push-Git }
+    'ShorebirdDoctor' { Assert-ShorebirdReady }
+    'ShorebirdReleaseAndroid' { Shorebird-ReleaseAndroid }
+    'ShorebirdPatchAndroid' { Shorebird-PatchAndroid }
+    'ShorebirdReleaseWindows' { Shorebird-ReleaseWindows }
+    'ShorebirdPatchWindows' { Shorebird-PatchWindows }
+    'BlockHubInternet' { Block-HubInternet }
+    'AllowHubInternet' { Allow-HubInternet }
+    'BlockEmulatorInternet' { Block-EmulatorInternet }
+    'AllowEmulatorInternet' { Allow-EmulatorInternet }
     'Clean'           { Clean-Build }
 }

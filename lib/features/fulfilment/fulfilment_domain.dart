@@ -18,6 +18,9 @@ class ServiceArea {
   const ServiceArea({
     required this.id,
     required this.name,
+    this.country = 'Kuzey Kıbrıs Türk Cumhuriyeti',
+    this.district = '',
+    this.town = '',
     this.deliveryFeeMinor = 0,
     this.minimumOrderMinor = 0,
     this.estimatedMinutes = 45,
@@ -26,6 +29,9 @@ class ServiceArea {
 
   final String id;
   final String name;
+  final String country;
+  final String district;
+  final String town;
   final int deliveryFeeMinor;
   final int minimumOrderMinor;
   final int estimatedMinutes;
@@ -81,6 +87,9 @@ class CustomerAddress {
     required this.area,
     required this.addressLines,
     this.notes = '',
+    this.isDefault = false,
+    this.latitude,
+    this.longitude,
   });
 
   final String id;
@@ -90,6 +99,16 @@ class CustomerAddress {
   final String area;
   final String addressLines;
   final String notes;
+  final bool isDefault;
+  final double? latitude;
+  final double? longitude;
+
+  String get oneLine => [
+    addressLines,
+    area,
+    town,
+    country,
+  ].where((part) => part.trim().isNotEmpty).join(', ');
 }
 
 class VenueFulfilmentSettings {
@@ -97,6 +116,8 @@ class VenueFulfilmentSettings {
     this.collectionEnabled = false,
     this.deliveryEnabled = false,
     this.courseControlEnabled = false,
+    this.collectionLeadMinutes = 20,
+    this.deliveryLeadMinutes = 20,
     this.collectionWindows = const <ServiceWindow>[],
     this.deliveryWindows = const <ServiceWindow>[],
     this.serviceAreas = const <ServiceArea>[],
@@ -106,6 +127,8 @@ class VenueFulfilmentSettings {
   final bool collectionEnabled;
   final bool deliveryEnabled;
   final bool courseControlEnabled;
+  final int collectionLeadMinutes;
+  final int deliveryLeadMinutes;
   final List<ServiceWindow> collectionWindows;
   final List<ServiceWindow> deliveryWindows;
   final List<ServiceArea> serviceAreas;

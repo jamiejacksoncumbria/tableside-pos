@@ -7,6 +7,11 @@ class OfflineEventLedger {
   OfflineEventLedger._({OfflineEventStore? store})
     : _store = store ?? createOfflineEventStore();
 
+  /// Builds an isolated ledger around a supplied store for deterministic
+  /// durability and crash-recovery tests. Production code must use [instance]
+  /// so every hub component shares one encrypted append-only ledger.
+  OfflineEventLedger.forTesting(OfflineEventStore store) : _store = store;
+
   static final OfflineEventLedger instance = OfflineEventLedger._();
 
   final OfflineEventStore _store;
@@ -122,6 +127,19 @@ class OfflineEventLedger {
   Future<void> quarantine(String eventId, String reason) {
     _requireReady();
     return _store.quarantine(eventId, reason);
+  }
+
+  Future<int> restoreQuarantinedCloudBaselines({
+    required String tenantId,
+    required String venueId,
+    required int hubEpoch,
+  }) {
+    _requireReady();
+    return _store.restoreQuarantinedCloudBaselines(
+      tenantId: tenantId,
+      venueId: venueId,
+      hubEpoch: hubEpoch,
+    );
   }
 
   void _requireReady() {

@@ -147,6 +147,134 @@ void main() {
       ),
     );
   });
+
+  test('preserves the hub staff-session rejection code', () async {
+    final credential =
+        await VenueHubDeviceCredentialStore(
+          secrets: _MemorySecrets(),
+        ).getOrCreate(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'device-a',
+        );
+    final client = VenueHubClient(
+      configuration: VenueHubClientConfiguration(
+        endpoint: Uri.parse('https://hub.example.test:8443'),
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'device-a',
+        staffId: 'staff-a',
+        staffSessionId: 'expired-session',
+        staffSessionToken: '01234567890123456789012345678901',
+        hubEpoch: 2,
+        credential: credential,
+      ),
+      httpClient: MockClient(
+        (_) async => http.Response(
+          jsonEncode({
+            'error': 'staff_session_invalid',
+            'message': 'The staff session is unavailable, expired, or revoked.',
+          }),
+          403,
+        ),
+      ),
+    );
+
+    await expectLater(
+      client.sendEvent(
+        eventType: 'order.opened',
+        payload: const {'orderId': 'order-a'},
+      ),
+      throwsA(
+        isA<VenueHubClientException>()
+            .having(
+              (error) => error.code,
+              'code',
+              'staff_session_invalid',
+            )
+            .having(
+              (error) => error.message,
+              'message',
+              contains('expired'),
+            ),
+      ),
+    );
+  });
+
+  test(
+    'requests only the bounded print-job view required by a screen',
+    () async {
+      final credential =
+          await VenueHubDeviceCredentialStore(
+            secrets: _MemorySecrets(),
+          ).getOrCreate(
+            tenantId: 'tenant-a',
+            venueId: 'venue-a',
+            deviceId: 'device-a',
+          );
+      late Map<String, dynamic> sent;
+      final client = VenueHubClient(
+        configuration: VenueHubClientConfiguration(
+          endpoint: Uri.parse('https://hub.example.test:8443'),
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'device-a',
+          staffId: 'staff-a',
+          staffSessionId: 'session-a',
+          staffSessionToken: '01234567890123456789012345678901',
+          hubEpoch: 2,
+          credential: credential,
+        ),
+        httpClient: MockClient((request) async {
+          sent = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(jsonEncode({'jobs': <Object>[]}), 200);
+        }),
+      );
+      final since = DateTime.utc(2026, 9, 1);
+
+      await client.fetchPrintJobs(
+        statuses: const {'printed'},
+        sinceUtc: since,
+        limit: 250,
+      );
+
+      expect(sent['body']['statuses'], ['printed']);
+      expect(sent['body']['sinceUtc'], since.toIso8601String());
+      expect(sent['body']['limit'], 250);
+    },
+  );
+
+  test('large snapshots do not inherit the short health timeout', () async {
+    final credential =
+        await VenueHubDeviceCredentialStore(
+          secrets: _MemorySecrets(),
+        ).getOrCreate(
+          tenantId: 'tenant-a',
+          venueId: 'venue-a',
+          deviceId: 'device-a',
+        );
+    final client = VenueHubClient(
+      configuration: VenueHubClientConfiguration(
+        endpoint: Uri.parse('https://hub.example.test:8443'),
+        tenantId: 'tenant-a',
+        venueId: 'venue-a',
+        deviceId: 'device-a',
+        staffId: 'staff-a',
+        staffSessionId: 'session-a',
+        staffSessionToken: '01234567890123456789012345678901',
+        hubEpoch: 2,
+        credential: credential,
+      ),
+      timeout: const Duration(milliseconds: 5),
+      snapshotTimeout: const Duration(milliseconds: 250),
+      httpClient: MockClient((_) async {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        return http.Response(jsonEncode({'version': 1}), 200);
+      }),
+    );
+
+    expect((await client.fetchCatalogue())['version'], 1);
+  });
 }
 
 class _MemorySecrets implements VenueHubSecretStore {

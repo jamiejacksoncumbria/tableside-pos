@@ -2,22 +2,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:tableside_pos/offline/venue_hub_routing.dart';
 
 void main() {
-  test(
-    'cloud-connected web submits commands to the authoritative hub',
-    () {
-      expect(
-        chooseVenueMutationRoute(
-          const VenueHubRoutingInput(
-            platform: VenueClientPlatform.web,
-            cloudReachable: true,
-            hubReachable: false,
-            hubOwnsAuthority: true,
-          ),
+  test('cloud-connected web submits commands to the authoritative hub', () {
+    expect(
+      chooseVenueMutationRoute(
+        const VenueHubRoutingInput(
+          platform: VenueClientPlatform.web,
+          cloudReachable: true,
+          hubReachable: false,
+          hubOwnsAuthority: true,
         ),
-        VenueMutationRoute.remoteHub,
-      );
-    },
-  );
+      ),
+      VenueMutationRoute.remoteHub,
+    );
+  });
 
   test('native mobile-data clients route through the remote hub queue', () {
     expect(
@@ -83,5 +80,45 @@ void main() {
       ),
       VenueMutationRoute.firebase,
     );
+  });
+
+  test('authoritative hub routing fails closed for every native platform', () {
+    for (final platform in [
+      VenueClientPlatform.android,
+      VenueClientPlatform.ios,
+      VenueClientPlatform.windows,
+    ]) {
+      expect(
+        chooseVenueMutationRoute(
+          VenueHubRoutingInput(
+            platform: platform,
+            cloudReachable: false,
+            hubReachable: false,
+            hubOwnsAuthority: true,
+          ),
+        ),
+        VenueMutationRoute.unavailable,
+      );
+    }
+  });
+
+  test('LAN remains preferred when both LAN and cloud are reachable', () {
+    for (final platform in [
+      VenueClientPlatform.android,
+      VenueClientPlatform.ios,
+      VenueClientPlatform.windows,
+    ]) {
+      expect(
+        chooseVenueMutationRoute(
+          VenueHubRoutingInput(
+            platform: platform,
+            cloudReachable: true,
+            hubReachable: true,
+            hubOwnsAuthority: true,
+          ),
+        ),
+        VenueMutationRoute.venueHub,
+      );
+    }
   });
 }

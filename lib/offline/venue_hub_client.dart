@@ -70,6 +70,7 @@ class VenueHubClient {
     http.Client? httpClient,
     this.timeout = const Duration(seconds: 8),
     this.loginTimeout = const Duration(seconds: 20),
+    this.snapshotTimeout = const Duration(seconds: 15),
   }) : _http =
            httpClient ??
            createVenueHubHttpClient(
@@ -96,6 +97,11 @@ class VenueHubClient {
   final VenueHubClientConfiguration configuration;
   final Duration timeout;
   final Duration loginTimeout;
+  /// Initial catalogue/order snapshots are materially larger than health and
+  /// mutation responses. Keep their limit separate so a two-second LAN health
+  /// policy cannot make a valid promoted hub impossible to unlock on slower
+  /// Android hardware or a debug emulator.
+  final Duration snapshotTimeout;
   final http.Client _http;
   String? _lastHealthFailure;
 
@@ -194,11 +200,16 @@ class VenueHubClient {
         .timeout(timeout);
     if (response.statusCode != 201) {
       String? safeMessage;
+      String? errorCode;
       try {
         final errorBody = jsonDecode(response.body);
         final message = errorBody is Map ? errorBody['message'] : null;
+        final code = errorBody is Map ? errorBody['error'] : null;
         if (message is String && message.trim().isNotEmpty) {
           safeMessage = message.trim();
+        }
+        if (code is String && code.trim().isNotEmpty) {
+          errorCode = code.trim();
         }
       } on Object {
         // Use the status-based message below for malformed error responses.
@@ -208,6 +219,7 @@ class VenueHubClient {
             (response.statusCode == 401 || response.statusCode == 403
                 ? 'The venue hub rejected this device or staff session.'
                 : 'The venue hub could not safely save this operation.'),
+        code: errorCode,
       );
     }
     final decoded = jsonDecode(response.body);
@@ -327,9 +339,102 @@ class VenueHubClient {
     return job is Map ? Map<String, Object?>.from(job) : null;
   }
 
+  /// Performs manager-only recovery against the authoritative hub queue. The
+  /// request carries both the enrolled device signature and current staff PIN
+  /// session, so exposing local recovery never weakens the security boundary.
+  Future<Map<String, Object?>> managePrintJob({
+    required String action,
+    required String jobId,
+    String? reason,
+  }) async {
+    final sessionId = configuration.staffSessionId;
+    final sessionToken = configuration.staffSessionToken;
+    if (sessionId == null || sessionToken == null) {
+      throw const VenueHubClientException(
+        'Enter a manager PIN before changing the print queue.',
+      );
+    }
+    final body = <String, Object?>{
+      'staffSessionId': sessionId,
+      'staffSessionToken': sessionToken,
+      'action': action,
+      'jobId': jobId,
+      'reason': ?reason,
+    };
+    final envelope =
+        await VenueHubRequestSigner(configuration.credential.keyPair).sign(
+          credentialId: configuration.credential.credentialId,
+          tenantId: configuration.tenantId,
+          venueId: configuration.venueId,
+          deviceId: configuration.deviceId,
+          staffId: configuration.staffId,
+          method: 'POST',
+          path: '/v1/print/manage',
+          hubEpoch: configuration.hubEpoch,
+          sentAtUtc: TrustedClock.instance.nowUtc(),
+          body: body,
+        );
+    final response = await _http
+        .post(
+          configuration.endpoint.resolve('/v1/print/manage'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({'envelope': envelope.toJson(), 'body': body}),
+        )
+        .timeout(timeout);
+    if (response.statusCode != 200) {
+      throw const VenueHubClientException(
+        'The venue hub rejected this print queue action.',
+      );
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map) {
+      throw const VenueHubClientException('The print response is invalid.');
+    }
+    return Map<String, Object?>.from(decoded);
+  }
+
+  Future<List<Map<String, Object?>>> fetchPrintJobs({
+    Set<String>? statuses,
+    DateTime? sinceUtc,
+    int? limit,
+  }) async {
+    final sessionId = configuration.staffSessionId;
+    final sessionToken = configuration.staffSessionToken;
+    if (sessionId == null || sessionToken == null) return const [];
+    final body = <String, Object?>{
+      'staffSessionId': sessionId,
+      'staffSessionToken': sessionToken,
+      if (statuses?.isNotEmpty == true) 'statuses': statuses!.toList(),
+      if (sinceUtc != null) 'sinceUtc': sinceUtc.toUtc().toIso8601String(),
+      'limit': ?limit,
+    };
+    final response = await _signedPost('/v1/print/jobs', body);
+    if (response.statusCode != 200) {
+      throw _exceptionFromResponse(
+        response,
+        fallback: 'The venue hub print queue is unavailable.',
+      );
+    }
+    final decoded = jsonDecode(response.body);
+    final jobs = decoded is Map ? decoded['jobs'] : null;
+    if (jobs is! List) {
+      throw const VenueHubClientException(
+        'The print queue response is invalid.',
+      );
+    }
+    return jobs
+        .whereType<Map>()
+        .map((job) => Map<String, Object?>.from(job))
+        .toList(growable: false);
+  }
+
   Future<Map<String, Object?>> fetchCatalogue() async {
     const body = <String, Object?>{};
-    final response = await _signedPost('/v1/catalogue', body);
+    final response = await _signedPost(
+      '/v1/catalogue',
+      body,
+      requestTimeout: snapshotTimeout,
+    );
     if (response.statusCode != 200) {
       throw const VenueHubClientException(
         'The venue hub catalogue is unavailable.',
@@ -344,6 +449,45 @@ class VenueHubClient {
     return Map<String, Object?>.from(decoded);
   }
 
+  Future<void> refreshCatalogue() async {
+    final sessionId = configuration.staffSessionId;
+    final sessionToken = configuration.staffSessionToken;
+    if (sessionId == null || sessionToken == null) {
+      throw const VenueHubClientException(
+        'Enter a manager PIN before refreshing venue configuration.',
+      );
+    }
+    final body = <String, Object?>{
+      'staffSessionId': sessionId,
+      'staffSessionToken': sessionToken,
+    };
+    final envelope =
+        await VenueHubRequestSigner(configuration.credential.keyPair).sign(
+          credentialId: configuration.credential.credentialId,
+          tenantId: configuration.tenantId,
+          venueId: configuration.venueId,
+          deviceId: configuration.deviceId,
+          staffId: configuration.staffId,
+          method: 'POST',
+          path: '/v1/catalogue/refresh',
+          hubEpoch: configuration.hubEpoch,
+          sentAtUtc: TrustedClock.instance.nowUtc(),
+          body: body,
+        );
+    final response = await _http
+        .post(
+          configuration.endpoint.resolve('/v1/catalogue/refresh'),
+          headers: const {'Content-Type': 'application/json'},
+          body: jsonEncode({'envelope': envelope.toJson(), 'body': body}),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode != 200) {
+      throw const VenueHubClientException(
+        'The venue hub could not refresh its configuration.',
+      );
+    }
+  }
+
   Future<List<Map<String, Object?>>> fetchOrders() async {
     final sessionId = configuration.staffSessionId;
     final sessionToken = configuration.staffSessionToken;
@@ -354,9 +498,16 @@ class VenueHubClient {
       'staffSessionId': sessionId,
       'staffSessionToken': sessionToken,
     };
-    final response = await _signedPost('/v1/orders', body);
+    final response = await _signedPost(
+      '/v1/orders',
+      body,
+      requestTimeout: snapshotTimeout,
+    );
     if (response.statusCode != 200) {
-      throw const VenueHubClientException('The hub orders are unavailable.');
+      throw _exceptionFromResponse(
+        response,
+        fallback: 'The hub orders are unavailable.',
+      );
     }
     final decoded = jsonDecode(response.body);
     final orders = decoded is Map ? decoded['orders'] : null;
@@ -443,8 +594,9 @@ class VenueHubClient {
 
   Future<http.Response> _signedPost(
     String path,
-    Map<String, Object?> body,
-  ) async {
+    Map<String, Object?> body, {
+    Duration? requestTimeout,
+  }) async {
     final envelope =
         await VenueHubRequestSigner(configuration.credential.keyPair).sign(
           credentialId: configuration.credential.credentialId,
@@ -464,7 +616,29 @@ class VenueHubClient {
           headers: const {'Content-Type': 'application/json'},
           body: jsonEncode({'envelope': envelope.toJson(), 'body': body}),
         )
-        .timeout(timeout);
+        .timeout(requestTimeout ?? timeout);
+  }
+
+  VenueHubClientException _exceptionFromResponse(
+    http.Response response, {
+    required String fallback,
+  }) {
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map) {
+        final code = decoded['error'];
+        final message = decoded['message'];
+        return VenueHubClientException(
+          message is String && message.trim().isNotEmpty
+              ? message.trim()
+              : fallback,
+          code: code is String && code.trim().isNotEmpty ? code.trim() : null,
+        );
+      }
+    } on Object {
+      // Preserve the endpoint-specific safe fallback for malformed responses.
+    }
+    return VenueHubClientException(fallback);
   }
 
   void close() => _http.close();

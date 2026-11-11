@@ -2,22 +2,38 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/order_flow_display_mode.dart';
+import '../../core/safe_dialog.dart';
+import '../../core/trusted_clock.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/production_command_repository.dart';
+import '../../data/printer_device_repository.dart';
+import '../../offline/venue_hub_client_registry.dart';
+import '../../offline/venue_hub_offline_view.dart';
 import '../notifications/notification_centre.dart';
 import '../auth/staff_pin_gate.dart';
+import '../fulfilment/fulfilment_domain.dart';
+import '../fulfilment/fulfilment_repository.dart';
 import '../pos/domain.dart';
+import '../pos/pos_controller.dart';
+import 'order_flow_timing.dart';
 import 'order_flow_sound.dart';
 
 final orderFlowProvider = StreamProvider<List<OrderFlowOrder>>((ref) {
   final scope = ref.watch(activeVenueScopeProvider);
   if (scope == null) return Stream.value(demoOrderFlow);
+  // A venue hub remains the authoritative order source when the internet is
+  // unavailable. Never construct a Firestore listener in that state: doing so
+  // fails before the KDS can render and used to trigger a PIN-session lock.
+  if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+    return VenueHubOfflineView.instance.orderFlowStream;
+  }
   return ref.watch(firestorePosRepositoryProvider).watchOrderFlow(scope);
 });
 
@@ -44,7 +60,8 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   Timer? _sessionKeepAlive;
   ProductionArea? _area;
   _FlowFilter _filter = _FlowFilter.all;
-  final Map<String, OrderFlowOrder> _demoOverrides = {};
+  final Map<String, OrderFlowOrder> _optimisticOverrides = {};
+  final Set<String> _pendingOrderIds = <String>{};
   final Set<String> _seenTicketIds = <String>{};
   final Set<String> _redAlertedTicketIds = <String>{};
   final Set<String> _activeAllergyTicketIds = <String>{};
@@ -52,10 +69,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   final Set<String> _dismissedLateTicketIds = <String>{};
   final Set<String> _expandedTicketIds = <String>{};
   late final OrderFlowSound _sound;
+  late final OrderFlowDisplayModeController _displayModeController;
   bool _receivedInitialOrders = false;
   bool _audioMuted = false;
   bool _audioPreferenceLoaded = false;
   bool _refreshingPinSession = false;
+  bool _releasingScheduledTickets = false;
   bool _compactFiltersExpanded = false;
   bool _compactStatusExpanded = false;
   static const _audioMutedPreferenceKey = 'tableside.orderFlow.audioMuted';
@@ -64,9 +83,13 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   void initState() {
     super.initState();
     _sound = OrderFlowSound();
+    // Riverpod 3 deliberately rejects `ref.read` once a ConsumerState is
+    // unmounting. Cache the controller while the element is live so dispose
+    // can always clear the KDS keep-awake flag safely.
+    _displayModeController = ref.read(orderFlowDisplayActiveProvider.notifier);
     scheduleMicrotask(() {
       if (mounted) {
-        ref.read(orderFlowDisplayActiveProvider.notifier).setActive(true);
+        _displayModeController.setActive(true);
         unawaited(_refreshKdsPinSession());
       }
     });
@@ -76,8 +99,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     );
     unawaited(_loadAudioPreference());
     _clock = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {});
+        unawaited(_releaseScheduledTickets());
+      }
     });
+    scheduleMicrotask(_releaseScheduledTickets);
   }
 
   @override
@@ -86,7 +113,11 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     _allergyAlarm?.cancel();
     _lateAlarm?.cancel();
     _sessionKeepAlive?.cancel();
-    ref.read(orderFlowDisplayActiveProvider.notifier).setActive(false);
+    // Riverpod rejects provider mutations while Flutter is finalising the
+    // widget tree. Clear the KDS keep-awake state immediately after that frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _displayModeController.setActive(false);
+    });
     unawaited(_sound.dispose());
     super.dispose();
   }
@@ -103,17 +134,51 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
         return scope == null ? demoOrderFlow : const <OrderFlowOrder>[];
       },
     );
+    final confirmedOverrideIds = rawOrders
+        .where((order) {
+          final optimistic = _optimisticOverrides[order.id];
+          return optimistic != null && _sameVisibleState(order, optimistic);
+        })
+        .map((order) => order.id)
+        .toList(growable: false);
+    if (confirmedOverrideIds.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() {
+          for (final id in confirmedOverrideIds) {
+            _optimisticOverrides.remove(id);
+          }
+        });
+      });
+    }
     final orders = rawOrders
-        .map(
-          (order) => scope == null ? _demoOverrides[order.id] ?? order : order,
-        )
+        .map((order) => _optimisticOverrides[order.id] ?? order)
         .where(_matchesFilters)
         .toList(growable: false);
     final allOrders = rawOrders
-        .map(
-          (order) => scope == null ? _demoOverrides[order.id] ?? order : order,
-        )
+        .map((order) => _optimisticOverrides[order.id] ?? order)
         .toList(growable: false);
+    final tables =
+        ref.watch(diningTablesProvider).value ?? const <DiningTable>[];
+    final staffSession = ref.watch(activeStaffPinSessionProvider);
+    final canReprint =
+        staffSession?.roles.any(
+          (role) => role == 'owner' || role == 'manager',
+        ) ??
+        false;
+    final canAssignDrivers = canReprint;
+    final venueUtcOffsetMinutes =
+        scope != null &&
+            !kIsWeb &&
+            VenueHubClientRegistry.instance.hasUsableSession(scope)
+        ? VenueHubOfflineView.instance.venueUtcOffsetMinutes
+        : DateTime.now().timeZoneOffset.inMinutes;
+    final drivers = canAssignDrivers
+        ? (ref.watch(fulfilmentStaffProvider).value ??
+                  const <FulfilmentStaffMember>[])
+              .where((item) => item.roles.contains('driver'))
+              .toList(growable: false)
+        : const <FulfilmentStaffMember>[];
     if (scope != null && flowValue.hasValue) {
       scheduleMicrotask(() {
         if (mounted) _observeOrderAlerts(allOrders);
@@ -162,6 +227,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                 allOrders: allOrders,
                 amberMinutes: widget.amberMinutes,
                 redMinutes: widget.redMinutes,
+                now: TrustedClock.instance.nowUtc(),
               );
 
               if (compact) {
@@ -308,10 +374,26 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
                 for (final order in orders) ...[
                   _OrderFlowCard(
                     order: order,
-                    now: DateTime.now(),
+                    location: _resolvedOrderLocation(order, tables),
+                    now: TrustedClock.instance.nowUtc(),
                     amberMinutes: widget.amberMinutes,
                     redMinutes: widget.redMinutes,
+                    venueUtcOffsetMinutes: venueUtcOffsetMinutes,
                     onAction: (action) => _applyAction(order, action),
+                    onReprint: canReprint ? () => _reprintOrder(order) : null,
+                    onPrintDriverTicket:
+                        canReprint &&
+                            order.channel == OrderChannel.delivery &&
+                            order.orderId != null
+                        ? () => _printDriverTicket(order)
+                        : null,
+                    onAssignDriver:
+                        canAssignDrivers &&
+                            order.channel == OrderChannel.delivery &&
+                            order.orderId != null &&
+                            !order.status.isTerminal
+                        ? () => _chooseDriver(order, drivers)
+                        : null,
                     lateAlarmDismissed: _dismissedLateTicketIds.contains(
                       order.id,
                     ),
@@ -349,6 +431,20 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
         ..addAll(activeIds);
     }
     final alertCandidates = initialObservation ? orders : newOrders;
+    if (alertCandidates.isNotEmpty) {
+      final now = TrustedClock.instance.nowUtc();
+      final clock = TrustedClock.instance.snapshot;
+      for (final order in alertCandidates) {
+        AppLogger.info(
+          'Order-flow clock: ticket=${order.id}, '
+          'nowUtc=${now.toIso8601String()}, '
+          'releasedUtc=${order.ticketReleasedAt.toUtc().toIso8601String()}, '
+          'elapsedSeconds=${orderFlowElapsed(now, order.ticketReleasedAt).inSeconds}, '
+          'authority=${clock.authority.name}, '
+          'clockSkewMs=${clock.offset.inMilliseconds}.',
+        );
+      }
+    }
     final newAllergyIds = alertCandidates
         .where((order) => order.hasAllergyAlert)
         .map((order) => order.id)
@@ -363,13 +459,14 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     final currentRedIds = orders
         .where(
           (order) =>
+              order.driverDeclined ||
               _lateState(
-                order,
-                DateTime.now(),
-                widget.amberMinutes,
-                widget.redMinutes,
-              ) ==
-              _LateState.red,
+                    order,
+                  TrustedClock.instance.nowUtc(),
+                    widget.amberMinutes,
+                    widget.redMinutes,
+                  ) ==
+                  _LateState.red,
         )
         .map((order) => order.id)
         .toSet();
@@ -405,12 +502,14 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
   }
 
   void _startLateAlarm() {
+    if (_audioMuted) return;
     if (_lateAlarm != null) return;
     _lateAlarm = Timer.periodic(const Duration(seconds: 4), (_) {
       if (_currentLateTicketIds
               .difference(_dismissedLateTicketIds)
               .isNotEmpty &&
-          mounted) {
+          mounted &&
+          !_audioMuted) {
         unawaited(_sound.playLateOrder());
       }
     });
@@ -462,6 +561,15 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     }
     if (!muted) {
       if (_activeAllergyTicketIds.isNotEmpty) _startAllergyAlarm();
+      if (_currentLateTicketIds
+          .difference(_dismissedLateTicketIds)
+          .isNotEmpty) {
+        _startLateAlarm();
+      }
+    } else {
+      _lateAlarm?.cancel();
+      _lateAlarm = null;
+      await _sound.stopAll();
     }
   }
 
@@ -476,6 +584,13 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     final scope = ref.read(activeVenueScopeProvider);
     final session = ref.read(activeStaffPinSessionProvider);
     if (!mounted || scope == null || session == null || _refreshingPinSession) {
+      return;
+    }
+    // The local hub PIN session is verified from the signed encrypted venue
+    // snapshot and uses the trusted hub clock. It cannot be refreshed through
+    // Firebase while the venue is offline, and a cloud failure must never lock
+    // an otherwise valid kitchen display session.
+    if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
       return;
     }
     _refreshingPinSession = true;
@@ -495,6 +610,37 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     }
   }
 
+  Future<void> _releaseScheduledTickets() async {
+    if (!mounted || _releasingScheduledTickets) return;
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null || ref.read(activeStaffPinSessionProvider) == null) {
+      return;
+    }
+    if (!kIsWeb && VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+      // Recalculate held-ticket lead-time boundaries from the trusted local
+      // order projection. The periodic KDS timer calls this every 30 seconds.
+      VenueHubOfflineView.instance.refreshOrderFlow();
+      return;
+    }
+    _releasingScheduledTickets = true;
+    try {
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .releaseDueFulfilmentTickets(scope);
+    } on Object catch (error, stackTrace) {
+      // A LAN-only hub can continue serving its current queue while Firebase
+      // is unavailable. Do not cover the KDS with repetitive warnings; the
+      // held ticket remains visible and can still be released manually.
+      AppLogger.error(
+        'Release scheduled fulfilment tickets',
+        error,
+        stackTrace,
+      );
+    } finally {
+      _releasingScheduledTickets = false;
+    }
+  }
+
   bool _matchesFilters(OrderFlowOrder order) {
     if (_area != null && order.productionArea != _area) return false;
     return switch (_filter) {
@@ -502,7 +648,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       _FlowFilter.late =>
         _lateState(
               order,
-              DateTime.now(),
+              TrustedClock.instance.nowUtc(),
               widget.amberMinutes,
               widget.redMinutes,
             ) !=
@@ -516,6 +662,7 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
     OrderFlowOrder order,
     _OrderFlowAction action,
   ) async {
+    if (_pendingOrderIds.contains(order.id)) return;
     final updated = switch (action) {
       _OrderFlowAction.releaseCourse => order.copyWith(
         status: OrderFlowStatus.newOrder,
@@ -537,8 +684,12 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
       ),
     };
     final scope = ref.read(activeVenueScopeProvider);
+    setState(() {
+      _optimisticOverrides[order.id] = updated;
+      _pendingOrderIds.add(order.id);
+    });
     if (scope == null) {
-      setState(() => _demoOverrides[order.id] = updated);
+      setState(() => _pendingOrderIds.remove(order.id));
       return;
     }
     try {
@@ -547,17 +698,251 @@ class _OrderFlowPageState extends ConsumerState<OrderFlowPage> {
           .updateProductionTicket(
             scope: scope,
             ticketId: order.id,
+            orderId: order.orderId,
             flowStatus: updated.status.name,
             isDelayed: updated.isDelayed,
+            background: true,
           );
     } on Object catch (error, stackTrace) {
       AppLogger.error('Update order flow status', error, stackTrace);
       if (!mounted) return;
+      setState(() => _optimisticOverrides.remove(order.id));
       showAppNotification(
         context,
         ref: ref,
         title: 'Order flow update failed',
-        message: 'The order status could not be updated. Please retry.',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _pendingOrderIds.remove(order.id));
+    }
+  }
+
+  Future<void> _reprintOrder(OrderFlowOrder order) async {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null) return;
+    try {
+      final devices = await PrinterDeviceRepository(FirebaseFirestore.instance)
+          .watchVenueDevices(tenantId: scope.tenantId, venueId: scope.venueId)
+          .first
+          .timeout(const Duration(seconds: 10));
+      if (!mounted) return;
+      final compatible = devices
+          .where(
+            (device) =>
+                device.active &&
+                device.productionAreas.contains(order.productionArea.name),
+          )
+          .toList(growable: false);
+      if (compatible.isEmpty) {
+        showAppNotification(
+          context,
+          ref: ref,
+          title: 'No printer available',
+          message:
+              'Register an active ${order.productionArea.label.toLowerCase()} printer first.',
+          level: AppNotificationLevel.warning,
+        );
+        return;
+      }
+      final selected = await showAppDialog<PrinterDevice>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Reprint order'),
+          content: SizedBox(
+            width: 460,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                const Text(
+                  'Choose the physical printer. The replacement ticket will be marked REPRINT and audited.',
+                ),
+                const SizedBox(height: 12),
+                for (final device in compatible)
+                  ListTile(
+                    leading: const Icon(Icons.print_rounded),
+                    title: Text(device.name),
+                    subtitle: Text(device.platform),
+                    onTap: () => Navigator.pop(dialogContext, device),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      );
+      if (selected == null || !mounted) return;
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .reprintProductionTicket(
+            scope: scope,
+            ticketId: order.id,
+            targetDeviceId: selected.id,
+          );
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Reprint queued',
+        message: 'The order was sent to ${selected.name}.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Reprint order-flow ticket', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not reprint order',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    }
+  }
+
+  Future<void> _chooseDriver(
+    OrderFlowOrder order,
+    List<FulfilmentStaffMember> drivers,
+  ) async {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null || order.orderId == null) return;
+    if (drivers.isEmpty) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'No delivery drivers available',
+        message:
+            'Add an active staff member with the Driver role for this venue, then retry.',
+        level: AppNotificationLevel.warning,
+      );
+      return;
+    }
+    final selected = await showAppDialog<FulfilmentStaffMember>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: const Text('Assign delivery driver'),
+        children: [
+          for (final driver in drivers)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(dialogContext, driver),
+              child: ListTile(
+                leading: const Icon(Icons.delivery_dining_rounded),
+                title: Text(driver.name),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (selected == null || !mounted) return;
+    if (_pendingOrderIds.contains(order.id)) return;
+    final updated = order.copyWith(
+      assignedDriverName: selected.name,
+      driverDeclined: false,
+    );
+    setState(() {
+      _optimisticOverrides[order.id] = updated;
+      _pendingOrderIds.add(order.id);
+    });
+    try {
+      await ref
+          .read(fulfilmentRepositoryProvider)
+          .updateFulfilmentOrder(
+            scope: scope,
+            orderId: order.orderId!,
+            status: FulfilmentStatus.assigned,
+            driverId: selected.id,
+            background: true,
+          );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Assign driver from order flow', error, stackTrace);
+      if (!mounted) return;
+      setState(() => _optimisticOverrides.remove(order.id));
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Driver was not assigned',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    } finally {
+      if (mounted) setState(() => _pendingOrderIds.remove(order.id));
+    }
+  }
+
+  bool _sameVisibleState(OrderFlowOrder live, OrderFlowOrder optimistic) =>
+      live.status == optimistic.status &&
+      live.isDelayed == optimistic.isDelayed &&
+      live.assignedDriverName == optimistic.assignedDriverName &&
+      live.driverDeclined == optimistic.driverDeclined;
+
+  /// Prints the address-bearing driver copy from the live order rather than
+  /// the kitchen ticket. The server reconstructs prices, customer details and
+  /// the delivery address, so the KDS cannot alter financial information.
+  Future<void> _printDriverTicket(OrderFlowOrder order) async {
+    final scope = ref.read(activeVenueScopeProvider);
+    if (scope == null || order.orderId == null) return;
+    try {
+      final devices = await PrinterDeviceRepository(FirebaseFirestore.instance)
+          .watchVenueDevices(tenantId: scope.tenantId, venueId: scope.venueId)
+          .first
+          .timeout(const Duration(seconds: 10));
+      if (!mounted) return;
+      final printers = devices
+          .where(
+            (device) =>
+                device.active && device.productionAreas.contains('receipt'),
+          )
+          .toList(growable: false);
+      if (printers.isEmpty) {
+        throw StateError('No active receipt printer is registered here.');
+      }
+      final selected = await showAppDialog<PrinterDevice>(
+        context: context,
+        builder: (dialogContext) => SimpleDialog(
+          title: const Text('Print driver ticket'),
+          children: [
+            for (final printer in printers)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(dialogContext, printer),
+                child: ListTile(
+                  leading: const Icon(Icons.print_outlined),
+                  title: Text(printer.name),
+                  subtitle: Text(printer.platform),
+                ),
+              ),
+          ],
+        ),
+      );
+      if (selected == null || !mounted) return;
+      await ref
+          .read(productionCommandRepositoryProvider)
+          .printFulfilmentDeliveryNote(
+            scope: scope,
+            orderId: order.orderId!,
+            targetDeviceId: selected.id,
+          );
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Driver ticket queued',
+        message: 'The driver copy was sent to ${selected.name}.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Print driver ticket from order flow', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Could not print driver ticket',
+        message: '$error',
         level: AppNotificationLevel.error,
       );
     }
@@ -583,10 +968,11 @@ _LateState _lateState(
   int amberMinutes,
   int redMinutes,
 ) {
+  if (order.driverDeclined) return _LateState.normal;
   if (order.status == OrderFlowStatus.held) return _LateState.normal;
   if (order.isDelayed) return _LateState.red;
   if (order.status.isTerminal) return _LateState.normal;
-  final elapsed = now.difference(order.ticketReleasedAt);
+  final elapsed = orderFlowElapsed(now, order.ticketReleasedAt);
   if (elapsed >= Duration(minutes: redMinutes)) return _LateState.red;
   if (elapsed >= Duration(minutes: amberMinutes)) return _LateState.amber;
   return _LateState.normal;
@@ -597,15 +983,16 @@ class _BoardHealth extends StatelessWidget {
     required this.allOrders,
     required this.amberMinutes,
     required this.redMinutes,
+    required this.now,
   });
 
   final List<OrderFlowOrder> allOrders;
   final int amberMinutes;
   final int redMinutes;
+  final DateTime now;
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now();
     final late = allOrders
         .where(
           (order) =>
@@ -735,10 +1122,15 @@ class _EmptyBoard extends StatelessWidget {
 class _OrderFlowCard extends StatelessWidget {
   const _OrderFlowCard({
     required this.order,
+    required this.location,
     required this.now,
     required this.amberMinutes,
     required this.redMinutes,
+    required this.venueUtcOffsetMinutes,
     required this.onAction,
+    this.onReprint,
+    this.onPrintDriverTicket,
+    this.onAssignDriver,
     required this.itemsExpanded,
     required this.onToggleItems,
     required this.lateAlarmDismissed,
@@ -746,10 +1138,15 @@ class _OrderFlowCard extends StatelessWidget {
   });
 
   final OrderFlowOrder order;
+  final String location;
   final DateTime now;
   final int amberMinutes;
   final int redMinutes;
+  final int venueUtcOffsetMinutes;
   final ValueChanged<_OrderFlowAction> onAction;
+  final VoidCallback? onReprint;
+  final VoidCallback? onPrintDriverTicket;
+  final VoidCallback? onAssignDriver;
   final bool itemsExpanded;
   final VoidCallback onToggleItems;
   final bool lateAlarmDismissed;
@@ -758,14 +1155,15 @@ class _OrderFlowCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final late = _lateState(order, now, amberMinutes, redMinutes);
-    final background = switch (late) {
-      _LateState.red => Colors.red.shade800,
-      _LateState.amber => Colors.orange.shade800,
-      _LateState.normal => Colors.green.shade700,
-    };
-    final elapsed = now.difference(order.ticketReleasedAt);
-    final location = order.tableLabel ?? order.tabName ?? 'Unassigned';
-
+    final background =
+        order.driverDeclined || order.status == OrderFlowStatus.held
+        ? Colors.purple.shade700
+        : switch (late) {
+            _LateState.red => Colors.red.shade800,
+            _LateState.amber => Colors.orange.shade800,
+            _LateState.normal => Colors.green.shade700,
+          };
+    final elapsed = orderFlowElapsed(now, order.ticketReleasedAt);
     return Card(
       color: background,
       clipBehavior: Clip.antiAlias,
@@ -790,7 +1188,10 @@ class _OrderFlowCard extends StatelessWidget {
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        _AreaIcon(area: order.productionArea),
+                        _AreaIcon(
+                          area: order.productionArea,
+                          channel: order.channel,
+                        ),
                         const SizedBox(width: 7),
                         ConstrainedBox(
                           constraints: const BoxConstraints(maxWidth: 180),
@@ -832,14 +1233,66 @@ class _OrderFlowCard extends StatelessWidget {
                           ],
                         ),
                       ),
+                    if (order.driverDeclined && !lateAlarmDismissed)
+                      Container(
+                        padding: const EdgeInsets.only(left: 9),
+                        decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.white54),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              'DRIVER DECLINED — CHOOSE ANOTHER',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            _AnimatedAlarmBell(onPressed: onDismissLateAlarm),
+                          ],
+                        ),
+                      ),
                     _PrimaryFlowAction(order: order, onAction: onAction),
-                    _AlertRow(
-                      icon: late == _LateState.normal
-                          ? Icons.timer_outlined
-                          : Icons.priority_high_rounded,
-                      text: '${_formatElapsed(elapsed)} since ticket release',
-                      color: Colors.white,
-                    ),
+                    if (onAssignDriver != null)
+                      FilledButton.tonalIcon(
+                        onPressed: onAssignDriver,
+                        icon: const Icon(Icons.person_pin_circle_outlined),
+                        label: Text(
+                          order.driverDeclined
+                              ? 'Choose another driver'
+                              : 'Assign driver',
+                        ),
+                      ),
+                    if (order.scheduledFor != null &&
+                        order.status != OrderFlowStatus.held)
+                      _AlertRow(
+                        icon: order.channel == OrderChannel.delivery
+                            ? Icons.delivery_dining_rounded
+                            : Icons.shopping_bag_outlined,
+                        text:
+                            '${order.channel.label} ${_formatVenueClock(order.scheduledFor!, venueUtcOffsetMinutes)}',
+                        color: Colors.white,
+                      ),
+                    if (order.status == OrderFlowStatus.held)
+                      _AlertRow(
+                        icon: Icons.schedule_rounded,
+                        text: order.scheduledFor == null
+                            ? 'Held — release when preparation should start'
+                            : 'Due ${_formatVenueClock(order.scheduledFor!, venueUtcOffsetMinutes)} · timer starts at the venue lead time',
+                        color: Colors.white,
+                      )
+                    else
+                      _AlertRow(
+                        icon: late == _LateState.normal
+                            ? Icons.timer_outlined
+                            : Icons.priority_high_rounded,
+                        text: '${_formatElapsed(elapsed)} since ticket release',
+                        color: Colors.white,
+                      ),
                     SizedBox.square(
                       dimension: 34,
                       child: IconButton(
@@ -855,7 +1308,12 @@ class _OrderFlowCard extends StatelessWidget {
                         ),
                       ),
                     ),
-                    _OrderActions(order: order, onAction: onAction),
+                    _OrderActions(
+                      order: order,
+                      onAction: onAction,
+                      onReprint: onReprint,
+                      onPrintDriverTicket: onPrintDriverTicket,
+                    ),
                   ],
                 ),
                 if (itemsExpanded)
@@ -1038,8 +1496,14 @@ class _OrderFlowNotificationHostState
       if (previous != null &&
           previous != OrderFlowStatus.ready &&
           order.status == OrderFlowStatus.ready) {
+        // Fulfilment orders intentionally have no table. Use the customer or
+        // channel reference so a collection-ready alert is never described as
+        // an unassigned delivery.
         final location =
-            order.tableLabel ?? order.tabName ?? 'Unassigned order';
+            order.tableLabel ??
+            order.tabName ??
+            order.customerName ??
+            order.reference;
         showAppNotification(
           context,
           ref: ref,
@@ -1055,20 +1519,28 @@ class _OrderFlowNotificationHostState
 }
 
 class _AreaIcon extends StatelessWidget {
-  const _AreaIcon({required this.area});
+  const _AreaIcon({required this.area, required this.channel});
 
   final ProductionArea area;
+  final OrderChannel channel;
 
   @override
   Widget build(BuildContext context) => CircleAvatar(
     radius: 16,
     backgroundColor: Colors.white24,
     foregroundColor: Colors.white,
-    child: Icon(switch (area) {
-      ProductionArea.bar => Icons.local_bar_rounded,
-      ProductionArea.kitchen => Icons.restaurant_rounded,
-      ProductionArea.dessert => Icons.cake_outlined,
-    }, size: 18),
+    child: Icon(
+      channel == OrderChannel.delivery
+          ? Icons.delivery_dining_rounded
+          : channel == OrderChannel.collection
+          ? Icons.shopping_bag_rounded
+          : switch (area) {
+              ProductionArea.bar => Icons.local_bar_rounded,
+              ProductionArea.kitchen => Icons.restaurant_rounded,
+              ProductionArea.dessert => Icons.cake_outlined,
+            },
+      size: 18,
+    ),
   );
 }
 
@@ -1126,10 +1598,17 @@ class _AlertRow extends StatelessWidget {
 }
 
 class _OrderActions extends StatelessWidget {
-  const _OrderActions({required this.order, required this.onAction});
+  const _OrderActions({
+    required this.order,
+    required this.onAction,
+    this.onReprint,
+    this.onPrintDriverTicket,
+  });
 
   final OrderFlowOrder order;
   final ValueChanged<_OrderFlowAction> onAction;
+  final VoidCallback? onReprint;
+  final VoidCallback? onPrintDriverTicket;
 
   @override
   Widget build(BuildContext context) {
@@ -1160,10 +1639,18 @@ class _OrderActions extends StatelessWidget {
         Icons.priority_high_rounded,
       ),
     ];
-    return PopupMenuButton<_OrderFlowAction>(
+    return PopupMenuButton<Object>(
       tooltip: 'Update order',
       icon: const Icon(Icons.more_vert_rounded),
-      onSelected: onAction,
+      onSelected: (value) {
+        if (value == 'reprint') {
+          onReprint?.call();
+        } else if (value == 'driverTicket') {
+          onPrintDriverTicket?.call();
+        } else if (value is _OrderFlowAction) {
+          onAction(value);
+        }
+      },
       itemBuilder: (context) => [
         for (final action in actions)
           PopupMenuItem(
@@ -1176,13 +1663,59 @@ class _OrderActions extends StatelessWidget {
               ],
             ),
           ),
+        if (onReprint != null) ...[
+          const PopupMenuDivider(),
+          const PopupMenuItem<Object>(
+            value: 'reprint',
+            child: Row(
+              children: [
+                Icon(Icons.print_rounded, size: 19),
+                SizedBox(width: 10),
+                Text('Reprint order'),
+              ],
+            ),
+          ),
+        ],
+        if (onPrintDriverTicket != null)
+          const PopupMenuItem<Object>(
+            value: 'driverTicket',
+            child: Row(
+              children: [
+                Icon(Icons.receipt_long_outlined, size: 19),
+                SizedBox(width: 10),
+                Text('Print driver ticket'),
+              ],
+            ),
+          ),
       ],
     );
   }
+}
+
+String _resolvedOrderLocation(OrderFlowOrder order, List<DiningTable> tables) {
+  if (order.channel != OrderChannel.dineIn) {
+    final customer = order.customerName?.trim();
+    return customer?.isNotEmpty == true ? customer! : order.channel.label;
+  }
+
+  final tabName = order.tabName?.trim();
+  if (tabName?.isNotEmpty == true) return tabName!;
+  final stored = order.tableLabel?.trim();
+  if (stored?.isNotEmpty != true) return 'Unassigned';
+  for (final table in tables) {
+    if (table.id == stored) return table.label;
+  }
+  return stored!;
 }
 
 String _formatElapsed(Duration value) {
   final minutes = value.inMinutes;
   if (minutes < 60) return '${minutes}m';
   return '${minutes ~/ 60}h ${minutes % 60}m';
+}
+
+String _formatVenueClock(DateTime value, int utcOffsetMinutes) {
+  final venueTime = value.toUtc().add(Duration(minutes: utcOffsetMinutes));
+  return '${venueTime.hour.toString().padLeft(2, '0')}:'
+      '${venueTime.minute.toString().padLeft(2, '0')}';
 }

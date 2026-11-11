@@ -4,15 +4,21 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../../core/safe_dialog.dart';
+import '../../core/safe_modal_bottom_sheet.dart';
 import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
 import '../../core/money.dart';
 import '../../core/tenant_scope.dart';
 import '../../core/training_mode.dart';
 import '../../data/production_command_repository.dart';
+import '../../offline/venue_hub_client_registry.dart';
+import '../../offline/venue_hub_offline_view.dart';
+import '../../offline/venue_hub_realtime_client.dart';
 import '../auth/staff_pin_gate.dart';
 import '../fulfilment/customer_editor.dart';
 import '../fulfilment/fulfilment_domain.dart';
@@ -20,6 +26,7 @@ import '../fulfilment/fulfilment_repository.dart';
 import '../notifications/notification_centre.dart';
 import 'domain.dart';
 import 'pos_controller.dart';
+import 'pos_quick_search_field.dart';
 import 'product_configuration_sheet.dart';
 
 class PosPage extends ConsumerStatefulWidget {
@@ -138,34 +145,95 @@ class _PosPageState extends ConsumerState<PosPage>
                       .fold<int>(0, (total, line) => total + line.quantity);
                   final shownCount = pending > 0 ? pending : sent;
                   final badgeColor = pending > 0 ? Colors.red : Colors.green;
-                  return TabBar(
-                    controller: _compactTabController,
-                    onTap: (index) =>
-                        ref.read(posCompactTabProvider.notifier).select(index),
-                    tabs: [
-                      const Tab(
-                        icon: Icon(Icons.table_restaurant_rounded),
-                        text: 'Tables',
-                      ),
-                      const Tab(
-                        icon: Icon(Icons.restaurant_menu_rounded),
-                        text: 'Menu',
-                      ),
-                      Tab(
-                        icon: shownCount == 0
-                            ? const Icon(Icons.receipt_long_rounded)
-                            : Badge.count(
-                                count: shownCount,
-                                backgroundColor: badgeColor,
-                                child: const Icon(Icons.receipt_long_rounded),
-                              ),
-                        text: 'Order',
-                      ),
-                    ],
+                  final showTabLabels = constraints.maxWidth >= 400;
+                  return SizedBox(
+                    // Keep navigation touchable while returning vertical room
+                    // to the table, product and order workspaces on tablets.
+                    height: 38,
+                    child: TabBar(
+                      controller: _compactTabController,
+                      dividerHeight: 0,
+                      labelPadding: const EdgeInsets.symmetric(horizontal: 4),
+                      labelStyle: Theme.of(context).textTheme.labelLarge,
+                      onTap: (index) => ref
+                          .read(posCompactTabProvider.notifier)
+                          .select(index),
+                      tabs: [
+                        Tab(
+                          child: showTabLabels
+                              ? const Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.table_restaurant_rounded,
+                                      size: 17,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Flexible(child: Text('Tables')),
+                                  ],
+                                )
+                              : const Icon(
+                                  Icons.table_restaurant_rounded,
+                                  size: 18,
+                                ),
+                        ),
+                        Tab(
+                          child: showTabLabels
+                              ? const Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.restaurant_menu_rounded,
+                                      size: 17,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Flexible(child: Text('Menu')),
+                                  ],
+                                )
+                              : const Icon(
+                                  Icons.restaurant_menu_rounded,
+                                  size: 18,
+                                ),
+                        ),
+                        Tab(
+                          child: showTabLabels
+                              ? Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    shownCount == 0
+                                        ? const Icon(
+                                            Icons.receipt_long_rounded,
+                                            size: 17,
+                                          )
+                                        : Badge.count(
+                                            count: shownCount,
+                                            backgroundColor: badgeColor,
+                                            child: const Icon(
+                                              Icons.receipt_long_rounded,
+                                              size: 17,
+                                            ),
+                                          ),
+                                    const SizedBox(width: 4),
+                                    const Flexible(child: Text('Order')),
+                                  ],
+                                )
+                              : shownCount == 0
+                              ? const Icon(Icons.receipt_long_rounded, size: 18)
+                              : Badge.count(
+                                  count: shownCount,
+                                  backgroundColor: badgeColor,
+                                  child: const Icon(
+                                    Icons.receipt_long_rounded,
+                                    size: 18,
+                                  ),
+                                ),
+                        ),
+                      ],
+                    ),
                   );
                 },
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 6),
               Expanded(
                 child: TabBarView(
                   controller: _compactTabController,
@@ -240,210 +308,406 @@ class _TablesPanel extends ConsumerWidget {
                 },
               );
     final namedTabGroups = _groupOpenNamedTabs(namedTabs);
-    final scheme = Theme.of(context).colorScheme;
+    final fulfilmentOrders = isTraining
+        ? trainingOrders
+              .where((order) => order.channel != OrderChannel.dineIn)
+              .toList(growable: false)
+        : ref
+                  .watch(fulfilmentOrdersProvider)
+                  .value
+                  ?.where((order) => order.status != OrderStatus.closed)
+                  .toList(growable: false) ??
+              const <PosOrder>[];
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Padding(
         padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
-              spacing: 8,
-              runSpacing: 0,
-              alignment: WrapAlignment.spaceBetween,
-              crossAxisAlignment: WrapCrossAlignment.center,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final content = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Tables & tabs',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 0,
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    if (onToggleExpanded != null)
-                      IconButton(
-                        tooltip: expanded
-                            ? 'Return to POS'
-                            : 'Show all tables and tabs',
-                        onPressed: onToggleExpanded,
-                        icon: Icon(
-                          expanded
-                              ? Icons.fullscreen_exit_rounded
-                              : Icons.fullscreen_rounded,
-                        ),
-                      ),
-                    TextButton.icon(
-                      onPressed: () => _showNamedTabDialog(context, ref),
-                      icon: const Icon(Icons.person_add_alt_1_rounded),
-                      label: const Text('Named tab'),
+                    Text(
+                      'Tables & tabs',
+                      style: Theme.of(context).textTheme.titleLarge,
                     ),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                OutlinedButton.icon(
-                  onPressed: () => _showFulfilmentOrderDialog(
-                    context,
-                    OrderChannel.collection,
-                    onStarted: onSelection,
-                  ),
-                  icon: const Icon(Icons.shopping_bag_outlined),
-                  label: const Text('Collection'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: () => _showFulfilmentOrderDialog(
-                    context,
-                    OrderChannel.delivery,
-                    onStarted: onSelection,
-                  ),
-                  icon: const Icon(Icons.delivery_dining_outlined),
-                  label: const Text('Delivery'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              activeOrder.tabName == null
-                  ? 'Select a table or open a named tab'
-                  : 'Current tab: ${activeOrder.tabName}',
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-            ),
-            const SizedBox(height: 14),
-            Expanded(
-              child: Scrollbar(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final table in tables)
-                            _TableButton(
-                              table: table,
-                              scope: scope,
-                              currencyCode: currencyCode,
-                              selected:
-                                  activeOrder.tabName == null &&
-                                  table.id == selectedTableId,
-                              compact: compact || !expanded,
-                              isTraining: isTraining,
-                              trainingOrder: isTraining
-                                  ? trainingOrders
-                                        .where(
-                                          (order) => order.tableId == table.id,
-                                        )
-                                        .firstOrNull
-                                  : null,
-                              onTap: () async {
-                                try {
-                                  await ref
-                                      .read(activeOrderProvider.notifier)
-                                      .openTable(table.id);
-                                  ref
-                                      .read(selectedTableProvider.notifier)
-                                      .select(table.id);
-                                  if (context.mounted) onSelection?.call();
-                                } on Object catch (error, stackTrace) {
-                                  AppLogger.error(
-                                    'Switch selected table',
-                                    error,
-                                    stackTrace,
-                                  );
-                                  if (!context.mounted) return;
-                                  showAppNotification(
-                                    context,
-                                    ref: ref,
-                                    title: 'Could not switch table',
-                                    message: '$error',
-                                    level: AppNotificationLevel.error,
-                                  );
-                                }
-                              },
-                            ),
-                        ],
-                      ),
-                      if (namedTabGroups.isNotEmpty) ...[
-                        const SizedBox(height: 16),
-                        Text(
-                          'Open named tabs',
-                          style: Theme.of(context).textTheme.labelLarge,
-                        ),
-                        const SizedBox(height: 6),
-                        for (final group in namedTabGroups) ...[
-                          Padding(
-                            padding: const EdgeInsets.only(top: 6, bottom: 6),
-                            child: Text(
-                              _namedTabDateLabel(group.openedDate),
-                              style: Theme.of(context).textTheme.labelMedium,
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        if (onToggleExpanded != null)
+                          IconButton(
+                            tooltip: expanded
+                                ? 'Return to POS'
+                                : 'Show all tables and tabs',
+                            onPressed: onToggleExpanded,
+                            icon: Icon(
+                              expanded
+                                  ? Icons.fullscreen_exit_rounded
+                                  : Icons.fullscreen_rounded,
                             ),
                           ),
-                          _CategoryTilePanel(
-                            children: [
-                              for (final tab in group.tabs)
-                                SizedBox(
-                                  width: compact
-                                      ? double.infinity
-                                      : expanded
-                                      ? 180
-                                      : 96,
-                                  child: _NamedTabButton(
-                                    tab: tab,
-                                    scope: scope,
-                                    currencyCode: currencyCode,
-                                    selected: tab.orderId == activeOrder.id,
-                                    onTap: () async {
-                                      try {
-                                        await ref
-                                            .read(activeOrderProvider.notifier)
-                                            .openNamedTab(tab.name);
-                                        ref
-                                            .read(
-                                              selectedTableProvider.notifier,
-                                            )
-                                            .select('');
-                                        if (context.mounted) {
-                                          onSelection?.call();
-                                        }
-                                      } on Object catch (error, stackTrace) {
-                                        AppLogger.error(
-                                          'Open listed named tab',
-                                          error,
-                                          stackTrace,
-                                        );
-                                        if (!context.mounted) return;
-                                        showAppNotification(
-                                          context,
-                                          ref: ref,
-                                          title: 'Could not open named tab',
-                                          message: '$error',
-                                          level: AppNotificationLevel.error,
-                                        );
-                                      }
-                                    },
+                        TextButton.icon(
+                          onPressed: () => _showNamedTabDialog(context, ref),
+                          icon: const Icon(Icons.person_add_alt_1_rounded),
+                          label: const Text('Named tab'),
+                        ),
+                        if (constraints.maxWidth < 600)
+                          SizedBox(
+                            width: constraints.maxWidth,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                OutlinedButton.icon(
+                                  onPressed: () => _showFulfilmentOrderDialog(
+                                    context,
+                                    OrderChannel.collection,
+                                    onStarted: onSelection,
                                   ),
+                                  icon: const Icon(Icons.shopping_bag_outlined),
+                                  label: const Text('Collection'),
                                 ),
-                            ],
+                                const SizedBox(height: 6),
+                                OutlinedButton.icon(
+                                  onPressed: () => _showFulfilmentOrderDialog(
+                                    context,
+                                    OrderChannel.delivery,
+                                    onStarted: onSelection,
+                                  ),
+                                  icon: const Icon(
+                                    Icons.delivery_dining_outlined,
+                                  ),
+                                  label: const Text('Delivery'),
+                                ),
+                              ],
+                            ),
+                          )
+                        else ...[
+                          OutlinedButton.icon(
+                            onPressed: () => _showFulfilmentOrderDialog(
+                              context,
+                              OrderChannel.collection,
+                              onStarted: onSelection,
+                            ),
+                            icon: const Icon(Icons.shopping_bag_outlined),
+                            label: const Text('Collection'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: () => _showFulfilmentOrderDialog(
+                              context,
+                              OrderChannel.delivery,
+                              onStarted: onSelection,
+                            ),
+                            icon: const Icon(Icons.delivery_dining_outlined),
+                            label: const Text('Delivery'),
                           ),
                         ],
                       ],
-                    ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Expanded(
+                  child: Scrollbar(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              for (final table in tables)
+                                _TableButton(
+                                  table: table,
+                                  scope: scope,
+                                  currencyCode: currencyCode,
+                                  selected:
+                                      activeOrder.tabName == null &&
+                                      table.id == selectedTableId,
+                                  compact: compact || !expanded,
+                                  isTraining: isTraining,
+                                  trainingOrder: isTraining
+                                      ? trainingOrders
+                                            .where(
+                                              (order) =>
+                                                  order.tableId == table.id,
+                                            )
+                                            .firstOrNull
+                                      : null,
+                                  onTap: () async {
+                                    try {
+                                      await ref
+                                          .read(activeOrderProvider.notifier)
+                                          .openTable(table.id);
+                                      ref
+                                          .read(selectedTableProvider.notifier)
+                                          .select(table.id);
+                                      if (context.mounted) onSelection?.call();
+                                    } on Object catch (error, stackTrace) {
+                                      AppLogger.error(
+                                        'Switch selected table',
+                                        error,
+                                        stackTrace,
+                                      );
+                                      if (!context.mounted) return;
+                                      showAppNotification(
+                                        context,
+                                        ref: ref,
+                                        title: 'Could not switch table',
+                                        message: '$error',
+                                        level: AppNotificationLevel.error,
+                                      );
+                                    }
+                                  },
+                                  onDeselect: selectedTableId == table.id
+                                      ? () => ref
+                                            .read(activeOrderProvider.notifier)
+                                            .clearCurrentSelection()
+                                      : null,
+                                ),
+                            ],
+                          ),
+                          if (namedTabGroups.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            Text(
+                              'Open named tabs',
+                              style: Theme.of(context).textTheme.labelLarge,
+                            ),
+                            const SizedBox(height: 6),
+                            for (final group in namedTabGroups) ...[
+                              Padding(
+                                padding: const EdgeInsets.only(
+                                  top: 6,
+                                  bottom: 6,
+                                ),
+                                child: Text(
+                                  _namedTabDateLabel(group.openedDate),
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.labelMedium,
+                                ),
+                              ),
+                              _CategoryTilePanel(
+                                children: [
+                                  for (final tab in group.tabs)
+                                    SizedBox(
+                                      width: compact
+                                          ? 118
+                                          : expanded
+                                          ? 180
+                                          : 132,
+                                      child: _NamedTabButton(
+                                        tab: tab,
+                                        scope: scope,
+                                        currencyCode: currencyCode,
+                                        selected: tab.orderId == activeOrder.id,
+                                        onTap: () async {
+                                          try {
+                                            ref
+                                                .read(
+                                                  activeOrderProvider.notifier,
+                                                )
+                                                .openExistingNamedTab(tab);
+                                            ref
+                                                .read(
+                                                  selectedTableProvider
+                                                      .notifier,
+                                                )
+                                                .select('');
+                                            if (context.mounted) {
+                                              onSelection?.call();
+                                            }
+                                          } on Object catch (
+                                            error,
+                                            stackTrace
+                                          ) {
+                                            AppLogger.error(
+                                              'Open listed named tab',
+                                              error,
+                                              stackTrace,
+                                            );
+                                            if (!context.mounted) return;
+                                            showAppNotification(
+                                              context,
+                                              ref: ref,
+                                              title: 'Could not open named tab',
+                                              message: '$error',
+                                              level: AppNotificationLevel.error,
+                                            );
+                                          }
+                                        },
+                                        onDeselect:
+                                            tab.orderId == activeOrder.id
+                                            ? () => ref
+                                                  .read(
+                                                    activeOrderProvider
+                                                        .notifier,
+                                                  )
+                                                  .clearCurrentSelection()
+                                            : null,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ],
+                          if (fulfilmentOrders.isNotEmpty) ...[
+                            const SizedBox(height: 16),
+                            if (compact)
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  for (final channel in const [
+                                    OrderChannel.collection,
+                                    OrderChannel.delivery,
+                                  ]) ...[
+                                    if (channel != OrderChannel.collection)
+                                      const SizedBox(width: 8),
+                                    Expanded(
+                                      child: _FulfilmentOrderGroup(
+                                        channel: channel,
+                                        orders: fulfilmentOrders,
+                                        scope: scope,
+                                        currencyCode: currencyCode,
+                                        activeOrderId: activeOrder.id,
+                                        tileWidth: 118,
+                                        onSelection: onSelection,
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              )
+                            else
+                              for (final channel in const [
+                                OrderChannel.collection,
+                                OrderChannel.delivery,
+                              ]) ...[
+                                if (channel != OrderChannel.collection)
+                                  const SizedBox(height: 16),
+                                _FulfilmentOrderGroup(
+                                  channel: channel,
+                                  orders: fulfilmentOrders,
+                                  scope: scope,
+                                  currencyCode: currencyCode,
+                                  activeOrderId: activeOrder.id,
+                                  tileWidth: expanded ? 180 : 132,
+                                  onSelection: onSelection,
+                                ),
+                              ],
+                          ],
+                        ],
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
-          ],
+              ],
+            );
+            // TabBarView lays out inactive tabs too. When an amount/name
+            // keyboard opens, the viewport can become shorter than this
+            // panel's fixed header even while the Order tab is visible. Give
+            // the panel a scrollable minimum canvas so it cannot overflow and
+            // trigger repeated InputBorder paint assertions.
+            if (constraints.maxHeight >= 260) return content;
+            return SingleChildScrollView(
+              child: SizedBox(height: 260, child: content),
+            );
+          },
         ),
       ),
+    );
+  }
+}
+
+/// Keeps collection and delivery work visible as two predictable columns on
+/// compact/tablet layouts. Each column owns its own wrapping tile grid, so a
+/// busy collection list cannot push deliveries below the visible viewport.
+class _FulfilmentOrderGroup extends ConsumerWidget {
+  const _FulfilmentOrderGroup({
+    required this.channel,
+    required this.orders,
+    required this.scope,
+    required this.currencyCode,
+    required this.activeOrderId,
+    required this.tileWidth,
+    this.onSelection,
+  });
+
+  final OrderChannel channel;
+  final List<PosOrder> orders;
+  final VenueScope? scope;
+  final String currencyCode;
+  final String activeOrderId;
+  final double tileWidth;
+  final VoidCallback? onSelection;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final matching = orders
+        .where((order) => order.channel == channel)
+        .toList(growable: false);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          channel == OrderChannel.collection ? 'Collections' : 'Deliveries',
+          style: Theme.of(context).textTheme.labelLarge,
+        ),
+        const SizedBox(height: 8),
+        if (matching.isEmpty)
+          Text('None open', style: Theme.of(context).textTheme.bodySmall)
+        else
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final order in matching)
+                SizedBox(
+                  width: tileWidth,
+                  child: _FulfilmentOrderButton(
+                    order: order,
+                    scope: scope,
+                    currencyCode: currencyCode,
+                    selected: order.id == activeOrderId,
+                    onTap: () {
+                      try {
+                        ref
+                            .read(activeOrderProvider.notifier)
+                            .openFulfilmentOrder(order);
+                        if (context.mounted) onSelection?.call();
+                      } on Object catch (error, stackTrace) {
+                        AppLogger.error(
+                          'Open fulfilment order',
+                          error,
+                          stackTrace,
+                        );
+                        if (!context.mounted) return;
+                        showAppNotification(
+                          context,
+                          ref: ref,
+                          title: 'Could not open order',
+                          message: '$error',
+                          level: AppNotificationLevel.error,
+                        );
+                      }
+                    },
+                    onDeselect: order.id == activeOrderId
+                        ? () => ref
+                              .read(activeOrderProvider.notifier)
+                              .clearCurrentSelection()
+                        : null,
+                  ),
+                ),
+            ],
+          ),
+      ],
     );
   }
 }
@@ -458,6 +722,7 @@ class _TableButton extends ConsumerWidget {
     required this.isTraining,
     this.trainingOrder,
     required this.onTap,
+    this.onDeselect,
   });
 
   final DiningTable table;
@@ -468,6 +733,7 @@ class _TableButton extends ConsumerWidget {
   final bool isTraining;
   final PosOrder? trainingOrder;
   final VoidCallback onTap;
+  final VoidCallback? onDeselect;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -476,29 +742,33 @@ class _TableButton extends ConsumerWidget {
         isTraining || scope == null || table.currentOrderId == null
         ? null
         : ref.watch(tableOpenOrderProvider(table.currentOrderId!));
-    final amountDueMinor = isTraining
-        ? trainingOrder?.balanceDueMinor
+    final openOrder = isTraining
+        ? trainingOrder
         : openOrderValue?.when(
-            data: (order) => order?.balanceDueMinor,
+            data: (order) => order,
             loading: () => null,
             error: (_, _) => null,
           );
+    final amountDueMinor = openOrder?.balanceDueMinor;
+    final needsAttention = openOrder?.hasPendingProductionLines == true;
     final isOpen = isTraining ? trainingOrder != null : table.hasOpenOrder;
     final openGreen = Theme.of(context).brightness == Brightness.dark
         ? Colors.green.shade700
         : Colors.green.shade600;
-    final background = isOpen
-        ? openGreen
-        : selected
+    // Blue always means selected. Green means open but not selected.
+    final background = selected
         ? scheme.primary
+        : isOpen
+        ? openGreen
         : scheme.surfaceContainerHighest;
     final foreground = isOpen || selected ? Colors.white : scheme.onSurface;
+    final titleColor = needsAttention ? Colors.orangeAccent : foreground;
     final width = compact ? 72.0 : 104.0;
     return Semantics(
       button: true,
       selected: selected,
       label: isOpen
-          ? 'Table ${table.label}, open, ${amountDueMinor == null ? 'amount loading' : formatMoney(amountDueMinor, currencyCode: currencyCode)} owed'
+          ? 'Table ${table.label}, open${needsAttention ? ', pending items not sent' : ''}, ${amountDueMinor == null ? 'amount loading' : formatMoney(amountDueMinor, currencyCode: currencyCode)} owed'
           : 'Table ${table.label}, available',
       child: InkWell(
         onTap: onTap,
@@ -509,61 +779,77 @@ class _TableButton extends ConsumerWidget {
           decoration: BoxDecoration(
             color: background,
             borderRadius: BorderRadius.circular(14),
-            border: selected
-                ? Border.all(
-                    color: isOpen ? Colors.white : scheme.primary,
-                    width: 2,
-                  )
-                : null,
+            border: selected ? Border.all(color: Colors.white, width: 2) : null,
           ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+          child: Stack(
             children: [
-              Text(
-                table.label,
-                style: TextStyle(
-                  fontWeight: FontWeight.w800,
-                  color: foreground,
-                ),
-              ),
-              const SizedBox(height: 3),
-              if (isOpen) ...[
-                Text(
-                  'OPEN',
-                  style: TextStyle(
-                    fontSize: compact ? 9 : 10,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: .6,
-                    color: foreground.withValues(alpha: .84),
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text(
-                      amountDueMinor == null
-                          ? 'Loading...'
-                          : formatMoney(
-                              amountDueMinor,
-                              currencyCode: currencyCode,
-                            ),
-                      maxLines: 1,
+              Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      table.label,
+                      textAlign: TextAlign.center,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: compact ? 11 : 13,
                         fontWeight: FontWeight.w800,
-                        color: foreground,
+                        color: titleColor,
                       ),
                     ),
-                  ),
+                    const SizedBox(height: 3),
+                    if (isOpen) ...[
+                      Text(
+                        'OPEN',
+                        style: TextStyle(
+                          fontSize: compact ? 9 : 10,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: .6,
+                          color: foreground.withValues(alpha: .84),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            amountDueMinor == null
+                                ? 'Loading...'
+                                : formatMoney(
+                                    amountDueMinor,
+                                    currencyCode: currencyCode,
+                                  ),
+                            maxLines: 1,
+                            style: TextStyle(
+                              fontSize: compact ? 11 : 13,
+                              fontWeight: FontWeight.w800,
+                              color: foreground,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ] else
+                      Text(
+                        '${table.seats} seats',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: foreground.withValues(alpha: .8),
+                        ),
+                      ),
+                  ],
                 ),
-              ] else
-                Text(
-                  '${table.seats} seats',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: foreground.withValues(alpha: .8),
+              ),
+              if (onDeselect != null)
+                Positioned(
+                  top: 0,
+                  right: 0,
+                  child: IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Deselect table',
+                    onPressed: onDeselect,
+                    icon: const Icon(Icons.close_rounded, size: 17),
+                    color: Colors.white,
                   ),
                 ),
             ],
@@ -581,6 +867,7 @@ class _NamedTabButton extends ConsumerWidget {
     required this.currencyCode,
     required this.selected,
     required this.onTap,
+    this.onDeselect,
   });
 
   final OpenNamedTab tab;
@@ -588,33 +875,38 @@ class _NamedTabButton extends ConsumerWidget {
   final String currencyCode;
   final bool selected;
   final VoidCallback onTap;
+  final VoidCallback? onDeselect;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final trainingOrder = ref.watch(trainingModeProvider) == null
         ? null
         : ref.watch(trainingOpenOrdersProvider)[tab.orderId];
-    final totalMinor = trainingOrder != null
-        ? trainingOrder.balanceDueMinor
-        : scope == null
-        ? null
-        : ref
-              .watch(tableOpenOrderProvider(tab.orderId))
-              .when(
-                data: (order) => order?.balanceDueMinor,
-                loading: () => null,
-                error: (_, _) => null,
-              );
+    final liveOrder =
+        trainingOrder ??
+        (scope == null
+            ? null
+            : ref
+                  .watch(tableOpenOrderProvider(tab.orderId))
+                  .when(
+                    data: (order) => order,
+                    loading: () => null,
+                    error: (_, _) => null,
+                  ));
+    final totalMinor = liveOrder?.balanceDueMinor;
+    final needsAttention = liveOrder?.hasPendingProductionLines == true;
     // Every item here represents a live named tab. Make that operational
     // state as obvious as an open table, not merely the currently selected
     // tab.
-    final background = Colors.green.shade600;
+    final background = selected
+        ? Theme.of(context).colorScheme.primary
+        : Colors.green.shade600;
     final foreground = Colors.white;
     return Semantics(
       button: true,
       selected: selected,
       label:
-          'Open tab for ${tab.name}${totalMinor == null ? '' : ', ${formatMoney(totalMinor, currencyCode: currencyCode)} owed'}',
+          'Open tab for ${tab.name}${needsAttention ? ', pending items not sent' : ''}${totalMinor == null ? '' : ', ${formatMoney(totalMinor, currencyCode: currencyCode)} owed'}',
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(12),
@@ -623,6 +915,7 @@ class _NamedTabButton extends ConsumerWidget {
           decoration: BoxDecoration(
             color: background,
             borderRadius: BorderRadius.circular(12),
+            border: selected ? Border.all(color: Colors.white, width: 2) : null,
           ),
           child: Row(
             children: [
@@ -639,7 +932,9 @@ class _NamedTabButton extends ConsumerWidget {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontWeight: FontWeight.w700,
-                        color: foreground,
+                        color: needsAttention
+                            ? Colors.orangeAccent
+                            : foreground,
                       ),
                     ),
                     if (totalMinor != null)
@@ -653,10 +948,108 @@ class _NamedTabButton extends ConsumerWidget {
                   ],
                 ),
               ),
-              if (selected)
-                const Icon(Icons.check_circle_rounded, color: Colors.white),
+              if (onDeselect != null)
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Deselect named tab',
+                  onPressed: onDeselect,
+                  icon: const Icon(Icons.close_rounded, size: 18),
+                  color: Colors.white,
+                ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FulfilmentOrderButton extends ConsumerWidget {
+  const _FulfilmentOrderButton({
+    required this.order,
+    required this.scope,
+    required this.currencyCode,
+    required this.selected,
+    required this.onTap,
+    this.onDeselect,
+  });
+
+  final PosOrder order;
+  final VenueScope? scope;
+  final String currencyCode;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback? onDeselect;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final liveOrder = scope == null
+        ? null
+        : ref.watch(tableOpenOrderProvider(order.id)).value;
+    final displayedOrder = liveOrder ?? order;
+    final amount = displayedOrder.balanceDueMinor;
+    final needsAttention = displayedOrder.hasPendingProductionLines;
+    final scheduled = order.scheduledFor;
+    final background = selected
+        ? Theme.of(context).colorScheme.primary
+        : Colors.green.shade600;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Ink(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(12),
+          border: selected ? Border.all(color: Colors.white, width: 2) : null,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  order.channel == OrderChannel.delivery
+                      ? Icons.delivery_dining_rounded
+                      : Icons.shopping_bag_rounded,
+                  size: 18,
+                  color: Colors.white,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    order.customerName ?? 'Customer',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w700)
+                        .copyWith(
+                          color: needsAttention
+                              ? Colors.orangeAccent
+                              : Colors.white,
+                        ),
+                  ),
+                ),
+                if (onDeselect != null)
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Deselect order',
+                    onPressed: onDeselect,
+                    icon: const Icon(Icons.close_rounded, size: 18),
+                    color: Colors.white,
+                  ),
+              ],
+            ),
+            const SizedBox(height: 3),
+            Text(
+              scheduled == null
+                  ? 'ASAP · ${formatMoney(amount, currencyCode: currencyCode)}'
+                  : '${scheduled.hour.toString().padLeft(2, '0')}:${scheduled.minute.toString().padLeft(2, '0')} · ${formatMoney(amount, currencyCode: currencyCode)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white, fontSize: 11),
+            ),
+          ],
         ),
       ),
     );
@@ -710,44 +1103,28 @@ class _MenuPanel extends ConsumerStatefulWidget {
 }
 
 class _MenuPanelState extends ConsumerState<_MenuPanel> {
-  final TextEditingController _searchController = TextEditingController();
   final ScrollController _productScrollController = ScrollController();
   final ScrollController _sectionScrollController = ScrollController();
   final ScrollController _subsectionScrollController = ScrollController();
   bool _menuControlsCollapsed = false;
   bool _compactLayout = false;
   bool _tileCategoryOpen = false;
+  String _lastSearchQuery = '';
 
   String get currencyCode => widget.currencyCode;
 
   @override
   void initState() {
     super.initState();
-    _searchController.addListener(_searchChanged);
     _productScrollController.addListener(_productScrollChanged);
   }
 
   @override
   void dispose() {
-    _searchController
-      ..removeListener(_searchChanged)
-      ..dispose();
     _productScrollController.dispose();
     _sectionScrollController.dispose();
     _subsectionScrollController.dispose();
     super.dispose();
-  }
-
-  void _searchChanged() {
-    setState(() {
-      _menuControlsCollapsed = false;
-      if (_searchController.text.trim().isEmpty) {
-        _tileCategoryOpen = false;
-      }
-    });
-    if (_productScrollController.hasClients) {
-      _productScrollController.jumpTo(0);
-    }
   }
 
   void _productScrollChanged() {
@@ -818,74 +1195,20 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     }
   }
 
-  Future<void> _showSearchTouchKeyboard() async {
-    const rows = <String>['QWERTYUIOP', 'ASDFGHJKL', 'ZXCVBNM'];
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Product search keyboard'),
-        content: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 620),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (final row in rows)
-                Wrap(
-                  alignment: WrapAlignment.center,
-                  spacing: 4,
-                  runSpacing: 4,
-                  children: [
-                    for (final key in row.split(''))
-                      SizedBox(
-                        width: 48,
-                        child: FilledButton.tonal(
-                          onPressed: () => _searchController.text += key,
-                          child: Text(key),
-                        ),
-                      ),
-                  ],
-                ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  OutlinedButton.icon(
-                    onPressed: () {
-                      final value = _searchController.text;
-                      if (value.isNotEmpty) {
-                        _searchController.text = value.substring(
-                          0,
-                          value.length - 1,
-                        );
-                      }
-                    },
-                    icon: const Icon(Icons.backspace_outlined),
-                    label: const Text('Delete'),
-                  ),
-                  OutlinedButton(
-                    onPressed: _searchController.clear,
-                    child: const Text('Clear'),
-                  ),
-                  FilledButton(
-                    onPressed: () => Navigator.pop(dialogContext),
-                    child: const Text('Done'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     _compactLayout = MediaQuery.sizeOf(context).width < 700;
     final selectedSection = ref.watch(activeSectionProvider);
     final selectedSubsection = ref.watch(activeSubsectionProvider);
     final activeOrder = ref.watch(activeOrderProvider);
+    final selectedTableId = ref.watch(selectedTableProvider);
+    final menuTables =
+        ref.watch(diningTablesProvider).value ?? const <DiningTable>[];
+    final activeOrderLocation = posMenuOrderLocationLabel(
+      activeOrder,
+      menuTables,
+      selectedTableId: selectedTableId,
+    );
     final categoryView = ref.watch(posCategoryViewPreferenceProvider);
     final useCategoryTiles = categoryView == 'tiles';
     final productSort = ref.watch(posProductSortPreferenceProvider);
@@ -950,9 +1273,30 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
             effectiveSection,
             ...subsections.map((section) => section.id),
           };
-    final searchQuery = _searchController.text.trim().toLowerCase();
+    final rawSearchQuery = ref.watch(posMenuSearchQueryProvider);
+    final searchQuery = rawSearchQuery.trim().toLowerCase();
+    if (_lastSearchQuery != rawSearchQuery) {
+      _lastSearchQuery = rawSearchQuery;
+      _menuControlsCollapsed = false;
+      if (searchQuery.isEmpty) _tileCategoryOpen = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _productScrollController.hasClients) {
+          _productScrollController.jumpTo(0);
+        }
+      });
+    }
     final showTileCategoryBrowser =
         useCategoryTiles && searchQuery.isEmpty && !_tileCategoryOpen;
+    // Compact tile navigation is deliberately staged. Once a category is
+    // opened, the search row gives its space to the products while the Back
+    // control remains pinned at the top. This prevents the product grid from
+    // appearing to slide behind a search field that belongs to the preceding
+    // category-browser stage.
+    final compactTileProductStage =
+        _compactLayout &&
+        useCategoryTiles &&
+        _tileCategoryOpen &&
+        searchQuery.isEmpty;
     final products = catalog.where((product) {
       if (searchQuery.isNotEmpty) {
         return productMatchesMenuSearch(product, sections, searchQuery);
@@ -992,27 +1336,83 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
         ? null
         : topLevelSections.firstWhere((item) => item.id == effectiveSection);
 
-    Future<void> addSelectedProduct(
+    Future<bool> addSelectedProduct(
       MenuProduct product, {
       required bool forceConfiguration,
     }) async {
       try {
-        if (!await _ensureOrderLocation(context, ref)) return;
-        if (!context.mounted) return;
-        final selection = forceConfiguration || product.requiresConfiguration
+        if (!await _ensureOrderLocation(context, ref)) return false;
+        if (!context.mounted) return false;
+        final activeChannel = ref.read(activeOrderProvider).channel;
+        final channelUnavailable =
+            activeChannel != OrderChannel.dineIn &&
+            !product.isAvailableFor(activeChannel);
+        var channelAvailabilityOverride = false;
+        if (channelUnavailable) {
+          final confirmed = await showAppDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              title: Text('Not normally available for ${activeChannel.label}'),
+              content: Text(
+                '${product.name} is marked as unavailable for '
+                '${activeChannel.label.toLowerCase()}. Add it anyway at staff discretion?',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: const Text('Add anyway'),
+                ),
+              ],
+            ),
+          );
+          if (confirmed != true || !context.mounted) return false;
+          channelAvailabilityOverride = true;
+        }
+        final requiresConfiguration =
+            forceConfiguration || product.requiresConfiguration;
+        final selection = requiresConfiguration
             ? await showProductConfigurationSheet(
                 context: context,
                 product: product,
                 availableGroups: modifierGroups,
                 availableProducts: catalog,
                 currencyCode: currencyCode,
+                onAdd: (selection) async {
+                  try {
+                    await ref
+                        .read(activeOrderProvider.notifier)
+                        .addProduct(
+                          product,
+                          selection: selection,
+                          channelAvailabilityOverride:
+                              channelAvailabilityOverride,
+                        );
+                  } on Object catch (error, stackTrace) {
+                    AppLogger.error(
+                      'Add configured item to shared draft order',
+                      error,
+                      stackTrace,
+                    );
+                    rethrow;
+                  }
+                },
               )
             : const ProductConfigurationSelection();
-        if (selection == null) return;
-        await ref
-            .read(activeOrderProvider.notifier)
-            .addProduct(product, selection: selection);
-        if (!context.mounted) return;
+        if (selection == null) return false;
+        if (!requiresConfiguration) {
+          await ref
+              .read(activeOrderProvider.notifier)
+              .addProduct(
+                product,
+                selection: selection,
+                channelAvailabilityOverride: channelAvailabilityOverride,
+              );
+        }
+        if (!context.mounted) return true;
         showAppNotification(
           context,
           ref: ref,
@@ -1020,9 +1420,10 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
           message: product.name,
           level: AppNotificationLevel.success,
         );
+        return true;
       } on Object catch (error, stackTrace) {
         AppLogger.error('Add item to shared draft order', error, stackTrace);
-        if (!context.mounted) return;
+        if (!context.mounted) return false;
         showAppNotification(
           context,
           ref: ref,
@@ -1030,6 +1431,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
           message: '$error',
           level: AppNotificationLevel.error,
         );
+        return false;
       }
     }
 
@@ -1038,7 +1440,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
         if (searchQuery.isNotEmpty) {
-          _searchController.clear();
+          ref.read(posMenuSearchQueryProvider.notifier).clear();
           return;
         }
         setState(() {
@@ -1053,105 +1455,219 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
         clipBehavior: Clip.antiAlias,
         child: Padding(
           padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              AnimatedSize(
-                duration: const Duration(milliseconds: 180),
-                curve: Curves.easeOut,
-                child: _compactLayout && _menuControlsCollapsed
-                    ? const SizedBox.shrink()
-                    : Column(
+          child: LayoutBuilder(
+            builder: (context, panelConstraints) => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // This header used to be a loose Flexible next to the product
+                // Expanded. Flex divided the height before measuring it, so a
+                // short header could reserve half a medium tablet and leave a
+                // large blank area below the product grid. A non-flexible,
+                // height-capped scroller uses only what it needs and gives all
+                // remaining height to the products.
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: panelConstraints.maxHeight < 230
+                        ? (panelConstraints.maxHeight * .48)
+                              .clamp(0.0, 300.0)
+                              .toDouble()
+                        : (panelConstraints.maxHeight * .48)
+                              .clamp(110.0, 300.0)
+                              .toDouble(),
+                  ),
+                  child: SingleChildScrollView(
+                    primary: false,
+                    child: AnimatedSize(
+                      duration: const Duration(milliseconds: 180),
+                      curve: Curves.easeOut,
+                      child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Row(
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  'New order',
-                                  style: Theme.of(context).textTheme.titleLarge,
+                          // Compact Android/iOS POS mode deliberately
+                          // hides the app shell, including its centred
+                          // search field. Keep the same shared search at
+                          // the top of the menu so immersive mode never
+                          // removes product search entirely.
+                          if (MediaQuery.sizeOf(context).width < 840 &&
+                              !(_compactLayout && _menuControlsCollapsed)) ...[
+                            const SizedBox(
+                              height: 40,
+                              child: PosQuickSearchField(),
+                            ),
+                            const SizedBox(height: 4),
+                          ],
+                          if (!compactTileProductStage &&
+                              !(_compactLayout && _menuControlsCollapsed))
+                            Row(
+                              children: [
+                                Text(
+                                  activeOrderLocation,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context).textTheme.labelMedium
+                                      ?.copyWith(fontWeight: FontWeight.w700),
                                 ),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                flex: 2,
-                                child: TextField(
-                                  controller: _searchController,
-                                  textInputAction: TextInputAction.search,
-                                  decoration: InputDecoration(
-                                    isDense: true,
-                                    labelText: 'Quick product search',
-                                    hintText: 'Search products or categories',
-                                    prefixIcon: const Icon(
-                                      Icons.search_rounded,
-                                    ),
-                                    suffixIcon: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        IconButton(
-                                          tooltip: 'Open touch keyboard',
-                                          onPressed: _showSearchTouchKeyboard,
-                                          icon: const Icon(
-                                            Icons.keyboard_alt_outlined,
-                                          ),
+                                const SizedBox(width: 8),
+                                if (panelConstraints.maxWidth >= 700 &&
+                                    !useCategoryTiles) ...[
+                                  Expanded(
+                                    child: _CompactMenuDropdown(
+                                      tooltip: 'Category',
+                                      icon: Icons.category_outlined,
+                                      value: showPopular
+                                          ? popularMenuSectionId
+                                          : effectiveSection ?? '__all__',
+                                      items: [
+                                        const DropdownMenuItem(
+                                          value: popularMenuSectionId,
+                                          child: Text('Popular'),
                                         ),
-                                        if (searchQuery.isNotEmpty)
-                                          IconButton(
-                                            tooltip: 'Clear search',
-                                            onPressed: _searchController.clear,
-                                            icon: const Icon(
-                                              Icons.close_rounded,
+                                        const DropdownMenuItem(
+                                          value: '__all__',
+                                          child: Text('All categories'),
+                                        ),
+                                        for (final item in topLevelSections)
+                                          DropdownMenuItem(
+                                            value: item.id,
+                                            child: Text(
+                                              '${item.icon} ${item.name}',
+                                              overflow: TextOverflow.ellipsis,
                                             ),
                                           ),
                                       ],
+                                      onChanged: (value) {
+                                        ref
+                                            .read(
+                                              activeSectionProvider.notifier,
+                                            )
+                                            .select(
+                                              value == '__all__' ? null : value,
+                                            );
+                                        ref
+                                            .read(
+                                              activeSubsectionProvider.notifier,
+                                            )
+                                            .select(null);
+                                      },
                                     ),
                                   ),
-                                ),
-                              ),
-                              IconButton(
-                                tooltip: useCategoryTiles
-                                    ? 'Use scrolling category bars'
-                                    : 'Use category tiles',
-                                onPressed: () => _changeCategoryView(
-                                  scope,
-                                  useCategoryTiles ? 'bars' : 'tiles',
-                                ),
-                                icon: Icon(
-                                  useCategoryTiles
-                                      ? Icons.view_stream_outlined
-                                      : Icons.grid_view_rounded,
-                                ),
-                              ),
-                              PopupMenuButton<String>(
-                                tooltip: 'Sort products',
-                                initialValue: productSort,
-                                onSelected: (value) =>
-                                    _changeProductSort(scope, value),
-                                icon: Icon(
-                                  productSort == 'alphabetical'
-                                      ? Icons.sort_by_alpha_rounded
-                                      : productSort == 'priceDesc'
-                                      ? Icons.south_rounded
-                                      : Icons.north_rounded,
-                                ),
-                                itemBuilder: (_) => const [
-                                  PopupMenuItem(
-                                    value: 'alphabetical',
-                                    child: Text('Alphabetical (A–Z)'),
+                                  if (subsections.isNotEmpty) ...[
+                                    const SizedBox(width: 6),
+                                    Expanded(
+                                      child: _CompactMenuDropdown(
+                                        tooltip: 'Subcategory',
+                                        icon: Icons.account_tree_outlined,
+                                        value:
+                                            effectiveSubsection ??
+                                            '__all_subcategories__',
+                                        items: [
+                                          DropdownMenuItem(
+                                            value: '__all_subcategories__',
+                                            child: Text(
+                                              'All ${section?.name ?? ''}',
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                          for (final item in subsections)
+                                            DropdownMenuItem(
+                                              value: item.id,
+                                              child: Text(
+                                                '${item.icon} ${item.name}',
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                        ],
+                                        onChanged: (value) => ref
+                                            .read(
+                                              activeSubsectionProvider.notifier,
+                                            )
+                                            .select(
+                                              value == '__all_subcategories__'
+                                                  ? null
+                                                  : value,
+                                            ),
+                                      ),
+                                    ),
+                                  ],
+                                ] else if (panelConstraints.maxWidth >= 700 &&
+                                    useCategoryTiles &&
+                                    _tileCategoryOpen &&
+                                    searchQuery.isEmpty)
+                                  Expanded(
+                                    child: Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: TextButton.icon(
+                                        onPressed: () => setState(() {
+                                          if (effectiveSubsection != null) {
+                                            ref
+                                                .read(
+                                                  activeSubsectionProvider
+                                                      .notifier,
+                                                )
+                                                .select(null);
+                                          } else {
+                                            _tileCategoryOpen = false;
+                                          }
+                                        }),
+                                        icon: const Icon(
+                                          Icons.arrow_back_rounded,
+                                          size: 18,
+                                        ),
+                                        label: Text(
+                                          effectiveSubsection != null
+                                              ? section?.name ?? 'Category'
+                                              : section?.name ?? 'Categories',
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                else
+                                  const Spacer(),
+                                IconButton(
+                                  tooltip: useCategoryTiles
+                                      ? 'Use scrolling category bars'
+                                      : 'Use category tiles',
+                                  onPressed: () => _changeCategoryView(
+                                    scope,
+                                    useCategoryTiles ? 'bars' : 'tiles',
                                   ),
-                                  PopupMenuItem(
-                                    value: 'priceAsc',
-                                    child: Text('Price: low to high'),
+                                  icon: Icon(
+                                    useCategoryTiles
+                                        ? Icons.view_stream_outlined
+                                        : Icons.grid_view_rounded,
                                   ),
-                                  PopupMenuItem(
-                                    value: 'priceDesc',
-                                    child: Text('Price: high to low'),
+                                ),
+                                PopupMenuButton<String>(
+                                  tooltip: 'Sort products',
+                                  initialValue: productSort,
+                                  onSelected: (value) =>
+                                      _changeProductSort(scope, value),
+                                  icon: Icon(
+                                    productSort == 'alphabetical'
+                                        ? Icons.sort_by_alpha_rounded
+                                        : productSort == 'priceDesc'
+                                        ? Icons.south_rounded
+                                        : Icons.north_rounded,
                                   ),
-                                ],
-                              ),
-                            ],
-                          ),
+                                  itemBuilder: (_) => const [
+                                    PopupMenuItem(
+                                      value: 'alphabetical',
+                                      child: Text('Alphabetical (A–Z)'),
+                                    ),
+                                    PopupMenuItem(
+                                      value: 'priceAsc',
+                                      child: Text('Price: low to high'),
+                                    ),
+                                    PopupMenuItem(
+                                      value: 'priceDesc',
+                                      child: Text('Price: high to low'),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
                           if (useCategoryTiles &&
+                              panelConstraints.maxWidth < 700 &&
                               _tileCategoryOpen &&
                               searchQuery.isEmpty) ...[
                             const SizedBox(height: 4),
@@ -1181,8 +1697,13 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                               ),
                             ),
                           ],
-                          const SizedBox(height: 14),
-                          if (!useCategoryTiles)
+                          if (!compactTileProductStage &&
+                              !(_compactLayout && _menuControlsCollapsed) &&
+                              panelConstraints.maxWidth < 700)
+                            const SizedBox(height: 14),
+                          if (!useCategoryTiles &&
+                              panelConstraints.maxWidth < 700 &&
+                              !(_compactLayout && _menuControlsCollapsed))
                             _HorizontalMenuScroller(
                               controller: _sectionScrollController,
                               child: Row(
@@ -1256,7 +1777,10 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                                 ],
                               ),
                             ),
-                          if (!useCategoryTiles && subsections.isNotEmpty) ...[
+                          if (!useCategoryTiles &&
+                              panelConstraints.maxWidth < 700 &&
+                              !(_compactLayout && _menuControlsCollapsed) &&
+                              subsections.isNotEmpty) ...[
                             const SizedBox(height: 10),
                             _HorizontalMenuScroller(
                               controller: _subsectionScrollController,
@@ -1294,36 +1818,13 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                               ),
                             ),
                           ],
-                          if (useCategoryTiles &&
-                              _tileCategoryOpen &&
-                              searchQuery.isEmpty &&
-                              effectiveSubsection == null &&
-                              subsections.isNotEmpty) ...[
-                            const SizedBox(height: 10),
-                            Text(
-                              'Subcategories',
-                              style: Theme.of(context).textTheme.labelLarge,
-                            ),
-                            const SizedBox(height: 6),
-                            _CategoryTilePanel(
-                              children: [
-                                for (final item in subsections)
-                                  _CategoryTile(
-                                    textIcon: item.icon,
-                                    label: item.name,
-                                    selected: false,
-                                    onTap: () => ref
-                                        .read(activeSubsectionProvider.notifier)
-                                        .select(item.id),
-                                  ),
-                              ],
-                            ),
-                          ],
-                          if (!showTileCategoryBrowser) ...[
+                          if (!showTileCategoryBrowser &&
+                              panelConstraints.maxWidth < 700 &&
+                              !(_compactLayout && _menuControlsCollapsed)) ...[
                             const SizedBox(height: 14),
                             Text(
                               searchQuery.isNotEmpty
-                                  ? 'Search results for “${_searchController.text.trim()}”'
+                                  ? 'Search results for “${rawSearchQuery.trim()}”'
                                   : effectiveSubsection == null
                                   ? section?.name ?? 'All menu items'
                                   : subsections
@@ -1338,123 +1839,159 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                           ],
                         ],
                       ),
-              ),
-              Expanded(
-                child: showTileCategoryBrowser
-                    ? SingleChildScrollView(
-                        child: Wrap(
-                          spacing: 10,
-                          runSpacing: 10,
-                          children: [
-                            _CategoryTile(
-                              icon: Icons.local_fire_department_rounded,
-                              label: 'Popular',
-                              selected: showPopular,
-                              onTap: () => setState(() {
-                                ref
-                                    .read(activeSectionProvider.notifier)
-                                    .select(popularMenuSectionId);
-                                ref
-                                    .read(activeSubsectionProvider.notifier)
-                                    .select(null);
-                                _tileCategoryOpen = true;
-                              }),
-                            ),
-                            _CategoryTile(
-                              icon: Icons.apps_rounded,
-                              label: 'All',
-                              selected:
-                                  !showPopular && effectiveSection == null,
-                              onTap: () => setState(() {
-                                ref
-                                    .read(activeSectionProvider.notifier)
-                                    .select(null);
-                                ref
-                                    .read(activeSubsectionProvider.notifier)
-                                    .select(null);
-                                _tileCategoryOpen = true;
-                              }),
-                            ),
-                            for (final item in topLevelSections)
-                              _CategoryTile(
-                                textIcon: item.icon,
-                                label: item.name,
-                                selected: item.id == effectiveSection,
-                                onTap: () => setState(() {
-                                  ref
-                                      .read(activeSectionProvider.notifier)
-                                      .select(item.id);
-                                  ref
-                                      .read(activeSubsectionProvider.notifier)
-                                      .select(null);
-                                  _tileCategoryOpen = true;
-                                }),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: showTileCategoryBrowser
+                      ? LayoutBuilder(
+                          builder: (context, constraints) {
+                            const spacing = 10.0;
+                            final columns = posCategoryGridColumnCount(
+                              constraints.maxWidth,
+                            );
+                            final tileWidth =
+                                (constraints.maxWidth -
+                                    (spacing * (columns - 1))) /
+                                columns;
+                            return SingleChildScrollView(
+                              child: Wrap(
+                                spacing: spacing,
+                                runSpacing: spacing,
+                                children: [
+                                  _CategoryTile(
+                                    width: tileWidth,
+                                    icon: Icons.local_fire_department_rounded,
+                                    label: 'Popular',
+                                    selected: showPopular,
+                                    onTap: () => setState(() {
+                                      ref
+                                          .read(activeSectionProvider.notifier)
+                                          .select(popularMenuSectionId);
+                                      ref
+                                          .read(
+                                            activeSubsectionProvider.notifier,
+                                          )
+                                          .select(null);
+                                      _tileCategoryOpen = true;
+                                    }),
+                                  ),
+                                  _CategoryTile(
+                                    width: tileWidth,
+                                    icon: Icons.apps_rounded,
+                                    label: 'All',
+                                    selected:
+                                        !showPopular &&
+                                        effectiveSection == null,
+                                    onTap: () => setState(() {
+                                      ref
+                                          .read(activeSectionProvider.notifier)
+                                          .select(null);
+                                      ref
+                                          .read(
+                                            activeSubsectionProvider.notifier,
+                                          )
+                                          .select(null);
+                                      _tileCategoryOpen = true;
+                                    }),
+                                  ),
+                                  for (final item in topLevelSections)
+                                    _CategoryTile(
+                                      width: tileWidth,
+                                      textIcon: item.icon,
+                                      label: item.name,
+                                      selected: item.id == effectiveSection,
+                                      onTap: () => setState(() {
+                                        ref
+                                            .read(
+                                              activeSectionProvider.notifier,
+                                            )
+                                            .select(item.id);
+                                        ref
+                                            .read(
+                                              activeSubsectionProvider.notifier,
+                                            )
+                                            .select(null);
+                                        _tileCategoryOpen = true;
+                                      }),
+                                    ),
+                                ],
                               ),
-                          ],
-                        ),
-                      )
-                    : loading
-                    ? const Center(child: CircularProgressIndicator())
-                    : menuError != null
-                    ? _MenuStateMessage(
-                        icon: Icons.cloud_off_rounded,
-                        title: 'Could not load this venue’s menu',
-                        detail: '$menuError',
-                      )
-                    : products.isEmpty
-                    ? const _MenuStateMessage(
-                        icon: Icons.menu_book_outlined,
-                        title: 'No menu items are available',
-                        detail:
-                            'Add a product in Menu management, or choose a different category.',
-                      )
-                    : LayoutBuilder(
-                        builder: (context, _) {
-                          return Scrollbar(
-                            controller: _productScrollController,
-                            thumbVisibility: true,
-                            child: GridView.builder(
+                            );
+                          },
+                        )
+                      : loading
+                      ? const Center(child: CircularProgressIndicator())
+                      : menuError != null
+                      ? _MenuStateMessage(
+                          icon: Icons.cloud_off_rounded,
+                          title: 'Could not load this venue’s menu',
+                          detail: '$menuError',
+                        )
+                      : products.isEmpty
+                      ? const _MenuStateMessage(
+                          icon: Icons.menu_book_outlined,
+                          title: 'No menu items are available',
+                          detail:
+                              'Add a product in Menu management, or choose a different category.',
+                        )
+                      : LayoutBuilder(
+                          builder: (context, _) {
+                            return Scrollbar(
                               controller: _productScrollController,
-                              primary: false,
-                              itemCount: products.length,
-                              gridDelegate:
-                                  const SliverGridDelegateWithMaxCrossAxisExtent(
-                                    maxCrossAxisExtent: 180,
-                                    crossAxisSpacing: 12,
-                                    mainAxisSpacing: 12,
-                                    mainAxisExtent: 148,
-                                  ),
-                              itemBuilder: (context, index) => _ProductTile(
-                                product: products[index],
-                                categoryLabel: _primaryCategoryLabel(
-                                  products[index],
-                                  sections,
-                                ),
-                                currencyCode: currencyCode,
-                                canAdd: activeOrder.canAddProduct(
-                                  products[index],
-                                ),
-                                onTap: () => addSelectedProduct(
-                                  products[index],
-                                  forceConfiguration: false,
-                                ),
-                                onLongPress: () => _showPosProductDetails(
-                                  context: context,
+                              thumbVisibility: true,
+                              child: GridView.builder(
+                                controller: _productScrollController,
+                                primary: false,
+                                itemCount: products.length,
+                                gridDelegate:
+                                    const SliverGridDelegateWithMaxCrossAxisExtent(
+                                      // Compact cards fit an additional product
+                                      // across a typical tablet while retaining
+                                      // a generous touch target and two name
+                                      // lines.
+                                      maxCrossAxisExtent: 145,
+                                      crossAxisSpacing: 8,
+                                      mainAxisSpacing: 8,
+                                      mainAxisExtent: 136,
+                                    ),
+                                itemBuilder: (context, index) => _ProductTile(
                                   product: products[index],
-                                  sections: sections,
-                                  currencyCode: currencyCode,
-                                  onAdd: () => addSelectedProduct(
+                                  categoryLabel: _primaryCategoryLabel(
                                     products[index],
-                                    forceConfiguration: true,
+                                    sections,
                                   ),
+                                  currencyCode: currencyCode,
+                                  canAdd: activeOrder.canAddProduct(
+                                    products[index],
+                                  ),
+                                  onTap: () => addSelectedProduct(
+                                    products[index],
+                                    forceConfiguration: false,
+                                  ),
+                                  onLongPress: () async {
+                                    await _showPosProductDetails(
+                                      context: context,
+                                      product: products[index],
+                                      sections: sections,
+                                      currencyCode: currencyCode,
+                                      onAdd: () async {
+                                        await addSelectedProduct(
+                                          products[index],
+                                          forceConfiguration: true,
+                                        );
+                                      },
+                                    );
+                                    return false;
+                                  },
                                 ),
                               ),
-                            ),
-                          );
-                        },
-                      ),
-              ),
-            ],
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1469,6 +2006,7 @@ class _CategoryTile extends StatelessWidget {
     required this.onTap,
     this.icon,
     this.textIcon,
+    this.width = 150,
   });
 
   final String label;
@@ -1476,12 +2014,13 @@ class _CategoryTile extends StatelessWidget {
   final VoidCallback onTap;
   final IconData? icon;
   final String? textIcon;
+  final double width;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return SizedBox(
-      width: 150,
+      width: width,
       height: 58,
       child: Material(
         color: selected ? scheme.primaryContainer : scheme.surfaceContainerHigh,
@@ -1517,6 +2056,49 @@ class _CategoryTile extends StatelessWidget {
   }
 }
 
+/// Chooses a compact, predictable category grid for the available menu width.
+///
+/// Tablet layouts deliberately use five columns. Wider desktop layouts can
+/// use more, while phone layouts retain a readable minimum tile width.
+@visibleForTesting
+int posCategoryGridColumnCount(double width) {
+  if (width >= 1200) return (width / 160).floor().clamp(6, 8);
+  if (width >= 600) return 5;
+  if (width >= 440) return 4;
+  if (width >= 300) return 3;
+  return 2;
+}
+
+/// Produces the short order identity shown in the POS menu toolbar.
+///
+/// Staff need to see where every product will be added before touching it, so
+/// fulfilment customer names and named tabs take precedence over the selected
+/// dining table. Raw table IDs are used only while table metadata is loading.
+@visibleForTesting
+String posMenuOrderLocationLabel(
+  PosOrder order,
+  List<DiningTable> tables, {
+  String? selectedTableId,
+}) {
+  final customerName = order.customerName?.trim();
+  if (order.channel == OrderChannel.delivery) {
+    return 'Delivery · ${customerName?.isNotEmpty == true ? customerName : 'Customer'}';
+  }
+  if (order.channel == OrderChannel.collection) {
+    return 'Collection · ${customerName?.isNotEmpty == true ? customerName : 'Customer'}';
+  }
+  final tabName = order.tabName?.trim();
+  if (tabName?.isNotEmpty == true) return 'Tab · $tabName';
+  final tableId = order.tableId?.trim().isNotEmpty == true
+      ? order.tableId!.trim()
+      : selectedTableId?.trim() ?? '';
+  if (tableId.isEmpty) return 'New order';
+  for (final table in tables) {
+    if (table.id == tableId) return table.label;
+  }
+  return tableId;
+}
+
 class _CategoryTilePanel extends StatelessWidget {
   const _CategoryTilePanel({required this.children});
 
@@ -1529,6 +2111,58 @@ class _CategoryTilePanel extends StatelessWidget {
       child: Wrap(spacing: 8, runSpacing: 8, children: children),
     ),
   );
+}
+
+/// Dense category selector used by landscape tablets and desktop POS layouts.
+/// The full chip scrollers remain available on narrow screens, while this
+/// single-line control returns substantially more height to the product grid.
+class _CompactMenuDropdown extends StatelessWidget {
+  const _CompactMenuDropdown({
+    required this.tooltip,
+    required this.icon,
+    required this.value,
+    required this.items,
+    required this.onChanged,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final String value;
+  final List<DropdownMenuItem<String>> items;
+  final ValueChanged<String?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Tooltip(
+      message: tooltip,
+      child: Container(
+        height: 36,
+        padding: const EdgeInsets.only(left: 8),
+        decoration: BoxDecoration(
+          border: Border.all(color: scheme.outlineVariant),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 17, color: scheme.primary),
+            const SizedBox(width: 6),
+            Expanded(
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: value,
+                  isExpanded: true,
+                  isDense: true,
+                  items: items,
+                  onChanged: onChanged,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _HorizontalMenuScroller extends StatelessWidget {
@@ -1666,8 +2300,8 @@ class _ProductTile extends StatefulWidget {
   final String categoryLabel;
   final String currencyCode;
   final bool canAdd;
-  final Future<void> Function() onTap;
-  final Future<void> Function() onLongPress;
+  final Future<bool> Function() onTap;
+  final Future<bool> Function() onLongPress;
 
   @override
   State<_ProductTile> createState() => _ProductTileState();
@@ -1676,15 +2310,112 @@ class _ProductTile extends StatefulWidget {
 class _ProductTileState extends State<_ProductTile> {
   bool _pressed = false;
 
-  Future<void> _activate(Future<void> Function() action) async {
+  Future<void> _activate(
+    Future<bool> Function() action, {
+    bool animateToOrder = false,
+  }) async {
     if (_pressed) return;
+    HapticFeedback.selectionClick();
     setState(() => _pressed = true);
     await Future<void>.delayed(const Duration(milliseconds: 90));
     try {
-      await action();
+      final added = await action();
+      if (added && animateToOrder && mounted) _animateProductToOrder();
     } finally {
       if (mounted) setState(() => _pressed = false);
     }
+  }
+
+  /// Gives immediate, unmistakable feedback while the authoritative order
+  /// update completes in the background. The visual copy spins, tilts and
+  /// shrinks towards the Order area; it carries no order state and therefore
+  /// cannot conceal a later server rejection or alter transaction safety.
+  void _animateProductToOrder() {
+    final tileBox = context.findRenderObject();
+    final overlay = Overlay.of(context);
+    final overlayBox = overlay.context.findRenderObject();
+    if (tileBox is! RenderBox || overlayBox is! RenderBox) return;
+    final start = overlayBox.globalToLocal(tileBox.localToGlobal(Offset.zero));
+    final media = MediaQuery.sizeOf(context);
+    final target = Offset(
+      overlayBox.size.width - 68,
+      (MediaQuery.paddingOf(context).top + (media.width >= 840 ? 112 : 44))
+          .clamp(12.0, overlayBox.size.height - 70),
+    );
+    late final OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (overlayContext) => Positioned.fill(
+        child: IgnorePointer(
+          child: TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0, end: 1),
+            duration: const Duration(milliseconds: 720),
+            curve: Curves.easeInOutCubicEmphasized,
+            onEnd: () {
+              if (entry.mounted) entry.remove();
+            },
+            builder: (context, progress, child) {
+              final offset = Offset.lerp(start, target, progress)!;
+              return Stack(
+                children: [
+                  Positioned(
+                    left: offset.dx,
+                    top: offset.dy,
+                    child: Opacity(
+                      opacity: (1 - (progress * .55)).clamp(0.0, 1.0),
+                      child: Transform(
+                        alignment: Alignment.center,
+                        transform: Matrix4.identity()
+                          ..setEntry(3, 2, .0015)
+                          ..rotateY(progress * 6.283185307)
+                          ..rotateZ(progress * 6.283185307)
+                          ..scaleByDouble(
+                            1 - (progress * .58),
+                            1 - (progress * .58),
+                            1 - (progress * .58),
+                            1,
+                          ),
+                        child: child,
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+            child: Material(
+              elevation: 14,
+              color: Theme.of(overlayContext).colorScheme.primaryContainer,
+              borderRadius: BorderRadius.circular(14),
+              child: SizedBox(
+                width: 132,
+                height: 68,
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Row(
+                    children: [
+                      Icon(
+                        widget.product.productionArea == ProductionArea.bar
+                            ? Icons.local_bar_rounded
+                            : Icons.restaurant_rounded,
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          widget.product.name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    overlay.insert(entry);
   }
 
   @override
@@ -1704,7 +2435,12 @@ class _ProductTileState extends State<_ProductTile> {
         scale: _pressed ? .92 : 1,
         duration: const Duration(milliseconds: 110),
         child: InkWell(
-          onTap: unavailable ? null : () => _activate(widget.onTap),
+          onTap: unavailable
+              ? null
+              : () => _activate(
+                  widget.onTap,
+                  animateToOrder: !widget.product.requiresConfiguration,
+                ),
           onLongPress: unavailable ? null : () => _activate(widget.onLongPress),
           borderRadius: BorderRadius.circular(16),
           child: Ink(
@@ -1715,7 +2451,9 @@ class _ProductTileState extends State<_ProductTile> {
               borderRadius: BorderRadius.circular(16),
             ),
             child: Padding(
-              padding: const EdgeInsets.all(14),
+              // Eight pixels keeps the complete two-line name, price and
+              // category readable while allowing a denser waiter workspace.
+              padding: const EdgeInsets.all(8),
               child: LayoutBuilder(
                 builder: (context, constraints) {
                   // Phone grids intentionally use a short tile. Keep its most
@@ -1728,7 +2466,7 @@ class _ProductTileState extends State<_ProductTile> {
                         widget.product.productionArea == ProductionArea.bar
                             ? Icons.local_bar_rounded
                             : Icons.restaurant_rounded,
-                        size: compact ? 20 : null,
+                        size: compact ? 18 : null,
                         color: unavailable ? scheme.outline : scheme.primary,
                       ),
                       if (!compact && widget.product.requiresConfiguration)
@@ -1813,7 +2551,7 @@ Future<void> _showPosProductDetails({
       .where((section) => product.sectionIds.contains(section.id))
       .map((section) => section.name)
       .join(' · ');
-  final add = await showDialog<bool>(
+  final add = await showAppDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
       title: Text(product.name),
@@ -1899,6 +2637,72 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     });
   }
 
+  Future<void> _closeEmptyOrder() async {
+    final reason = TextEditingController(text: 'All items removed');
+    final confirmed = await showAppDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Close empty order?'),
+        content: TextField(
+          controller: reason,
+          autofocus: true,
+          maxLength: 240,
+          decoration: const InputDecoration(
+            labelText: 'Reason',
+            helperText: 'Required and saved in the audit trail.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep open'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Close order'),
+          ),
+        ],
+      ),
+    );
+    final cancellationReason = reason.text.trim();
+    reason.dispose();
+    if (confirmed != true || !mounted) return;
+    if (cancellationReason.length < 3) {
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Order remains open',
+        message: 'Enter a short reason for closing the empty order.',
+        level: AppNotificationLevel.warning,
+      );
+      return;
+    }
+    try {
+      await ref
+          .read(activeOrderProvider.notifier)
+          .cancelEmptyOrder(reason: cancellationReason);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Empty order closed',
+        message: 'The table or tab is available again.',
+        level: AppNotificationLevel.success,
+      );
+      ref.read(posCompactTabProvider.notifier).select(0);
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Close empty order', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        ref: ref,
+        title: 'Order remains open',
+        message: '$error',
+        level: AppNotificationLevel.error,
+      );
+    }
+  }
+
   Future<void> _adjustLine(OrderLine line, String operation) async {
     final reason = TextEditingController();
     final value = TextEditingController(
@@ -1906,7 +2710,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
           ? _moneyInputFromMinor(line.unitPriceMinor, widget.currencyCode)
           : '',
     );
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(switch (operation) {
@@ -2036,7 +2840,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     }
     final value = TextEditingController();
     final reason = TextEditingController();
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(
@@ -2151,6 +2955,11 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     final order = ref.watch(activeOrderProvider);
     final trainingSession = ref.watch(trainingModeProvider);
     final isTraining = trainingSession != null;
+    final persistedOrderId = ref.watch(activePersistedOrderIdProvider);
+    final canCloseEmptyOrder =
+        order.lines.isEmpty &&
+        order.payments.isEmpty &&
+        persistedOrderId == order.id;
     final currentLineIds = order.lines.map((line) => line.id).toSet();
     _selectedLineIds.removeWhere((id) => !currentLineIds.contains(id));
     final splitOrdersValue = order.isSplitOrder || isTraining
@@ -2192,28 +3001,59 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 loading: () => tableId,
                 error: (_, _) => tableId,
               );
-    final orderLocationLabel =
-        order.tabName ??
-        (tableLabel.isEmpty ? 'No table selected' : tableLabel);
+    final orderLocationLabel = order.channel == OrderChannel.collection
+        ? 'Collection · ${order.customerName ?? 'Customer'}'
+        : order.channel == OrderChannel.delivery
+        ? 'Delivery · ${order.customerName ?? 'Customer'}'
+        : order.tabName ??
+              (tableLabel.isEmpty ? 'No table selected' : tableLabel);
     final scheme = Theme.of(context).colorScheme;
+    final orderTitleColor = hasUnsentLines
+        ? (Theme.of(context).brightness == Brightness.dark
+              ? Colors.orangeAccent
+              : Colors.orange.shade800)
+        : null;
     final staff = ref.watch(activeStaffPinSessionProvider);
     final canAdjustSale =
         staff?.roles.any((role) => role == 'owner' || role == 'manager') ??
         false;
+    final compactOutlinedButtonStyle = OutlinedButton.styleFrom(
+      visualDensity: VisualDensity.compact,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      minimumSize: const Size(0, 32),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      textStyle: Theme.of(context).textTheme.labelMedium,
+    );
+    final compactFilledButtonStyle = FilledButton.styleFrom(
+      visualDensity: VisualDensity.compact,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      minimumSize: const Size(0, 32),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      textStyle: Theme.of(context).textTheme.labelMedium,
+    );
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        // Keep the order controls usable on medium-height tablets. The line
+        // list remains the flexible region, while compact vertical spacing
+        // prevents the fixed totals and action controls overflowing below it.
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Text(
-                  orderLocationLabel,
-                  style: Theme.of(context).textTheme.titleLarge,
+                Expanded(
+                  child: Text(
+                    orderLocationLabel,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.titleMedium?.copyWith(color: orderTitleColor),
+                  ),
                 ),
-                const Spacer(),
+                const SizedBox(width: 8),
                 _StatusChip(status: order.status),
               ],
             ),
@@ -2224,6 +3064,29 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 context,
               ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
             ),
+            if (order.channel != OrderChannel.dineIn)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  order.scheduledFor == null
+                      ? '${order.channel.label} time: ASAP'
+                      : '${order.channel.label} time: ${formatAppDateTime(order.scheduledFor!)}',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+            if (order.channel == OrderChannel.delivery &&
+                order.deliveryAddress?.trim().isNotEmpty == true)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '${order.deliveryAddressLabel?.trim().isNotEmpty == true ? '${order.deliveryAddressLabel}: ' : ''}${order.deliveryAddress}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
             if (order.isSplitOrder)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -2288,7 +3151,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                 ),
               ),
             ],
-            const Divider(height: 24),
+            const Divider(height: 16),
             if (_selectedLineIds.isNotEmpty && canAdjustSale) ...[
               Wrap(
                 spacing: 8,
@@ -2324,6 +3187,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
               const SizedBox(height: 8),
             ],
             Expanded(
+              flex: 3,
               child: order.lines.isEmpty
                   ? const Center(child: Text('Choose menu items to begin.'))
                   : Scrollbar(
@@ -2488,233 +3352,337 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                       ),
                     ),
             ),
-            const Divider(height: 24),
-            Row(
-              children: [
-                Text('Total', style: Theme.of(context).textTheme.titleMedium),
-                const Spacer(),
-                Text(
-                  formatMoney(
-                    order.totalMinor,
-                    currencyCode: widget.currencyCode,
-                  ),
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ],
-            ),
-            if (order.paidMinor > 0) ...[
-              const SizedBox(height: 4),
-              Row(
+            // Tablets and desktop tills pin totals/actions below the list, so
+            // staff never have to scroll past order items to reach payment or
+            // sending controls. Phones retain the safe scroll fallback.
+            _AdaptiveOrderFooter(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text('Payments received'),
-                  const Spacer(),
-                  Text(
-                    formatMoney(
-                      order.paidMinor,
-                      currencyCode: widget.currencyCode,
+                  if (order.channel == OrderChannel.delivery &&
+                      order.deliveryFeeMinor > 0) ...[
+                    const Divider(height: 20),
+                    Row(
+                      children: [
+                        Text(
+                          order.serviceAreaName?.trim().isNotEmpty == true
+                              ? 'Delivery · ${order.serviceAreaName}'
+                              : 'Delivery fee',
+                        ),
+                        const Spacer(),
+                        Text(
+                          formatMoney(
+                            order.deliveryFeeMinor,
+                            currencyCode: widget.currencyCode,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                  const Divider(height: 16),
+                  Row(
+                    children: [
+                      Text(
+                        'Total',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const Spacer(),
+                      Text(
+                        formatMoney(
+                          order.totalMinor,
+                          currencyCode: widget.currencyCode,
+                        ),
+                        style: Theme.of(context).textTheme.headlineSmall
+                            ?.copyWith(fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        key: const ValueKey('order-view-bill-button'),
+                        onPressed: order.lines.isEmpty
+                            ? null
+                            : () => _showCheckoutBillPreview(
+                                context,
+                                order: order,
+                                currencyCode: widget.currencyCode,
+                                pendingPaymentMinor: 0,
+                              ),
+                        style: compactOutlinedButtonStyle,
+                        icon: const Icon(Icons.list_alt_rounded, size: 17),
+                        label: const Text('Items'),
+                      ),
+                    ],
+                  ),
+                  if (order.paidMinor > 0) ...[
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        const Text('Payments received'),
+                        const Spacer(),
+                        Text(
+                          formatMoney(
+                            order.paidMinor,
+                            currencyCode: widget.currencyCode,
+                          ),
+                        ),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        Text(
+                          'Balance due',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const Spacer(),
+                        Text(
+                          formatMoney(
+                            order.balanceDueMinor,
+                            currencyCode: widget.currencyCode,
+                          ),
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w800),
+                        ),
+                      ],
+                    ),
+                    if (order.payments.length > 2)
+                      Text(
+                        '+ ${order.payments.length - 2} earlier payment${order.payments.length == 3 ? '' : 's'}',
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                    for (final payment in order.payments.skip(
+                      order.payments.length > 2 ? order.payments.length - 2 : 0,
+                    ))
+                      Text(
+                        '${payment.recordedLocalDateTime?.trim().isNotEmpty == true ? formatVenueDateTimeSnapshot(payment.recordedLocalDateTime!) : formatAppDateTime(payment.recordedAt)} · ${payment.method} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                  ],
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: compactOutlinedButtonStyle,
+                          onPressed:
+                              order.isSplitOrder ||
+                                  order.payments.isNotEmpty ||
+                                  order.lines.isEmpty ||
+                                  hasUnsentLines
+                              ? null
+                              : () => _showSplitBillSheet(
+                                  context,
+                                  ref: ref,
+                                  order: order,
+                                  currencyCode: widget.currencyCode,
+                                ),
+                          icon: const Icon(Icons.call_split_rounded, size: 17),
+                          label: const Text('Split bill'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: compactOutlinedButtonStyle,
+                          onPressed: hasUnsentLines
+                              ? () => _showPendingOrderItems(
+                                  context,
+                                  order: order,
+                                  currencyCode: widget.currencyCode,
+                                )
+                              : null,
+                          icon: const Icon(
+                            Icons.pending_actions_rounded,
+                            size: 17,
+                          ),
+                          label: Text(
+                            'Pending (${order.lines.where((line) => !line.isSentToProduction).fold<int>(0, (total, line) => total + line.quantity)})',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: compactOutlinedButtonStyle,
+                          onPressed:
+                              isTraining ||
+                                  order.lines.isEmpty ||
+                                  hasUnsentLines
+                              ? null
+                              : () async {
+                                  try {
+                                    final queued = await ref
+                                        .read(activeOrderProvider.notifier)
+                                        .printPreReceipt();
+                                    if (!context.mounted) return;
+                                    showAppNotification(
+                                      context,
+                                      ref: ref,
+                                      title: queued
+                                          ? 'Pre receipt queued'
+                                          : 'Pre receipt not queued',
+                                      message: queued
+                                          ? 'The unpaid bill has been sent to the receipt printer.'
+                                          : 'No receipt printer accepted the pre receipt.',
+                                    );
+                                  } on Object catch (error, stackTrace) {
+                                    AppLogger.error(
+                                      'Print pre receipt',
+                                      error,
+                                      stackTrace,
+                                    );
+                                    if (!context.mounted) return;
+                                    showAppNotification(
+                                      context,
+                                      ref: ref,
+                                      title: 'Pre receipt was not printed',
+                                      message: '$error',
+                                      level: AppNotificationLevel.error,
+                                    );
+                                  }
+                                },
+                          icon: const Icon(
+                            Icons.receipt_long_outlined,
+                            size: 17,
+                          ),
+                          label: const Text('Pre receipt'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: FilledButton.icon(
+                          style: compactFilledButtonStyle,
+                          onPressed:
+                              order.lines.isEmpty ||
+                                  hasUnsentLines ||
+                                  (!order.isSplitOrder &&
+                                      openSplitOrders.isNotEmpty)
+                              ? null
+                              : () => _showCheckoutSheet(
+                                  context,
+                                  ref: ref,
+                                  order: order,
+                                  currencyCode: widget.currencyCode,
+                                ),
+                          icon: const Icon(Icons.payments_outlined, size: 17),
+                          label: const Text('Pay'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  if (canCloseEmptyOrder) ...[
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        style: compactOutlinedButtonStyle,
+                        onPressed: _closeEmptyOrder,
+                        icon: const Icon(Icons.cancel_outlined, size: 17),
+                        label: const Text('Close empty order'),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                  ],
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      style: compactFilledButtonStyle,
+                      onPressed: !hasUnsentLines
+                          ? null
+                          : () async {
+                              final printRequired =
+                                  await _confirmProductionPrint(context);
+                              if (printRequired == null || !context.mounted) {
+                                return;
+                              }
+                              try {
+                                final printResult = await ref
+                                    .read(activeOrderProvider.notifier)
+                                    .sendToProduction(
+                                      printRequired: printRequired,
+                                    );
+                                if (!context.mounted) return;
+                                final message = isTraining
+                                    ? (printRequired &&
+                                              trainingSession.targetDeviceId !=
+                                                  null
+                                          ? 'Training order saved and a clearly marked training ticket was queued.'
+                                          : 'Training order saved without printing. No live order or stock was changed.')
+                                    : !printRequired
+                                    ? 'New items sent to the Order Flow Board without printing.'
+                                    : printResult.ticketsPrinted > 0
+                                    ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
+                                    : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.';
+                                showAppNotification(
+                                  context,
+                                  ref: ref,
+                                  title: isTraining
+                                      ? 'Training order sent'
+                                      : 'Order sent',
+                                  message: message,
+                                  level: AppNotificationLevel.success,
+                                );
+                                ref
+                                    .read(activeOrderProvider.notifier)
+                                    .clearSelectionAfterSend();
+                                ref
+                                    .read(posCompactTabProvider.notifier)
+                                    .select(0);
+                              } on Object catch (error, stackTrace) {
+                                AppLogger.error(
+                                  'Send order to production',
+                                  error,
+                                  stackTrace,
+                                );
+                                if (!context.mounted) return;
+                                showAppNotification(
+                                  context,
+                                  ref: ref,
+                                  title: 'Order needs attention',
+                                  message:
+                                      'The order or its local ticket could not be completed. It remains open for a safe retry.',
+                                  level: AppNotificationLevel.error,
+                                );
+                              }
+                            },
+                      icon: const Icon(Icons.print_rounded, size: 17),
+                      label: Text(
+                        order.status == OrderStatus.sent
+                            ? 'Send additions'
+                            : 'Send order',
+                      ),
                     ),
                   ),
                 ],
-              ),
-              Row(
-                children: [
-                  Text(
-                    'Balance due',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const Spacer(),
-                  Text(
-                    formatMoney(
-                      order.balanceDueMinor,
-                      currencyCode: widget.currencyCode,
-                    ),
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ],
-              ),
-              for (final payment in order.payments)
-                Text(
-                  '${payment.recordedLocalDateTime?.trim().isNotEmpty == true ? formatVenueDateTimeSnapshot(payment.recordedLocalDateTime!) : formatAppDateTime(payment.recordedAt)} · ${payment.method} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-            ],
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed:
-                        order.isSplitOrder ||
-                            order.payments.isNotEmpty ||
-                            order.lines.isEmpty ||
-                            hasUnsentLines
-                        ? null
-                        : () => _showSplitBillSheet(
-                            context,
-                            ref: ref,
-                            order: order,
-                            currencyCode: widget.currencyCode,
-                          ),
-                    icon: const Icon(Icons.call_split_rounded),
-                    label: const Text('Split'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: hasUnsentLines
-                        ? () => _showPendingOrderItems(
-                            context,
-                            order: order,
-                            currencyCode: widget.currencyCode,
-                          )
-                        : null,
-                    icon: const Icon(Icons.pending_actions_rounded),
-                    label: Text(
-                      'Pending (${order.lines.where((line) => !line.isSentToProduction).fold<int>(0, (total, line) => total + line.quantity)})',
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed:
-                        isTraining || order.lines.isEmpty || hasUnsentLines
-                        ? null
-                        : () async {
-                            try {
-                              final queued = await ref
-                                  .read(activeOrderProvider.notifier)
-                                  .printPreReceipt();
-                              if (!context.mounted) return;
-                              showAppNotification(
-                                context,
-                                ref: ref,
-                                title: queued
-                                    ? 'Pre receipt queued'
-                                    : 'Pre receipt not queued',
-                                message: queued
-                                    ? 'The unpaid bill has been sent to the receipt printer.'
-                                    : 'No receipt printer accepted the pre receipt.',
-                              );
-                            } on Object catch (error, stackTrace) {
-                              AppLogger.error(
-                                'Print pre receipt',
-                                error,
-                                stackTrace,
-                              );
-                              if (!context.mounted) return;
-                              showAppNotification(
-                                context,
-                                ref: ref,
-                                title: 'Pre receipt was not printed',
-                                message: '$error',
-                                level: AppNotificationLevel.error,
-                              );
-                            }
-                          },
-                    icon: const Icon(Icons.receipt_long_outlined),
-                    label: const Text('Pre receipt'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed:
-                        order.lines.isEmpty ||
-                            hasUnsentLines ||
-                            (!order.isSplitOrder && openSplitOrders.isNotEmpty)
-                        ? null
-                        : () => _showCheckoutSheet(
-                            context,
-                            ref: ref,
-                            order: order,
-                            currencyCode: widget.currencyCode,
-                          ),
-                    icon: const Icon(Icons.payments_outlined),
-                    label: const Text('Pay'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: !hasUnsentLines
-                    ? null
-                    : () async {
-                        final printRequired = await _confirmProductionPrint(
-                          context,
-                        );
-                        if (printRequired == null || !context.mounted) {
-                          return;
-                        }
-                        try {
-                          final printResult = await ref
-                              .read(activeOrderProvider.notifier)
-                              .sendToProduction(printRequired: printRequired);
-                          if (!context.mounted) return;
-                          final message = isTraining
-                              ? (printRequired &&
-                                        trainingSession.targetDeviceId != null
-                                    ? 'Training order saved and a clearly marked training ticket was queued.'
-                                    : 'Training order saved without printing. No live order or stock was changed.')
-                              : !printRequired
-                              ? 'New items sent to the Order Flow Board without printing.'
-                              : printResult.ticketsPrinted > 0
-                              ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
-                              : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.';
-                          showAppNotification(
-                            context,
-                            ref: ref,
-                            title: isTraining
-                                ? 'Training order sent'
-                                : 'Order sent',
-                            message: message,
-                            level: AppNotificationLevel.success,
-                          );
-                          ref
-                              .read(activeOrderProvider.notifier)
-                              .clearSelectionAfterSend();
-                          ref.read(posCompactTabProvider.notifier).select(0);
-                        } on Object catch (error, stackTrace) {
-                          AppLogger.error(
-                            'Send order to production',
-                            error,
-                            stackTrace,
-                          );
-                          if (!context.mounted) return;
-                          showAppNotification(
-                            context,
-                            ref: ref,
-                            title: 'Order needs attention',
-                            message:
-                                'The order or its local ticket could not be completed. It remains open for a safe retry.',
-                            level: AppNotificationLevel.error,
-                          );
-                        }
-                      },
-                icon: const Icon(Icons.print_rounded),
-                label: Text(
-                  order.status == OrderStatus.sent
-                      ? 'Send additions'
-                      : 'Send order',
-                ),
               ),
             ),
           ],
         ),
       ),
     );
+  }
+}
+
+/// Keeps the order controls permanently visible where the display has enough
+/// room, while retaining a scrollable safety fallback on compact phones.
+///
+/// The order-line list above this footer is already an [Expanded] [ListView],
+/// so tablet and desktop tills scroll only the items rather than moving the
+/// payment and production controls off screen.
+class _AdaptiveOrderFooter extends StatelessWidget {
+  const _AdaptiveOrderFooter({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context);
+    final pinActions = size.shortestSide >= 600 || size.width >= 1000;
+    if (pinActions) return child;
+
+    return Flexible(flex: 2, child: SingleChildScrollView(child: child));
   }
 }
 
@@ -2726,7 +3694,7 @@ Future<void> _showPendingOrderItems(
   final pending = order.lines
       .where((line) => !line.isSentToProduction)
       .toList(growable: false);
-  return showDialog<void>(
+  return showAppDialog<void>(
     context: context,
     builder: (context) => AlertDialog(
       title: Text(
@@ -2764,6 +3732,219 @@ Future<void> _showPendingOrderItems(
   );
 }
 
+/// Shows the complete bill without leaving the order or payment screen. This
+/// is deliberately read-only: staff can read every item and price back to the
+/// customer while the authoritative order and prepared payments stay intact.
+Future<void> _showCheckoutBillPreview(
+  BuildContext context, {
+  required PosOrder order,
+  required String currencyCode,
+  required int pendingPaymentMinor,
+}) async {
+  final itemSubtotalMinor = order.lines.fold<int>(
+    0,
+    (total, line) => total + line.totalMinor,
+  );
+  final deliveryFeeMinor = order.channel == OrderChannel.delivery
+      ? order.deliveryFeeMinor
+      : 0;
+  final pendingBalanceMinor = (order.balanceDueMinor - pendingPaymentMinor)
+      .clamp(0, order.totalMinor)
+      .toInt();
+  await showAppDialog<void>(
+    context: context,
+    builder: (dialogContext) {
+      final theme = Theme.of(dialogContext);
+      return Dialog(
+        key: const ValueKey('checkout-bill-preview'),
+        insetPadding: const EdgeInsets.all(16),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 900, maxHeight: 760),
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 8, 12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.receipt_long_rounded),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Full bill',
+                            style: theme.textTheme.titleLarge?.copyWith(
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          Text(
+                            '${order.lines.length} item line${order.lines.length == 1 ? '' : 's'}',
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close bill view',
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: order.lines.isEmpty
+                    ? const Center(
+                        child: Text('There are no items on this bill.'),
+                      )
+                    : ListView.separated(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 12,
+                        ),
+                        itemCount: order.lines.length,
+                        separatorBuilder: (_, _) => const Divider(height: 20),
+                        itemBuilder: (context, index) {
+                          final line = order.lines[index];
+                          return Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              CircleAvatar(
+                                radius: 18,
+                                child: Text('${line.quantity}'),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      line.productName,
+                                      style: theme.textTheme.titleSmall
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      '${line.quantity} × ${formatMoney(line.unitPriceMinor, currencyCode: currencyCode)}',
+                                      style: theme.textTheme.bodySmall,
+                                    ),
+                                    if (line.productionDetails.isNotEmpty) ...[
+                                      const SizedBox(height: 3),
+                                      Text(
+                                        line.productionDetails.join(' · '),
+                                        style: theme.textTheme.bodySmall,
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Text(
+                                formatMoney(
+                                  line.totalMinor,
+                                  currencyCode: currencyCode,
+                                ),
+                                style: theme.textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+              ),
+              const Divider(height: 1),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+                child: Column(
+                  children: [
+                    _BillPreviewTotalRow(
+                      label: 'Items subtotal',
+                      amountMinor: itemSubtotalMinor,
+                      currencyCode: currencyCode,
+                    ),
+                    if (deliveryFeeMinor > 0)
+                      _BillPreviewTotalRow(
+                        label: 'Delivery charge',
+                        amountMinor: deliveryFeeMinor,
+                        currencyCode: currencyCode,
+                      ),
+                    _BillPreviewTotalRow(
+                      label: 'Bill total',
+                      amountMinor: order.totalMinor,
+                      currencyCode: currencyCode,
+                      emphasize: true,
+                    ),
+                    if (order.paidMinor > 0)
+                      _BillPreviewTotalRow(
+                        label: 'Already paid',
+                        amountMinor: order.paidMinor,
+                        currencyCode: currencyCode,
+                      ),
+                    if (pendingPaymentMinor > 0)
+                      _BillPreviewTotalRow(
+                        label: 'Prepared payments',
+                        amountMinor: pendingPaymentMinor,
+                        currencyCode: currencyCode,
+                      ),
+                    const Divider(height: 18),
+                    _BillPreviewTotalRow(
+                      label: 'Remaining after prepared payments',
+                      amountMinor: pendingBalanceMinor,
+                      currencyCode: currencyCode,
+                      emphasize: true,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+class _BillPreviewTotalRow extends StatelessWidget {
+  const _BillPreviewTotalRow({
+    required this.label,
+    required this.amountMinor,
+    required this.currencyCode,
+    this.emphasize = false,
+  });
+
+  final String label;
+  final int amountMinor;
+  final String currencyCode;
+  final bool emphasize;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = emphasize
+        ? Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800)
+        : Theme.of(context).textTheme.bodyMedium;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Expanded(child: Text(label, style: style)),
+          const SizedBox(width: 12),
+          Text(
+            formatMoney(amountMinor, currencyCode: currencyCode),
+            style: style,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 Future<void> _showCheckoutSheet(
   BuildContext pageContext, {
   required WidgetRef ref,
@@ -2779,23 +3960,27 @@ Future<void> _showCheckoutSheet(
   );
   final exchangeRateController = TextEditingController(text: '1');
   final currencyChoices = checkoutTenderCurrencies(baseCurrencyCode);
-  await showModalBottomSheet<void>(
+  _CompletedCheckout? completed;
+  // Keep mutable checkout state outside the route builder. Opening a native
+  // keyboard changes MediaQuery.viewInsets and can rebuild that builder; when
+  // these values lived inside it, a selected foreign currency silently reset
+  // to the venue currency as soon as staff entered an amount.
+  var method = PaymentMethod.cash;
+  var tenderedCurrencyCode = baseCurrencyCode;
+  var cardApproved = false;
+  var saving = false;
+  var printReceipt = isTraining ? false : defaultPrintPaidReceipt;
+  var loadingOfficialRate = false;
+  var showAmountKeypad = false;
+  var showRateKeypad = false;
+  ExchangeRateQuote? officialRateQuote;
+  var voucherSuggestions = <String>[];
+  final paymentEntries = <_CheckoutPaymentDraft>[];
+  await showAppModalBottomSheet<void>(
     context: pageContext,
     showDragHandle: true,
     isScrollControlled: true,
     builder: (sheetContext) {
-      var method = PaymentMethod.cash;
-      var tenderedCurrencyCode = baseCurrencyCode;
-      var cardApproved = false;
-      var saving = false;
-      // Paid receipts are normally required in a restaurant. Staff can still
-      // opt out for a particular payment, but the safe operational default is
-      // to queue one to the venue's dedicated receipt printer.
-      var printReceipt = isTraining ? false : defaultPrintPaidReceipt;
-      var loadingOfficialRate = false;
-      ExchangeRateQuote? officialRateQuote;
-      var voucherSuggestions = <String>[];
-      final paymentEntries = <_CheckoutPaymentDraft>[];
       return StatefulBuilder(
         builder: (context, setSheetState) {
           final tenderedMinor = _minorFromMoneyInput(
@@ -2829,10 +4014,17 @@ Future<void> _showCheckoutSheet(
               appliedBaseMinor > 0 &&
               (method == PaymentMethod.cash ||
                   appliedBaseMinor <= remainingBaseMinor);
+          // A hub may have durably accepted the final payment before its cloud
+          // projection was interrupted. Once that payment is replayed, staff
+          // must be able to finalise the now-zero bill without charging it a
+          // second time.
+          final alreadyPaidInFull =
+              order.balanceDueMinor == 0 && paymentEntries.isEmpty;
           final canRecordPayment =
-              paymentEntries.isNotEmpty &&
-              remainingBaseMinor >= 0 &&
-              (!isTraining || remainingBaseMinor == 0);
+              alreadyPaidInFull ||
+              (paymentEntries.isNotEmpty &&
+                  remainingBaseMinor >= 0 &&
+                  (!isTraining || remainingBaseMinor == 0));
           final willCloseBill = canRecordPayment && remainingBaseMinor == 0;
           final isForeignCash = tenderedCurrencyCode != baseCurrencyCode;
           final hasAmountInput = tenderedAmountController.text
@@ -2848,6 +4040,14 @@ Future<void> _showCheckoutSheet(
               ? 'This payment allocation is more than the amount remaining.'
               : 'This payment cannot be added.';
           final loadedOfficialRate = officialRateQuote;
+          final activeScope = ref.read(activeVenueScopeProvider);
+          final requiresHub =
+              activeScope != null &&
+              VenueHubClientRegistry.instance.requiresHub(activeScope);
+          final usingOfflineLanHub =
+              requiresHub &&
+              !VenueHubRealtimeClient.instance.hubOnline &&
+              VenueHubClientRegistry.instance.hasUsableSession(activeScope);
           return SafeArea(
             child: SingleChildScrollView(
               padding: EdgeInsets.fromLTRB(
@@ -2860,16 +4060,21 @@ Future<void> _showCheckoutSheet(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(
-                    isTraining ? 'Simulate payment' : 'Take payment',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    order.tabName?.trim().isNotEmpty == true
-                        ? 'Named tab: ${order.tabName}'
-                        : 'Table bill',
-                    style: Theme.of(context).textTheme.bodySmall,
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isTraining ? 'Simulate payment' : 'Take payment',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        order.tabName?.trim().isNotEmpty == true
+                            ? 'Named tab: ${order.tabName}'
+                            : 'Table bill',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 16),
                   Card(
@@ -2887,6 +4092,27 @@ Future<void> _showCheckoutSheet(
                             ),
                             style: Theme.of(context).textTheme.headlineSmall
                                 ?.copyWith(fontWeight: FontWeight.w800),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            key: const ValueKey('checkout-view-bill-button'),
+                            onPressed: saving
+                                ? null
+                                : () => _showCheckoutBillPreview(
+                                    sheetContext,
+                                    order: order,
+                                    currencyCode: currencyCode,
+                                    pendingPaymentMinor: recordedBaseMinor,
+                                  ),
+                            style: OutlinedButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 8,
+                              ),
+                            ),
+                            icon: const Icon(Icons.list_alt_rounded, size: 18),
+                            label: const Text('Items'),
                           ),
                         ],
                       ),
@@ -2946,6 +4172,7 @@ Future<void> _showCheckoutSheet(
                                 method == PaymentMethod.voucher) {
                               tenderedCurrencyCode = baseCurrencyCode;
                               exchangeRateController.text = '1';
+                              showRateKeypad = false;
                               tenderedAmountController.text =
                                   _moneyInputFromMinor(
                                     order.balanceDueMinor,
@@ -3097,48 +4324,131 @@ Future<void> _showCheckoutSheet(
                   TextField(
                     controller: tenderedAmountController,
                     enabled: !saving,
-                    readOnly: true,
-                    showCursor: false,
                     keyboardType: const TextInputType.numberWithOptions(
                       decimal: true,
                     ),
+                    textInputAction: TextInputAction.done,
+                    inputFormatters: [
+                      _MoneyAmountInputFormatter(tenderedCurrencyCode),
+                    ],
                     decoration: InputDecoration(
                       labelText: 'Amount received ($tenderedCurrencyCode)',
-                      suffixIcon: const Icon(Icons.dialpad_rounded),
+                      suffixIcon: IconButton(
+                        tooltip: showAmountKeypad
+                            ? 'Hide touch keypad'
+                            : 'Show touch keypad',
+                        onPressed: saving
+                            ? null
+                            : () => setSheetState(
+                                () => showAmountKeypad = !showAmountKeypad,
+                              ),
+                        icon: Icon(
+                          showAmountKeypad
+                              ? Icons.keyboard_hide_rounded
+                              : Icons.dialpad_rounded,
+                        ),
+                      ),
                       helperText: isForeignCash
                           ? 'Enter the physical cash received in $tenderedCurrencyCode.'
-                          : 'Enter the amount received.',
+                          : 'Type the amount or use the touch keypad.',
                     ),
-                    onTap: saving
-                        ? null
-                        : () => _showDecimalKeypad(
-                            sheetContext,
-                            controller: tenderedAmountController,
-                            title: 'Amount received ($tenderedCurrencyCode)',
-                            onChanged: () => setSheetState(() {}),
-                          ),
                     onChanged: (_) => setSheetState(() {}),
+                    onSubmitted: (_) => FocusScope.of(context).unfocus(),
                   ),
+                  if (showAmountKeypad) ...[
+                    const SizedBox(height: 10),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 340),
+                        child: _DecimalKeypad(
+                          controller: tenderedAmountController,
+                          decimalDigits: currencyDecimalDigits(
+                            tenderedCurrencyCode,
+                          ),
+                          onChanged: () => setSheetState(() {}),
+                        ),
+                      ),
+                    ),
+                  ],
                   if (isForeignCash) ...[
                     const SizedBox(height: 12),
+                    if (usingOfflineLanHub)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.tertiaryContainer,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(Icons.cloud_off_rounded, size: 20),
+                            SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Offline mode: the official rate cannot be checked. Enter and verify the exchange rate manually; the exact rate will be retained with the payment audit record.',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     TextField(
                       controller: exchangeRateController,
                       enabled: !saving,
                       keyboardType: const TextInputType.numberWithOptions(
                         decimal: true,
                       ),
+                      inputFormatters: const [_ExchangeRateInputFormatter()],
                       decoration: InputDecoration(
                         labelText:
                             '1 $tenderedCurrencyCode = how many $currencyCode?',
-                        helperText:
-                            'Use the official rate as a starting point, then review or override it. The exact rate is retained on the bill.',
+                        suffixIcon: IconButton(
+                          tooltip: showRateKeypad
+                              ? 'Hide rate keypad'
+                              : 'Show rate keypad',
+                          onPressed: saving
+                              ? null
+                              : () => setSheetState(
+                                  () => showRateKeypad = !showRateKeypad,
+                                ),
+                          icon: Icon(
+                            showRateKeypad
+                                ? Icons.keyboard_hide_rounded
+                                : Icons.dialpad_rounded,
+                          ),
+                        ),
+                        helperText: usingOfflineLanHub
+                            ? 'Enter the approved manual rate. Example: 1 $tenderedCurrencyCode = 52.50 $currencyCode.'
+                            : 'Use the official rate as a starting point, then review or override it. The exact rate is retained on the bill.',
                       ),
-                      onChanged: (_) =>
-                          setSheetState(() => officialRateQuote = null),
+                      onChanged: (_) => setSheetState(() {
+                        officialRateQuote = null;
+                      }),
                     ),
+                    if (showRateKeypad) ...[
+                      const SizedBox(height: 10),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 340),
+                          child: _DecimalKeypad(
+                            controller: exchangeRateController,
+                            decimalDigits: 6,
+                            onChanged: () => setSheetState(() {
+                              officialRateQuote = null;
+                            }),
+                          ),
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     OutlinedButton.icon(
-                      onPressed: saving || loadingOfficialRate
+                      onPressed:
+                          saving || loadingOfficialRate || usingOfflineLanHub
                           ? null
                           : () async {
                               final scope = ref.read(activeVenueScopeProvider);
@@ -3199,6 +4509,8 @@ Future<void> _showCheckoutSheet(
                       label: Text(
                         loadingOfficialRate
                             ? 'Loading official rate…'
+                            : usingOfflineLanHub
+                            ? 'Official rate unavailable offline'
                             : 'Use official CBRT rate',
                       ),
                     ),
@@ -3367,7 +4679,7 @@ Future<void> _showCheckoutSheet(
                                   if (method == PaymentMethod.voucher) {
                                     final code = voucherCodeController.text
                                         .trim();
-                                    final confirmed = await showDialog<bool>(
+                                    final confirmed = await showAppDialog<bool>(
                                       context: sheetContext,
                                       builder: (context) => AlertDialog(
                                         title: const Text(
@@ -3405,7 +4717,9 @@ Future<void> _showCheckoutSheet(
                                         tenderedCurrencyCode:
                                             tenderedCurrencyCode,
                                         exchangeRateToBase:
-                                            exchangeRateController.text.trim(),
+                                            normalizeExchangeRateInput(
+                                              exchangeRateController.text,
+                                            ),
                                         baseAmountMinor: appliedBaseMinor,
                                         cardPaymentApproved: cardApproved,
                                         terminalLabel: terminalController.text
@@ -3413,7 +4727,12 @@ Future<void> _showCheckoutSheet(
                                         cashChangeBaseMinor:
                                             cashChangeBaseMinor,
                                         exchangeRateSource:
-                                            officialRateQuote?.source,
+                                            officialRateQuote?.source ??
+                                            (isForeignCash
+                                                ? usingOfflineLanHub
+                                                      ? 'Manual offline rate'
+                                                      : 'Manual rate'
+                                                : null),
                                         exchangeRatePublishedDate:
                                             officialRateQuote?.publishedDate,
                                         exchangeRateFetchedAt:
@@ -3436,6 +4755,7 @@ Future<void> _showCheckoutSheet(
                                     cardApproved = false;
                                     exchangeRateController.text = '1';
                                     officialRateQuote = null;
+                                    showRateKeypad = false;
                                     terminalController.clear();
                                     voucherCodeController.clear();
                                     tenderedAmountController.text =
@@ -3473,22 +4793,14 @@ Future<void> _showCheckoutSheet(
                                       printReceipt: printReceipt,
                                     );
                                 if (!sheetContext.mounted) return;
-                                Navigator.of(sheetContext).pop();
-                                if (!pageContext.mounted) return;
-                                showAppNotification(
-                                  pageContext,
-                                  ref: ref,
-                                  title: isTraining
-                                      ? 'Training payment simulated'
-                                      : result.alreadyClosed
-                                      ? 'Bill was already closed'
-                                      : result.orderClosed
-                                      ? 'Payment recorded · bill closed'
-                                      : 'Partial payment recorded',
-                                  message:
-                                      '${result.orderClosed ? 'Receipt' : 'Payment receipt'} ${result.receiptNumber}. Paid now ${formatMoney(result.paidThisTimeMinor, currencyCode: result.currencyCode)}; balance ${formatMoney(result.balanceDueMinor, currencyCode: result.currencyCode)}.${result.receiptPrintRequested ? (result.receiptPrintQueued ? ' Printing has been queued.' : ' No dedicated receipt printer is configured.') : ''}',
-                                  level: AppNotificationLevel.success,
+                                completed = _CompletedCheckout(
+                                  result: result,
+                                  payments: List<_CheckoutPaymentDraft>.of(
+                                    paymentEntries,
+                                  ),
+                                  training: isTraining,
                                 );
+                                Navigator.of(sheetContext).pop();
                               } on Object catch (error, stackTrace) {
                                 AppLogger.error(
                                   'Close bill',
@@ -3515,6 +4827,8 @@ Future<void> _showCheckoutSheet(
                       label: Text(
                         saving
                             ? 'Recording…'
+                            : alreadyPaidInFull
+                            ? 'Finalise bill'
                             : willCloseBill
                             ? 'Close bill'
                             : 'Record partial payment',
@@ -3534,7 +4848,209 @@ Future<void> _showCheckoutSheet(
     exchangeRateController.dispose();
     voucherCodeController.dispose();
   });
+  final checkoutResult = completed;
+  if (checkoutResult != null && pageContext.mounted) {
+    // Wait until the bottom sheet has detached its semantics tree before
+    // presenting the payment result route.
+    await Future<void>.delayed(const Duration(milliseconds: 320));
+    if (!pageContext.mounted) return;
+    await _showPaymentSummary(
+      pageContext,
+      order: order,
+      completed: checkoutResult,
+      baseCurrencyCode: baseCurrencyCode,
+    );
+  }
 }
+
+class _CompletedCheckout {
+  const _CompletedCheckout({
+    required this.result,
+    required this.payments,
+    required this.training,
+  });
+
+  final BillCloseResult result;
+  final List<_CheckoutPaymentDraft> payments;
+  final bool training;
+}
+
+Future<void> _showPaymentSummary(
+  BuildContext context, {
+  required PosOrder order,
+  required _CompletedCheckout completed,
+  required String baseCurrencyCode,
+}) async {
+  final result = completed.result;
+  // Headline bill values are always denominated in the venue's functional
+  // currency. A foreign currency belongs only to the payment that used it.
+  final reportingCurrency = baseCurrencyCode.trim().toUpperCase();
+  await showAppDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) => AlertDialog(
+      scrollable: true,
+      icon: Icon(
+        result.orderClosed
+            ? Icons.check_circle_rounded
+            : Icons.payments_outlined,
+        color: Theme.of(dialogContext).colorScheme.primary,
+        size: 38,
+      ),
+      title: Text(
+        completed.training
+            ? 'Training payment completed'
+            : result.orderClosed
+            ? 'Payment completed'
+            : 'Partial payment completed',
+      ),
+      content: SizedBox(
+        width: 560,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Receipt ${result.receiptNumber}'),
+            const SizedBox(height: 12),
+            Text('Items', style: Theme.of(dialogContext).textTheme.titleSmall),
+            for (final line in order.lines)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: Text('${line.quantity} × ${line.productName}'),
+                subtitle: line.productionDetails.isEmpty
+                    ? null
+                    : Text(line.productionDetails.join(' · ')),
+                trailing: Text(
+                  formatMoney(line.totalMinor, currencyCode: reportingCurrency),
+                ),
+              ),
+            const Divider(),
+            _PaymentSummaryRow(
+              label: 'Total bill',
+              value: formatMoney(
+                result.totalMinor,
+                currencyCode: reportingCurrency,
+              ),
+              emphasize: true,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Payment made now',
+              style: Theme.of(dialogContext).textTheme.titleSmall,
+            ),
+            for (final payment in completed.payments)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(
+                  payment.method == PaymentMethod.cash
+                      ? Icons.payments_outlined
+                      : payment.method == PaymentMethod.voucher
+                      ? Icons.card_giftcard_rounded
+                      : Icons.credit_card_rounded,
+                ),
+                title: Text(
+                  '${_paymentMethodLabel(payment.method)} · ${formatMoney(payment.tenderedAmountMinor, currencyCode: payment.tenderedCurrencyCode)}',
+                ),
+                subtitle: payment.tenderedCurrencyCode == reportingCurrency
+                    ? null
+                    : Text(
+                        'Applied ${formatMoney(payment.baseAmountMinor, currencyCode: reportingCurrency)} at rate ${payment.exchangeRateToBase}',
+                      ),
+                trailing: payment.cashChangeBaseMinor > 0
+                    ? Text(
+                        'Change\n${formatMoney(payment.cashChangeBaseMinor, currencyCode: reportingCurrency)}',
+                        textAlign: TextAlign.end,
+                      )
+                    : null,
+              ),
+            const Divider(),
+            _PaymentSummaryRow(
+              label: 'Paid now',
+              value: formatMoney(
+                result.paidThisTimeMinor,
+                currencyCode: reportingCurrency,
+              ),
+            ),
+            _PaymentSummaryRow(
+              label: 'Paid in total',
+              value: formatMoney(
+                result.paidTotalMinor,
+                currencyCode: reportingCurrency,
+              ),
+            ),
+            _PaymentSummaryRow(
+              label: 'Balance remaining',
+              value: formatMoney(
+                result.balanceDueMinor,
+                currencyCode: reportingCurrency,
+              ),
+              emphasize: result.balanceDueMinor > 0,
+            ),
+            if (result.receiptPrintRequested) ...[
+              const SizedBox(height: 10),
+              Text(
+                result.receiptPrintQueued
+                    ? 'The receipt has been queued for printing.'
+                    : 'The receipt was requested, but no active receipt printer route was available.',
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        FilledButton.icon(
+          onPressed: () => Navigator.pop(dialogContext),
+          icon: const Icon(Icons.done_rounded),
+          label: const Text('Done'),
+        ),
+      ],
+    ),
+  );
+}
+
+class _PaymentSummaryRow extends StatelessWidget {
+  const _PaymentSummaryRow({
+    required this.label,
+    required this.value,
+    this.emphasize = false,
+  });
+
+  final String label;
+  final String value;
+  final bool emphasize;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: emphasize
+                ? const TextStyle(fontWeight: FontWeight.w700)
+                : null,
+          ),
+        ),
+        Text(
+          value,
+          style: emphasize
+              ? const TextStyle(fontWeight: FontWeight.w700)
+              : null,
+        ),
+      ],
+    ),
+  );
+}
+
+String _paymentMethodLabel(PaymentMethod method) => switch (method) {
+  PaymentMethod.cash => 'Cash',
+  PaymentMethod.cardTerminal => 'Card',
+  PaymentMethod.voucher => 'Voucher',
+  PaymentMethod.online => 'Online',
+};
 
 class _CheckoutPaymentDraft {
   const _CheckoutPaymentDraft({
@@ -3588,7 +5104,7 @@ String _displayVoucherCode(String raw) {
 
 Future<String?> _scanVoucherQr(BuildContext context) async {
   var detected = false;
-  return showModalBottomSheet<String>(
+  return await showAppModalBottomSheet<String>(
     context: context,
     isScrollControlled: true,
     builder: (sheetContext) => SafeArea(
@@ -3664,7 +5180,7 @@ int? _convertedBaseMinor({
   required String exchangeRateText,
 }) {
   if (tenderedCurrencyCode == baseCurrencyCode) return tenderedMinor;
-  final normalizedRate = exchangeRateText.trim();
+  final normalizedRate = normalizeExchangeRateInput(exchangeRateText);
   if (!RegExp(r'^(?:0|[1-9]\d{0,8})(?:\.\d{1,6})?$').hasMatch(normalizedRate)) {
     return null;
   }
@@ -3699,11 +5215,12 @@ int _minorScale(int decimalDigits) {
 
 /// Always asks at the point an order leaves the basket. Bar staff often need
 /// the order recorded and visible on the flow board without wasting a ticket.
-Future<bool?> _confirmProductionPrint(BuildContext context) => showDialog<bool>(
-  context: context,
-  barrierDismissible: false,
-  builder: (_) => const _ProductionPrintCountdownDialog(),
-);
+Future<bool?> _confirmProductionPrint(BuildContext context) =>
+    showAppDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _ProductionPrintCountdownDialog(),
+    );
 
 class _ProductionPrintCountdownDialog extends StatefulWidget {
   const _ProductionPrintCountdownDialog();
@@ -3765,124 +5282,163 @@ class _ProductionPrintCountdownDialogState
   );
 }
 
-Future<void> _showDecimalKeypad(
-  BuildContext context, {
-  required TextEditingController controller,
-  required String title,
-  required VoidCallback onChanged,
-}) => showDialog<void>(
-  context: context,
-  builder: (dialogContext) {
-    void enter(String value, StateSetter setDialogState) {
-      var text = controller.text;
-      if (value == '.' && text.contains('.')) return;
-      if (value == '.' && text.isEmpty) text = '0';
-      controller.text = '$text$value';
-      controller.selection = TextSelection.collapsed(
-        offset: controller.text.length,
-      );
-      setDialogState(() {});
-      onChanged();
-    }
+class _MoneyAmountInputFormatter extends TextInputFormatter {
+  _MoneyAmountInputFormatter(String currencyCode)
+    : decimalDigits = currencyDecimalDigits(currencyCode);
 
-    return StatefulBuilder(
-      builder: (context, setDialogState) => AlertDialog(
-        title: Text(title),
-        content: SizedBox(
-          width: 300,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+  final int decimalDigits;
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final expression = decimalDigits == 0
+        ? RegExp(r'^\d{0,9}$')
+        : RegExp('^\\d{0,9}(?:[.,]\\d{0,$decimalDigits})?\$');
+    return expression.hasMatch(newValue.text) ? newValue : oldValue;
+  }
+}
+
+class _ExchangeRateInputFormatter extends TextInputFormatter {
+  const _ExchangeRateInputFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    // Six decimal places retain substantially more precision than cash input
+    // while still keeping the signed/audited rate bounded and readable.
+    return RegExp(r'^\d{0,9}(?:[.,]\d{0,6})?$').hasMatch(newValue.text)
+        ? newValue
+        : oldValue;
+  }
+}
+
+class _DecimalKeypad extends StatelessWidget {
+  const _DecimalKeypad({
+    required this.controller,
+    required this.decimalDigits,
+    required this.onChanged,
+  });
+
+  final TextEditingController controller;
+  final int decimalDigits;
+  final VoidCallback onChanged;
+
+  void _replace(String text) {
+    controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    onChanged();
+  }
+
+  void _enter(String value) {
+    var text = controller.text;
+    if (value == '.') {
+      if (decimalDigits == 0 || text.contains('.') || text.contains(',')) {
+        return;
+      }
+      if (text.isEmpty) text = '0';
+    } else {
+      final separator = text.contains('.')
+          ? '.'
+          : text.contains(',')
+          ? ','
+          : '';
+      if (separator.isEmpty && text.length >= 9) return;
+      if (separator.isNotEmpty &&
+          text.split(separator).last.length >= decimalDigits) {
+        return;
+      }
+    }
+    _replace('$text$value');
+  }
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+    ),
+    child: Padding(
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          GridView.count(
+            shrinkWrap: true,
+            crossAxisCount: 3,
+            mainAxisSpacing: 6,
+            crossAxisSpacing: 6,
+            childAspectRatio: 2.6,
+            physics: const NeverScrollableScrollPhysics(),
             children: [
-              TextField(
-                controller: controller,
-                autofocus: true,
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
+              for (final key in const [
+                '1',
+                '2',
+                '3',
+                '4',
+                '5',
+                '6',
+                '7',
+                '8',
+                '9',
+              ])
+                FilledButton.tonal(
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: () => _enter(key),
+                  child: Text(key, style: const TextStyle(fontSize: 16)),
                 ),
-                textAlign: TextAlign.end,
-                decoration: const InputDecoration(
-                  labelText: 'Enter amount',
-                  border: OutlineInputBorder(),
+              OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
                 ),
-                onChanged: (_) {
-                  setDialogState(() {});
-                  onChanged();
-                },
+                onPressed: controller.text.isEmpty ? null : () => _replace(''),
+                child: const Text('Clear'),
               ),
-              const SizedBox(height: 12),
-              GridView.count(
-                shrinkWrap: true,
-                crossAxisCount: 3,
-                mainAxisSpacing: 8,
-                crossAxisSpacing: 8,
-                childAspectRatio: 1.7,
-                physics: const NeverScrollableScrollPhysics(),
-                children: [
-                  for (final key in const [
-                    '1',
-                    '2',
-                    '3',
-                    '4',
-                    '5',
-                    '6',
-                    '7',
-                    '8',
-                    '9',
-                  ])
-                    FilledButton.tonal(
-                      onPressed: () => enter(key, setDialogState),
-                      child: Text(key, style: const TextStyle(fontSize: 20)),
-                    ),
-                  OutlinedButton(
-                    onPressed: () {
-                      controller.clear();
-                      setDialogState(() {});
-                      onChanged();
-                    },
-                    child: const Text('Clear'),
-                  ),
-                  FilledButton.tonal(
-                    onPressed: () => enter('0', setDialogState),
-                    child: const Text('0', style: TextStyle(fontSize: 20)),
-                  ),
-                  FilledButton.tonal(
-                    onPressed: () => enter('.', setDialogState),
-                    child: const Text('.', style: TextStyle(fontSize: 24)),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: controller.text.isEmpty
-                      ? null
-                      : () {
-                          final text = controller.text;
-                          controller.text = text.substring(0, text.length - 1);
-                          controller.selection = TextSelection.collapsed(
-                            offset: controller.text.length,
-                          );
-                          setDialogState(() {});
-                          onChanged();
-                        },
-                  icon: const Icon(Icons.backspace_outlined),
-                  label: const Text('Delete'),
+              FilledButton.tonal(
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
                 ),
+                onPressed: () => _enter('0'),
+                child: const Text('0', style: TextStyle(fontSize: 16)),
+              ),
+              FilledButton.tonal(
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
+                onPressed: decimalDigits == 0 ? null : () => _enter('.'),
+                child: const Text('.', style: TextStyle(fontSize: 18)),
               ),
             ],
           ),
-        ),
-        actions: [
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Done'),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+              ),
+              onPressed: controller.text.isEmpty
+                  ? null
+                  : () => _replace(
+                      controller.text.substring(0, controller.text.length - 1),
+                    ),
+              icon: const Icon(Icons.backspace_outlined),
+              label: const Text('Delete'),
+            ),
           ),
         ],
       ),
-    );
-  },
-);
+    ),
+  );
+}
 
 class _StatusChip extends StatelessWidget {
   const _StatusChip({required this.status});
@@ -3915,10 +5471,11 @@ Future<bool> _ensureOrderLocation(BuildContext context, WidgetRef ref) async {
       order.tabName?.trim().isNotEmpty == true) {
     return true;
   }
-  return await showDialog<bool>(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const _OrderLocationDialog(),
+  return await Navigator.of(context).push<bool>(
+        MaterialPageRoute<bool>(
+          fullscreenDialog: true,
+          builder: (_) => const _OrderLocationPage(),
+        ),
       ) ??
       false;
 }
@@ -3928,25 +5485,51 @@ Future<void> _showFulfilmentOrderDialog(
   OrderChannel channel, {
   VoidCallback? onStarted,
 }) async {
-  final started = await showDialog<bool>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => _OrderLocationDialog(initialChannel: channel),
+  final started = await Navigator.of(context).push<bool>(
+    MaterialPageRoute<bool>(
+      fullscreenDialog: true,
+      builder: (_) => _OrderLocationPage(initialChannel: channel),
+    ),
   );
   if (started == true && context.mounted) onStarted?.call();
 }
 
-class _OrderLocationDialog extends ConsumerStatefulWidget {
-  const _OrderLocationDialog({this.initialChannel});
+bool _serviceAreaMatchesAddress(
+  ServiceArea serviceArea,
+  CustomerAddress address,
+) {
+  String normalized(String value) => value.trim().toLowerCase();
+  final addressTown = normalized(address.town);
+  final addressDistrict = normalized(address.area);
+  final areaTown = normalized(serviceArea.town);
+  final areaDistrict = normalized(serviceArea.district);
+  final areaName = normalized(serviceArea.name);
+  // New records match the structured district + town pair. The name fallback
+  // keeps existing venues working where older service areas stored only town.
+  return (areaTown.isNotEmpty &&
+          areaTown == addressTown &&
+          (areaDistrict.isEmpty || areaDistrict == addressDistrict)) ||
+      areaName == addressTown ||
+      (areaName == addressDistrict && areaTown.isEmpty);
+}
+
+/// Stable route used by every new-order entry point.
+///
+/// This deliberately is not a dialog. The old implementation stacked the
+/// location, customer and fulfilment dialogs while the POS order provider was
+/// rebuilding beneath them. Flutter could then rebuild a removed semantics
+/// node and crash in debug/release accessibility modes. A dedicated route
+/// keeps one owner alive until the order location has been committed.
+class _OrderLocationPage extends ConsumerStatefulWidget {
+  const _OrderLocationPage({this.initialChannel});
 
   final OrderChannel? initialChannel;
 
   @override
-  ConsumerState<_OrderLocationDialog> createState() =>
-      _OrderLocationDialogState();
+  ConsumerState<_OrderLocationPage> createState() => _OrderLocationPageState();
 }
 
-class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
+class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
   final _tabName = TextEditingController();
   bool _saving = false;
   String? _error;
@@ -3998,7 +5581,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
       _error = null;
     });
     try {
-      await ref.read(activeOrderProvider.notifier).openNamedTab(tab.name);
+      ref.read(activeOrderProvider.notifier).openExistingNamedTab(tab);
       ref.read(selectedTableProvider.notifier).select('');
       if (mounted) Navigator.of(context).pop(true);
     } on Object catch (error, stackTrace) {
@@ -4009,15 +5592,34 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
     }
   }
 
-  Future<void> _startFulfilment(OrderChannel channel) async {
+  Future<void> _startFulfilment(
+    OrderChannel channel,
+    VenueFulfilmentSettings settings,
+  ) async {
     setState(() {
       _saving = true;
       _error = null;
     });
     try {
-      final loadedCustomers = await ref
-          .read(venueCustomersProvider.future)
-          .timeout(const Duration(seconds: 10));
+      final scope = ref.read(activeVenueScopeProvider);
+      if (scope == null) throw StateError('Select a venue first.');
+      final cached = ref.read(venueCustomersProvider).value;
+      late final List<VenueCustomer> loadedCustomers;
+      if (cached != null) {
+        loadedCustomers = cached;
+      } else if (!kIsWeb &&
+          VenueHubClientRegistry.instance.hasUsableSession(scope)) {
+        // Hub snapshots are replayable state. Reading them directly avoids
+        // waiting for a broadcast stream to emit a change that may never be
+        // needed while the cached customer list is already complete.
+        loadedCustomers = VenueHubOfflineView.instance.customers;
+      } else {
+        loadedCustomers = await ref
+            .read(fulfilmentRepositoryProvider)
+            .watchCustomers(scope)
+            .first
+            .timeout(const Duration(seconds: 10));
+      }
       if (!mounted) return;
       final customers = loadedCustomers
           .where(
@@ -4025,7 +5627,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
                 customer.phoneNumbers.any((number) => number.trim().isNotEmpty),
           )
           .toList(growable: false);
-      await _chooseFulfilmentCustomer(channel, customers);
+      await _chooseFulfilmentCustomer(channel, customers, settings);
     } on Object catch (error, stackTrace) {
       AppLogger.error('Start ${channel.label} order', error, stackTrace);
       if (!mounted) return;
@@ -4047,15 +5649,35 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
   Future<void> _chooseFulfilmentCustomer(
     OrderChannel channel,
     List<VenueCustomer> customers,
+    VenueFulfilmentSettings settings,
   ) async {
     final selected = await _pickFulfilmentCustomer(channel, customers);
     if (selected == null || !mounted) return;
     DateTime? scheduledFor;
-    final address = TextEditingController(
-      text: selected.addresses.firstOrNull?.addressLines ?? '',
-    );
+    FulfilmentStaffMember? selectedDriver;
+    final drivers = channel == OrderChannel.delivery
+        ? (ref.read(fulfilmentStaffProvider).value ??
+                  const <FulfilmentStaffMember>[])
+              .where((staff) => staff.roles.contains('driver'))
+              .toList(growable: false)
+        : const <FulfilmentStaffMember>[];
+    CustomerAddress? selectedAddress = selected.addresses
+        .where((item) => item.isDefault)
+        .firstOrNull;
+    selectedAddress ??= selected.addresses.firstOrNull;
+    final activeAreas = settings.serviceAreas
+        .where((area) => area.active)
+        .toList(growable: false);
+    ServiceArea? selectedArea;
+    if (channel == OrderChannel.delivery && selectedAddress != null) {
+      selectedArea = activeAreas
+          .where((area) => _serviceAreaMatchesAddress(area, selectedAddress!))
+          .firstOrNull;
+    }
+    selectedArea ??= activeAreas.length == 1 ? activeAreas.first : null;
+    final address = TextEditingController(text: selectedAddress?.oneLine ?? '');
     String? validationError;
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showAppDialog<bool>(
       context: context,
       builder: (customerContext) => StatefulBuilder(
         builder: (context, setCustomerState) => AlertDialog(
@@ -4072,13 +5694,101 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
               ),
               if (channel == OrderChannel.delivery) ...[
                 const SizedBox(height: 12),
+                if (selected.addresses.isNotEmpty)
+                  DropdownButtonFormField<CustomerAddress>(
+                    initialValue: selectedAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'Saved delivery address',
+                      prefixIcon: Icon(Icons.location_on_outlined),
+                    ),
+                    items: [
+                      for (final item in selected.addresses)
+                        DropdownMenuItem(
+                          value: item,
+                          child: Text(
+                            '${item.label}${item.isDefault ? ' · Default' : ''}',
+                          ),
+                        ),
+                    ],
+                    onChanged: (value) => setCustomerState(() {
+                      selectedAddress = value;
+                      address.text = value?.oneLine ?? '';
+                      selectedArea = activeAreas
+                          .where(
+                            (area) =>
+                                value != null &&
+                                _serviceAreaMatchesAddress(area, value),
+                          )
+                          .firstOrNull;
+                    }),
+                  ),
+                if (selected.addresses.isNotEmpty) const SizedBox(height: 8),
                 TextField(
                   controller: address,
                   maxLines: 3,
                   decoration: const InputDecoration(
-                    labelText: 'Delivery address',
+                    labelText: 'Delivery address / manual override',
                   ),
+                  onChanged: (_) => setCustomerState(() {
+                    if (selectedAddress?.oneLine != address.text.trim()) {
+                      selectedAddress = null;
+                    }
+                  }),
                 ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<ServiceArea>(
+                  initialValue: selectedArea,
+                  decoration: const InputDecoration(
+                    labelText: 'Delivery town / area',
+                    prefixIcon: Icon(Icons.map_outlined),
+                  ),
+                  items: [
+                    for (final area in activeAreas)
+                      DropdownMenuItem(
+                        value: area,
+                        child: Text(
+                          '${area.name} · ${(area.deliveryFeeMinor / 100).toStringAsFixed(2)}',
+                        ),
+                      ),
+                  ],
+                  onChanged: (value) =>
+                      setCustomerState(() => selectedArea = value),
+                ),
+                if (selectedAddress?.notes.trim().isNotEmpty == true)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.directions_outlined),
+                    title: const Text('Driver directions'),
+                    subtitle: Text(selectedAddress!.notes),
+                  ),
+                if (selectedAddress?.latitude != null)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.pin_drop_outlined),
+                    title: const Text('Map pin'),
+                    subtitle: Text(
+                      '${selectedAddress!.latitude}, ${selectedAddress!.longitude}',
+                    ),
+                  ),
+                if (drivers.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<FulfilmentStaffMember>(
+                    initialValue: selectedDriver,
+                    decoration: const InputDecoration(
+                      labelText: 'Delivery driver (optional)',
+                      prefixIcon: Icon(Icons.delivery_dining_outlined),
+                    ),
+                    items: [
+                      for (final driver in drivers)
+                        DropdownMenuItem(
+                          value: driver,
+                          child: Text(driver.name),
+                        ),
+                    ],
+                    onChanged: (value) =>
+                        setCustomerState(() => selectedDriver = value),
+                  ),
+                ],
               ],
               const SizedBox(height: 12),
               ListTile(
@@ -4139,6 +5849,14 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
                   );
                   return;
                 }
+                if (channel == OrderChannel.delivery && selectedArea == null) {
+                  setCustomerState(
+                    () => validationError = activeAreas.isEmpty
+                        ? 'A manager must configure at least one delivery area.'
+                        : 'Choose the delivery town / area.',
+                  );
+                  return;
+                }
                 Navigator.pop(customerContext, true);
               },
               child: const Text('Start order'),
@@ -4148,6 +5866,10 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
       ),
     );
     if (confirmed == true && mounted) {
+      // Do not dismiss two stacked dialogs while the order controller is
+      // still rebuilding the POS tree. Besides losing server errors, that
+      // route race can make Flutter flush semantics while parent data is
+      // dirty (the assertion previously seen on Collection/Delivery).
       ref
           .read(activeOrderProvider.notifier)
           .startFulfilmentOrder(
@@ -4158,9 +5880,33 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
             deliveryAddress: channel == OrderChannel.delivery
                 ? address.text
                 : null,
+            deliveryAddressLabel: channel == OrderChannel.delivery
+                ? selectedAddress?.label
+                : null,
+            deliveryLatitude: channel == OrderChannel.delivery
+                ? selectedAddress?.latitude
+                : null,
+            deliveryLongitude: channel == OrderChannel.delivery
+                ? selectedAddress?.longitude
+                : null,
+            serviceAreaId: channel == OrderChannel.delivery
+                ? selectedArea?.id
+                : null,
+            serviceAreaName: channel == OrderChannel.delivery
+                ? selectedArea?.name
+                : null,
+            deliveryFeeMinor: channel == OrderChannel.delivery
+                ? selectedArea?.deliveryFeeMinor ?? 0
+                : 0,
             scheduledFor: scheduledFor,
+            assignedDriverId: selectedDriver?.id,
+            assignedDriverName: selectedDriver?.name,
           );
-      Navigator.of(context).pop(true);
+      // Collection and delivery orders have no table tile to select again.
+      // Move straight to the menu so staff can begin adding the order.
+      ref.read(posCompactTabProvider.notifier).select(1);
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted) Navigator.of(context).pop(true);
     }
     address.dispose();
   }
@@ -4171,12 +5917,19 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
   ) async {
     final search = TextEditingController();
     try {
-      return await showDialog<VenueCustomer>(
+      final selected = await showAppDialog<Object>(
         context: context,
         builder: (pickerContext) {
           var query = '';
           return StatefulBuilder(
             builder: (context, setPickerState) {
+              final media = MediaQuery.of(context);
+              // Use the actual unobscured viewport. AlertDialog's separately
+              // measured title/content/actions can still overflow on a short
+              // landscape tablet once the software keyboard is visible.
+              final unobscuredHeight =
+                  media.size.height - media.viewInsets.bottom;
+              final pickerHeight = (unobscuredHeight - 24).clamp(120.0, 620.0);
               final terms = query
                   .trim()
                   .toLowerCase()
@@ -4191,97 +5944,140 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
                     return terms.every(searchable.contains);
                   })
                   .toList(growable: false);
-              return AlertDialog(
-                title: Text('Choose ${channel.label.toLowerCase()} customer'),
-                content: SizedBox(
+              return Dialog(
+                insetPadding: const EdgeInsets.all(12),
+                child: SizedBox(
                   width: 560,
-                  height: MediaQuery.sizeOf(context).height * 0.62,
-                  child: Column(
-                    children: [
-                      TextField(
-                        controller: search,
-                        autofocus: customers.isNotEmpty,
-                        decoration: InputDecoration(
-                          prefixIcon: const Icon(Icons.search),
-                          labelText: 'Search name, phone, email or address',
-                          suffixIcon: query.isEmpty
-                              ? null
-                              : IconButton(
-                                  tooltip: 'Clear search',
-                                  onPressed: () {
-                                    search.clear();
-                                    setPickerState(() => query = '');
+                  height: pickerHeight,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          'Choose ${channel.label.toLowerCase()} customer',
+                          style: Theme.of(context).textTheme.headlineSmall,
+                        ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: search,
+                          autofocus: customers.isNotEmpty,
+                          textInputAction: TextInputAction.search,
+                          decoration: InputDecoration(
+                            prefixIcon: const Icon(Icons.search),
+                            hintText: 'Name, phone, email or address',
+                            suffixIcon: query.isEmpty
+                                ? null
+                                : IconButton(
+                                    tooltip: 'Clear search',
+                                    onPressed: () {
+                                      search.clear();
+                                      setPickerState(() => query = '');
+                                    },
+                                    icon: const Icon(Icons.clear),
+                                  ),
+                          ),
+                          onChanged: (value) =>
+                              setPickerState(() => query = value),
+                        ),
+                        const SizedBox(height: 8),
+                        Expanded(
+                          child: filtered.isEmpty
+                              ? Center(
+                                  child: Text(
+                                    customers.isEmpty
+                                        ? 'No customers yet. Add the first customer below.'
+                                        : 'No customers match this search.',
+                                    textAlign: TextAlign.center,
+                                  ),
+                                )
+                              : ListView.builder(
+                                  keyboardDismissBehavior:
+                                      ScrollViewKeyboardDismissBehavior.onDrag,
+                                  itemCount: filtered.length,
+                                  itemBuilder: (context, index) {
+                                    final customer = filtered[index];
+                                    final address =
+                                        customer.addresses.firstOrNull;
+                                    return ListTile(
+                                      dense: true,
+                                      leading: const Icon(Icons.person_outline),
+                                      title: Text(customer.displayName),
+                                      subtitle: Text(
+                                        '${customer.phoneNumbers.join(' · ')}${address == null ? '' : '\n${address.area}, ${address.town}'}',
+                                      ),
+                                      isThreeLine: address != null,
+                                      trailing: IconButton(
+                                        tooltip: 'Edit customer or add address',
+                                        onPressed: () => Navigator.pop(
+                                          pickerContext,
+                                          _EditFulfilmentCustomer(customer),
+                                        ),
+                                        icon: const Icon(Icons.edit_outlined),
+                                      ),
+                                      onTap: () => Navigator.pop(
+                                        pickerContext,
+                                        customer,
+                                      ),
+                                    );
                                   },
-                                  icon: const Icon(Icons.clear),
                                 ),
                         ),
-                        onChanged: (value) =>
-                            setPickerState(() => query = value),
-                      ),
-                      const SizedBox(height: 8),
-                      Expanded(
-                        child: filtered.isEmpty
-                            ? Center(
-                                child: Text(
-                                  customers.isEmpty
-                                      ? 'No customers yet. Add the first customer below.'
-                                      : 'No customers match this search.',
-                                  textAlign: TextAlign.center,
-                                ),
-                              )
-                            : ListView.builder(
-                                itemCount: filtered.length,
-                                itemBuilder: (context, index) {
-                                  final customer = filtered[index];
-                                  final address =
-                                      customer.addresses.firstOrNull;
-                                  return ListTile(
-                                    leading: const Icon(Icons.person_outline),
-                                    title: Text(customer.displayName),
-                                    subtitle: Text(
-                                      '${customer.phoneNumbers.join(' · ')}${address == null ? '' : '\n${address.area}, ${address.town}'}',
-                                    ),
-                                    isThreeLine: address != null,
-                                    trailing: const Icon(
-                                      Icons.chevron_right_rounded,
-                                    ),
-                                    onTap: () =>
-                                        Navigator.pop(pickerContext, customer),
-                                  );
-                                },
+                        const SizedBox(height: 8),
+                        Wrap(
+                          alignment: WrapAlignment.end,
+                          spacing: 8,
+                          runSpacing: 6,
+                          children: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(pickerContext),
+                              child: const Text('Cancel'),
+                            ),
+                            FilledButton.icon(
+                              // Close this picker completely before opening
+                              // the editor; stacked routes caused semantics
+                              // races when a customer stream refreshed.
+                              onPressed: () => Navigator.pop(
+                                pickerContext,
+                                const _CreateFulfilmentCustomer(),
                               ),
-                      ),
-                    ],
+                              icon: const Icon(Icons.person_add_alt_1),
+                              label: const Text('New customer'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(pickerContext),
-                    child: const Text('Cancel'),
-                  ),
-                  FilledButton.icon(
-                    onPressed: () async {
-                      final scope = ref.read(activeVenueScopeProvider);
-                      if (scope == null) return;
-                      final created = await showVenueCustomerEditor(
-                        context: pickerContext,
-                        ref: ref,
-                        scope: scope,
-                        requireAddress: channel == OrderChannel.delivery,
-                      );
-                      if (created != null && pickerContext.mounted) {
-                        Navigator.pop(pickerContext, created);
-                      }
-                    },
-                    icon: const Icon(Icons.person_add_alt_1),
-                    label: const Text('New customer'),
-                  ),
-                ],
               );
             },
           );
         },
       );
+      if (selected is VenueCustomer) return selected;
+      if (selected is _EditFulfilmentCustomer && mounted) {
+        final scope = ref.read(activeVenueScopeProvider);
+        if (scope == null) return null;
+        return await showVenueCustomerEditor(
+          context: context,
+          ref: ref,
+          scope: scope,
+          existing: selected.customer,
+          requireAddress: channel == OrderChannel.delivery,
+        );
+      }
+      if (selected is _CreateFulfilmentCustomer && mounted) {
+        final scope = ref.read(activeVenueScopeProvider);
+        if (scope == null) return null;
+        return await showVenueCustomerEditor(
+          context: context,
+          ref: ref,
+          scope: scope,
+          requireAddress: channel == OrderChannel.delivery,
+        );
+      }
+      return null;
     } finally {
       search.dispose();
     }
@@ -4303,7 +6099,7 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
           );
           return;
         }
-        unawaited(_startFulfilment(channel));
+        unawaited(_startFulfilment(channel, value));
       },
       loading: () => setState(
         () => _error = 'Venue collection and delivery settings are loading.',
@@ -4350,144 +6146,212 @@ class _OrderLocationDialogState extends ConsumerState<_OrderLocationDialog> {
         }
       });
     }
-    return AlertDialog(
-      scrollable: true,
-      icon: const Icon(Icons.receipt_long_outlined),
-      title: const Text('Start this order'),
-      content: SizedBox(
-        width: 520,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text('Choose the table, or open a named customer tab first.'),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
+    return Scaffold(
+      appBar: AppBar(
+        leading: IconButton(
+          tooltip: 'Cancel',
+          onPressed: _saving ? null : () => Navigator.of(context).pop(false),
+          icon: const Icon(Icons.close_rounded),
+        ),
+        title: const Text('Start this order'),
+      ),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 620),
+            child: ListView(
+              padding: const EdgeInsets.all(20),
               children: [
-                OutlinedButton.icon(
-                  onPressed: _saving
-                      ? null
-                      : () => _requestFulfilment(
-                          OrderChannel.collection,
-                          fulfilmentSettings,
+                const Icon(Icons.receipt_long_outlined, size: 36),
+                const SizedBox(height: 12),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      'Choose the table, or open a named customer tab first.',
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: _saving
+                              ? null
+                              : () => _requestFulfilment(
+                                  OrderChannel.collection,
+                                  fulfilmentSettings,
+                                ),
+                          icon: const Icon(Icons.shopping_bag_outlined),
+                          label: const Text('Collection'),
                         ),
-                  icon: const Icon(Icons.shopping_bag_outlined),
-                  label: const Text('Collection'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _saving
-                      ? null
-                      : () => _requestFulfilment(
-                          OrderChannel.delivery,
-                          fulfilmentSettings,
+                        OutlinedButton.icon(
+                          onPressed: _saving
+                              ? null
+                              : () => _requestFulfilment(
+                                  OrderChannel.delivery,
+                                  fulfilmentSettings,
+                                ),
+                          icon: const Icon(Icons.delivery_dining_outlined),
+                          label: const Text('Delivery'),
                         ),
-                  icon: const Icon(Icons.delivery_dining_outlined),
-                  label: const Text('Delivery'),
+                      ],
+                    ),
+                    if (_saving) ...[
+                      const SizedBox(height: 8),
+                      const LinearProgressIndicator(),
+                    ],
+                    const SizedBox(height: 12),
+                    if (_error != null) ...[
+                      Text(
+                        _error!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    // Keep one scroll owner for the complete location page.
+                    // A nested, height-capped ListView trapped touch drags on
+                    // small tablets, making open named tabs and the controls
+                    // below the table list difficult to reach.
+                    locationsLoading
+                        ? const SizedBox(
+                            height: 120,
+                            child: Center(child: CircularProgressIndicator()),
+                          )
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              if (tables.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    4,
+                                    16,
+                                    4,
+                                  ),
+                                  child: Text(
+                                    'Tables',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.labelLarge,
+                                  ),
+                                ),
+                              for (final table in tables)
+                                ListTile(
+                                  enabled: !_saving,
+                                  leading: const Icon(
+                                    Icons.table_restaurant_rounded,
+                                  ),
+                                  title: Text(table.label),
+                                  subtitle: Text('${table.seats} seats'),
+                                  trailing: const Icon(
+                                    Icons.chevron_right_rounded,
+                                  ),
+                                  onTap: () => _selectTable(table),
+                                ),
+                              if (tables.isNotEmpty && namedTabs.isNotEmpty)
+                                const Divider(height: 16),
+                              if (namedTabs.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    4,
+                                    16,
+                                    4,
+                                  ),
+                                  child: Text(
+                                    'Open named tabs',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.labelLarge,
+                                  ),
+                                ),
+                              if (namedTabs.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 4,
+                                  ),
+                                  child: Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      for (final tab in namedTabs)
+                                        SizedBox(
+                                          width: 132,
+                                          child: OutlinedButton.icon(
+                                            onPressed: _saving
+                                                ? null
+                                                : () => _selectNamedTab(tab),
+                                            icon: const Icon(
+                                              Icons.person_outline_rounded,
+                                              size: 18,
+                                            ),
+                                            label: Text(
+                                              tab.name,
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              if (tables.isEmpty && namedTabs.isEmpty)
+                                const Padding(
+                                  padding: EdgeInsets.all(16),
+                                  child: Text(
+                                    'No tables or open named tabs are available.',
+                                  ),
+                                ),
+                            ],
+                          ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _tabName,
+                      enabled: !_saving,
+                      maxLength: 80,
+                      textCapitalization: TextCapitalization.words,
+                      decoration: const InputDecoration(
+                        labelText: 'Or open a named tab',
+                        hintText: 'For example, John N',
+                      ),
+                      onSubmitted: (_) {
+                        if (!_saving) _openNamedTab();
+                      },
+                    ),
+                    FilledButton.icon(
+                      onPressed: _saving ? null : _openNamedTab,
+                      icon: const Icon(Icons.person_add_alt_1_rounded),
+                      label: const Text('Open named tab'),
+                    ),
+                  ],
                 ),
               ],
             ),
-            if (_saving) ...[
-              const SizedBox(height: 8),
-              const LinearProgressIndicator(),
-            ],
-            const SizedBox(height: 12),
-            if (_error != null) ...[
-              Text(
-                _error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-              const SizedBox(height: 8),
-            ],
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 300),
-              child: locationsLoading
-                  ? const Center(child: CircularProgressIndicator())
-                  : ListView(
-                      shrinkWrap: true,
-                      children: [
-                        if (tables.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-                            child: Text(
-                              'Tables',
-                              style: Theme.of(context).textTheme.labelLarge,
-                            ),
-                          ),
-                        for (final table in tables)
-                          ListTile(
-                            enabled: !_saving,
-                            leading: const Icon(Icons.table_restaurant_rounded),
-                            title: Text(table.label),
-                            subtitle: Text('${table.seats} seats'),
-                            trailing: const Icon(Icons.chevron_right_rounded),
-                            onTap: () => _selectTable(table),
-                          ),
-                        if (tables.isNotEmpty && namedTabs.isNotEmpty)
-                          const Divider(height: 16),
-                        if (namedTabs.isNotEmpty)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-                            child: Text(
-                              'Open named tabs',
-                              style: Theme.of(context).textTheme.labelLarge,
-                            ),
-                          ),
-                        for (final tab in namedTabs)
-                          ListTile(
-                            enabled: !_saving,
-                            leading: const Icon(Icons.person_outline_rounded),
-                            title: Text(tab.name),
-                            subtitle: const Text('Open named tab'),
-                            trailing: const Icon(Icons.chevron_right_rounded),
-                            onTap: () => _selectNamedTab(tab),
-                          ),
-                        if (tables.isEmpty && namedTabs.isEmpty)
-                          const Padding(
-                            padding: EdgeInsets.all(16),
-                            child: Text(
-                              'No tables or open named tabs are available.',
-                            ),
-                          ),
-                      ],
-                    ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _tabName,
-              enabled: !_saving,
-              maxLength: 80,
-              textCapitalization: TextCapitalization.words,
-              decoration: const InputDecoration(
-                labelText: 'Or open a named tab',
-                hintText: 'For example, John N',
-              ),
-              onSubmitted: (_) {
-                if (!_saving) _openNamedTab();
-              },
-            ),
-            FilledButton.icon(
-              onPressed: _saving ? null : _openNamedTab,
-              icon: const Icon(Icons.person_add_alt_1_rounded),
-              label: const Text('Open named tab'),
-            ),
-          ],
+          ),
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: _saving ? null : () => Navigator.of(context).pop(false),
-          child: const Text('Cancel'),
-        ),
-      ],
     );
   }
 }
 
+class _CreateFulfilmentCustomer {
+  const _CreateFulfilmentCustomer();
+}
+
+class _EditFulfilmentCustomer {
+  const _EditFulfilmentCustomer(this.customer);
+
+  final VenueCustomer customer;
+}
+
 Future<void> _showNamedTabDialog(BuildContext context, WidgetRef ref) async {
   final nameController = TextEditingController();
-  await showDialog<void>(
+  await showAppDialog<void>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       icon: const Icon(Icons.person_outline_rounded),
@@ -4557,7 +6421,7 @@ Future<void> _showSplitBillSheet(
     for (final line in order.lines) line.id: 0,
   };
   var saving = false;
-  await showModalBottomSheet<void>(
+  await showAppModalBottomSheet<void>(
     context: pageContext,
     showDragHandle: true,
     isScrollControlled: true,

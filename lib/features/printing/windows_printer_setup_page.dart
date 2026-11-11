@@ -24,6 +24,7 @@ class _WindowsPrinterSetupPageState extends State<WindowsPrinterSetupPage> {
 
   List<WindowsPrintQueueDevice> _printers = const [];
   WindowsPrintQueueDevice? _selected;
+  Map<String, WindowsPrintQueueDevice?> _areaSelections = const {};
   bool _loading = true;
   bool _printing = false;
   String? _error;
@@ -50,6 +51,12 @@ class _WindowsPrinterSetupPageState extends State<WindowsPrinterSetupPage> {
     try {
       final selected = await _printer.selectedPrinter();
       final printers = await _printer.installedPrinters();
+      final areaSelections = <String, WindowsPrintQueueDevice?>{};
+      for (final area in _printAreas) {
+        areaSelections[area] = await _printer.selectedPrinter(
+          productionArea: area,
+        );
+      }
       if (!mounted) return;
       setState(() {
         _printers = printers;
@@ -59,6 +66,7 @@ class _WindowsPrinterSetupPageState extends State<WindowsPrinterSetupPage> {
         _selected = matching.isEmpty
             ? selected
             : matching.first.copyWith(paperWidth: selected?.paperWidth);
+        _areaSelections = areaSelections;
       });
     } on Object catch (error, stackTrace) {
       AppLogger.error('Load installed Windows printers', error, stackTrace);
@@ -96,6 +104,38 @@ class _WindowsPrinterSetupPageState extends State<WindowsPrinterSetupPage> {
     final selected = _selected;
     if (selected == null) return;
     await _select(selected.copyWith(paperWidth: paperWidth));
+  }
+
+  Future<void> _selectAreaPrinter(
+    String area,
+    WindowsPrintQueueDevice? printer,
+  ) async {
+    try {
+      if (printer == null) {
+        await _printer.clearSelectedPrinter(productionArea: area);
+      } else {
+        await _printer.selectPrinter(printer, productionArea: area);
+      }
+      if (!mounted) return;
+      setState(() => _areaSelections = {..._areaSelections, area: printer});
+      showAppNotification(
+        context,
+        title: '${_areaLabel(area)} printer updated',
+        message: printer == null
+            ? 'This route now uses the device default printer.'
+            : '${printer.name} will print ${_areaLabel(area).toLowerCase()} jobs on this device.',
+        level: AppNotificationLevel.success,
+      );
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Assign Windows printer route', error, stackTrace);
+      if (!mounted) return;
+      showAppNotification(
+        context,
+        title: 'Could not assign printer',
+        message: _friendlyError(error),
+        level: AppNotificationLevel.error,
+      );
+    }
   }
 
   Future<void> _clearSelection() async {
@@ -276,6 +316,54 @@ class _WindowsPrinterSetupPageState extends State<WindowsPrinterSetupPage> {
                 ),
               ),
             ),
+            const SizedBox(height: 16),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      'Local printer bindings',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'One registered TableSideCY device can drive several Windows printers. Assign each ticket area below; leaving it on Device default keeps existing setups unchanged.',
+                    ),
+                    const SizedBox(height: 12),
+                    for (final area in _printAreas) ...[
+                      DropdownButtonFormField<String>(
+                        initialValue: _areaSelections[area]?.name,
+                        decoration: InputDecoration(
+                          labelText: '${_areaLabel(area)} tickets',
+                        ),
+                        items: [
+                          const DropdownMenuItem<String>(
+                            value: null,
+                            child: Text('Device default printer'),
+                          ),
+                          for (final printer in _printers)
+                            DropdownMenuItem<String>(
+                              value: printer.name,
+                              child: Text(printer.name),
+                            ),
+                        ],
+                        onChanged: (name) => _selectAreaPrinter(
+                          area,
+                          name == null
+                              ? null
+                              : _printers.firstWhere(
+                                  (printer) => printer.name == name,
+                                ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
+                  ],
+                ),
+              ),
+            ),
           ],
           const SizedBox(height: 16),
           FilledButton.icon(
@@ -296,3 +384,12 @@ class _WindowsPrinterSetupPageState extends State<WindowsPrinterSetupPage> {
     );
   }
 }
+
+const _printAreas = <String>['receipt', 'kitchen', 'bar', 'dessert'];
+
+String _areaLabel(String area) => switch (area) {
+  'receipt' => 'Receipt',
+  'bar' => 'Bar',
+  'dessert' => 'Dessert',
+  _ => 'Kitchen',
+};

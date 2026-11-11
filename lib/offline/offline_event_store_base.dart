@@ -40,5 +40,15 @@ abstract interface class OfflineEventStore {
 
   Future<void> quarantine(String eventId, String reason);
 
+  /// Repairs the short-lived schema-3 migration which quarantined signed
+  /// cloud baselines even though they still occupy a sequence number in the
+  /// append-only upload chain. Only that exact migration quarantine is
+  /// restored; unrelated security quarantines remain untouched.
+  Future<int> restoreQuarantinedCloudBaselines({
+    required String tenantId,
+    required String venueId,
+    required int hubEpoch,
+  });
+
   Future<void> close();
 }

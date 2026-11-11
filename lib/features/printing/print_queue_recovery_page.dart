@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
 import '../../core/tenant_scope.dart';
@@ -16,6 +17,15 @@ final venuePrintJobsProvider = StreamProvider.autoDispose
       (ref, scope) => PrintJobRepository(
         FirebaseFirestore.instance,
       ).watchVenueJobs(tenantId: scope.tenantId, venueId: scope.venueId),
+    );
+
+final recentlyPrintedVenueJobsProvider = StreamProvider.autoDispose
+    .family<List<PrintJob>, VenueScope>(
+      (ref, scope) => PrintJobRepository(FirebaseFirestore.instance)
+          .watchRecentlyPrintedJobs(
+            tenantId: scope.tenantId,
+            venueId: scope.venueId,
+          ),
     );
 
 /// The venue's live print-recovery desk. Jobs are never physically deleted:
@@ -74,7 +84,7 @@ class _PrintQueueRecoveryPageState
   }
 
   Future<bool> _confirmRetry(PrintJob job) async {
-    final accepted = await showDialog<bool>(
+    final accepted = await showAppDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Reprint failed ticket?'),
@@ -101,7 +111,7 @@ class _PrintQueueRecoveryPageState
     if (_retryingAll) return;
     final eligible = jobs.where(_canRetry).toList(growable: false);
     if (eligible.isEmpty) return;
-    final accepted = await showDialog<bool>(
+    final accepted = await showAppDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text('Queue ${eligible.length} reprint(s)?'),
@@ -158,7 +168,7 @@ class _PrintQueueRecoveryPageState
   }) async {
     final reasonController = TextEditingController(text: 'No longer required.');
     try {
-      return await showDialog<String>(
+      return await showAppDialog<String>(
         context: context,
         builder: (context) => AlertDialog(
           title: Text(
@@ -538,7 +548,7 @@ class _PrintedTicketHistoryPageState
   final Set<String> _reprinting = <String>{};
 
   Future<void> _reprint(PrintJob job) async {
-    final accepted = await showDialog<bool>(
+    final accepted = await showAppDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Reprint this ticket?'),
@@ -593,8 +603,7 @@ class _PrintedTicketHistoryPageState
     if (scope == null) {
       return const Scaffold(body: Center(child: Text('Choose a venue first.')));
     }
-    final jobs = ref.watch(venuePrintJobsProvider(scope));
-    final cutoff = DateTime.now().subtract(const Duration(days: 5));
+    final jobs = ref.watch(recentlyPrintedVenueJobsProvider(scope));
     return Scaffold(
       appBar: AppBar(title: const Text('Printed ticket history')),
       body: jobs.when(
@@ -604,16 +613,13 @@ class _PrintedTicketHistoryPageState
           return _QueueError(error: error);
         },
         data: (allJobs) {
-          final printed = allJobs.where((job) {
-            final printedAt = job.completedAt;
-            return job.status == PrintJobStatus.printed &&
-                printedAt != null &&
-                !printedAt.isBefore(cutoff);
-          }).toList(growable: false)
+          final printed = allJobs.toList(growable: false)
             ..sort((a, b) => b.completedAt!.compareTo(a.completedAt!));
           if (printed.isEmpty) {
             return const Center(
-              child: Text('No successfully printed tickets in the last five days.'),
+              child: Text(
+                'No successfully printed tickets in the last five days.',
+              ),
             );
           }
           return ListView.builder(
@@ -639,7 +645,9 @@ class _PrintedTicketHistoryPageState
                               ? const SizedBox(
                                   height: 18,
                                   width: 18,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
                                 )
                               : const Icon(Icons.print_rounded),
                           label: Text(busy ? 'Queueing…' : 'Reprint'),

@@ -8,10 +8,12 @@ list(APPEND FLUTTER_PLUGIN_LIST
   firebase_app_check
   firebase_auth
   firebase_core
+  firebase_database
   firebase_storage
   flutter_secure_storage_windows
   permission_handler_windows
   print_bluetooth_thermal
+  restart_app
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST

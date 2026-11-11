@@ -1,14 +1,17 @@
 import 'dart:async';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
+import '../core/app_logger.dart';
 import '../core/tenant_scope.dart';
+import '../core/app_busy_state.dart';
 import 'venue_hub_client.dart';
+import 'venue_hub_availability.dart';
 
-typedef RemoteHubSubmitter = Future<Map<String, Object?>> Function(
-  Map<String, Object?> request,
-);
+typedef RemoteHubSubmitter =
+    Future<Map<String, Object?>> Function(Map<String, Object?> request);
+typedef RemoteHubStatusWaiter =
+    Future<Map<String, Object?>> Function(Map<String, Object?> request);
 
 /// Global, process-local indicator used by the shell to make the durability
 /// wait explicit. A remote command is never reported as saved merely because
@@ -24,12 +27,8 @@ class RemoteHubWaitState {
 }
 
 class VenueHubRemoteCommandClient {
-  VenueHubRemoteCommandClient({
-    FirebaseFirestore? firestore,
-    this.timeout = const Duration(seconds: 32),
-  }) : _firestore = firestore ?? FirebaseFirestore.instance;
+  VenueHubRemoteCommandClient({this.timeout = const Duration(seconds: 45)});
 
-  final FirebaseFirestore _firestore;
   final Duration timeout;
 
   Future<VenueHubEventAcknowledgement> send({
@@ -38,13 +37,38 @@ class VenueHubRemoteCommandClient {
     required String eventType,
     required Map<String, Object?> payload,
     required RemoteHubSubmitter submit,
+    required RemoteHubStatusWaiter waitForStatus,
     DateTime? businessTimestampUtc,
+    bool showBusy = true,
+  }) async {
+    Future<VenueHubEventAcknowledgement> operation() => _sendUnblocked(
+      scope: scope,
+      hubEpoch: hubEpoch,
+      eventType: eventType,
+      payload: payload,
+      submit: submit,
+      waitForStatus: waitForStatus,
+      businessTimestampUtc: businessTimestampUtc,
+      showWaitIndicator: showBusy,
+    );
+    return showBusy ? AppBusyState.guard(operation) : operation();
+  }
+
+  Future<VenueHubEventAcknowledgement> _sendUnblocked({
+    required VenueScope scope,
+    required int hubEpoch,
+    required String eventType,
+    required Map<String, Object?> payload,
+    required RemoteHubSubmitter submit,
+    required RemoteHubStatusWaiter waitForStatus,
+    DateTime? businessTimestampUtc,
+    required bool showWaitIndicator,
   }) async {
     final commandId =
         'remote-${DateTime.now().microsecondsSinceEpoch}-${UniqueKey().hashCode.abs()}';
-    RemoteHubWaitState.begin();
+    if (showWaitIndicator) RemoteHubWaitState.begin();
     try {
-      final submitted = await submit(<String, Object?>{
+      final request = <String, Object?>{
         'tenantId': scope.tenantId,
         'venueId': scope.venueId,
         'hubEpoch': hubEpoch,
@@ -53,47 +77,140 @@ class VenueHubRemoteCommandClient {
         'eventType': eventType,
         'payload': payload,
         if (businessTimestampUtc != null)
-          'businessTimestampUtc': businessTimestampUtc.toUtc().toIso8601String(),
-      });
+          'businessTimestampUtc': businessTimestampUtc
+              .toUtc()
+              .toIso8601String(),
+      };
+      final deadline = DateTime.now().toUtc().add(timeout);
+      Map<String, Object?>? submitted;
+      Object? lastSubmitError;
+      for (var attempt = 1; attempt <= 3; attempt++) {
+        try {
+          AppLogger.info(
+            'Remote hub command $commandId: submitting (attempt $attempt).',
+          );
+          final remaining = deadline.difference(DateTime.now().toUtc());
+          final attemptTimeout = remaining.inSeconds > 15
+              ? const Duration(seconds: 15)
+              : remaining;
+          submitted = await submit(request).timeout(attemptTimeout);
+          break;
+        } catch (error) {
+          lastSubmitError = error;
+          if (!_looksLikeConnectivityFailure(error) ||
+              attempt == 3 ||
+              !DateTime.now().toUtc().isBefore(deadline)) {
+            rethrow;
+          }
+          await Future<void>.delayed(Duration(milliseconds: attempt * 500));
+        }
+      }
+      if (submitted == null) throw lastSubmitError!;
       final returnedId = submitted['commandId'];
       if (returnedId is! String || returnedId != commandId) {
-        throw StateError('The venue command server returned an invalid acknowledgement.');
-      }
-      final reference = _firestore
-          .collection('tenants')
-          .doc(scope.tenantId)
-          .collection('venues')
-          .doc(scope.venueId)
-          .collection('remoteHubCommands')
-          .doc(commandId);
-      final snapshot = await reference.snapshots().firstWhere((value) {
-        final status = value.data()?['status'];
-        return status == 'accepted' || status == 'rejected' || status == 'expired';
-      }).timeout(timeout);
-      final value = snapshot.data();
-      if (value == null) {
-        throw StateError('The venue hub command disappeared before confirmation.');
-      }
-      if (value['status'] != 'accepted') {
-        final message = value['rejectionMessage'];
         throw StateError(
-          message is String && message.trim().isNotEmpty
-              ? message
-              : 'The venue hub did not accept this command in time.',
+          'The venue command server returned an invalid acknowledgement.',
         );
       }
-      final result = value['result'];
+      AppLogger.info('Remote hub command $commandId: queued in cloud.');
+      Map<String, Object?>? value;
+      Object? lastWaitError;
+      while (DateTime.now().toUtc().isBefore(deadline)) {
+        try {
+          final remaining = deadline.difference(DateTime.now().toUtc());
+          final pollTimeout = remaining.inSeconds > 15
+              ? const Duration(seconds: 15)
+              : remaining;
+          value = await waitForStatus(<String, Object?>{
+            'tenantId': scope.tenantId,
+            'venueId': scope.venueId,
+            'commandId': commandId,
+          }).timeout(pollTimeout);
+          final status = value['status'];
+          final stage = value['stage'] ?? status;
+          final claimedBy = value['claimedByDeviceId'] ?? 'none';
+          AppLogger.info(
+            'Remote hub command $commandId: status=$status, stage=$stage, '
+            'claimedBy=$claimedBy.',
+          );
+          if (status == 'accepted') {
+            // A durable acknowledgement proves the authoritative hub is
+            // responding. Clear any stale transport warning immediately so a
+            // recovered terminal is not left looking offline.
+            VenueHubAvailability.markOnline();
+            break;
+          }
+          if (status == 'rejected' || status == 'expired') {
+            // A hub-side business rejection is also proof of connectivity.
+            // Cloud expiry without a claimant is not: in that case the hub
+            // may genuinely still be unavailable.
+            if (stage == 'hubRejected' || claimedBy != 'none') {
+              VenueHubAvailability.markOnline();
+            }
+            final message = value['rejectionMessage'];
+            throw StateError(
+              message is String && message.trim().isNotEmpty
+                  ? message
+                  : status == 'expired'
+                  ? 'The venue hub did not claim this command before it expired.'
+                  : 'The venue hub rejected this command.',
+            );
+          }
+          lastWaitError = null;
+          // The production waiter normally holds the request for several
+          // seconds. This small floor also prevents a misconfigured or mocked
+          // server from creating a tight acknowledgement polling loop.
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        } catch (error) {
+          // A terminal response is not a transport failure, even when its
+          // business-rule message contains words such as "offline" (for
+          // example an offline idempotency-key rejection). Surface the exact
+          // hub decision immediately instead of polling the same rejected
+          // command until the 90-second deadline.
+          if (value?['status'] == 'rejected' || value?['status'] == 'expired') {
+            rethrow;
+          }
+          if (!_looksLikeConnectivityFailure(error)) rethrow;
+          lastWaitError = error;
+          AppLogger.info(
+            'Remote hub command $commandId: acknowledgement connection '
+            'interrupted; resuming the same command.',
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 750));
+        }
+      }
+      if (value?['status'] != 'accepted') {
+        final stage = value?['stage'] ?? value?['status'] ?? 'unknown';
+        throw StateError(
+          'The venue hub did not confirm command $commandId before the safe '
+                  'deadline (last stage: $stage). '
+                  '${lastWaitError ?? ''}'
+              .trim(),
+        );
+      }
+      final acceptedValue = value!;
+      final result = acceptedValue['result'];
       if (result is! Map) {
-        throw StateError('The venue hub returned an invalid durable acknowledgement.');
+        throw StateError(
+          'The venue hub returned an invalid durable acknowledgement.',
+        );
       }
       final data = Map<String, Object?>.from(result);
       final eventId = data['eventId'];
       final sequence = data['sequence'];
       final eventHash = data['eventHash'];
-      final committedAt = DateTime.tryParse(data['committedAtUtc'] as String? ?? '');
-      if (eventId is! String || sequence is! int || eventHash is! String || committedAt == null) {
-        throw StateError('The venue hub returned an invalid durable acknowledgement.');
+      final committedAt = DateTime.tryParse(
+        data['committedAtUtc'] as String? ?? '',
+      );
+      if (eventId is! String ||
+          sequence is! int ||
+          eventHash is! String ||
+          committedAt == null) {
+        throw StateError(
+          'The venue hub returned an invalid durable acknowledgement.',
+        );
       }
+      VenueHubAvailability.markOnline();
       return VenueHubEventAcknowledgement(
         eventId: eventId,
         sequence: sequence,
@@ -101,11 +218,43 @@ class VenueHubRemoteCommandClient {
         committedAtUtc: committedAt.toUtc(),
       );
     } on TimeoutException {
+      VenueHubAvailability.markOffline();
       throw StateError(
         'The venue hub did not confirm this command. It was not shown as saved; check the connection before retrying.',
       );
+    } on Object catch (error) {
+      // Business-rule rejections (for example insufficient stock) prove that
+      // the hub is online and responding. Only transport-shaped failures are
+      // allowed to raise the global HUB OFFLINE warning.
+      if (_looksLikeConnectivityFailure(error)) {
+        VenueHubAvailability.markOffline(error.toString());
+      }
+      rethrow;
     } finally {
-      RemoteHubWaitState.end();
+      if (showWaitIndicator) RemoteHubWaitState.end();
     }
+  }
+
+  bool _looksLikeConnectivityFailure(Object error) {
+    // A timeout is always a transport failure. Other errors are classified by
+    // precise transport phrases rather than broad words such as "offline" or
+    // "unavailable". Business-rule exception names can legitimately contain
+    // those words (for example OfflineProjectionException) even though the hub
+    // replied successfully, and must never flip the terminal to HUB OFFLINE.
+    if (error is TimeoutException) return true;
+    final message = error.toString().toLowerCase();
+    return message.contains('socketexception') ||
+        message.contains('clientexception') ||
+        message.contains('connection refused') ||
+        message.contains('connection reset') ||
+        message.contains('connection closed') ||
+        message.contains('connection interrupted') ||
+        message.contains('failed host lookup') ||
+        message.contains('network is unreachable') ||
+        message.contains('network connection') ||
+        message.contains('venue hub is offline') ||
+        message.contains('venue hub is unavailable') ||
+        message.contains('timed out') ||
+        message.contains('timeout');
   }
 }

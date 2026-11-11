@@ -108,6 +108,12 @@ class FirestorePosRepository {
                   tenantId: tenantId,
                   name: data['name'] as String? ?? 'Unnamed venue',
                   timeZone: data['timeZone'] as String? ?? 'UTC',
+                  country:
+                      data['country'] as String? ??
+                      'Kuzey Kıbrıs Türk Cumhuriyeti',
+                  deliveryLocations: _deliveryLocations(
+                    data['deliveryLocations'],
+                  ),
                   receiptName: data['receiptName'] as String? ?? '',
                   address: data['address'] as String? ?? '',
                   phoneNumbers: (data['phoneNumbers'] as List? ?? const [])
@@ -153,6 +159,17 @@ class FirestorePosRepository {
               })
               .toList(growable: false),
         );
+  }
+
+  Map<String, List<String>> _deliveryLocations(Object? raw) {
+    if (raw is! Map) return const <String, List<String>>{};
+    return <String, List<String>>{
+      for (final entry in raw.entries)
+        if (entry.key is String && entry.value is List)
+          entry.key as String: (entry.value as List).whereType<String>().toList(
+            growable: false,
+          ),
+    };
   }
 
   int _notificationRetentionSeconds(Object? value) {
@@ -326,13 +343,10 @@ class FirestorePosRepository {
       await for (final snapshot
           in _firestore
               .collection('tenants/${scope.tenantId}/menuSections')
+              .where('venueId', isEqualTo: scope.venueId)
               .orderBy('sortOrder')
               .snapshots()) {
         final items = snapshot.docs
-            .where(
-              (document) =>
-                  (document.data()['venueId'] as String?) == scope.venueId,
-            )
             .map((document) {
               final data = document.data();
               return MenuSection(
@@ -366,6 +380,7 @@ class FirestorePosRepository {
       await for (final snapshot
           in _firestore
               .collection('tenants/${scope.tenantId}/products')
+              .where('venueId', isEqualTo: scope.venueId)
               .orderBy('name')
               .snapshots()) {
         final productDataById = <String, Map<String, dynamic>>{
@@ -374,8 +389,7 @@ class FirestorePosRepository {
         final items = snapshot.docs
             .where(
               (document) =>
-                  (document.data()['venueId'] as String?) == scope.venueId &&
-                  (includeArchived || document.data()['archived'] != true),
+                  includeArchived || document.data()['archived'] != true,
             )
             .map((document) {
               final data = document.data();
@@ -471,14 +485,11 @@ class FirestorePosRepository {
   Stream<List<DiningTable>> watchTables(VenueScope scope) {
     return _firestore
         .collection('tenants/${scope.tenantId}/tables')
+        .where('venueId', isEqualTo: scope.venueId)
         .orderBy('label')
         .snapshots()
         .map(
           (snapshot) => snapshot.docs
-              .where(
-                (document) =>
-                    (document.data()['venueId'] as String?) == scope.venueId,
-              )
               .map((document) {
                 final data = document.data();
                 final currentOrderId = data['currentOrderId'] as String?;
@@ -486,6 +497,7 @@ class FirestorePosRepository {
                   id: document.id,
                   label: data['label'] as String? ?? 'Table',
                   seats: data['seats'] as int? ?? 0,
+                  sortOrder: (data['sortOrder'] as num?)?.toInt(),
                   hasOpenOrder: currentOrderId?.trim().isNotEmpty == true,
                   currentOrderId: currentOrderId?.trim().isNotEmpty == true
                       ? currentOrderId
@@ -790,11 +802,15 @@ class FirestorePosRepository {
       tenantId: scope.tenantId,
       venueId: scope.venueId,
       tableId: data['tableId'] as String?,
-      tabName:
-          data['tabName'] as String? ??
-          (data['channel'] == 'dineIn'
-              ? null
-              : data['customerName'] as String?),
+      // A collection/delivery customer is not a named tab. The previous
+      // display fallback copied customerName into tabName, then checkout sent
+      // that invented tab identity back to the hub. The hub correctly rejected
+      // it because the immutable opening event has no tab for fulfilment
+      // orders. Keep display data in customerName and preserve tabName only for
+      // genuine dine-in named tabs.
+      tabName: data['channel'] == 'collection' || data['channel'] == 'delivery'
+          ? null
+          : data['tabName'] as String?,
       businessDate: DateTime(date.year, date.month, date.day),
       openedAt: date,
       status: status,
@@ -809,6 +825,12 @@ class FirestorePosRepository {
       customerName: data['customerName'] as String?,
       customerPhone: data['customerPhone'] as String?,
       deliveryAddress: data['deliveryAddress'] as String?,
+      deliveryAddressLabel: data['deliveryAddressLabel'] as String?,
+      deliveryLatitude: (data['deliveryLatitude'] as num?)?.toDouble(),
+      deliveryLongitude: (data['deliveryLongitude'] as num?)?.toDouble(),
+      serviceAreaId: data['serviceAreaId'] as String?,
+      serviceAreaName: data['serviceAreaName'] as String?,
+      deliveryFeeMinor: (data['deliveryFeeMinor'] as num?)?.toInt() ?? 0,
       scheduledFor:
           _dateTime(data['scheduledFor']) ??
           _dateTimeFromMillis(data['scheduledForMillis']),
@@ -836,6 +858,7 @@ class FirestorePosRepository {
     }
     return _firestore
         .collection('tenants/${scope.tenantId}/orders')
+        .where('venueId', isEqualTo: scope.venueId)
         .where('splitFromOrderId', isEqualTo: sourceOrderId)
         .snapshots()
         .map((snapshot) {
@@ -913,9 +936,11 @@ class FirestorePosRepository {
   }) async {
     final sections = await _firestore
         .collection('tenants/${scope.tenantId}/menuSections')
+        .where('venueId', isEqualTo: scope.venueId)
         .get();
     final products = await _firestore
         .collection('tenants/${scope.tenantId}/products')
+        .where('venueId', isEqualTo: scope.venueId)
         .get();
     final hasChild = sections.docs.any(
       (document) =>
@@ -1074,7 +1099,9 @@ class FirestorePosRepository {
     bool? showOnOrderFlow,
     List<String>? modifierGroupIds,
     int? targetMarginBasisPoints,
-    List<MenuProductVariant>? variants,
+    String? variantSetId,
+    bool changeTaxRate = false,
+    String? taxRateId,
     bool? availableForCollection,
     bool? availableForDelivery,
     bool removeCollectionPriceOverride = false,
@@ -1094,7 +1121,8 @@ class FirestorePosRepository {
         if (modifierGroupIds != null) 'modifierGroupIds': modifierGroupIds,
         if (targetMarginBasisPoints != null)
           'targetMarginBasisPoints': targetMarginBasisPoints,
-        if (variants != null) 'variants': _variantsToMap(variants),
+        if (variantSetId != null) 'variantSetId': variantSetId,
+        if (changeTaxRate) ...{'changeTaxRate': true, 'taxRateId': taxRateId},
         if (availableForCollection != null)
           'availableForCollection': availableForCollection,
         if (availableForDelivery != null)
@@ -1263,6 +1291,7 @@ class FirestorePosRepository {
   Stream<List<MenuModifierGroup>> watchModifierGroups(VenueScope scope) {
     return _firestore
         .collection('tenants/${scope.tenantId}/modifierGroups')
+        .where('venueId', isEqualTo: scope.venueId)
         .orderBy('name')
         .snapshots()
         .map(
@@ -1385,6 +1414,7 @@ class FirestorePosRepository {
   }) async {
     final products = await _firestore
         .collection('tenants/${scope.tenantId}/products')
+        .where('venueId', isEqualTo: scope.venueId)
         .get();
     final inUse = products.docs.any((product) {
       final data = product.data();
@@ -1472,15 +1502,16 @@ class FirestorePosRepository {
     return name;
   }
 
-  CollectionReference<Map<String, dynamic>> _taxRates(String tenantId) =>
-      _firestore.collection('tenants/$tenantId/taxRates');
+  Query<Map<String, dynamic>> _taxRates(VenueScope scope) => _firestore
+      .collection('tenants/${scope.tenantId}/taxRates')
+      .where('venueId', isEqualTo: scope.venueId);
 
   Stream<List<TaxRate>> watchTaxRates(VenueScope scope) async* {
     AppLogger.info(
       'Load tax rates: tenant=${scope.tenantId}, venue=${scope.venueId}.',
     );
     try {
-      await for (final snapshot in _taxRates(scope.tenantId).snapshots()) {
+      await for (final snapshot in _taxRates(scope).snapshots()) {
         final rates =
             snapshot.docs
                 .where(
@@ -1550,6 +1581,7 @@ class FirestorePosRepository {
   }) async {
     final products = await _firestore
         .collection('tenants/${scope.tenantId}/products')
+        .where('venueId', isEqualTo: scope.venueId)
         .where('taxRateId', isEqualTo: rate.id)
         .get();
     final inUse = products.docs.any(
@@ -1586,7 +1618,7 @@ class FirestorePosRepository {
     String? exceptId,
   }) async {
     final normalised = name.toLowerCase();
-    final existing = await _taxRates(scope.tenantId).get();
+    final existing = await _taxRates(scope).get();
     if (existing.docs.any(
       (document) =>
           document.id != exceptId &&
@@ -1607,6 +1639,7 @@ class FirestorePosRepository {
   Stream<List<OrderFlowOrder>> watchOrderFlow(VenueScope scope) {
     return _firestore
         .collection('tenants/${scope.tenantId}/productionTickets')
+        .where('venueId', isEqualTo: scope.venueId)
         .orderBy('ticketReleasedAt', descending: true)
         .limit(200)
         .snapshots()
@@ -1661,7 +1694,8 @@ class FirestorePosRepository {
   Stream<List<PosOrder>> watchVenueOpenOrders(VenueScope scope) {
     return _firestore
         .collection('tenants/${scope.tenantId}/orders')
-        .limit(1000)
+        .where('venueId', isEqualTo: scope.venueId)
+        .where('status', whereIn: const <String>['open', 'sent'])
         .snapshots()
         .map(
           (snapshot) => snapshot.docs
@@ -1669,7 +1703,6 @@ class FirestorePosRepository {
                 (document) => _orderFromSnapshot(scope: scope, order: document),
               )
               .whereType<PosOrder>()
-              .where((order) => order.venueId == scope.venueId)
               .toList(growable: false),
         );
   }
@@ -1907,7 +1940,14 @@ class FirestorePosRepository {
       isDelayed: data['isDelayed'] as bool? ?? false,
       note: data['productionNote'] as String? ?? '',
       channel: _orderChannel(data['channel'] as String?),
+      customerName: data['customerName'] as String?,
+      scheduledFor:
+          _dateTime(data['scheduledFor']) ??
+          _dateTimeFromMillis(data['scheduledForMillis']),
       courseName: data['courseName'] as String? ?? 'Standard',
+      orderId: data['orderId'] as String?,
+      assignedDriverName: data['assignedDriverName'] as String?,
+      driverDeclined: data['driverDeclined'] as bool? ?? false,
     );
   }
 
@@ -1927,6 +1967,7 @@ class FirestorePosRepository {
     'readyForCollection' => FulfilmentStatus.readyForCollection,
     'awaitingDriver' => FulfilmentStatus.awaitingDriver,
     'assigned' => FulfilmentStatus.assigned,
+    'driverDeclined' => FulfilmentStatus.driverDeclined,
     'outForDelivery' => FulfilmentStatus.outForDelivery,
     'collected' => FulfilmentStatus.collected,
     'delivered' => FulfilmentStatus.delivered,

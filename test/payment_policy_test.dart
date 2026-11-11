@@ -17,5 +17,10 @@ void main() {
     test('defaults paid receipt printing to selected', () {
       expect(defaultPrintPaidReceipt, isTrue);
     });
+
+    test('normalises touch-keyboard exchange rates for audit storage', () {
+      expect(normalizeExchangeRateInput(' 52,500001 '), '52.500001');
+      expect(normalizeExchangeRateInput('1.25'), '1.25');
+    });
   });
 }

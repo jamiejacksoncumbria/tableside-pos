@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/safe_dialog.dart';
 import '../../core/app_logger.dart';
 import '../../core/date_formats.dart';
 import '../../core/money.dart';
@@ -908,7 +909,7 @@ Future<void> _adjustStock(
   final quantity = TextEditingController();
   final reason = TextEditingController();
   var type = _StockAdjustmentType.correction;
-  final confirmed = await showDialog<bool>(
+  final confirmed = await showAppDialog<bool>(
     context: context,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setDialogState) => AlertDialog(
@@ -1027,7 +1028,7 @@ Future<void> _editSupplier(
   final contact = TextEditingController(text: existing?.contactName);
   final email = TextEditingController(text: existing?.email);
   final phone = TextEditingController(text: existing?.phone);
-  final saved = await showDialog<bool>(
+  final saved = await showAppDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
       title: Text(existing == null ? 'Add supplier' : 'Edit supplier'),
@@ -1100,7 +1101,7 @@ Future<void> _bulkLinkProducts(
   String currencyCode,
 ) async {
   final selected = <String>{};
-  final result = await showDialog<Set<String>>(
+  final result = await showAppDialog<Set<String>>(
     context: context,
     builder: (context) => StatefulBuilder(
       builder: (context, setState) => AlertDialog(
@@ -1175,7 +1176,7 @@ Future<void> _editSupplierProduct(
     text: existing?.currencyCode ?? baseCurrencyCode,
   );
   var preferred = existing?.preferred ?? false;
-  final saved = await showDialog<bool>(
+  final saved = await showAppDialog<bool>(
     context: context,
     builder: (context) => StatefulBuilder(
       builder: (context, setState) => AlertDialog(
@@ -1275,7 +1276,7 @@ Future<void> _createRecommendedOrder(
 ) async {
   var supplierId = suppliers.first.id;
   final days = TextEditingController(text: '7');
-  final confirmed = await showDialog<bool>(
+  final confirmed = await showAppDialog<bool>(
     context: context,
     builder: (context) => StatefulBuilder(
       builder: (context, setState) => AlertDialog(
@@ -1363,7 +1364,7 @@ Future<void> _editDraftOrder(
     for (final line in order.lines)
       line.id: TextEditingController(text: _quantity(line.orderedPacks)),
   };
-  final confirmed = await showDialog<bool>(
+  final confirmed = await showAppDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
       title: const Text('Review recommended quantities'),
@@ -1451,7 +1452,7 @@ Future<void> _receiveOrder(
     for (final line in order.lines.where((line) => line.remainingPacks > 0))
       line.id: TextEditingController(text: _quantity(line.remainingPacks)),
   };
-  final confirmed = await showDialog<bool>(
+  final confirmed = await showAppDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
       title: const Text('Receive delivered stock'),

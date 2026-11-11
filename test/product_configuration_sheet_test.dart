@@ -1,0 +1,163 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:tableside_pos/features/pos/domain.dart';
+import 'package:tableside_pos/features/pos/product_configuration_sheet.dart';
+
+void main() {
+  testWidgets('item note keyboard action focuses and saves the note', (
+    tester,
+  ) async {
+    ProductConfigurationSelection? selection;
+    final textInputMethods = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.textInput,
+      (call) async {
+        textInputMethods.add(call.method);
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.textInput,
+        null,
+      ),
+    );
+    const product = MenuProduct(
+      id: 'product-a',
+      name: 'Test Product',
+      priceMinor: 1200,
+      sectionIds: <String>['section-a'],
+      productionArea: ProductionArea.kitchen,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () async {
+                selection = await showProductConfigurationSheet(
+                  context: context,
+                  product: product,
+                  availableGroups: const <MenuModifierGroup>[],
+                  availableProducts: const <MenuProduct>[product],
+                  currencyCode: 'GBP',
+                );
+              },
+              child: const Text('Configure'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Configure'));
+    await tester.pumpAndSettle();
+    final keyboard = find.byTooltip('Open keyboard for item note');
+    expect(keyboard, findsOneWidget);
+
+    await tester.tap(keyboard);
+    await tester.pump();
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.focusNode?.hasFocus, isTrue);
+    expect(textInputMethods, contains('TextInput.show'));
+
+    await tester.enterText(find.byType(TextField), 'No onions');
+    await tester.tap(find.text('Add to order'));
+    await tester.pumpAndSettle();
+
+    expect(selection?.itemNote, 'No onions');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('configured item closes only after a successful add', (
+    tester,
+  ) async {
+    ProductConfigurationSelection? selection;
+    var addCalls = 0;
+    const product = MenuProduct(
+      id: 'product-success',
+      name: 'Configured Product',
+      priceMinor: 1200,
+      sectionIds: <String>['section-a'],
+      productionArea: ProductionArea.kitchen,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () async {
+                selection = await showProductConfigurationSheet(
+                  context: context,
+                  product: product,
+                  availableGroups: const <MenuModifierGroup>[],
+                  availableProducts: const <MenuProduct>[product],
+                  currencyCode: 'GBP',
+                  onAdd: (_) async {
+                    addCalls += 1;
+                  },
+                );
+              },
+              child: const Text('Configure'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Configure'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add to order'));
+    await tester.pumpAndSettle();
+
+    expect(addCalls, 1);
+    expect(selection, isNotNull);
+    expect(find.text('Configured Product'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('configured item remains open when the add fails', (
+    tester,
+  ) async {
+    const product = MenuProduct(
+      id: 'product-failure',
+      name: 'Configured Product',
+      priceMinor: 1200,
+      sectionIds: <String>['section-a'],
+      productionArea: ProductionArea.kitchen,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: FilledButton(
+              onPressed: () => showProductConfigurationSheet(
+                context: context,
+                product: product,
+                availableGroups: const <MenuModifierGroup>[],
+                availableProducts: const <MenuProduct>[product],
+                currencyCode: 'GBP',
+                onAdd: (_) async => throw StateError('network unavailable'),
+              ),
+              child: const Text('Configure'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Configure'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add to order'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Configured Product'), findsOneWidget);
+    expect(find.textContaining('network unavailable'), findsOneWidget);
+    expect(find.text('Add to order'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+}

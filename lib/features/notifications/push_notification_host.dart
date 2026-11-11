@@ -24,6 +24,8 @@ class PushNotificationHost extends ConsumerStatefulWidget {
 
 class _PushNotificationHostState extends ConsumerState<PushNotificationHost> {
   StreamSubscription<String>? _tokenSubscription;
+  StreamSubscription<RemoteMessage>? _openSubscription;
+  Timer? _registrationRetryTimer;
   String? _registeredKey;
   bool _registering = false;
 
@@ -36,18 +38,50 @@ class _PushNotificationHostState extends ConsumerState<PushNotificationHost> {
   void initState() {
     super.initState();
     if (_supported) {
+      unawaited(
+        FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
+          alert: true,
+          badge: true,
+          sound: true,
+        ),
+      );
       _tokenSubscription = FirebaseMessaging.instance.onTokenRefresh.listen(
         (_) => _scheduleRegistration(force: true),
         onError: (Object error, StackTrace stack) =>
             AppLogger.error('Refresh push notification token', error, stack),
       );
+      _openSubscription = FirebaseMessaging.onMessageOpenedApp.listen(
+        _recordNotificationOpen,
+        onError: (Object error, StackTrace stack) =>
+            AppLogger.error('Open push notification', error, stack),
+      );
+      unawaited(_recordInitialNotificationOpen());
     }
   }
 
   @override
   void dispose() {
     _tokenSubscription?.cancel();
+    _openSubscription?.cancel();
+    _registrationRetryTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _recordInitialNotificationOpen() async {
+    try {
+      final message = await FirebaseMessaging.instance.getInitialMessage();
+      if (message != null) _recordNotificationOpen(message);
+    } on Object catch (error, stack) {
+      AppLogger.error('Read initial push notification', error, stack);
+    }
+  }
+
+  void _recordNotificationOpen(RemoteMessage message) {
+    // Live venue streams already refresh the appropriate operational screens.
+    // Do not log message text, customer details, order IDs, or device tokens.
+    AppLogger.info(
+      'Push notification opened: ${message.data['type'] ?? 'operational'}.',
+    );
   }
 
   @override
@@ -79,6 +113,18 @@ class _PushNotificationHostState extends ConsumerState<PushNotificationHost> {
         sound: true,
       );
       if (permission.authorizationStatus == AuthorizationStatus.denied) return;
+      if (defaultTargetPlatform == TargetPlatform.iOS &&
+          !await _waitForApplePushToken()) {
+        AppLogger.info(
+          'APNs registration is not ready; push registration will retry.',
+        );
+        _registrationRetryTimer?.cancel();
+        _registrationRetryTimer = Timer(
+          const Duration(seconds: 5),
+          () => _scheduleRegistration(force: true),
+        );
+        return;
+      }
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null || token.isEmpty) return;
       final deviceId = await LocalPrinterDeviceIdentity().getOrCreate();
@@ -105,5 +151,14 @@ class _PushNotificationHostState extends ConsumerState<PushNotificationHost> {
     } finally {
       _registering = false;
     }
+  }
+
+  Future<bool> _waitForApplePushToken() async {
+    for (var attempt = 0; attempt < 20; attempt += 1) {
+      final token = await FirebaseMessaging.instance.getAPNSToken();
+      if (token != null && token.isNotEmpty) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    }
+    return false;
   }
 }

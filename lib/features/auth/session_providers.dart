@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/app_logger.dart';
 import '../../data/firestore_pos_repository.dart';
 import '../../data/platform_admin_repository.dart';
+import '../../offline/venue_hub_offline_workspace.dart';
 import '../pos/domain.dart';
 
 final platformAdminProvider = FutureProvider<bool>((ref) async {
@@ -12,7 +13,15 @@ final platformAdminProvider = FutureProvider<bool>((ref) async {
     AppLogger.info('Platform access check: no signed-in user.');
     return false;
   }
-  final token = await user.getIdTokenResult();
+  late final IdTokenResult token;
+  try {
+    token = await user.getIdTokenResult().timeout(const Duration(seconds: 5));
+  } on Object catch (error, stackTrace) {
+    // Platform tools fail closed, but a cached signed-in account must still be
+    // able to reach an enrolled LAN hub while venue internet is unavailable.
+    AppLogger.error('Platform access token refresh', error, stackTrace);
+    return false;
+  }
   final hasCustomClaim = token.claims?['platformAdmin'] == true;
   AppLogger.info(
     'Platform access check: custom admin claim present=$hasCustomClaim.',
@@ -38,6 +47,10 @@ final platformAdminProvider = FutureProvider<bool>((ref) async {
     return false;
   }
 });
+
+final cachedLanWorkspaceProvider = FutureProvider.autoDispose(
+  (ref) => VenueHubOfflineWorkspaceLoader().load(requireHubHost: false),
+);
 
 final platformAuthUsersProvider =
     FutureProvider.autoDispose<List<PlatformAuthUser>>(

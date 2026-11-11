@@ -8,6 +8,8 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/print_job_repository.dart';
 import '../../data/printer_device_repository.dart';
+import '../../offline/venue_hub_runtime.dart';
+import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
 import '../pos/domain.dart';
 
@@ -32,7 +34,9 @@ class _PrintDeliveryMonitorHostState
     extends ConsumerState<PrintDeliveryMonitorHost> {
   static const _queueAlertAfter = Duration(seconds: 15);
   static const _claimedAlertAfter = Duration(seconds: 45);
-  static const _offlineAfter = Duration(seconds: 90);
+  // RTDB presence refreshes every five seconds and uses server-side
+  // onDisconnect. Three missed leases are enough to alert staff promptly.
+  static const _offlineAfter = Duration(seconds: 15);
 
   final PrintJobRepository _jobs = PrintJobRepository(
     FirebaseFirestore.instance,
@@ -44,6 +48,7 @@ class _PrintDeliveryMonitorHostState
   StreamSubscription<List<PrinterDevice>>? _devicesSubscription;
   Timer? _ageTimer;
   VenueScope? _scope;
+  String? _staffSessionId;
   List<PrintJob> _currentJobs = const [];
   List<PrinterDevice> _currentDevices = const [];
   Set<String> _activeAlertKeys = const {};
@@ -59,22 +64,32 @@ class _PrintDeliveryMonitorHostState
   @override
   Widget build(BuildContext context) {
     final scope = ref.watch(activeVenueScopeProvider);
-    if (scope != _scope) {
-      scheduleMicrotask(() => _configure(scope));
+    final staffSessionId = ref.watch(
+      activeStaffPinSessionProvider.select((session) => session?.sessionId),
+    );
+    if (scope != _scope || staffSessionId != _staffSessionId) {
+      scheduleMicrotask(() => _configure(scope, staffSessionId));
     }
     return const SizedBox.shrink();
   }
 
-  void _configure(VenueScope? scope) {
-    if (!mounted || scope == _scope) return;
+  void _configure(VenueScope? scope, String? staffSessionId) {
+    if (!mounted || (scope == _scope && staffSessionId == _staffSessionId)) {
+      return;
+    }
     _jobsSubscription?.cancel();
     _devicesSubscription?.cancel();
     _ageTimer?.cancel();
     _resolveAllAlerts();
     _scope = scope;
+    _staffSessionId = staffSessionId;
     _currentJobs = const [];
     _currentDevices = const [];
-    if (scope == null) return;
+    // The physical queue worker remains mounted and credential-authorised on
+    // the PIN screen. This staff-facing alert monitor does not: it must not
+    // retain cloud subscriptions or reveal operational job details after the
+    // staff session locks.
+    if (scope == null || staffSessionId == null) return;
 
     _jobsSubscription = _jobs
         .watchVenueJobs(tenantId: scope.tenantId, venueId: scope.venueId)
@@ -138,6 +153,14 @@ class _PrintDeliveryMonitorHostState
     final alerts = <_PrintDeliveryAlert>[];
 
     for (final job in _currentJobs) {
+      // While this process owns the venue hub, its encrypted local queue is
+      // authoritative. Legacy Firestore jobs from before hub activation stay
+      // available in recovery history, but must not create permanent false
+      // "printer offline" alarms beside current hub tickets.
+      if (VenueHubRuntime.instance.activeScope == _scope &&
+          !job.id.startsWith('offline-')) {
+        continue;
+      }
       final primary = job.fallbackFromJobId == null
           ? null
           : jobsById[job.fallbackFromJobId];

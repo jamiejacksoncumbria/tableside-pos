@@ -1,11 +1,15 @@
 import 'dart:async';
 
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/safe_dialog.dart';
+import '../core/app_environment.dart';
 import '../core/app_logger.dart';
 import '../core/app_theme_controller.dart';
+import '../core/firebase_runtime_config.dart';
 import '../core/tenant_scope.dart';
 import '../core/training_mode.dart';
 import '../data/production_command_repository.dart';
@@ -19,11 +23,19 @@ import '../features/notifications/push_notification_host.dart';
 import '../features/pos/domain.dart';
 import '../features/pos/pos_controller.dart';
 import '../features/pos/pos_page.dart';
+import '../features/pos/pos_quick_search_field.dart';
 import '../features/platform_admin/platform_admin_page.dart';
 import '../features/printing/print_delivery_monitor.dart';
 import '../features/reports/reports_page.dart';
 import '../features/settings/settings_page.dart';
+import '../features/settings/venue_offline_hub_page.dart';
 import '../features/training/training_mode_page.dart';
+import '../offline/venue_hub_client_cache.dart';
+import '../offline/venue_hub_client_registry.dart';
+import '../offline/venue_hub_availability.dart';
+import '../offline/venue_hub_backup_monitor.dart';
+import '../offline/venue_hub_realtime_client.dart';
+import '../offline/venue_hub_runtime.dart';
 
 enum HomeSection {
   pos,
@@ -130,7 +142,7 @@ class HomeShell extends ConsumerWidget {
         const _Destination(
           HomeSection.fulfilment,
           Icons.delivery_dining_outlined,
-          'Delivery',
+          'Collect / deliver',
         ),
       if (canManageVenue && !trainingModeActive)
         const _Destination(
@@ -157,9 +169,6 @@ class HomeShell extends ConsumerWidget {
           'Platform',
         ),
     ];
-    final index = destinations.indexWhere(
-      (destination) => destination.section == visibleSection,
-    );
     // Material NavigationBar intentionally supports at most five destinations.
     // Platform tools stay available on compact devices from the app bar rather
     // than making the entire mobile shell fail for a platform administrator.
@@ -177,15 +186,7 @@ class HomeShell extends ConsumerWidget {
               titleSpacing: wide ? 20 : 12,
               title: Row(
                 children: [
-                  CircleAvatar(
-                    radius: 16,
-                    foregroundImage: profile.logoUrl == null
-                        ? null
-                        : NetworkImage(profile.logoUrl!),
-                    child: profile.logoUrl == null
-                        ? const Icon(Icons.storefront_rounded, size: 18)
-                        : null,
-                  ),
+                  _VenueLogo(url: profile.logoUrl),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Column(
@@ -295,28 +296,16 @@ class HomeShell extends ConsumerWidget {
                   ),
                 const SizedBox(width: 8),
               ],
-              bottom: const PreferredSize(
-                preferredSize: Size.fromHeight(42),
-                child: _CurrentOrderLocationIndicator(),
-              ),
+              bottom: const _HomeAppBarBottom(),
             ),
       body: Row(
         children: [
           if (wide)
-            NavigationRail(
-              selectedIndex: index,
-              labelType: NavigationRailLabelType.all,
-              onDestinationSelected: (selected) => ref
-                  .read(homeSectionProvider.notifier)
-                  .select(destinations[selected].section),
-              destinations: [
-                for (final item in destinations)
-                  NavigationRailDestination(
-                    icon: Icon(item.icon),
-                    selectedIcon: Icon(item.icon),
-                    label: Text(item.label),
-                  ),
-              ],
+            _ScrollableHomeRail(
+              destinations: destinations,
+              selectedSection: visibleSection,
+              onSelected: (section) =>
+                  ref.read(homeSectionProvider.notifier).select(section),
             ),
           Expanded(
             // The print worker is intentionally invisible. A default loose
@@ -375,6 +364,10 @@ class HomeShell extends ConsumerWidget {
                 if (Firebase.apps.isNotEmpty)
                   const OperationalNotificationHost(),
                 if (Firebase.apps.isNotEmpty) const PushNotificationHost(),
+                const _VenueHubAccessNotificationHost(),
+                const _VenueHubSynchronizationNotificationHost(),
+                const _VenueHubRealtimeStatusHost(),
+                const _VenueHubTakeoverPromptHost(),
               ],
             ),
           ),
@@ -391,6 +384,9 @@ class HomeShell extends ConsumerWidget {
                 const _BottomNotificationTray(),
                 if (!wide)
                   NavigationBar(
+                    height: 60,
+                    labelBehavior:
+                        NavigationDestinationLabelBehavior.alwaysHide,
                     selectedIndex: compactIndex < 0 ? 0 : compactIndex,
                     onDestinationSelected: (selected) => ref
                         .read(homeSectionProvider.notifier)
@@ -398,7 +394,11 @@ class HomeShell extends ConsumerWidget {
                     destinations: [
                       for (final item in compactDestinations)
                         NavigationDestination(
-                          icon: Icon(item.icon),
+                          // Explicit centring prevents short labels/icons from
+                          // inheriting asymmetric space on narrow Android
+                          // navigation bars.
+                          icon: Center(child: Icon(item.icon)),
+                          selectedIcon: Center(child: Icon(item.icon)),
                           label: item.label,
                         ),
                     ],
@@ -408,32 +408,405 @@ class HomeShell extends ConsumerWidget {
     );
   }
 
-  Widget _buildBody(
-    HomeSection section,
-    TenantProfile profile,
-  ) => switch (section) {
-    HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
-    HomeSection.bookings => BookingCalendarPage(
-      defaultDurationMinutes:
-          venueOverride?.defaultBookingDurationMinutes ?? 120,
+  Widget _buildBody(HomeSection section, TenantProfile profile) =>
+      switch (section) {
+        HomeSection.pos => PosPage(currencyCode: profile.currencyCode),
+        HomeSection.bookings =>
+          Firebase.apps.isEmpty
+              ? const _CloudFeatureUnavailable(feature: 'Bookings')
+              : BookingCalendarPage(
+                  defaultDurationMinutes:
+                      venueOverride?.defaultBookingDurationMinutes ?? 120,
+                ),
+        HomeSection.orderFlow => OrderFlowPage(
+          amberMinutes: venueOverride?.orderFlowAmberMinutes ?? 15,
+          redMinutes: venueOverride?.orderFlowRedMinutes ?? 25,
+        ),
+        HomeSection.fulfilment => const FulfilmentOperationsPage(),
+        HomeSection.menu =>
+          Firebase.apps.isEmpty
+              ? const _CloudFeatureUnavailable(feature: 'Menu management')
+              : MenuManagementPage(currencyCode: profile.currencyCode),
+        HomeSection.reports =>
+          Firebase.apps.isEmpty
+              ? const _CloudFeatureUnavailable(feature: 'Reports')
+              : ReportsPage(
+                  currencyCode: profile.currencyCode,
+                  businessDayCutoffMinutes:
+                      venueOverride?.businessDayCutoffMinutes ?? 240,
+                ),
+        HomeSection.settings => SettingsPage(
+          profileOverride: profileOverride,
+          venueOverride: venueOverride,
+          persistToFirebase: persistCompanyProfile,
+        ),
+        HomeSection.platformAdmin =>
+          Firebase.apps.isEmpty
+              ? const _CloudFeatureUnavailable(
+                  feature: 'Platform administration',
+                )
+              : const PlatformAdminPage(),
+      };
+}
+
+/// Starts the browser's RTDB presence listener as soon as the unlocked venue
+/// workspace appears. Previously this was effectively lazy: if the PIN path's
+/// fire-and-forget setup raced a rebuild, hub status remained "unknown" until
+/// an order command happened to configure the same channel.
+class _VenueHubRealtimeStatusHost extends ConsumerStatefulWidget {
+  const _VenueHubRealtimeStatusHost();
+
+  @override
+  ConsumerState<_VenueHubRealtimeStatusHost> createState() =>
+      _VenueHubRealtimeStatusHostState();
+}
+
+class _VenueHubRealtimeStatusHostState
+    extends ConsumerState<_VenueHubRealtimeStatusHost> {
+  Timer? _retryTimer;
+  String? _configurationKey;
+  bool _configuring = false;
+
+  void _scheduleConfiguration() {
+    if (!kIsWeb || _configuring) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_configure());
+    });
+  }
+
+  Future<void> _configure() async {
+    if (_configuring || !mounted) return;
+    final scope = ref.read(activeVenueScopeProvider);
+    final session = ref.read(activeStaffPinSessionProvider);
+    if (scope == null || session == null) return;
+    final bootstrap = VenueHubClientRegistry.instance.bootstrapFor(scope);
+    if (bootstrap == null) {
+      _scheduleRetry(const Duration(milliseconds: 500));
+      return;
+    }
+    if (!bootstrap.enabled) {
+      _configurationKey = '${scope.tenantId}/${scope.venueId}/cloud-only';
+      VenueHubAvailability.markCloudOnly();
+      return;
+    }
+    final key =
+        '${scope.tenantId}/${scope.venueId}/${bootstrap.hubEpoch}/${session.sessionId}';
+    if (_configurationKey == key &&
+        VenueHubRealtimeClient.instance.isReadyFor(scope, bootstrap.hubEpoch)) {
+      return;
+    }
+    _configuring = true;
+    _retryTimer?.cancel();
+    if (VenueHubAvailability.status.value.connectivity ==
+        VenueHubConnectivity.unknown) {
+      VenueHubAvailability.markChecking('Connecting to venue hub presence…');
+    }
+    try {
+      await VenueHubRealtimeClient.instance.ensureConfigured(
+        scope: scope,
+        hubEpoch: bootstrap.hubEpoch,
+        repository: ProductionCommandRepository(),
+      );
+      _configurationKey = key;
+    } on Object catch (error, stackTrace) {
+      AppLogger.error(
+        'Start realtime venue hub status for web workspace',
+        error,
+        stackTrace,
+      );
+      VenueHubAvailability.markOffline(
+        'The venue hub status channel could not connect. Orders remain blocked until it reconnects.',
+      );
+      _scheduleRetry(const Duration(seconds: 10));
+    } finally {
+      _configuring = false;
+    }
+  }
+
+  void _scheduleRetry(Duration delay) {
+    _retryTimer?.cancel();
+    _retryTimer = Timer(delay, _scheduleConfiguration);
+  }
+
+  @override
+  void dispose() {
+    _retryTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    ref.watch(activeVenueScopeProvider);
+    ref.watch(activeStaffPinSessionProvider);
+    _scheduleConfiguration();
+    return const SizedBox.shrink();
+  }
+}
+
+/// Makes a failed primary hub visible to an already-unlocked manager on every
+/// workspace screen. This is only navigation into the existing secured flow:
+/// authority still transfers exclusively after a fresh manager PIN, reason,
+/// acknowledgement, server-side lease check and audit event on the dedicated
+/// venue-hub settings page.
+class _VenueHubTakeoverPromptHost extends ConsumerStatefulWidget {
+  const _VenueHubTakeoverPromptHost();
+
+  @override
+  ConsumerState<_VenueHubTakeoverPromptHost> createState() =>
+      _VenueHubTakeoverPromptHostState();
+}
+
+class _VenueHubTakeoverPromptHostState
+    extends ConsumerState<_VenueHubTakeoverPromptHost> {
+  String? _lastPromptKey;
+  bool _promptScheduled = false;
+  bool _promptOpen = false;
+
+  void _schedulePrompt(
+    VenueHubManualTakeoverRequest request,
+    VenueScope activeScope,
+  ) {
+    final key =
+        '${request.scope.tenantId}/${request.scope.venueId}/'
+        '${request.primaryDeviceId}/${request.detectedAt.microsecondsSinceEpoch}';
+    if (_lastPromptKey == key || _promptScheduled || _promptOpen) return;
+    _promptScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      _promptScheduled = false;
+      if (!mounted) return;
+      final current = VenueHubManualTakeoverCoordinator.instance.pending.value;
+      final session = ref.read(activeStaffPinSessionProvider);
+      final isManager =
+          session?.roles.any((role) {
+            final normalized = role.trim().toLowerCase();
+            return normalized == 'owner' || normalized == 'manager';
+          }) ??
+          false;
+      if (current != request || current?.scope != activeScope || !isManager) {
+        return;
+      }
+      _lastPromptKey = key;
+      _promptOpen = true;
+      final review = await showAppDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.warning_amber_rounded),
+          title: const Text('Primary venue hub is unavailable'),
+          content: const SingleChildScrollView(
+            child: Text(
+              'This device is the configured backup and the primary hub has '
+              'stopped renewing its authority lease. Orders remain blocked. '
+              'Would you like to review the manager-authorised takeover now?',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Not now'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              icon: const Icon(Icons.settings_outlined),
+              label: const Text('Review takeover'),
+            ),
+          ],
+        ),
+      );
+      _promptOpen = false;
+      if (!mounted || review != true) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => VenueOfflineHubPage(scope: activeScope),
+        ),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final session = ref.watch(activeStaffPinSessionProvider);
+    final activeScope = ref.watch(activeVenueScopeProvider);
+    final isManager =
+        session?.roles.any((role) {
+          final normalized = role.trim().toLowerCase();
+          return normalized == 'owner' || normalized == 'manager';
+        }) ??
+        false;
+    // The takeover request is process-local operational state, not Riverpod
+    // application data. Listen to its ValueNotifier explicitly so the prompt
+    // appears immediately even if no unrelated widget/provider rebuild occurs.
+    return ValueListenableBuilder<VenueHubManualTakeoverRequest?>(
+      valueListenable: VenueHubManualTakeoverCoordinator.instance.pending,
+      builder: (context, request, _) {
+        if (request == null) {
+          _lastPromptKey = null;
+        } else if (isManager &&
+            activeScope != null &&
+            request.scope == activeScope) {
+          _schedulePrompt(request, activeScope);
+        }
+        return const SizedBox.shrink();
+      },
+    );
+  }
+}
+
+/// Keeps device enrolment and certificate failures in the manager-visible
+/// notification centre. Background retries are deduplicated, and successful
+/// hub recovery removes the alert automatically.
+class _VenueHubAccessNotificationHost extends ConsumerStatefulWidget {
+  const _VenueHubAccessNotificationHost();
+
+  @override
+  ConsumerState<_VenueHubAccessNotificationHost> createState() =>
+      _VenueHubAccessNotificationHostState();
+}
+
+class _VenueHubAccessNotificationHostState
+    extends ConsumerState<_VenueHubAccessNotificationHost> {
+  static const _notificationKey = 'venue-hub-device-authorisation';
+
+  @override
+  void initState() {
+    super.initState();
+    VenueHubAvailability.issue.addListener(_scheduleHandle);
+    _scheduleHandle();
+  }
+
+  void _scheduleHandle() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final issue = VenueHubAvailability.issue.value;
+      final controller = ref.read(appNotificationsProvider.notifier);
+      if (issue == null) {
+        controller.resolve(_notificationKey);
+        return;
+      }
+      final presentation = venueHubIssuePresentation(issue);
+      if (!presentation.requiresManagerAttention) {
+        controller.resolve(_notificationKey);
+        return;
+      }
+      controller.add(
+        title: presentation.title,
+        message: presentation.message,
+        level: AppNotificationLevel.error,
+        retentionSeconds: 60,
+        deduplicationKey: _notificationKey,
+        requiresAttention: true,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    VenueHubAvailability.issue.removeListener(_scheduleHandle);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
+}
+
+/// Promotes a durable hub/cloud conflict into the manager-visible notification
+/// tray. The warning remains until synchronization recovers or a staff member
+/// deliberately dismisses it; routine temporary connectivity failures do not
+/// create a permanent alarm.
+class _VenueHubSynchronizationNotificationHost extends ConsumerStatefulWidget {
+  const _VenueHubSynchronizationNotificationHost();
+
+  @override
+  ConsumerState<_VenueHubSynchronizationNotificationHost> createState() =>
+      _VenueHubSynchronizationNotificationHostState();
+}
+
+class _VenueHubSynchronizationNotificationHostState
+    extends ConsumerState<_VenueHubSynchronizationNotificationHost> {
+  static const _notificationKey = 'venue-hub-cloud-sync-conflict';
+  StreamSubscription<VenueHubRuntimeStatus>? _subscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleHandle(VenueHubRuntime.instance.status);
+    _subscription = VenueHubRuntime.instance.statuses.listen(_scheduleHandle);
+  }
+
+  /// Riverpod deliberately rejects provider mutations while Flutter is
+  /// mounting or rebuilding the tree. Runtime status may already be degraded
+  /// when this host first appears after PIN entry, so always promote it after
+  /// the current frame rather than writing from [initState].
+  void _scheduleHandle(VenueHubRuntimeStatus status) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _handle(status);
+    });
+  }
+
+  void _handle(VenueHubRuntimeStatus status) {
+    if (!mounted) return;
+    final message = status.message ?? '';
+    final requiresAdministrator = message.contains(
+      'Contact the system administrator',
+    );
+    final controller = ref.read(appNotificationsProvider.notifier);
+    if (!requiresAdministrator) {
+      controller.resolve(_notificationKey);
+      return;
+    }
+    controller.add(
+      title: 'Venue hub data needs administrator attention',
+      message: '${status.pendingEvents} cloud event(s) are pending. $message',
+      level: AppNotificationLevel.error,
+      retentionSeconds: 60,
+      deduplicationKey: _notificationKey,
+      requiresAttention: true,
+    );
+  }
+
+  @override
+  void dispose() {
+    _subscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
+}
+
+class _CloudFeatureUnavailable extends StatelessWidget {
+  const _CloudFeatureUnavailable({required this.feature});
+
+  final String feature;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 520),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.cloud_off_rounded, size: 42),
+              const SizedBox(height: 12),
+              Text(
+                '$feature requires an internet connection',
+                style: Theme.of(context).textTheme.titleLarge,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'The POS, kitchen flow and local ticket printing continue through the venue hub while offline.',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
     ),
-    HomeSection.orderFlow => OrderFlowPage(
-      amberMinutes: venueOverride?.orderFlowAmberMinutes ?? 15,
-      redMinutes: venueOverride?.orderFlowRedMinutes ?? 25,
-    ),
-    HomeSection.fulfilment => const FulfilmentOperationsPage(),
-    HomeSection.menu => MenuManagementPage(currencyCode: profile.currencyCode),
-    HomeSection.reports => ReportsPage(
-      currencyCode: profile.currencyCode,
-      businessDayCutoffMinutes: venueOverride?.businessDayCutoffMinutes ?? 240,
-    ),
-    HomeSection.settings => SettingsPage(
-      profileOverride: profileOverride,
-      venueOverride: venueOverride,
-      persistToFirebase: persistCompanyProfile,
-    ),
-    HomeSection.platformAdmin => const PlatformAdminPage(),
-  };
+  );
 }
 
 Future<void> _endTrainingFromWorkspace({
@@ -475,7 +848,7 @@ Future<void> _changeOwnAppearance({
   required WidgetRef ref,
   required VenueScope scope,
 }) async {
-  final selected = await showDialog<String>(
+  final selected = await showAppDialog<String>(
     context: context,
     builder: (dialogContext) => SimpleDialog(
       title: const Text('My appearance'),
@@ -510,6 +883,16 @@ Future<void> _changeOwnAppearance({
         .read(productionCommandRepositoryProvider)
         .updateOwnThemePreference(scope: scope, themeMode: selected);
     ref.read(appThemeControllerProvider.notifier).applyUserPreference(selected);
+    final session = ref.read(activeStaffPinSessionProvider);
+    if (session != null) {
+      await VenueHubClientCache().saveStaffPreferences(
+        scope,
+        userId: session.userId,
+        themeModePreference: selected,
+        posCategoryViewPreference: session.posCategoryViewPreference,
+        posProductSortPreference: session.posProductSortPreference,
+      );
+    }
     if (context.mounted) {
       showAppNotification(
         context,
@@ -534,19 +917,205 @@ Future<void> _changeOwnAppearance({
   }
 }
 
+class _VenueLogo extends StatelessWidget {
+  const _VenueLogo({required this.url});
+
+  final String? url;
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback = CircleAvatar(
+      radius: 16,
+      child: const Icon(Icons.storefront_rounded, size: 18),
+    );
+    final value = url?.trim();
+    if (value == null || value.isEmpty) return fallback;
+    return ClipOval(
+      child: Image.network(
+        value,
+        width: 32,
+        height: 32,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => fallback,
+      ),
+    );
+  }
+}
+
 /// Keeps the currently selected service location unmistakable on every screen.
 /// A venue deliberately starts with no table selected to prevent accidental
 /// orders being attached to the first table in the list.
+class _HomeAppBarBottom extends StatelessWidget implements PreferredSizeWidget {
+  const _HomeAppBarBottom();
+
+  @override
+  Size get preferredSize => const Size.fromHeight(64);
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: const [
+      _VenueHubStatusStrip(),
+      SizedBox(height: 46, child: _CurrentOrderLocationIndicator()),
+    ],
+  );
+}
+
+/// A reserved, full-width connection line beneath the app-bar actions. Unlike
+/// the former floating badge, this strip participates in layout and therefore
+/// can never cover venue, notification or POS controls.
+class _VenueHubStatusStrip extends StatelessWidget {
+  const _VenueHubStatusStrip();
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: VenueHubAvailability.status,
+    builder: (context, status, _) {
+      final (background, foreground, icon) = switch (status.connectivity) {
+        VenueHubConnectivity.online => (
+          const Color(0xff2e7d32),
+          Colors.white,
+          Icons.cloud_done_rounded,
+        ),
+        VenueHubConnectivity.cloudOnly => (
+          const Color(0xffef6c00),
+          Colors.white,
+          Icons.cloud_outlined,
+        ),
+        VenueHubConnectivity.lanOnly => (
+          const Color(0xfff9a825),
+          Colors.black,
+          Icons.wifi_rounded,
+        ),
+        VenueHubConnectivity.unavailable => (
+          Theme.of(context).colorScheme.error,
+          Theme.of(context).colorScheme.onError,
+          Icons.cloud_off_rounded,
+        ),
+        VenueHubConnectivity.checking => (
+          Theme.of(context).colorScheme.surfaceContainerHighest,
+          Theme.of(context).colorScheme.onSurfaceVariant,
+          Icons.sync_rounded,
+        ),
+        VenueHubConnectivity.unknown => (
+          Theme.of(context).colorScheme.surfaceContainerLow,
+          Theme.of(context).colorScheme.onSurfaceVariant,
+          Icons.hub_outlined,
+        ),
+      };
+      final label = status.connectivity == VenueHubConnectivity.unknown
+          ? 'Hub status unavailable'
+          : status.shortLabel;
+      final showStaging =
+          FirebaseRuntimeConfig.enabled && AppEnvironment.isStaging;
+      return Semantics(
+        liveRegion: true,
+        label: label,
+        child: SizedBox(
+          height: 18,
+          child: Row(
+            children: [
+              if (showStaging)
+                const Expanded(
+                  child: _StatusStripSegment(
+                    background: Color(0xffff9800),
+                    foreground: Colors.black,
+                    icon: Icons.science_outlined,
+                    label: 'STAGING · TEST DATA ONLY',
+                  ),
+                ),
+              Expanded(
+                child: _StatusStripSegment(
+                  background: background,
+                  foreground: foreground,
+                  icon: icon,
+                  label: label,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+class _StatusStripSegment extends StatelessWidget {
+  const _StatusStripSegment({
+    required this.background,
+    required this.foreground,
+    required this.icon,
+    required this.label,
+  });
+
+  final Color background;
+  final Color foreground;
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => ColoredBox(
+    color: background,
+    child: Center(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12, color: foreground),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: foreground,
+                fontSize: 10,
+                height: 1,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 class _CurrentOrderLocationIndicator extends ConsumerWidget {
   const _CurrentOrderLocationIndicator();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final order = ref.watch(activeOrderProvider);
+    final homeSection = ref.watch(homeSectionProvider);
+    final compactPosTab = ref.watch(posCompactTabProvider);
+    final mediaSize = MediaQuery.sizeOf(context);
+    final posUsesThreePanels =
+        mediaSize.width >= 1200 && mediaSize.height >= 780;
+    final showMenuSearch =
+        homeSection == HomeSection.pos &&
+        (posUsesThreePanels || compactPosTab == 1);
     final tabName = order.tabName?.trim();
     final tableId = order.tableId;
     final scheme = Theme.of(context).colorScheme;
-    final (icon, label) = tabName?.isNotEmpty == true
+    final needsAttention = order.hasPendingProductionLines;
+    final identityColor = needsAttention
+        ? (Theme.of(context).brightness == Brightness.dark
+              ? Colors.orangeAccent
+              : Colors.orange.shade800)
+        : scheme.primary;
+    final customerName = order.customerName?.trim();
+    final (icon, label) = order.channel == OrderChannel.delivery
+        ? (
+            Icons.delivery_dining_rounded,
+            'Delivery · ${customerName?.isNotEmpty == true ? customerName : 'Customer'}',
+          )
+        : order.channel == OrderChannel.collection
+        ? (
+            Icons.shopping_bag_outlined,
+            'Collection · ${customerName?.isNotEmpty == true ? customerName : 'Customer'}',
+          )
+        : tabName?.isNotEmpty == true
         ? (Icons.person_outline_rounded, 'Current tab: $tabName')
         : tableId == null
         ? (Icons.table_restaurant_outlined, 'No table or tab selected')
@@ -560,22 +1129,40 @@ class _CurrentOrderLocationIndicator extends ConsumerWidget {
       child: Container(
         width: double.infinity,
         color: scheme.surfaceContainerLow,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Row(
-          children: [
-            Icon(icon, size: 18, color: scheme.primary),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(
-                  context,
-                ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+        child: LayoutBuilder(
+          builder: (context, constraints) => Row(
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    Icon(icon, size: 18, color: identityColor),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          fontWeight: FontWeight.w700,
+                          color: needsAttention ? identityColor : null,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+              if (showMenuSearch)
+                SizedBox(
+                  width: (constraints.maxWidth * .42)
+                      .clamp(260.0, 480.0)
+                      .toDouble(),
+                  height: 36,
+                  child: const PosQuickSearchField(),
+                ),
+              if (showMenuSearch) const Spacer(),
+            ],
+          ),
         ),
       ),
     );
@@ -665,6 +1252,100 @@ class _BottomNotificationTray extends ConsumerWidget {
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A compact navigation rail that remains usable when role-based destinations
+/// outgrow the available window height.
+///
+/// Material's [NavigationRail] contains a flex child and therefore cannot be
+/// placed in a vertical scroll view. Doing so gives it unbounded height and
+/// prevents the entire authenticated workspace from laying out after PIN
+/// entry. This rail uses a bounded [ListView] and keeps every destination
+/// reachable on short Windows displays and landscape tablets.
+class _ScrollableHomeRail extends StatelessWidget {
+  const _ScrollableHomeRail({
+    required this.destinations,
+    required this.selectedSection,
+    required this.onSelected,
+  });
+
+  final List<_Destination> destinations;
+  final HomeSection selectedSection;
+  final ValueChanged<HomeSection> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surface,
+      child: SafeArea(
+        right: false,
+        child: SizedBox(
+          width: 112,
+          child: ListView.separated(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+            itemCount: destinations.length,
+            separatorBuilder: (_, _) => const SizedBox(height: 4),
+            itemBuilder: (context, index) {
+              final destination = destinations[index];
+              final selected = destination.section == selectedSection;
+              return Semantics(
+                selected: selected,
+                button: true,
+                label: destination.label,
+                child: Tooltip(
+                  message: destination.label,
+                  child: Material(
+                    color: selected
+                        ? scheme.secondaryContainer
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(14),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: () => onSelected(destination.section),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 9,
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              destination.icon,
+                              color: selected
+                                  ? scheme.onSecondaryContainer
+                                  : scheme.onSurfaceVariant,
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              destination.label,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                              style: Theme.of(context).textTheme.labelMedium
+                                  ?.copyWith(
+                                    color: selected
+                                        ? scheme.onSecondaryContainer
+                                        : scheme.onSurfaceVariant,
+                                    fontWeight: selected
+                                        ? FontWeight.w700
+                                        : FontWeight.w500,
+                                  ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
           ),
         ),
       ),

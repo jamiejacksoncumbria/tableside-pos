@@ -23,6 +23,9 @@ class OfflineProjectedLine {
     required this.taxRateBasisPoints,
     required this.taxRateName,
     required this.sent,
+    this.addedAtUtc,
+    this.sentAtUtc,
+    this.sentEventId,
   });
 
   final String id;
@@ -35,22 +38,45 @@ class OfflineProjectedLine {
   final int taxRateBasisPoints;
   final String taxRateName;
   final bool sent;
+  final DateTime? addedAtUtc;
+  final DateTime? sentAtUtc;
+  final String? sentEventId;
 
   int get totalMinor => quantity * unitPriceMinor;
 
-  OfflineProjectedLine copyWith({int? quantity, bool? sent}) =>
-      OfflineProjectedLine(
-        id: id,
-        productId: productId,
-        name: name,
-        quantity: quantity ?? this.quantity,
-        unitPriceMinor: unitPriceMinor,
-        productionArea: productionArea,
-        details: details,
-        taxRateBasisPoints: taxRateBasisPoints,
-        taxRateName: taxRateName,
-        sent: sent ?? this.sent,
-      );
+  OfflineProjectedLine copyWith({
+    int? quantity,
+    int? unitPriceMinor,
+    bool? sent,
+    DateTime? sentAtUtc,
+    String? sentEventId,
+  }) => OfflineProjectedLine(
+    id: id,
+    productId: productId,
+    name: name,
+    quantity: quantity ?? this.quantity,
+    unitPriceMinor: unitPriceMinor ?? this.unitPriceMinor,
+    productionArea: productionArea,
+    details: details,
+    taxRateBasisPoints: taxRateBasisPoints,
+    taxRateName: taxRateName,
+    sent: sent ?? this.sent,
+    addedAtUtc: addedAtUtc,
+    sentAtUtc: sentAtUtc ?? this.sentAtUtc,
+    sentEventId: sentEventId ?? this.sentEventId,
+  );
+}
+
+class OfflineProductionTicketState {
+  const OfflineProductionTicketState({
+    required this.status,
+    this.isDelayed = false,
+  });
+
+  final String status;
+  final bool isDelayed;
+
+  Map<String, Object?> toJson() => {'status': status, 'isDelayed': isDelayed};
 }
 
 class OfflineProjectedPayment {
@@ -91,14 +117,26 @@ class OfflineOrderProjection {
     required this.payments,
     required this.isClosed,
     this.receiptNumber,
+    this.closedAtUtc,
     this.channel = 'dineIn',
     this.customerId,
     this.customerName,
     this.customerPhone,
     this.deliveryAddress,
+    this.deliveryAddressLabel,
+    this.deliveryLatitude,
+    this.deliveryLongitude,
+    this.serviceAreaId,
+    this.serviceAreaName,
+    this.deliveryFeeMinor = 0,
     this.scheduledForUtc,
     this.fulfilmentStatus = 'awaitingPreparation',
     this.assignedDriverId,
+    this.splitFromOrderId,
+    this.splitSequence = 0,
+    this.openSplitOrderIds = const <String>[],
+    this.productionTicketStates =
+        const <String, OfflineProductionTicketState>{},
   });
 
   final String tenantId;
@@ -113,17 +151,29 @@ class OfflineOrderProjection {
   final List<OfflineProjectedPayment> payments;
   final bool isClosed;
   final String? receiptNumber;
+  final DateTime? closedAtUtc;
   final String channel;
   final String? customerId;
   final String? customerName;
   final String? customerPhone;
   final String? deliveryAddress;
+  final String? deliveryAddressLabel;
+  final double? deliveryLatitude;
+  final double? deliveryLongitude;
+  final String? serviceAreaId;
+  final String? serviceAreaName;
+  final int deliveryFeeMinor;
   final DateTime? scheduledForUtc;
   final String fulfilmentStatus;
   final String? assignedDriverId;
+  final String? splitFromOrderId;
+  final int splitSequence;
+  final List<String> openSplitOrderIds;
+  final Map<String, OfflineProductionTicketState> productionTicketStates;
 
   int get totalMinor =>
-      lines.values.fold(0, (sum, line) => sum + line.totalMinor);
+      lines.values.fold(0, (sum, line) => sum + line.totalMinor) +
+      (channel == 'delivery' ? deliveryFeeMinor : 0);
   int get paidMinor =>
       payments.fold(0, (sum, payment) => sum + payment.baseAmountMinor);
   int get balanceDueMinor => totalMinor - paidMinor;
@@ -139,14 +189,28 @@ class OfflineOrderProjection {
     'tabName': tabName,
     'isClosed': isClosed,
     'receiptNumber': receiptNumber,
+    'closedAtUtc': closedAtUtc?.toIso8601String(),
     'channel': channel,
     'customerId': customerId,
     'customerName': customerName,
     'customerPhone': customerPhone,
     'deliveryAddress': deliveryAddress,
+    'deliveryAddressLabel': deliveryAddressLabel,
+    'deliveryLatitude': deliveryLatitude,
+    'deliveryLongitude': deliveryLongitude,
+    'serviceAreaId': serviceAreaId,
+    'serviceAreaName': serviceAreaName,
+    'deliveryFeeMinor': deliveryFeeMinor,
     'scheduledForUtc': scheduledForUtc?.toIso8601String(),
     'fulfilmentStatus': fulfilmentStatus,
     'assignedDriverId': assignedDriverId,
+    'splitFromOrderId': splitFromOrderId,
+    'splitSequence': splitSequence,
+    'openSplitOrderIds': openSplitOrderIds,
+    'productionTicketStates': {
+      for (final entry in productionTicketStates.entries)
+        entry.key: entry.value.toJson(),
+    },
     'lines': lines.values
         .map(
           (line) => <String, Object?>{
@@ -160,6 +224,9 @@ class OfflineOrderProjection {
             'taxRateBasisPoints': line.taxRateBasisPoints,
             'taxRateName': line.taxRateName,
             'sent': line.sent,
+            'addedAtUtc': line.addedAtUtc?.toIso8601String(),
+            'sentAtUtc': line.sentAtUtc?.toIso8601String(),
+            'sentEventId': line.sentEventId,
           },
         )
         .toList(growable: false),
@@ -179,6 +246,41 @@ class OfflineOrderProjection {
         )
         .toList(growable: false),
   };
+
+  OfflineOrderProjection withOpenSplitOrderIds(List<String> value) =>
+      OfflineOrderProjection._(
+        tenantId: tenantId,
+        venueId: venueId,
+        orderId: orderId,
+        openedAtUtc: openedAtUtc,
+        tableId: tableId,
+        tabName: tabName,
+        hubEpoch: hubEpoch,
+        lastSequence: lastSequence,
+        lines: lines,
+        payments: payments,
+        isClosed: isClosed,
+        receiptNumber: receiptNumber,
+        closedAtUtc: closedAtUtc,
+        channel: channel,
+        customerId: customerId,
+        customerName: customerName,
+        customerPhone: customerPhone,
+        deliveryAddress: deliveryAddress,
+        deliveryAddressLabel: deliveryAddressLabel,
+        deliveryLatitude: deliveryLatitude,
+        deliveryLongitude: deliveryLongitude,
+        serviceAreaId: serviceAreaId,
+        serviceAreaName: serviceAreaName,
+        deliveryFeeMinor: deliveryFeeMinor,
+        scheduledForUtc: scheduledForUtc,
+        fulfilmentStatus: fulfilmentStatus,
+        assignedDriverId: assignedDriverId,
+        splitFromOrderId: splitFromOrderId,
+        splitSequence: splitSequence,
+        openSplitOrderIds: List.unmodifiable(value),
+        productionTicketStates: productionTicketStates,
+      );
 }
 
 /// Rebuilds an order solely from its immutable venue-hub events. Validation is
@@ -197,14 +299,215 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
   var opened = false;
   var closed = false;
   String? receiptNumber;
+  DateTime? closedAtUtc;
   var channel = 'dineIn';
   String? customerId;
   String? customerName;
   String? customerPhone;
   String? deliveryAddress;
+  String? deliveryAddressLabel;
+  double? deliveryLatitude;
+  double? deliveryLongitude;
+  String? serviceAreaId;
+  String? serviceAreaName;
+  var deliveryFeeMinor = 0;
   DateTime? scheduledForUtc;
   var fulfilmentStatus = 'awaitingPreparation';
   String? assignedDriverId;
+  String? splitFromOrderId;
+  var splitSequence = 0;
+  final openSplitOrderIds = <String>[];
+  final productionTicketStates = <String, OfflineProductionTicketState>{};
+
+  // A replacement hub starts a new immutable epoch, but open orders may have
+  // been created by the preceding hub. The cloud signs these baselines into
+  // the encrypted snapshot. Seed replay from that trusted state before
+  // applying new-epoch events, even when the baseline was appended later to
+  // repair an order that had already received a command.
+  final baselines = events
+      .where((event) => event.type == 'order.cloudBaseline')
+      .toList(growable: false);
+  if (baselines.length > 1) {
+    throw const OfflineProjectionException(
+      'An order has more than one cloud baseline.',
+    );
+  }
+  final baseline = baselines.firstOrNull;
+  DateTime openedAtUtc = first.createdAtUtc;
+  String? tableId = first.payload['tableId'] as String?;
+  String? tabName = first.payload['tabName'] as String?;
+  if (baseline != null) {
+    final payload = baseline.payload;
+    final sourceEpoch = (payload['sourceOfflineHubEpoch'] as num?)?.toInt();
+    if (sourceEpoch == null || sourceEpoch > baseline.hubEpoch) {
+      throw const OfflineProjectionException(
+        'The cloud baseline belongs to a future hub epoch.',
+      );
+    }
+    opened = true;
+    openedAtUtc =
+        DateTime.tryParse(payload['openedAtUtc'] as String? ?? '')?.toUtc() ??
+        baseline.createdAtUtc;
+    tableId = payload['tableId'] as String?;
+    tabName = payload['tabName'] as String?;
+    channel = payload['channel'] as String? ?? 'dineIn';
+    if (!const ['dineIn', 'collection', 'delivery'].contains(channel)) {
+      throw const OfflineProjectionException(
+        'The cloud baseline channel is invalid.',
+      );
+    }
+    customerId = payload['customerId'] as String?;
+    customerName = payload['customerName'] as String?;
+    customerPhone = payload['customerPhone'] as String?;
+    deliveryAddress = payload['deliveryAddress'] as String?;
+    deliveryAddressLabel = payload['deliveryAddressLabel'] as String?;
+    deliveryLatitude = (payload['deliveryLatitude'] as num?)?.toDouble();
+    deliveryLongitude = (payload['deliveryLongitude'] as num?)?.toDouble();
+    serviceAreaId = payload['serviceAreaId'] as String?;
+    serviceAreaName = payload['serviceAreaName'] as String?;
+    deliveryFeeMinor = (payload['deliveryFeeMinor'] as num?)?.toInt() ?? 0;
+    scheduledForUtc = DateTime.tryParse(
+      payload['scheduledForUtc'] as String? ?? '',
+    )?.toUtc();
+    fulfilmentStatus =
+        payload['fulfilmentStatus'] as String? ??
+        (channel == 'delivery' ? 'awaitingDriver' : 'awaitingPreparation');
+    assignedDriverId = payload['assignedDriverId'] as String?;
+    splitFromOrderId = payload['splitFromOrderId'] as String?;
+    splitSequence = (payload['splitSequence'] as num?)?.toInt() ?? 0;
+    openSplitOrderIds.addAll(
+      (payload['openSplitOrderIds'] as List?)?.whereType<String>() ??
+          const <String>[],
+    );
+    final rawLines = payload['lines'];
+    if (rawLines is! List) {
+      throw const OfflineProjectionException(
+        'The cloud baseline lines are invalid.',
+      );
+    }
+    for (final raw in rawLines) {
+      if (raw is! Map) {
+        throw const OfflineProjectionException(
+          'A cloud baseline line is invalid.',
+        );
+      }
+      final value = Map<String, Object?>.from(raw);
+      final lineId = _requiredString(value, 'id');
+      if (lines.containsKey(lineId)) {
+        throw const OfflineProjectionException(
+          'A cloud baseline line ID was used more than once.',
+        );
+      }
+      lines[lineId] = OfflineProjectedLine(
+        id: lineId,
+        productId: _requiredString(value, 'productId'),
+        name: _requiredString(value, 'name'),
+        quantity: _positiveInt(value, 'quantity'),
+        unitPriceMinor: _nonNegativeInt(value, 'unitPriceMinor'),
+        productionArea: value['productionArea'] as String? ?? 'kitchen',
+        details:
+            (value['details'] as List?)?.whereType<String>().toList(
+              growable: false,
+            ) ??
+            const <String>[],
+        taxRateBasisPoints: (value['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
+        taxRateName: value['taxRateName'] as String? ?? 'Zero Rate',
+        sent: value['sent'] == true,
+        addedAtUtc: DateTime.tryParse(
+          value['addedAtUtc'] as String? ?? '',
+        )?.toUtc(),
+        sentAtUtc: DateTime.tryParse(
+          value['sentAtUtc'] as String? ?? '',
+        )?.toUtc(),
+        sentEventId: value['sentEventId'] as String?,
+      );
+    }
+    final rawPayments = payload['payments'];
+    if (rawPayments is! List) {
+      throw const OfflineProjectionException(
+        'The cloud baseline payments are invalid.',
+      );
+    }
+    for (final raw in rawPayments) {
+      if (raw is! Map) {
+        throw const OfflineProjectionException(
+          'A cloud baseline payment is invalid.',
+        );
+      }
+      final value = Map<String, Object?>.from(raw);
+      final paymentId = _requiredString(value, 'id');
+      if (!paymentIds.add(paymentId)) {
+        throw const OfflineProjectionException(
+          'A cloud baseline payment ID was used more than once.',
+        );
+      }
+      payments.add(
+        OfflineProjectedPayment(
+          id: paymentId,
+          baseAmountMinor: _positiveInt(value, 'baseAmountMinor'),
+          tenderedAmountMinor:
+              (value['tenderedAmountMinor'] as num?)?.toInt() ??
+              _positiveInt(value, 'baseAmountMinor'),
+          method: _requiredString(value, 'method'),
+          currencyCode: _requiredString(value, 'currencyCode'),
+          exchangeRateToBase: value['exchangeRateToBase'] as String? ?? '1',
+          recordedAtUtc:
+              DateTime.tryParse(
+                value['recordedAtUtc'] as String? ?? '',
+              )?.toUtc() ??
+              baseline.createdAtUtc,
+          terminalLabel: value['terminalLabel'] as String?,
+          cashChangeBaseMinor:
+              (value['cashChangeBaseMinor'] as num?)?.toInt() ?? 0,
+        ),
+      );
+    }
+    final total =
+        lines.values.fold<int>(0, (sum, line) => sum + line.totalMinor) +
+        (channel == 'delivery' ? deliveryFeeMinor : 0);
+    final paid = payments.fold<int>(
+      0,
+      (sum, payment) => sum + payment.baseAmountMinor,
+    );
+    if (paid > total) {
+      throw const OfflineProjectionException('The cloud baseline is overpaid.');
+    }
+  }
+
+  void addItem(Map<String, Object?> payload, DateTime createdAtUtc) {
+    _requireOpened(opened);
+    final lineId = _requiredString(payload, 'lineId');
+    if (lines.containsKey(lineId)) {
+      final existing = lines[lineId]!;
+      // A same-epoch recovery baseline already contains cloud-projected
+      // lines. Replaying the original add is idempotent when its immutable
+      // sale identity matches; later quantity events still replay below.
+      final sameCloudLine =
+          baseline != null &&
+          existing.productId == _requiredString(payload, 'productId') &&
+          existing.name == _requiredString(payload, 'productName') &&
+          existing.unitPriceMinor == _nonNegativeInt(payload, 'unitPriceMinor');
+      if (sameCloudLine) return;
+      throw const OfflineProjectionException(
+        'An order line ID was used more than once.',
+      );
+    }
+    final quantity = _positiveInt(payload, 'quantity');
+    final unitPriceMinor = _nonNegativeInt(payload, 'unitPriceMinor');
+    lines[lineId] = OfflineProjectedLine(
+      id: lineId,
+      productId: _requiredString(payload, 'productId'),
+      name: _requiredString(payload, 'productName'),
+      quantity: quantity,
+      unitPriceMinor: unitPriceMinor,
+      productionArea: payload['productionArea'] as String? ?? 'kitchen',
+      details: _productionDetails(payload),
+      taxRateBasisPoints: (payload['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
+      taxRateName: payload['taxRateName'] as String? ?? 'Zero Rate',
+      sent: false,
+      addedAtUtc: createdAtUtc,
+    );
+  }
 
   for (final event in events) {
     if (event.tenantId != first.tenantId || event.venueId != first.venueId) {
@@ -226,7 +529,16 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         'An event belongs to a different order.',
       );
     }
-    if (closed) {
+    if (event.type == 'order.cloudBaseline') {
+      // The signed baseline is applied before chronological replay. It can be
+      // appended after a local close during recovery, so encountering its
+      // sequence after closure is a no-op rather than a post-close mutation.
+      continue;
+    }
+    if (closed &&
+        event.type != 'order.fulfilmentChanged' &&
+        event.type != 'order.productionTicketUpdated' &&
+        event.type != 'receipt.requested') {
       throw const OfflineProjectionException(
         'A closed offline order cannot be changed.',
       );
@@ -235,6 +547,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     switch (event.type) {
       case 'order.opened':
         if (opened) {
+          if (baseline != null) break;
           throw const OfflineProjectionException(
             'The order was opened more than once.',
           );
@@ -250,6 +563,15 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         customerName = event.payload['customerName'] as String?;
         customerPhone = event.payload['customerPhone'] as String?;
         deliveryAddress = event.payload['deliveryAddress'] as String?;
+        deliveryAddressLabel = event.payload['deliveryAddressLabel'] as String?;
+        deliveryLatitude = (event.payload['deliveryLatitude'] as num?)
+            ?.toDouble();
+        deliveryLongitude = (event.payload['deliveryLongitude'] as num?)
+            ?.toDouble();
+        serviceAreaId = event.payload['serviceAreaId'] as String?;
+        serviceAreaName = event.payload['serviceAreaName'] as String?;
+        deliveryFeeMinor =
+            (event.payload['deliveryFeeMinor'] as num?)?.toInt() ?? 0;
         final scheduled = event.payload['scheduledForUtc'] as String?;
         scheduledForUtc = scheduled == null
             ? null
@@ -271,29 +593,22 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
             : 'awaitingPreparation';
         break;
       case 'order.itemAdded':
+        addItem(event.payload, event.createdAtUtc);
+        break;
+      case 'order.itemsAdded':
         _requireOpened(opened);
-        final lineId = _requiredString(event.payload, 'lineId');
-        if (lines.containsKey(lineId)) {
+        final rawItems = event.payload['items'];
+        if (rawItems is! List || rawItems.isEmpty) {
           throw const OfflineProjectionException(
-            'An order line ID was used more than once.',
+            'The basket batch is empty or invalid.',
           );
         }
-        final quantity = _positiveInt(event.payload, 'quantity');
-        final unitPriceMinor = _nonNegativeInt(event.payload, 'unitPriceMinor');
-        lines[lineId] = OfflineProjectedLine(
-          id: lineId,
-          productId: _requiredString(event.payload, 'productId'),
-          name: _requiredString(event.payload, 'productName'),
-          quantity: quantity,
-          unitPriceMinor: unitPriceMinor,
-          productionArea:
-              event.payload['productionArea'] as String? ?? 'kitchen',
-          details: _productionDetails(event.payload),
-          taxRateBasisPoints:
-              (event.payload['taxRateBasisPoints'] as num?)?.toInt() ?? 0,
-          taxRateName: event.payload['taxRateName'] as String? ?? 'Zero Rate',
-          sent: false,
-        );
+        for (final raw in rawItems) {
+          if (raw is! Map) {
+            throw const OfflineProjectionException('A basket item is invalid.');
+          }
+          addItem(Map<String, Object?>.from(raw), event.createdAtUtc);
+        }
         break;
       case 'order.itemQuantityChanged':
         _requireOpened(opened);
@@ -311,6 +626,51 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           lines[lineId] = existing.copyWith(quantity: quantity);
         }
         break;
+      case 'order.lineAdjusted':
+        _requireOpened(opened);
+        final lineId = _requiredString(event.payload, 'lineId');
+        final existing = lines[lineId];
+        if (existing == null) {
+          throw const OfflineProjectionException(
+            'Only an existing sale line can be adjusted.',
+          );
+        }
+        final operation = _requiredString(event.payload, 'operation');
+        final reason = _requiredString(event.payload, 'reason').trim();
+        if (reason.isEmpty) {
+          throw const OfflineProjectionException(
+            'A manager adjustment needs a reason.',
+          );
+        }
+        if (operation == 'remove') {
+          lines.remove(lineId);
+        } else {
+          final valueMinor = _nonNegativeInt(event.payload, 'valueMinor');
+          final nextPrice = operation == 'setUnitPrice'
+              ? valueMinor
+              : operation == 'discountUnitAmount'
+              ? existing.unitPriceMinor - valueMinor
+              : -1;
+          if (nextPrice < 0) {
+            throw const OfflineProjectionException(
+              'The manager price adjustment is invalid.',
+            );
+          }
+          lines[lineId] = existing.copyWith(unitPriceMinor: nextPrice);
+        }
+        final adjustedTotal =
+            lines.values.fold<int>(0, (sum, line) => sum + line.totalMinor) +
+            (channel == 'delivery' ? deliveryFeeMinor : 0);
+        final alreadyPaid = payments.fold<int>(
+          0,
+          (sum, payment) => sum + payment.baseAmountMinor,
+        );
+        if (adjustedTotal < alreadyPaid) {
+          throw const OfflineProjectionException(
+            'This adjustment would invalidate payments already recorded.',
+          );
+        }
+        break;
       case 'order.sent':
         _requireOpened(opened);
         final rawLineIds = event.payload['lineIds'];
@@ -325,8 +685,117 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
               'A send event refers to an unknown line.',
             );
           }
-          lines[value] = lines[value]!.copyWith(sent: true);
+          lines[value] = lines[value]!.copyWith(
+            sent: true,
+            sentAtUtc: event.createdAtUtc,
+            sentEventId: event.id,
+          );
         }
+        final sentLines = rawLineIds
+            .whereType<String>()
+            .map((id) => lines[id]!)
+            .toList(growable: false);
+        for (final area
+            in sentLines.map((line) => line.productionArea).toSet()) {
+          final ticketId = 'offline_${event.id}_$area';
+          productionTicketStates.putIfAbsent(
+            ticketId,
+            // The live view applies the venue's collection/delivery lead time
+            // to this initial state. An explicit KDS action replaces it with a
+            // concrete workflow state below.
+            () => const OfflineProductionTicketState(status: 'initial'),
+          );
+        }
+        break;
+      case 'order.productionTicketUpdated':
+        _requireOpened(opened);
+        final ticketId = _requiredString(event.payload, 'ticketId');
+        final status = _requiredString(event.payload, 'flowStatus');
+        if (!const {
+              'held',
+              'newOrder',
+              'preparing',
+              'ready',
+              'collected',
+              'served',
+              'cancelled',
+              'voided',
+            }.contains(status) ||
+            !productionTicketStates.containsKey(ticketId)) {
+          throw const OfflineProjectionException(
+            'The production ticket update is invalid.',
+          );
+        }
+        final currentStatus = productionTicketStates[ticketId]!.status;
+        if (!_validProductionTransition(currentStatus, status)) {
+          throw const OfflineProjectionException(
+            'The production ticket transition is invalid.',
+          );
+        }
+        productionTicketStates[ticketId] = OfflineProductionTicketState(
+          status: status,
+          isDelayed: event.payload['isDelayed'] == true,
+        );
+        break;
+      case 'order.splitCreated':
+        _requireOpened(opened);
+        if (splitFromOrderId != null || payments.isNotEmpty) {
+          throw const OfflineProjectionException(
+            'Only an unpaid main bill can be split.',
+          );
+        }
+        final splitOrderId = _requiredString(event.payload, 'splitOrderId');
+        final rawAllocations = event.payload['splitLines'];
+        if (rawAllocations is! List || rawAllocations.isEmpty) {
+          throw const OfflineProjectionException(
+            'The split bill selection is invalid.',
+          );
+        }
+        var selectedQuantity = 0;
+        final selectedLineIds = <String>{};
+        for (final raw in rawAllocations) {
+          if (raw is! Map) {
+            throw const OfflineProjectionException(
+              'A split bill item is invalid.',
+            );
+          }
+          final allocation = Map<String, Object?>.from(raw);
+          final lineId = _requiredString(allocation, 'lineId');
+          final quantity = _positiveInt(allocation, 'quantity');
+          final line = lines[lineId];
+          if (line == null ||
+              !line.sent ||
+              quantity > line.quantity ||
+              !selectedLineIds.add(lineId)) {
+            throw const OfflineProjectionException(
+              'A selected split item is no longer available.',
+            );
+          }
+          selectedQuantity += quantity;
+        }
+        final sourceQuantity = lines.values.fold<int>(
+          0,
+          (sum, line) => sum + line.quantity,
+        );
+        if (selectedQuantity >= sourceQuantity ||
+            openSplitOrderIds.contains(splitOrderId)) {
+          throw const OfflineProjectionException(
+            'The split must leave at least one item on the main bill.',
+          );
+        }
+        for (final raw in rawAllocations.whereType<Map>()) {
+          final lineId = raw['lineId']! as String;
+          final quantity = (raw['quantity']! as num).toInt();
+          final line = lines[lineId]!;
+          final remaining = line.quantity - quantity;
+          if (remaining == 0) {
+            lines.remove(lineId);
+          } else {
+            lines[lineId] = line.copyWith(quantity: remaining);
+          }
+        }
+        splitSequence++;
+        openSplitOrderIds.add(splitOrderId);
         break;
       case 'order.fulfilmentChanged':
         _requireOpened(opened);
@@ -336,6 +805,7 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           'readyForCollection',
           'awaitingDriver',
           'assigned',
+          'driverDeclined',
           'outForDelivery',
           'collected',
           'delivered',
@@ -349,35 +819,55 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         if (!managerAuthorized &&
             (assignedDriverId == null ||
                 event.staffId != assignedDriverId ||
-                !const {'outForDelivery', 'delivered'}.contains(status))) {
+                !const {
+                  'driverDeclined',
+                  'outForDelivery',
+                  'delivered',
+                }.contains(status))) {
           throw const OfflineProjectionException(
             'A driver may update only their own assigned delivery.',
           );
         }
+        // Historic delivery events predate structured service areas. They
+        // must remain replayable so an upgraded hub can start and complete
+        // those orders. New order.opened commands are still fail-closed by
+        // VenueOfflineCatalogue.validateDeliveryArea before being committed.
         fulfilmentStatus = status;
-        assignedDriverId =
-            event.payload['driverId'] as String? ?? assignedDriverId;
+        assignedDriverId = status == 'driverDeclined'
+            ? null
+            : event.payload['driverId'] as String? ?? assignedDriverId;
         break;
       case 'payment.recorded':
         _requireOpened(opened);
         final paymentId = _requiredString(event.payload, 'paymentId');
         if (!paymentIds.add(paymentId)) {
+          final existing = payments.where((item) => item.id == paymentId).first;
+          if (baseline != null &&
+              existing.baseAmountMinor ==
+                  _positiveInt(event.payload, 'baseAmountMinor')) {
+            break;
+          }
           throw const OfflineProjectionException(
             'A payment ID was used more than once.',
           );
         }
         final amountMinor = _positiveInt(event.payload, 'baseAmountMinor');
-        final total = lines.values.fold<int>(
-          0,
-          (sum, line) => sum + line.totalMinor,
-        );
+        // Delivery charges are part of the bill. This replay validation must
+        // use the same total as [OfflineOrderProjection.totalMinor] and the
+        // pre-commit order-book check; otherwise a valid full delivery payment
+        // is incorrectly treated as an overpayment by exactly the fee amount.
+        final total =
+            lines.values.fold<int>(0, (sum, line) => sum + line.totalMinor) +
+            (channel == 'delivery' ? deliveryFeeMinor : 0);
         final alreadyPaid = payments.fold<int>(
           0,
           (sum, payment) => sum + payment.baseAmountMinor,
         );
         if (alreadyPaid + amountMinor > total) {
-          throw const OfflineProjectionException(
-            'The payment exceeds the outstanding balance.',
+          throw OfflineProjectionException(
+            'The payment exceeds the outstanding balance '
+            '(attempted $amountMinor minor units; '
+            'remaining ${total - alreadyPaid}).',
           );
         }
         payments.add(
@@ -398,12 +888,76 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
           ),
         );
         break;
+      case 'payment.batchRecorded':
+        _requireOpened(opened);
+        _requiredString(event.payload, 'batchId');
+        final rawPayments = event.payload['payments'];
+        if (rawPayments is! List || rawPayments.any((value) => value is! Map)) {
+          throw const OfflineProjectionException(
+            'The payment batch is invalid.',
+          );
+        }
+        final total =
+            lines.values.fold<int>(0, (sum, line) => sum + line.totalMinor) +
+            (channel == 'delivery' ? deliveryFeeMinor : 0);
+        var paid = payments.fold<int>(
+          0,
+          (sum, payment) => sum + payment.baseAmountMinor,
+        );
+        for (final rawPayment in rawPayments.whereType<Map>()) {
+          final payment = Map<String, Object?>.from(rawPayment);
+          final paymentId = _requiredString(payment, 'paymentId');
+          final amountMinor = _positiveInt(payment, 'baseAmountMinor');
+          if (!paymentIds.add(paymentId)) {
+            final existing = payments
+                .where((item) => item.id == paymentId)
+                .first;
+            if (existing.baseAmountMinor == amountMinor) continue;
+            throw const OfflineProjectionException(
+              'A payment ID was used more than once.',
+            );
+          }
+          if (paid + amountMinor > total) {
+            throw const OfflineProjectionException(
+              'The payment batch exceeds the outstanding balance.',
+            );
+          }
+          payments.add(
+            OfflineProjectedPayment(
+              id: paymentId,
+              baseAmountMinor: amountMinor,
+              tenderedAmountMinor:
+                  (payment['tenderedAmountMinor'] as num?)?.toInt() ??
+                  amountMinor,
+              method: _requiredString(payment, 'method'),
+              currencyCode: _requiredString(payment, 'currencyCode'),
+              exchangeRateToBase:
+                  payment['exchangeRateToBase'] as String? ?? '1',
+              recordedAtUtc: event.createdAtUtc,
+              terminalLabel: payment['terminalLabel'] as String?,
+              cashChangeBaseMinor:
+                  (payment['cashChangeBaseMinor'] as num?)?.toInt() ?? 0,
+            ),
+          );
+          paid += amountMinor;
+        }
+        if (event.payload['closeIfSettled'] == true) {
+          if (lines.isEmpty || paid != total) {
+            throw const OfflineProjectionException(
+              'An order may close only when its balance is exactly zero.',
+            );
+          }
+          closed = true;
+          receiptNumber = event.payload['receiptNumber'] as String?;
+          closedAtUtc = event.createdAtUtc;
+          if (channel == 'collection') fulfilmentStatus = 'collected';
+        }
+        break;
       case 'order.closed':
         _requireOpened(opened);
-        final total = lines.values.fold<int>(
-          0,
-          (sum, line) => sum + line.totalMinor,
-        );
+        final total =
+            lines.values.fold<int>(0, (sum, line) => sum + line.totalMinor) +
+            (channel == 'delivery' ? deliveryFeeMinor : 0);
         final paid = payments.fold<int>(
           0,
           (sum, payment) => sum + payment.baseAmountMinor,
@@ -415,6 +969,23 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         }
         closed = true;
         receiptNumber = event.payload['receiptNumber'] as String?;
+        closedAtUtc = event.createdAtUtc;
+        if (channel == 'collection') fulfilmentStatus = 'collected';
+        break;
+      case 'order.cancelled':
+        _requireOpened(opened);
+        final reason = event.payload['reason'];
+        if (lines.isNotEmpty ||
+            payments.isNotEmpty ||
+            reason is! String ||
+            reason.trim().length < 3) {
+          throw const OfflineProjectionException(
+            'Only an empty, unpaid order can be cancelled.',
+          );
+        }
+        closed = true;
+        receiptNumber = null;
+        closedAtUtc = event.createdAtUtc;
         break;
       case 'receipt.requested':
         _requireOpened(opened);
@@ -430,24 +1001,49 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
     tenantId: first.tenantId,
     venueId: first.venueId,
     orderId: orderId,
-    openedAtUtc: first.createdAtUtc,
-    tableId: first.payload['tableId'] as String?,
-    tabName: first.payload['tabName'] as String?,
+    openedAtUtc: openedAtUtc,
+    tableId: tableId,
+    tabName: tabName,
     hubEpoch: first.hubEpoch,
     lastSequence: lastSequence,
     lines: UnmodifiableMapView(lines),
     payments: List.unmodifiable(payments),
     isClosed: closed,
     receiptNumber: receiptNumber,
+    closedAtUtc: closedAtUtc,
     channel: channel,
     customerId: customerId,
     customerName: customerName,
     customerPhone: customerPhone,
     deliveryAddress: deliveryAddress,
+    deliveryAddressLabel: deliveryAddressLabel,
+    deliveryLatitude: deliveryLatitude,
+    deliveryLongitude: deliveryLongitude,
+    serviceAreaId: serviceAreaId,
+    serviceAreaName: serviceAreaName,
+    deliveryFeeMinor: deliveryFeeMinor,
     scheduledForUtc: scheduledForUtc,
     fulfilmentStatus: fulfilmentStatus,
     assignedDriverId: assignedDriverId,
+    splitFromOrderId: splitFromOrderId,
+    splitSequence: splitSequence,
+    openSplitOrderIds: List.unmodifiable(openSplitOrderIds),
+    productionTicketStates: UnmodifiableMapView(productionTicketStates),
   );
+}
+
+bool _validProductionTransition(String current, String next) {
+  if (current == next) return true;
+  return switch (current) {
+    'initial' =>
+      next == 'held' || next == 'newOrder' || next == 'preparing',
+    'held' => next == 'newOrder',
+    'newOrder' => next == 'preparing',
+    'preparing' => next == 'ready',
+    'ready' => next == 'collected',
+    'collected' => next == 'served',
+    _ => false,
+  };
 }
 
 List<String> _productionDetails(Map<String, Object?> payload) {
