@@ -13104,7 +13104,12 @@ async function invokePosAction(action, caller, data) {
     case "issueRealtimeBackupHubSession":
       return issueRealtimeBackupHubSessionFor(caller, data);
     case "promoteOfflineBackupHub":
-      return promoteOfflineBackupHubFor(caller, data);
+      // Promotion is initiated from a shared POS/backup device, whose
+      // Firebase host account may intentionally have only the `printer`
+      // role. The device-bound PIN session has already been validated above;
+      // use that acting staff identity so the fresh manager PIN is checked
+      // against the manager who is actually approving the takeover.
+      return promoteOfflineBackupHubFor(actingCaller, data);
     case "uploadDeviceDiagnostics":
       return uploadDeviceDiagnosticsFor(caller, data);
     case "issueRealtimePosSession":

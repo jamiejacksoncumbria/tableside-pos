@@ -294,7 +294,7 @@ describe("POS role and replay protection", () => {
 });
 
 describe("venue hub cloud reconciliation", () => {
-  test("requires explicit manager approval and atomically promotes a configured backup", async () => {
+  test("uses the acting manager on a printer-hosted backup and promotes atomically", async () => {
     await environment.withSecurityRulesDisabled(async (context) => {
       await set(ref(context.database(), "hubAuthorities/tenant-a/venue-a"), {
         enabled: true,
