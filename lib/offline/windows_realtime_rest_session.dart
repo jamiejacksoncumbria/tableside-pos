@@ -72,18 +72,12 @@ class WindowsRealtimeRestSession {
   /// monitoring does not depend on the timing of Firebase's initial SSE put.
   Future<Object?> read(String path) async {
     var token = await _validIdToken();
-    var response = await _client.get(
-      _databaseUri(path),
-      headers: _authorizationHeaders(token),
-    );
+    var response = await _sendRead(path, token);
     if ((response.statusCode == 401 || response.statusCode == 403) &&
         renewCustomToken != null) {
       await _renewCredential();
       token = await _validIdToken();
-      response = await _client.get(
-        _databaseUri(path),
-        headers: _authorizationHeaders(token),
-      );
+      response = await _sendRead(path, token);
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw StateError(
@@ -107,10 +101,9 @@ class WindowsRealtimeRestSession {
       while (!cancelled && !_closed) {
         try {
           final token = await _validIdToken();
-          final request = http.Request('GET', _databaseUri(path));
+          final request = http.Request('GET', _databaseUri(path, token));
           request.headers['Accept'] = 'text/event-stream';
-          request.headers['Authorization'] = 'Bearer $token';
-          final response = await _client.send(request);
+          final response = await _sendRequest(request, operation: 'listener');
           if (response.statusCode < 200 || response.statusCode >= 300) {
             final body = await response.stream.bytesToString();
             throw StateError(
@@ -229,12 +222,39 @@ class WindowsRealtimeRestSession {
     String path,
     Object? value,
     String token,
-  ) {
-    final request = http.Request(method, _databaseUri(path))
+  ) async {
+    final request = http.Request(method, _databaseUri(path, token))
       ..headers['Content-Type'] = 'application/json'
-      ..headers['Authorization'] = 'Bearer $token'
       ..body = jsonEncode(value);
-    return _client.send(request);
+    return _sendRequest(request, operation: 'write');
+  }
+
+  Future<http.Response> _sendRead(String path, String token) async {
+    try {
+      return await _client.get(_databaseUri(path, token));
+    } on Object catch (error) {
+      throw StateError(
+        'Realtime read transport failed: ${_sanitiseTransportError(error)}',
+      );
+    }
+  }
+
+  /// Firebase RTDB accepts Firebase Authentication ID tokens through its
+  /// documented `auth` query parameter. Transport exceptions can echo the
+  /// request URI, so every exception is wrapped and scrubbed before it can
+  /// reach application diagnostics.
+  Future<http.StreamedResponse> _sendRequest(
+    http.Request request, {
+    required String operation,
+  }) async {
+    try {
+      return await _client.send(request);
+    } on Object catch (error) {
+      throw StateError(
+        'Realtime $operation transport failed: '
+        '${_sanitiseTransportError(error)}',
+      );
+    }
   }
 
   Future<String> _validIdToken() async {
@@ -315,11 +335,7 @@ class WindowsRealtimeRestSession {
     _expiresAt = DateTime.now().add(Duration(seconds: seconds));
   }
 
-  Map<String, String> _authorizationHeaders(String token) => <String, String>{
-    'Authorization': 'Bearer $token',
-  };
-
-  Uri _databaseUri(String path) {
+  Uri _databaseUri(String path, String token) {
     final base = databaseUrl.endsWith('/')
         ? databaseUrl.substring(0, databaseUrl.length - 1)
         : databaseUrl;
@@ -328,8 +344,15 @@ class WindowsRealtimeRestSession {
         .where((segment) => segment.isNotEmpty)
         .map(Uri.encodeComponent)
         .join('/');
-    return Uri.parse('$base/$encodedPath.json');
+    return Uri.parse(
+      '$base/$encodedPath.json',
+    ).replace(queryParameters: <String, String>{'auth': token});
   }
+
+  static String _sanitiseTransportError(Object error) => '$error'.replaceAll(
+    RegExp(r'([?&]auth=)[^&\s)]+', caseSensitive: false),
+    r'$1<redacted>',
+  );
 
   static Map<String, Object?> _decodedObject(String source) {
     final decoded = jsonDecode(source);
