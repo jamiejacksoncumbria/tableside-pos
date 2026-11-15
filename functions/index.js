@@ -3333,7 +3333,10 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   // Schema 4 adds independently versioned snapshot sections. A catalogue
   // edit no longer forces the hub to redownload customers, staff, printers,
   // tables and open orders.
-  const snapshotSchemaVersion = 5;
+  // Schema 6 retains canonical stock recipes on open-order baselines. Without
+  // them, a replacement/restarted hub could display an unsent cloud draft but
+  // had to reject production release because stock consumption was unknowable.
+  const snapshotSchemaVersion = 6;
   await db.runTransaction(async (transaction) => {
     const current = await transaction.get(snapshotVersionRef);
     if (!current.exists) {
@@ -3352,6 +3355,11 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
     if (Number(current.data()?.schemaVersion ?? 1) < snapshotSchemaVersion) {
       transaction.update(snapshotVersionRef, {
         generation: Number(current.data()?.generation ?? 1) + 1,
+        // Open orders live in the operations section. Increment it so clients
+        // using section-aware partial snapshots actually download the upgraded
+        // baseline instead of observing only the global generation change.
+        operationsGeneration:
+          Number(current.data()?.operationsGeneration ?? 0) + 1,
         schemaVersion: snapshotSchemaVersion,
         updatedAt: FieldValue.serverTimestamp(),
       });
@@ -3575,6 +3583,9 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
         sent: line.isSentToProduction === true,
         addedAtUtc: isoDate(line.addedAt),
         sentAtUtc: isoDate(line.sentAt),
+        trackStock: line.trackStock === true,
+        stockPerSale: Number(line.stockPerSale ?? 1),
+        stockComponents: offlineStockComponents(line.stockComponents),
       })),
       payments: payments.map((payment) => ({
         id: payment.id,

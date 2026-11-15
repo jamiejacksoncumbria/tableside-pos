@@ -13,6 +13,8 @@ class VenueOfflineCatalogueException implements Exception {
   String toString() => 'VenueOfflineCatalogueException: $message';
 }
 
+String _lineLedgerKey(String orderId, String lineId) => '$orderId\u0000$lineId';
+
 class VenueOfflineCatalogue {
   VenueOfflineCatalogue._({
     required this.version,
@@ -22,6 +24,7 @@ class VenueOfflineCatalogue {
     required this.modifierGroups,
     required this.routedProductionAreas,
     required this.deliveryAreas,
+    required this.cloudStockLines,
   });
 
   factory VenueOfflineCatalogue.fromSnapshot(Map<String, Object?> snapshot) {
@@ -31,6 +34,7 @@ class VenueOfflineCatalogue {
     final rawGroups = snapshot['modifierGroups'];
     final rawRoutes = snapshot['printerRoutes'] ?? const <Object?>[];
     final rawDeliveryAreas = snapshot['serviceAreas'] ?? const <Object?>[];
+    final rawOpenOrders = snapshot['openOrders'] ?? const <Object?>[];
     final cloudLastSequence = snapshot['cloudLastSequence'] ?? 0;
     if (version is! int ||
         version < 1 ||
@@ -40,6 +44,7 @@ class VenueOfflineCatalogue {
         rawGroups is! List ||
         rawRoutes is! List ||
         rawDeliveryAreas is! List ||
+        rawOpenOrders is! List ||
         cloudLastSequence is! int ||
         cloudLastSequence < 0) {
       throw const VenueOfflineCatalogueException(
@@ -90,6 +95,31 @@ class VenueOfflineCatalogue {
       }
       deliveryAreas[area.id] = area;
     }
+    // Open cloud orders are signed into the encrypted hub snapshot. Preserve
+    // their canonical stock recipe separately from the projected sale line so
+    // an unsent draft that survives a hub restart can still be validated.
+    // Older snapshots did not include these fields; those entries are omitted
+    // and therefore continue to fail closed instead of silently skipping stock.
+    final cloudStockLines = <String, Map<String, Object?>>{};
+    for (final rawOrder in rawOpenOrders) {
+      if (rawOrder is! Map) continue;
+      final order = Map<String, Object?>.from(rawOrder);
+      final orderId = order['orderId'];
+      final lines = order['lines'];
+      if (orderId is! String || orderId.isEmpty || lines is! List) continue;
+      for (final rawLine in lines) {
+        if (rawLine is! Map) continue;
+        final line = Map<String, Object?>.from(rawLine);
+        final lineId = line['id'];
+        if (lineId is! String ||
+            lineId.isEmpty ||
+            line['trackStock'] is! bool ||
+            line['stockComponents'] is! List) {
+          continue;
+        }
+        cloudStockLines[_lineLedgerKey(orderId, lineId)] = line;
+      }
+    }
     return VenueOfflineCatalogue._(
       version: version,
       currencyCode: currencyCode,
@@ -108,6 +138,7 @@ class VenueOfflineCatalogue {
             .map((route) => route['productionArea'] as String),
       ),
       deliveryAreas: UnmodifiableMapView(deliveryAreas),
+      cloudStockLines: UnmodifiableMapView(cloudStockLines),
     );
   }
 
@@ -118,6 +149,7 @@ class VenueOfflineCatalogue {
   final Map<String, OfflineModifierGroup> modifierGroups;
   final Set<String> routedProductionAreas;
   final Map<String, OfflineDeliveryArea> deliveryAreas;
+  final Map<String, Map<String, Object?>> cloudStockLines;
 
   void validateDeliveryArea(Map<String, Object?> payload) {
     if (payload['channel'] != 'delivery') return;
@@ -172,35 +204,67 @@ class VenueOfflineCatalogue {
     final linePayloads = <String, Map<String, Object?>>{};
     for (final event in existing) {
       if (event.type == 'order.itemAdded') {
+        final orderId = event.payload['orderId'];
         final lineId = event.payload['lineId'];
-        if (lineId is String) {
-          linePayloads[lineId] = Map<String, Object?>.from(event.payload);
+        if (orderId is String && lineId is String) {
+          linePayloads[_lineLedgerKey(orderId, lineId)] =
+              Map<String, Object?>.from(event.payload);
         }
       } else if (event.type == 'order.itemsAdded') {
+        final orderId = event.payload['orderId'];
         final items = event.payload['items'];
-        if (items is List) {
+        if (orderId is String && items is List) {
           for (final raw in items) {
             if (raw is! Map) continue;
             final item = Map<String, Object?>.from(raw);
             final lineId = item['lineId'];
-            if (lineId is String) linePayloads[lineId] = item;
+            if (lineId is String) {
+              linePayloads[_lineLedgerKey(orderId, lineId)] = item;
+            }
+          }
+        }
+      } else if (event.type == 'order.cloudBaseline') {
+        final orderId = event.payload['orderId'];
+        final lines = event.payload['lines'];
+        if (orderId is String && lines is List) {
+          for (final raw in lines) {
+            if (raw is! Map) continue;
+            final line = Map<String, Object?>.from(raw);
+            final lineId = line['id'];
+            if (lineId is String &&
+                line['trackStock'] is bool &&
+                line['stockComponents'] is List) {
+              linePayloads[_lineLedgerKey(orderId, lineId)] = line;
+            }
           }
         }
       } else if (event.type == 'order.itemQuantityChanged') {
+        final orderId = event.payload['orderId'];
         final lineId = event.payload['lineId'];
         final quantity = event.payload['quantity'];
-        if (lineId is String && quantity is int) {
+        if (orderId is String && lineId is String && quantity is int) {
+          final key = _lineLedgerKey(orderId, lineId);
           if (quantity == 0) {
-            linePayloads.remove(lineId);
+            linePayloads.remove(key);
           } else {
-            linePayloads[lineId]?['quantity'] = quantity;
+            linePayloads[key]?['quantity'] = quantity;
           }
         }
       } else if (event.type == 'order.sent') {
         if (event.sequence <= cloudLastSequence) continue;
+        final orderId = event.payload['orderId'];
+        if (orderId is! String) {
+          throw const VenueOfflineCatalogueException(
+            'An offline stock order identity is invalid.',
+          );
+        }
         for (final lineId in (event.payload['lineIds'] as List? ?? const [])) {
           if (lineId is String) {
-            _addConsumption(consumed, linePayloads[lineId]);
+            final key = _lineLedgerKey(orderId, lineId);
+            _addConsumption(
+              consumed,
+              linePayloads[key] ?? cloudStockLines[key],
+            );
           }
         }
       }
@@ -212,7 +276,8 @@ class VenueOfflineCatalogue {
           'Only unsent order items may be released.',
         );
       }
-      final payload = linePayloads[lineId];
+      final key = _lineLedgerKey(order.orderId, lineId);
+      final payload = linePayloads[key] ?? cloudStockLines[key];
       if (payload != null) payload['quantity'] = line.quantity;
       _addConsumption(consumed, payload);
     }

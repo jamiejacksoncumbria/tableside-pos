@@ -158,6 +158,106 @@ void main() {
     expect(accepted['channelAvailabilityOverride'], isTrue);
   });
 
+  test(
+    'trusted snapshot restores stock metadata for an unsent baseline line',
+    () {
+      final snapshot = _snapshot();
+      final product =
+          (snapshot['products'] as List).single as Map<String, Object>;
+      product.addAll(<String, Object>{
+        'trackStock': true,
+        'stockOnHand': 10.0,
+        'stockPerSale': 1.0,
+        'stockComponents': <Object>[],
+      });
+      snapshot['openOrders'] = [
+        {
+          'orderId': 'order-a',
+          'lines': [
+            {
+              'id': 'line-a',
+              'productId': 'steak',
+              'quantity': 1,
+              'trackStock': true,
+              'stockPerSale': 1.0,
+              'stockComponents': <Object?>[],
+            },
+          ],
+        },
+      ];
+      final baseline = _event(1, 'order.cloudBaseline', {
+        'orderId': 'order-a',
+        'sourceOfflineHubEpoch': 1,
+        'openedAtUtc': DateTime.utc(2026, 9, 12, 12).toIso8601String(),
+        'tableId': 'table-a',
+        'lines': [
+          {
+            'id': 'line-a',
+            'productId': 'steak',
+            'name': 'Sirloin Steak',
+            'quantity': 1,
+            'unitPriceMinor': 2500,
+            'productionArea': 'kitchen',
+            'sent': false,
+          },
+        ],
+        'payments': <Object?>[],
+      });
+      final order = projectOfflineOrder([baseline]);
+
+      expect(
+        () => VenueOfflineCatalogue.fromSnapshot(snapshot).validateStockForSend(
+          [baseline],
+          order,
+          const ['line-a'],
+          managerOverride: false,
+        ),
+        returnsNormally,
+      );
+    },
+  );
+
+  test('missing baseline stock metadata continues to fail closed', () {
+    final snapshot = _snapshot();
+    final product =
+        (snapshot['products'] as List).single as Map<String, Object>;
+    product.addAll(<String, Object>{
+      'trackStock': true,
+      'stockOnHand': 10.0,
+      'stockPerSale': 1.0,
+      'stockComponents': <Object>[],
+    });
+    final baseline = _event(1, 'order.cloudBaseline', {
+      'orderId': 'order-a',
+      'sourceOfflineHubEpoch': 1,
+      'openedAtUtc': DateTime.utc(2026, 9, 12, 12).toIso8601String(),
+      'tableId': 'table-a',
+      'lines': [
+        {
+          'id': 'line-a',
+          'productId': 'steak',
+          'name': 'Sirloin Steak',
+          'quantity': 1,
+          'unitPriceMinor': 2500,
+          'productionArea': 'kitchen',
+          'sent': false,
+        },
+      ],
+      'payments': <Object?>[],
+    });
+    final order = projectOfflineOrder([baseline]);
+
+    expect(
+      () => VenueOfflineCatalogue.fromSnapshot(snapshot).validateStockForSend(
+        [baseline],
+        order,
+        const ['line-a'],
+        managerOverride: false,
+      ),
+      throwsA(isA<VenueOfflineCatalogueException>()),
+    );
+  });
+
   test('required printing fails closed without a matching route', () {
     final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
     final order = projectOfflineOrder([
