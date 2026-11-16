@@ -84,8 +84,12 @@ class BluetoothProductionPrintResult {
   const BluetoothProductionPrintResult({
     this.ticketsPrinted = 0,
     this.skippedProductionAreas = const <String>[],
+    this.queuedProductionAreas = const <String>[],
+    this.unroutedProductionAreas = const <String>[],
   });
 
   final int ticketsPrinted;
   final List<String> skippedProductionAreas;
+  final List<String> queuedProductionAreas;
+  final List<String> unroutedProductionAreas;
 }

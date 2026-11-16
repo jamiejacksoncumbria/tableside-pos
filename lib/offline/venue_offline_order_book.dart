@@ -536,7 +536,8 @@ class VenueOfflineOrderBook {
         final flowStatus = draft.payload['flowStatus'];
         final delayed = draft.payload['isDelayed'];
         if (ticketId is! String ||
-            !current.productionTicketStates.containsKey(ticketId) ||
+            (!current.productionTicketStates.containsKey(ticketId) &&
+                !current.expectedProductionTicketIds.contains(ticketId)) ||
             flowStatus is! String ||
             !const {
               'held',
@@ -553,7 +554,8 @@ class VenueOfflineOrderBook {
             'The production ticket update is invalid.',
           );
         }
-        final currentStatus = current.productionTicketStates[ticketId]!.status;
+        final currentStatus =
+            current.productionTicketStates[ticketId]?.status ?? 'initial';
         if (!_validProductionTicketTransition(currentStatus, flowStatus)) {
           throw const OfflineProjectionException(
             'The production ticket transition is invalid.',
@@ -730,8 +732,7 @@ class VenueOfflineOrderBook {
 bool _validProductionTicketTransition(String current, String next) {
   if (current == next) return true;
   return switch (current) {
-    'initial' =>
-      next == 'held' || next == 'newOrder' || next == 'preparing',
+    'initial' => next == 'held' || next == 'newOrder' || next == 'preparing',
     'held' => next == 'newOrder',
     'newOrder' => next == 'preparing',
     'preparing' => next == 'ready',

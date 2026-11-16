@@ -2480,8 +2480,11 @@ async function uploadDeviceDiagnosticsFor(caller, rawData) {
     if (level === "ERROR") {
       const action = requiredText(entry, "action", 100);
       const errorType = requiredText(entry, "errorType", 100);
-      if (!/^[ A-Za-z0-9_.()/-]+$/u.test(action) ||
-          !/^[A-Za-z0-9_.]+$/u.test(errorType)) {
+      // Action labels are application-owned text and are JSON encoded below.
+      // Reject control characters, but retain useful Dart provider/generic
+      // labels such as `StreamProvider<List<...>>` and actions with colons.
+      if (/[\u0000-\u001f\u007f]/u.test(action) ||
+          !/^[A-Za-z0-9_.$<>-]+$/u.test(errorType)) {
         throw new HttpsError("invalid-argument", "An error diagnostic is invalid.");
       }
       return {timestamp, level, action, errorType};
@@ -2492,9 +2495,13 @@ async function uploadDeviceDiagnosticsFor(caller, rawData) {
     }
     return {timestamp, level, location};
   });
+  // Direct Firebase calls have only `uid`; staff-PIN delegated calls also
+  // include `hostUid`. Normalize both before hashing so diagnostics never
+  // crash merely because the device is still on the account-level PIN gate.
+  const hostUid = caller.hostUid ?? caller.uid;
   const throttleRef = db.doc(
     `tenants/${tenantId}/deviceDiagnosticUploadLimits/${createHash("sha256")
-      .update(`${caller.hostUid}:${deviceId}`).digest("hex")}`,
+      .update(`${hostUid}:${deviceId}`).digest("hex")}`,
   );
   await db.runTransaction(async (transaction) => {
     const current = await transaction.get(throttleRef);
@@ -2512,7 +2519,7 @@ async function uploadDeviceDiagnosticsFor(caller, rawData) {
     venueId,
     deviceId,
     platform: optionalText(data, "platform", 32) || "unknown",
-    hostUidHash: createHash("sha256").update(caller.hostUid).digest("hex").slice(0, 16),
+    hostUidHash: createHash("sha256").update(hostUid).digest("hex").slice(0, 16),
     entries,
   }));
   return {accepted: true, entryCount: entries.length};

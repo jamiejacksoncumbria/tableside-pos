@@ -1014,7 +1014,15 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                     ? 'New items sent to the Order Flow Board without printing.'
                                     : printResult.ticketsPrinted > 0
                                     ? 'New items sent. ${printResult.ticketsPrinted} production ticket(s) printed.'
-                                    : 'New items sent to the Order Flow Board. Enable production routing on this device to print tickets.';
+                                    : printResult
+                                          .queuedProductionAreas
+                                          .isNotEmpty
+                                    ? 'New items sent and queued for the configured production printer.'
+                                    : printResult
+                                          .unroutedProductionAreas
+                                          .isNotEmpty
+                                    ? 'New items sent, but ${printResult.unroutedProductionAreas.join(', ')} has no live printer route.'
+                                    : 'New items sent to the Order Flow Board without a matching live printer route.';
                                 showAppNotification(
                                   context,
                                   ref: ref,

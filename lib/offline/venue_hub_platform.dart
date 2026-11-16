@@ -36,6 +36,19 @@ class AndroidVenueHubService {
     await _channel.invokeMethod<void>('stop');
   }
 
+  /// Keeps an authenticated Android POS terminal's CPU and Wi-Fi connection
+  /// available while its screen is locked. This does not confer hub authority
+  /// and is deliberately not restored at boot.
+  static Future<void> startClient() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    await _channel.invokeMethod<void>('startClient');
+  }
+
+  static Future<void> stopClient() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    await _channel.invokeMethod<void>('stopClient');
+  }
+
   static Future<bool> isRunning() async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
       return false;

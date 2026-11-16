@@ -334,12 +334,27 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                     value: _routing.enabled,
                     onChanged: _selected == null || _savingRouting
                         ? null
-                        : (enabled) => _saveRouting(
-                            BluetoothProductionRouting(
-                              enabled: enabled,
-                              productionAreas: _routing.productionAreas,
-                            ),
-                          ),
+                        : (enabled) {
+                            // Enabling an empty route previously looked
+                            // successful but could never print a live ticket.
+                            // The explicit master switch therefore starts with
+                            // every standard area; staff can immediately remove
+                            // areas that belong to another printer below.
+                            const allAreas = <String>{
+                              'bar',
+                              'kitchen',
+                              'dessert',
+                            };
+                            _saveRouting(
+                              BluetoothProductionRouting(
+                                enabled: enabled,
+                                productionAreas:
+                                    enabled && _routing.productionAreas.isEmpty
+                                    ? allAreas
+                                    : _routing.productionAreas,
+                              ),
+                            );
+                          },
                   ),
                   Wrap(
                     spacing: 8,

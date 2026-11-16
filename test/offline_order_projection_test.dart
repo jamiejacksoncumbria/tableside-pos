@@ -168,6 +168,42 @@ void main() {
     );
   });
 
+  test('signed cloud baseline ticket accepts its first KDS transition', () {
+    final sentAt = DateTime.utc(2026, 9, 12, 11, 45);
+    final ticketId = 'offline_legacy_${sentAt.microsecondsSinceEpoch}_kitchen';
+    final projection = projectOfflineOrder([
+      _event(1, 'order.cloudBaseline', {
+        'orderId': 'order-a',
+        'sourceOfflineHubEpoch': 1,
+        'openedAtUtc': '2026-09-12T11:30:00.000Z',
+        'channel': 'dineIn',
+        'deliveryFeeMinor': 0,
+        'lines': [
+          {
+            'id': 'line-a',
+            'productId': 'product-a',
+            'name': 'Meal',
+            'quantity': 1,
+            'unitPriceMinor': 2000,
+            'productionArea': 'kitchen',
+            'sent': true,
+            'sentAtUtc': sentAt.toIso8601String(),
+          },
+        ],
+        'payments': <Object?>[],
+      }),
+      _event(2, 'order.productionTicketUpdated', {
+        'orderId': 'order-a',
+        'ticketId': ticketId,
+        'flowStatus': 'preparing',
+        'isDelayed': false,
+      }),
+    ]);
+
+    expect(projection.expectedProductionTicketIds, contains(ticketId));
+    expect(projection.productionTicketStates[ticketId]?.status, 'preparing');
+  });
+
   test('payment batch records split tender and closes atomically', () {
     final projection = projectOfflineOrder([
       _event(1, 'order.opened', {'orderId': 'order-a'}),

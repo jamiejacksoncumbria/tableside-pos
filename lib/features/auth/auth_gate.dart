@@ -17,6 +17,7 @@ import '../../data/auth_repository.dart';
 import '../../data/platform_admin_repository.dart';
 import '../../offline/venue_hub_auto_start_host.dart';
 import '../../offline/venue_hub_client_cache.dart';
+import '../../offline/venue_hub_client_background_host.dart';
 import '../../offline/venue_hub_offline_workspace.dart';
 import '../platform_admin/platform_admin_page.dart';
 import '../platform_admin/platform_admin_pin_gate.dart';
@@ -129,7 +130,11 @@ class _OfflineHubWorkspaceState extends ConsumerState<OfflineHubWorkspace> {
       );
       _retryOnline();
     } on Object catch (error, stackTrace) {
-      AppLogger.error('Check Firebase connectivity recovery', error, stackTrace);
+      AppLogger.error(
+        'Check Firebase connectivity recovery',
+        error,
+        stackTrace,
+      );
     } finally {
       _checkingOnline = false;
     }
@@ -163,6 +168,7 @@ class _OfflineHubWorkspaceState extends ConsumerState<OfflineHubWorkspace> {
           cloudRefreshEnabled: false,
         ),
         CloudDiagnosticUploadHost(scope: workspace.scope),
+        const VenueHubClientBackgroundHost(),
         StaffPinGate(
           scope: workspace.scope,
           backgroundLockSeconds: workspace.venue.backgroundLockSeconds,
@@ -661,6 +667,7 @@ class _TenantWorkspace extends ConsumerWidget {
         if (!kIsWeb) const QueuedPrintWorkerHost(),
         if (!kIsWeb) VenueHubAutoStartHost(scope: scope),
         CloudDiagnosticUploadHost(scope: scope),
+        const VenueHubClientBackgroundHost(),
         const TrustedClockHost(),
         StaffPinGate(
           scope: scope,

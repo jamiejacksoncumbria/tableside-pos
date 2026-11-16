@@ -302,112 +302,121 @@ class HomeShell extends ConsumerWidget {
               ],
               bottom: const _HomeAppBarBottom(),
             ),
-      body: Row(
-        children: [
-          if (wide)
-            _ScrollableHomeRail(
-              destinations: destinations,
-              selectedSection: visibleSection,
-              onSelected: (section) =>
-                  ref.read(homeSectionProvider.notifier).select(section),
-            ),
-          Expanded(
-            // The print worker is intentionally invisible. A default loose
-            // Stack sizes itself from non-positioned children, so this stack
-            // could collapse to the worker's zero height inside the outer Row
-            // and hide every venue screen. Expand to the workspace bounds.
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                Positioned.fill(
-                  child: Column(
-                    children: [
-                      if (trainingModeActive)
-                        Container(
-                          width: double.infinity,
-                          color: Colors.red.shade800,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 6,
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              const Flexible(
-                                child: Text(
-                                  'TRAINING MODE · NO REAL SALES OR STOCK',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
+      body: SafeArea(
+        top: false,
+        bottom: immersiveCompactPosMenu,
+        child: Row(
+          children: [
+            if (wide)
+              _ScrollableHomeRail(
+                destinations: destinations,
+                selectedSection: visibleSection,
+                onSelected: (section) =>
+                    ref.read(homeSectionProvider.notifier).select(section),
+              ),
+            Expanded(
+              // The print worker is intentionally invisible. A default loose
+              // Stack sizes itself from non-positioned children, so this stack
+              // could collapse to the worker's zero height inside the outer Row
+              // and hide every venue screen. Expand to the workspace bounds.
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned.fill(
+                    child: Column(
+                      children: [
+                        if (trainingModeActive)
+                          Container(
+                            width: double.infinity,
+                            color: Colors.red.shade800,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Flexible(
+                                  child: Text(
+                                    'TRAINING MODE · NO REAL SALES OR STOCK',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.bold,
+                                    ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: 12),
-                              FilledButton.tonalIcon(
-                                onPressed: venueScope == null
-                                    ? null
-                                    : () => _endTrainingFromWorkspace(
-                                        context: context,
-                                        ref: ref,
-                                        scope: venueScope,
-                                        session: trainingSession,
-                                      ),
-                                icon: const Icon(Icons.exit_to_app_rounded),
-                                label: const Text('Exit'),
-                              ),
-                            ],
+                                const SizedBox(width: 12),
+                                FilledButton.tonalIcon(
+                                  onPressed: venueScope == null
+                                      ? null
+                                      : () => _endTrainingFromWorkspace(
+                                          context: context,
+                                          ref: ref,
+                                          scope: venueScope,
+                                          session: trainingSession,
+                                        ),
+                                  icon: const Icon(Icons.exit_to_app_rounded),
+                                  label: const Text('Exit'),
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                      Expanded(child: _buildBody(visibleSection, profile)),
-                    ],
+                        Expanded(child: _buildBody(visibleSection, profile)),
+                      ],
+                    ),
                   ),
-                ),
-                if (Firebase.apps.isNotEmpty) const PrintDeliveryMonitorHost(),
-                if (Firebase.apps.isNotEmpty) const OrderFlowNotificationHost(),
-                if (Firebase.apps.isNotEmpty)
-                  const OperationalNotificationHost(),
-                if (Firebase.apps.isNotEmpty) const PushNotificationHost(),
-                const _VenueHubAccessNotificationHost(),
-                const _VenueHubSynchronizationNotificationHost(),
-                const _VenueHubRealtimeStatusHost(),
-                const _VenueHubTakeoverPromptHost(),
-              ],
+                  if (Firebase.apps.isNotEmpty)
+                    const PrintDeliveryMonitorHost(),
+                  if (Firebase.apps.isNotEmpty)
+                    const OrderFlowNotificationHost(),
+                  if (Firebase.apps.isNotEmpty)
+                    const OperationalNotificationHost(),
+                  if (Firebase.apps.isNotEmpty) const PushNotificationHost(),
+                  const _VenueHubAccessNotificationHost(),
+                  const _VenueHubSynchronizationNotificationHost(),
+                  const _VenueHubRealtimeStatusHost(),
+                  const _VenueHubTakeoverPromptHost(),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
       // Notifications live in the scaffold's bottom area rather than as a
       // floating SnackBar. This reserves layout space, so a message can never
       // cover a POS control or require staff to dismiss it before continuing.
       bottomNavigationBar: immersiveCompactPosMenu
           ? null
-          : Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const _BottomNotificationTray(),
-                if (!wide)
-                  NavigationBar(
-                    height: 60,
-                    labelBehavior:
-                        NavigationDestinationLabelBehavior.alwaysHide,
-                    selectedIndex: compactIndex < 0 ? 0 : compactIndex,
-                    onDestinationSelected: (selected) => ref
-                        .read(homeSectionProvider.notifier)
-                        .select(compactDestinations[selected].section),
-                    destinations: [
-                      for (final item in compactDestinations)
-                        NavigationDestination(
-                          // Explicit centring prevents short labels/icons from
-                          // inheriting asymmetric space on narrow Android
-                          // navigation bars.
-                          icon: Center(child: Icon(item.icon)),
-                          selectedIcon: Center(child: Icon(item.icon)),
-                          label: item.label,
-                        ),
-                    ],
-                  ),
-              ],
+          : SafeArea(
+              top: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const _BottomNotificationTray(),
+                  if (!wide)
+                    NavigationBar(
+                      height: 60,
+                      labelBehavior:
+                          NavigationDestinationLabelBehavior.alwaysHide,
+                      selectedIndex: compactIndex < 0 ? 0 : compactIndex,
+                      onDestinationSelected: (selected) => ref
+                          .read(homeSectionProvider.notifier)
+                          .select(compactDestinations[selected].section),
+                      destinations: [
+                        for (final item in compactDestinations)
+                          NavigationDestination(
+                            // Explicit centring prevents short labels/icons from
+                            // inheriting asymmetric space on narrow Android
+                            // navigation bars.
+                            icon: Center(child: Icon(item.icon)),
+                            selectedIcon: Center(child: Icon(item.icon)),
+                            label: item.label,
+                          ),
+                      ],
+                    ),
+                ],
+              ),
             ),
     );
   }

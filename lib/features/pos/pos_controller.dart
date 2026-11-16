@@ -1121,6 +1121,15 @@ class ActiveOrderController extends Notifier<PosOrder> {
           'Order ${state.id} sent without a production print by staff choice.',
         );
       }
+      // Preserve both printer paths in the result. Bluetooth printing happens
+      // locally, while registered production devices receive durable server
+      // queue jobs; the POS must not describe a queued ticket as disabled.
+      printResult = BluetoothProductionPrintResult(
+        ticketsPrinted: printResult.ticketsPrinted,
+        skippedProductionAreas: printResult.skippedProductionAreas,
+        queuedProductionAreas: dispatch.queuedProductionAreas,
+        unroutedProductionAreas: dispatch.unroutedProductionAreas,
+      );
     }
     state = state.copyWith(
       status: OrderStatus.sent,

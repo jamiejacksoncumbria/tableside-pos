@@ -29,6 +29,14 @@ class MainActivity : FlutterActivity() {
                     VenueHubForegroundService.stop(this)
                     result.success(null)
                 }
+                "startClient" -> {
+                    VenueHubForegroundService.startClient(this)
+                    result.success(null)
+                }
+                "stopClient" -> {
+                    VenueHubForegroundService.stopClient(this)
+                    result.success(null)
+                }
                 "isRunning" -> result.success(VenueHubForegroundService.isRunning)
                 "openBatterySettings" -> {
                     startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))

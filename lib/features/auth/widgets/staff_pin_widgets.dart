@@ -317,10 +317,18 @@ class _PinPadPanelState extends State<_PinPadPanel> {
   @override
   Widget build(BuildContext context) {
     final viewport = MediaQuery.sizeOf(context);
-    final compact = viewport.height < 700 || viewport.width < 600;
-    final gap = compact ? 4.0 : 10.0;
-    final keySpacing = compact ? 4.0 : 5.0;
-    final keyHeight = compact ? 38.0 : 48.0;
+    final tabletWidth = viewport.shortestSide >= 600;
+    final shortViewport = viewport.height < 520;
+    final compact =
+        !tabletWidth && (viewport.height < 700 || viewport.width < 600);
+    final gap = shortViewport ? 4.0 : (compact ? 6.0 : 10.0);
+    final keySpacing = shortViewport ? 4.0 : 6.0;
+    // Landscape tablets were previously treated as small purely because of
+    // height, creating 38px keys. These values retain the full keypad while
+    // providing larger, safer touch targets on tablet-class displays.
+    final keyHeight = tabletWidth
+        ? (shortViewport ? 48.0 : 58.0)
+        : (compact ? 44.0 : 50.0);
     final keyStyle = ButtonStyle(
       minimumSize: const WidgetStatePropertyAll(Size.zero),
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,

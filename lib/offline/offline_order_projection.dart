@@ -171,6 +171,12 @@ class OfflineOrderProjection {
   final List<String> openSplitOrderIds;
   final Map<String, OfflineProductionTicketState> productionTicketStates;
 
+  /// Ticket identities proven by sent lines in this immutable projection.
+  /// Signed cloud baselines can contain sent lines before this hub has stored
+  /// a local ticket-state event, so their first KDS action uses this allowlist.
+  Set<String> get expectedProductionTicketIds =>
+      _expectedProductionTicketIds(lines.values, openedAtUtc);
+
   int get totalMinor =>
       lines.values.fold(0, (sum, line) => sum + line.totalMinor) +
       (channel == 'delivery' ? deliveryFeeMinor : 0);
@@ -711,6 +717,10 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
         _requireOpened(opened);
         final ticketId = _requiredString(event.payload, 'ticketId');
         final status = _requiredString(event.payload, 'flowStatus');
+        final expectedTicketIds = _expectedProductionTicketIds(
+          lines.values,
+          openedAtUtc,
+        );
         if (!const {
               'held',
               'newOrder',
@@ -721,12 +731,14 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
               'cancelled',
               'voided',
             }.contains(status) ||
-            !productionTicketStates.containsKey(ticketId)) {
+            (!productionTicketStates.containsKey(ticketId) &&
+                !expectedTicketIds.contains(ticketId))) {
           throw const OfflineProjectionException(
             'The production ticket update is invalid.',
           );
         }
-        final currentStatus = productionTicketStates[ticketId]!.status;
+        final currentStatus =
+            productionTicketStates[ticketId]?.status ?? 'initial';
         if (!_validProductionTransition(currentStatus, status)) {
           throw const OfflineProjectionException(
             'The production ticket transition is invalid.',
@@ -1032,11 +1044,25 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
   );
 }
 
+Set<String> _expectedProductionTicketIds(
+  Iterable<OfflineProjectedLine> lines,
+  DateTime openedAtUtc,
+) {
+  final result = <String>{};
+  for (final line in lines) {
+    if (!line.sent) continue;
+    final sentAt = line.sentAtUtc ?? openedAtUtc;
+    final batchId =
+        line.sentEventId ?? 'legacy_${sentAt.toUtc().microsecondsSinceEpoch}';
+    result.add('offline_${batchId}_${line.productionArea}');
+  }
+  return result;
+}
+
 bool _validProductionTransition(String current, String next) {
   if (current == next) return true;
   return switch (current) {
-    'initial' =>
-      next == 'held' || next == 'newOrder' || next == 'preparing',
+    'initial' => next == 'held' || next == 'newOrder' || next == 'preparing',
     'held' => next == 'newOrder',
     'newOrder' => next == 'preparing',
     'preparing' => next == 'ready',

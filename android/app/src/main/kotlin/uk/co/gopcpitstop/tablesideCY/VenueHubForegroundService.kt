@@ -31,12 +31,21 @@ class VenueHubForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val runtimeReady = intent?.getBooleanExtra(EXTRA_RUNTIME_READY, false) == true
         val standby = intent?.getBooleanExtra(EXTRA_STANDBY, false) == true
-        getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_ENABLED, true)
+        val preferences = getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+        val mode = intent?.getStringExtra(EXTRA_MODE)
+            ?: preferences.getString(KEY_MODE, MODE_CLIENT)
+            ?: MODE_CLIENT
+        preferences.edit()
+            .putString(KEY_MODE, mode)
+            // Only an enrolled primary/backup hub may be restored after boot.
+            // A client foreground service never grants hub authority.
+            .putBoolean(KEY_ENABLED, mode == MODE_HUB)
             .apply()
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, notification(runtimeReady, standby))
+        manager.notify(
+            NOTIFICATION_ID,
+            notification(runtimeReady, standby, client = mode == MODE_CLIENT),
+        )
         return START_STICKY
     }
 
@@ -73,10 +82,12 @@ class VenueHubForegroundService : Service() {
     private fun notification(
         runtimeReady: Boolean,
         standby: Boolean,
+        client: Boolean = false,
     ) = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.mipmap.ic_launcher)
         .setContentTitle(
             when {
+                client -> "TableSideCY terminal connection is active"
                 standby -> "TableSideCY backup hub is on standby"
                 runtimeReady -> "TableSideCY venue hub is active"
                 else -> "Open TableSideCY to restore the venue hub"
@@ -84,6 +95,7 @@ class VenueHubForegroundService : Service() {
         )
         .setContentText(
             when {
+                client -> "Keeping secure venue hub ordering connected"
                 standby -> "Monitoring the primary hub for secure failover"
                 runtimeReady -> "Keeping local ordering and printing available"
                 else -> "The device restarted; tap here before tills take orders"
@@ -124,8 +136,12 @@ class VenueHubForegroundService : Service() {
         private const val NOTIFICATION_ID = 4811
         private const val PREFERENCES = "tableside_venue_hub"
         private const val KEY_ENABLED = "enabled"
+        private const val KEY_MODE = "mode"
         private const val EXTRA_RUNTIME_READY = "runtimeReady"
         private const val EXTRA_STANDBY = "standby"
+        private const val EXTRA_MODE = "mode"
+        private const val MODE_HUB = "hub"
+        private const val MODE_CLIENT = "client"
 
         @Volatile
         var isRunning: Boolean = false
@@ -135,16 +151,36 @@ class VenueHubForegroundService : Service() {
             val intent = Intent(context, VenueHubForegroundService::class.java).apply {
                 putExtra(EXTRA_RUNTIME_READY, runtimeReady)
                 putExtra(EXTRA_STANDBY, standby)
+                putExtra(EXTRA_MODE, MODE_HUB)
             }
             ContextCompat.startForegroundService(context, intent)
         }
 
+        fun startClient(context: Context) {
+            val intent = Intent(context, VenueHubForegroundService::class.java).apply {
+                putExtra(EXTRA_RUNTIME_READY, true)
+                putExtra(EXTRA_MODE, MODE_CLIENT)
+            }
+            ContextCompat.startForegroundService(context, intent)
+        }
+
+        fun stopClient(context: Context) {
+            val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            if (preferences.getString(KEY_MODE, null) != MODE_CLIENT) return
+            preferences.edit().remove(KEY_MODE).apply()
+            context.stopService(Intent(context, VenueHubForegroundService::class.java))
+        }
+
         fun stop(context: Context) {
-            context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+            preferences
                 .edit()
                 .putBoolean(KEY_ENABLED, false)
                 .apply()
-            context.stopService(Intent(context, VenueHubForegroundService::class.java))
+            // The workspace may still be open as a normal POS terminal. Drop
+            // hub authority without dropping its lock-screen connectivity;
+            // the mounted Flutter client host stops this service on sign-out.
+            startClient(context)
         }
 
         fun wasEnabled(context: Context): Boolean =
