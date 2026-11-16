@@ -385,6 +385,54 @@ OfflineOrderProjection projectOfflineOrder(List<OfflineEvent> events) {
       (payload['openSplitOrderIds'] as List?)?.whereType<String>() ??
           const <String>[],
     );
+    final rawProductionTicketStates = payload['productionTicketStates'];
+    if (rawProductionTicketStates != null) {
+      if (rawProductionTicketStates is! List ||
+          rawProductionTicketStates.length > 200) {
+        throw const OfflineProjectionException(
+          'The cloud baseline production tickets are invalid.',
+        );
+      }
+      for (final raw in rawProductionTicketStates) {
+        if (raw is! Map) {
+          throw const OfflineProjectionException(
+            'A cloud baseline production ticket is invalid.',
+          );
+        }
+        final value = Map<String, Object?>.from(raw);
+        final ticketId = value['ticketId'];
+        final status = value['status'];
+        final isDelayed = value['isDelayed'];
+        if (ticketId is! String ||
+            ticketId.trim().isEmpty ||
+            ticketId.length > 512 ||
+            ticketId.contains('/') ||
+            status is! String ||
+            !const {
+              'held',
+              'newOrder',
+              'preparing',
+              'ready',
+              'collected',
+              'served',
+              'cancelled',
+              'voided',
+            }.contains(status) ||
+            isDelayed is! bool ||
+            productionTicketStates.containsKey(ticketId)) {
+          throw const OfflineProjectionException(
+            'A cloud baseline production ticket is invalid.',
+          );
+        }
+        // These identities are accepted only because the authenticated cloud
+        // service placed them inside the signed encrypted venue snapshot.
+        // A client command can never add an arbitrary legacy ticket ID.
+        productionTicketStates[ticketId] = OfflineProductionTicketState(
+          status: status,
+          isDelayed: isDelayed,
+        );
+      }
+    }
     final rawLines = payload['lines'];
     if (rawLines is! List) {
       throw const OfflineProjectionException(

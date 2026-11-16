@@ -5,6 +5,7 @@ import '../notifications/notification_centre.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
 import 'receipt_paper_width.dart';
+import 'venue_printer_routing_page.dart';
 
 class BluetoothPrinterSetupPage extends StatefulWidget {
   const BluetoothPrinterSetupPage({
@@ -325,7 +326,17 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                   ),
                   const SizedBox(height: 6),
                   const Text(
-                    'When this device sends an order, the selected printer receives tickets only for the production areas enabled below. This setting is stored separately for the active venue.',
+                    'These choices enable direct printing when this device sends an order. The durable venue queue also requires this Android device to be enrolled and assigned in Venue printer routes.',
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const VenuePrinterRoutingPage(),
+                      ),
+                    ),
+                    icon: const Icon(Icons.route_rounded),
+                    label: const Text('Open venue printer routes'),
                   ),
                   const SizedBox(height: 8),
                   SwitchListTile.adaptive(

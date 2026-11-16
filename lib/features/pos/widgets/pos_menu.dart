@@ -194,6 +194,12 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
     }
     final showTileCategoryBrowser =
         useCategoryTiles && searchQuery.isEmpty && !_tileCategoryOpen;
+    final showTileSubcategories =
+        useCategoryTiles &&
+        searchQuery.isEmpty &&
+        _tileCategoryOpen &&
+        effectiveSubsection == null &&
+        subsections.isNotEmpty;
     // Compact tile navigation is deliberately staged. Once a category is
     // opened, the search row gives its space to the products while the Back
     // control remains pinned at the top. This prevents the product grid from
@@ -835,7 +841,7 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                           title: 'Could not load this venue’s menu',
                           detail: '$menuError',
                         )
-                      : products.isEmpty
+                      : products.isEmpty && !showTileSubcategories
                       ? const _MenuStateMessage(
                           icon: Icons.menu_book_outlined,
                           title: 'No menu items are available',
@@ -843,55 +849,100 @@ class _MenuPanelState extends ConsumerState<_MenuPanel> {
                               'Add a product in Menu management, or choose a different category.',
                         )
                       : LayoutBuilder(
-                          builder: (context, _) {
+                          builder: (context, constraints) {
+                            const spacing = 8.0;
+                            final subcategoryColumns =
+                                posCategoryGridColumnCount(
+                                  constraints.maxWidth,
+                                );
                             return Scrollbar(
                               controller: _productScrollController,
                               thumbVisibility: true,
-                              child: GridView.builder(
+                              child: CustomScrollView(
                                 controller: _productScrollController,
                                 primary: false,
-                                itemCount: products.length,
-                                gridDelegate:
-                                    const SliverGridDelegateWithMaxCrossAxisExtent(
-                                      // Compact cards fit an additional product
-                                      // across a typical tablet while retaining
-                                      // a generous touch target and two name
-                                      // lines.
-                                      maxCrossAxisExtent: 145,
-                                      crossAxisSpacing: 8,
-                                      mainAxisSpacing: 8,
-                                      mainAxisExtent: 136,
-                                    ),
-                                itemBuilder: (context, index) => _ProductTile(
-                                  product: products[index],
-                                  categoryLabel: _primaryCategoryLabel(
-                                    products[index],
-                                    sections,
-                                  ),
-                                  currencyCode: currencyCode,
-                                  canAdd: activeOrder.canAddProduct(
-                                    products[index],
-                                  ),
-                                  onTap: () => addSelectedProduct(
-                                    products[index],
-                                    forceConfiguration: false,
-                                  ),
-                                  onLongPress: () async {
-                                    await _showPosProductDetails(
-                                      context: context,
-                                      product: products[index],
-                                      sections: sections,
-                                      currencyCode: currencyCode,
-                                      onAdd: () async {
-                                        await addSelectedProduct(
-                                          products[index],
-                                          forceConfiguration: true,
+                                slivers: [
+                                  if (showTileSubcategories) ...[
+                                    SliverGrid(
+                                      gridDelegate:
+                                          SliverGridDelegateWithFixedCrossAxisCount(
+                                            crossAxisCount: subcategoryColumns,
+                                            crossAxisSpacing: spacing,
+                                            mainAxisSpacing: spacing,
+                                            mainAxisExtent: 74,
+                                          ),
+                                      delegate: SliverChildBuilderDelegate((
+                                        context,
+                                        index,
+                                      ) {
+                                        final subsection = subsections[index];
+                                        return _CategoryTile(
+                                          width: double.infinity,
+                                          textIcon: subsection.icon,
+                                          label: subsection.name,
+                                          selected: false,
+                                          onTap: () => setState(() {
+                                            ref
+                                                .read(
+                                                  activeSubsectionProvider
+                                                      .notifier,
+                                                )
+                                                .select(subsection.id);
+                                          }),
                                         );
-                                      },
-                                    );
-                                    return false;
-                                  },
-                                ),
+                                      }, childCount: subsections.length),
+                                    ),
+                                    const SliverToBoxAdapter(
+                                      child: SizedBox(height: 10),
+                                    ),
+                                  ],
+                                  SliverGrid(
+                                    gridDelegate:
+                                        const SliverGridDelegateWithMaxCrossAxisExtent(
+                                          // Compact cards fit an additional
+                                          // product across a typical tablet
+                                          // while retaining a generous touch
+                                          // target and two name lines.
+                                          maxCrossAxisExtent: 145,
+                                          crossAxisSpacing: 8,
+                                          mainAxisSpacing: 8,
+                                          mainAxisExtent: 136,
+                                        ),
+                                    delegate: SliverChildBuilderDelegate(
+                                      (context, index) => _ProductTile(
+                                        product: products[index],
+                                        categoryLabel: _primaryCategoryLabel(
+                                          products[index],
+                                          sections,
+                                        ),
+                                        currencyCode: currencyCode,
+                                        canAdd: activeOrder.canAddProduct(
+                                          products[index],
+                                        ),
+                                        onTap: () => addSelectedProduct(
+                                          products[index],
+                                          forceConfiguration: false,
+                                        ),
+                                        onLongPress: () async {
+                                          await _showPosProductDetails(
+                                            context: context,
+                                            product: products[index],
+                                            sections: sections,
+                                            currencyCode: currencyCode,
+                                            onAdd: () async {
+                                              await addSelectedProduct(
+                                                products[index],
+                                                forceConfiguration: true,
+                                              );
+                                            },
+                                          );
+                                          return false;
+                                        },
+                                      ),
+                                      childCount: products.length,
+                                    ),
+                                  ),
+                                ],
                               ),
                             );
                           },

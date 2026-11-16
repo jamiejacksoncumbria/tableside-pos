@@ -422,7 +422,46 @@ class _VenuePrinterRoutingPageState
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  'Register this physical Android or Windows device to receive queued tickets for the selected venue.',
+                  'Register this physical Android or Windows device to receive queued tickets for the selected venue. Hub authority and printer enrolment are separate security permissions.',
+                ),
+                const SizedBox(height: 12),
+                StreamBuilder<List<PrinterDevice>>(
+                  stream: _devices.watchVenueDevices(
+                    tenantId: scope.tenantId,
+                    venueId: scope.venueId,
+                  ),
+                  builder: (context, snapshot) {
+                    final localDevice =
+                        (snapshot.data ?? const <PrinterDevice>[])
+                            .where(
+                              (device) =>
+                                  device.id == _deviceId && device.active,
+                            )
+                            .firstOrNull;
+                    final enrolled = localDevice != null;
+                    return Card(
+                      color: enrolled
+                          ? Theme.of(context).colorScheme.secondaryContainer
+                          : Theme.of(context).colorScheme.errorContainer,
+                      child: ListTile(
+                        leading: Icon(
+                          enrolled
+                              ? Icons.verified_rounded
+                              : Icons.print_disabled_rounded,
+                        ),
+                        title: Text(
+                          enrolled
+                              ? 'This device is enrolled for live printing'
+                              : 'This device is not enrolled for live printing',
+                        ),
+                        subtitle: Text(
+                          enrolled
+                              ? 'Live queue access is authorised as ${localDevice.name}. Test and live tickets use different paths.'
+                              : 'A successful test print confirms only the cable/Bluetooth connection. Register or reconnect this device below before live tickets can leave the secured venue queue.',
+                        ),
+                      ),
+                    );
+                  },
                 ),
                 const SizedBox(height: 12),
                 Card(
@@ -460,7 +499,7 @@ class _VenuePrinterRoutingPageState
                           label: Text(
                             _registering
                                 ? 'Registering…'
-                                : 'Register this shared printer device',
+                                : 'Register or reconnect this printer device',
                           ),
                         ),
                         if (_deviceId != null) ...[

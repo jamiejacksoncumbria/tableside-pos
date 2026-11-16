@@ -204,6 +204,49 @@ void main() {
     expect(projection.productionTicketStates[ticketId]?.status, 'preparing');
   });
 
+  test('signed cloud baseline authorises a legacy cloud ticket identity', () {
+    const legacyTicketId = 'order-a_kitchen_standard_line-a';
+    final projection = projectOfflineOrder([
+      _event(1, 'order.cloudBaseline', {
+        'orderId': 'order-a',
+        'sourceOfflineHubEpoch': 1,
+        'openedAtUtc': '2026-09-12T11:30:00.000Z',
+        'channel': 'dineIn',
+        'deliveryFeeMinor': 0,
+        'productionTicketStates': const [
+          {
+            'ticketId': legacyTicketId,
+            'status': 'newOrder',
+            'isDelayed': false,
+          },
+        ],
+        'lines': const [
+          {
+            'id': 'line-a',
+            'productId': 'product-a',
+            'name': 'Meal',
+            'quantity': 1,
+            'unitPriceMinor': 2000,
+            'productionArea': 'kitchen',
+            'sent': true,
+          },
+        ],
+        'payments': const <Object?>[],
+      }),
+      _event(2, 'order.productionTicketUpdated', {
+        'orderId': 'order-a',
+        'ticketId': legacyTicketId,
+        'flowStatus': 'preparing',
+        'isDelayed': false,
+      }),
+    ]);
+
+    expect(
+      projection.productionTicketStates[legacyTicketId]?.status,
+      'preparing',
+    );
+  });
+
   test('payment batch records split tender and closes atomically', () {
     final projection = projectOfflineOrder([
       _event(1, 'order.opened', {'orderId': 'order-a'}),

@@ -3343,7 +3343,11 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
   // Schema 6 retains canonical stock recipes on open-order baselines. Without
   // them, a replacement/restarted hub could display an unsent cloud draft but
   // had to reject production release because stock consumption was unknowable.
-  const snapshotSchemaVersion = 6;
+  // Schema 7 also carries the existing production-ticket identities for each
+  // open order. Older cloud-created tickets do not use the newer `offline_`
+  // identifier format, so the signed snapshot must explicitly prove those
+  // IDs before the hub will accept a KDS status change for them.
+  const snapshotSchemaVersion = 7;
   await db.runTransaction(async (transaction) => {
     const current = await transaction.get(snapshotVersionRef);
     if (!current.exists) {
@@ -3535,11 +3539,42 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
         typeof value === "string" || typeof value === "number" ? new Date(value) : null;
     return date != null && Number.isFinite(date.getTime()) ? date.toISOString() : null;
   };
-  const openOrders = (orders?.docs ?? []).filter((document) => {
+  const openOrderDocuments = (orders?.docs ?? []).filter((document) => {
     const value = document.data();
     return ["open", "sent"].includes(value.status) &&
       Number(value.offlineHubEpoch ?? 0) <= upload.hubEpoch;
-  }).map((document) => {
+  });
+  // Fetch tickets only for currently open orders. Querying the complete venue
+  // ticket history would make hub startup progressively slower for a busy
+  // venue. Firestore accepts at most 30 values in an `in` query, hence the
+  // bounded chunks below.
+  const openOrderIds = openOrderDocuments.map((document) => document.id);
+  const productionTicketDocuments = [];
+  if (operationsChanged) {
+    for (let offset = 0; offset < openOrderIds.length; offset += 30) {
+      const orderIdChunk = openOrderIds.slice(offset, offset + 30);
+      if (orderIdChunk.length === 0) continue;
+      const ticketSnapshot = await tenantRef.collection("productionTickets")
+        .where("orderId", "in", orderIdChunk)
+        .get();
+      productionTicketDocuments.push(...ticketSnapshot.docs.filter((ticket) =>
+        ticket.data().venueId === upload.venueId));
+    }
+  }
+  const productionTicketsByOrder = new Map();
+  for (const ticket of productionTicketDocuments) {
+    const orderId = ticket.data().orderId;
+    if (typeof orderId !== "string") continue;
+    const tickets = productionTicketsByOrder.get(orderId) ?? [];
+    tickets.push({
+      ticketId: ticket.id,
+      status: typeof ticket.data().flowStatus === "string"
+        ? ticket.data().flowStatus : "newOrder",
+      isDelayed: ticket.data().isDelayed === true,
+    });
+    productionTicketsByOrder.set(orderId, tickets);
+  }
+  const openOrders = openOrderDocuments.map((document) => {
     const value = document.data();
     const lines = Array.isArray(value.lines) ? value.lines : [];
     const payments = Array.isArray(value.payments) ? value.payments : [];
@@ -3569,6 +3604,7 @@ async function getOfflineHubSnapshotFor(caller, rawData) {
       splitSequence: Number(value.splitSequence ?? 0),
       openSplitOrderIds: Array.isArray(value.openSplitOrderIds)
         ? value.openSplitOrderIds : [],
+      productionTicketStates: productionTicketsByOrder.get(document.id) ?? [],
       lines: lines.map((line) => ({
         id: line.id,
         productId: line.productId,
