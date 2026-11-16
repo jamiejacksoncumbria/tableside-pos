@@ -16,6 +16,7 @@ class PosQuickSearchField extends ConsumerStatefulWidget {
   ConsumerState<PosQuickSearchField> createState() =>
       _PosQuickSearchFieldState();
 }
+
 class _PosQuickSearchFieldState extends ConsumerState<PosQuickSearchField> {
   late final TextEditingController _controller;
   final FocusNode _focusNode = FocusNode(debugLabel: 'POS product search');
@@ -69,9 +70,8 @@ class _PosQuickSearchFieldState extends ConsumerState<PosQuickSearchField> {
                       SizedBox(
                         width: 48,
                         child: FilledButton.tonal(
-                          onPressed: () => _replaceText(
-                            '${_controller.text}$key',
-                          ),
+                          onPressed: () =>
+                              _replaceText('${_controller.text}$key'),
                           child: Text(key),
                         ),
                       ),
@@ -139,7 +139,10 @@ class _PosQuickSearchFieldState extends ConsumerState<PosQuickSearchField> {
               IconButton(
                 tooltip: 'Clear search',
                 visualDensity: VisualDensity.compact,
-                onPressed: () => _replaceText(''),
+                onPressed: () {
+                  _focusNode.unfocus();
+                  _replaceText('');
+                },
                 icon: const Icon(Icons.close_rounded, size: 19),
               ),
           ],

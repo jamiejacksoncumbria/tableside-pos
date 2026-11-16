@@ -12,6 +12,7 @@ import '../core/app_environment.dart';
 import '../core/firebase_bootstrap.dart';
 import '../core/firebase_connectivity_probe.dart';
 import '../core/firebase_runtime_config.dart';
+import '../core/keyboard_back_dismiss_host.dart';
 import '../core/shorebird_update_host.dart';
 import '../features/auth/auth_gate.dart';
 import '../offline/venue_hub_remote_command_client.dart';
@@ -75,120 +76,124 @@ class TableSideCYApp extends ConsumerWidget {
                 showHubIssue: hubIssue != null,
                 showPending: pending > 0,
               );
-              return _HubOfflineDialogHost(
-                issue: hubIssue,
-                child: Stack(
-                  children: [
-                    ?child,
-                    if (pending > 0)
-                      Positioned(
-                        top: overlayOffsets.pendingTop,
-                        left: 16,
-                        right: 16,
-                        child: Material(
-                          elevation: 8,
-                          color: Theme.of(
-                            context,
-                          ).colorScheme.tertiaryContainer,
-                          borderRadius: BorderRadius.circular(12),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 12,
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const SizedBox.square(
-                                  dimension: 20,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2.5,
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Text(
-                                    pending == 1
-                                        ? 'Waiting for venue hub…'
-                                        : 'Waiting for venue hub… ($pending commands)',
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.titleSmall,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    if (hubIssue != null)
-                      Positioned(
-                        top: overlayOffsets.hubTop,
-                        left: 16,
-                        right: 16,
-                        child: Material(
-                          elevation: 10,
-                          color: Theme.of(context).colorScheme.errorContainer,
-                          borderRadius: BorderRadius.circular(12),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 14,
-                              vertical: 10,
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.hub_outlined),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    hubPresentation!.bannerLabel,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .labelLarge
-                                        ?.copyWith(fontWeight: FontWeight.w900),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ShorebirdUpdateHost(top: overlayOffsets.updatesTop),
-                    if (busy > 0) ...[
-                      const Positioned.fill(
-                        child: ModalBarrier(
-                          dismissible: false,
-                          color: Color(0x66000000),
-                        ),
-                      ),
-                      Positioned.fill(
-                        child: Center(
-                          child: Card(
-                            elevation: 12,
+              return KeyboardBackDismissHost(
+                child: _HubOfflineDialogHost(
+                  issue: hubIssue,
+                  child: Stack(
+                    children: [
+                      ?child,
+                      if (pending > 0)
+                        Positioned(
+                          top: overlayOffsets.pendingTop,
+                          left: 16,
+                          right: 16,
+                          child: Material(
+                            elevation: 8,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.tertiaryContainer,
+                            borderRadius: BorderRadius.circular(12),
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
-                                horizontal: 24,
-                                vertical: 20,
+                                horizontal: 16,
+                                vertical: 12,
                               ),
-                              child: Column(
+                              child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  const CircularProgressIndicator(),
-                                  const SizedBox(height: 14),
-                                  Text(
-                                    'Please wait…',
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.titleSmall,
+                                  const SizedBox.square(
+                                    dimension: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2.5,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      pending == 1
+                                          ? 'Waiting for venue hub…'
+                                          : 'Waiting for venue hub… ($pending commands)',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.titleSmall,
+                                    ),
                                   ),
                                 ],
                               ),
                             ),
                           ),
                         ),
-                      ),
+                      if (hubIssue != null)
+                        Positioned(
+                          top: overlayOffsets.hubTop,
+                          left: 16,
+                          right: 16,
+                          child: Material(
+                            elevation: 10,
+                            color: Theme.of(context).colorScheme.errorContainer,
+                            borderRadius: BorderRadius.circular(12),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 10,
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.hub_outlined),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      hubPresentation!.bannerLabel,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelLarge
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w900,
+                                          ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ShorebirdUpdateHost(top: overlayOffsets.updatesTop),
+                      if (busy > 0) ...[
+                        const Positioned.fill(
+                          child: ModalBarrier(
+                            dismissible: false,
+                            color: Color(0x66000000),
+                          ),
+                        ),
+                        Positioned.fill(
+                          child: Center(
+                            child: Card(
+                              elevation: 12,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 24,
+                                  vertical: 20,
+                                ),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const CircularProgressIndicator(),
+                                    const SizedBox(height: 14),
+                                    Text(
+                                      'Please wait…',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.titleSmall,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               );
             },

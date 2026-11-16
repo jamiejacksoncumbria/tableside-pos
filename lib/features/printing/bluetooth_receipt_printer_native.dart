@@ -186,7 +186,7 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         ),
       ),
       ...generator.text(
-        ticketHeading,
+        _important(ticketHeading),
         styles: const PosStyles(align: PosAlign.center, bold: true),
       ),
       ...generator.hr(),
@@ -195,12 +195,17 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           'Order location: ${ticket.restaurantName} · ${ticket.channel == 'delivery' ? 'DELIVERY' : 'COLLECTION'}',
           styles: const PosStyles(bold: true),
         ),
-      ...generator.text(location, styles: const PosStyles(bold: true)),
+      ...generator.text(
+        _important(location),
+        styles: const PosStyles(bold: true),
+      ),
       if (ticket.channel != 'dineIn')
         ...generator.text(
-          ticket.scheduledForMillis == null
-              ? 'Time: ASAP'
-              : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch(ticket.scheduledForMillis!))}',
+          _important(
+            ticket.scheduledForMillis == null
+                ? 'Time: ASAP'
+                : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch(ticket.scheduledForMillis!))}',
+          ),
           styles: const PosStyles(bold: true),
         ),
       if (ticket.channel == 'delivery' &&
@@ -222,15 +227,25 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           '${line.quantity} x ${line.name}',
           styles: const PosStyles(bold: true),
         ),
-        for (final detail in line.details) ...generator.text('  - $detail'),
+        for (final detail in line.details)
+          ...generator.text(
+            detail.trimLeft().toUpperCase().startsWith('NOTE:')
+                ? _important(
+                    'NOTE: ${detail.split(':').skip(1).join(':').trim()}',
+                  )
+                : '  - $detail',
+            styles: const PosStyles(bold: true),
+          ),
       ],
       ...generator.hr(),
       ...generator.text(
-        ticket.isReprint
-            ? 'REPRINT OF EXISTING ORDER'
-            : ticket.isAddition
-            ? 'ADDITION TO EXISTING ORDER'
-            : 'NEW ORDER',
+        _important(
+          ticket.isReprint
+              ? 'REPRINT OF EXISTING ORDER'
+              : ticket.isAddition
+              ? 'ADDITION TO EXISTING ORDER'
+              : 'NEW ORDER',
+        ),
         styles: const PosStyles(align: PosAlign.center, bold: true),
       ),
       ...generator.feed(4),
@@ -312,17 +327,19 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           styles: const PosStyles(align: PosAlign.center, bold: true),
         ),
       ...generator.text(
-        receipt.isRefund
-            ? 'REFUND RECEIPT'
-            : receipt.isDeliveryNote
-            ? 'DELIVERY / COLLECTION NOTE'
-            : receipt.isPreReceipt
-            ? 'PRE RECEIPT - NOT PAID'
-            : receipt.isPartPayment
-            ? 'PART PAYMENT - BALANCE DUE'
-            : receipt.isReprint
-            ? 'REPRINT - PAID RECEIPT'
-            : 'PAID RECEIPT',
+        _important(
+          receipt.isRefund
+              ? 'REFUND RECEIPT'
+              : receipt.isDeliveryNote
+              ? 'DELIVERY / COLLECTION NOTE'
+              : receipt.isPreReceipt
+              ? 'PRE RECEIPT - NOT PAID'
+              : receipt.isPartPayment
+              ? 'PART PAYMENT - BALANCE DUE'
+              : receipt.isReprint
+              ? 'REPRINT - PAID RECEIPT'
+              : 'PAID RECEIPT',
+        ),
         styles: const PosStyles(align: PosAlign.center, bold: true),
       ),
       ...generator.hr(),
@@ -335,7 +352,9 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       if (location != null) ...generator.text(location),
       if (receipt.channel != 'dineIn')
         ...generator.text(
-          '${receipt.channel == 'delivery' ? 'Delivery' : 'Collection'}: ${receipt.customerName?.trim().isNotEmpty == true ? receipt.customerName!.trim() : 'Customer'}',
+          _important(
+            '${receipt.channel == 'delivery' ? 'Delivery' : 'Collection'}: ${receipt.customerName?.trim().isNotEmpty == true ? receipt.customerName!.trim() : 'Customer'}',
+          ),
           styles: const PosStyles(bold: true),
         ),
       if (receipt.channel != 'dineIn')
@@ -344,9 +363,12 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         ),
       if (receipt.channel != 'dineIn')
         ...generator.text(
-          receipt.scheduledForMillis == null
-              ? 'Time: ASAP'
-              : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch(receipt.scheduledForMillis!))}',
+          _important(
+            receipt.scheduledForMillis == null
+                ? 'Time: ASAP'
+                : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch(receipt.scheduledForMillis!))}',
+          ),
+          styles: const PosStyles(bold: true),
         ),
       if (receipt.channel == 'delivery' &&
           receipt.deliveryAddress?.trim().isNotEmpty == true)
@@ -395,12 +417,12 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         ),
       ...generator.row([
         PosColumn(
-          text: receipt.isRefund ? 'REFUND TOTAL' : 'TOTAL',
+          text: _important(receipt.isRefund ? 'REFUND TOTAL' : 'TOTAL'),
           width: 6,
           styles: const PosStyles(bold: true),
         ),
         PosColumn(
-          text: _money(receipt.totalMinor, receipt.currencyCode),
+          text: _important(_money(receipt.totalMinor, receipt.currencyCode)),
           width: 6,
           styles: const PosStyles(align: PosAlign.right, bold: true),
         ),
@@ -431,7 +453,10 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
           ],
           if (payment.changeBaseMinor > 0)
             ...generator.text(
-              'Change: ${_money(payment.changeBaseMinor, payment.baseCurrencyCode ?? receipt.currencyCode)}',
+              _important(
+                'Change: ${_money(payment.changeBaseMinor, payment.baseCurrencyCode ?? receipt.currencyCode)}',
+              ),
+              styles: const PosStyles(bold: true),
             ),
         ],
       ],
@@ -448,12 +473,14 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       if (receipt.balanceDueMinor != null) ...[
         ...generator.row([
           PosColumn(
-            text: 'BALANCE DUE',
+            text: _important('BALANCE DUE'),
             width: 6,
             styles: const PosStyles(bold: true),
           ),
           PosColumn(
-            text: _money(receipt.balanceDueMinor!, receipt.currencyCode),
+            text: _important(
+              _money(receipt.balanceDueMinor!, receipt.currencyCode),
+            ),
             width: 6,
             styles: const PosStyles(align: PosAlign.right, bold: true),
           ),
@@ -570,6 +597,10 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
         ? '${percentage.toStringAsFixed(0)}%'
         : '${percentage.toStringAsFixed(2)}%';
   }
+
+  /// Visible delimiters preserve emphasis on inexpensive thermal printers
+  /// whose firmware ignores or renders ESC/POS bold too faintly.
+  String _important(String value) => '** ${value.trim()} **';
 
   List<String> _nonEmptyLines(String value) => value
       .split(RegExp(r'\r?\n'))

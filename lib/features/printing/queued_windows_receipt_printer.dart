@@ -149,7 +149,16 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         if (line['details'] is List) {
           for (final detail in (line['details'] as List).whereType<String>()) {
             final trimmed = detail.trim();
-            if (trimmed.isNotEmpty) items.add(WindowsPrintLine('  - $trimmed'));
+            if (trimmed.isNotEmpty) {
+              items.add(
+                WindowsPrintLine(
+                  trimmed.toUpperCase().startsWith('NOTE:')
+                      ? _important(trimmed)
+                      : '  - $trimmed',
+                  bold: true,
+                ),
+              );
+            }
           }
         }
       }
@@ -188,11 +197,13 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         fontSizeDelta: 2,
       ),
       WindowsPrintLine(
-        isReprint
-            ? '$area REPRINT'
-            : payload['isAddition'] == true
-            ? '$area ADDITION'
-            : area,
+        _important(
+          isReprint
+              ? '$area REPRINT'
+              : payload['isAddition'] == true
+              ? '$area ADDITION'
+              : area,
+        ),
         alignment: WindowsPrintTextAlignment.center,
         bold: true,
       ),
@@ -202,12 +213,14 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
           'Order location: ${payload['restaurantName'] as String? ?? 'Venue'} · ${channel == 'delivery' ? 'DELIVERY' : 'COLLECTION'}',
           bold: true,
         ),
-      WindowsPrintLine(location),
+      WindowsPrintLine(_important(location), bold: true),
       if (channel != 'dineIn')
         WindowsPrintLine(
-          (payload['scheduledForMillis'] as num?) == null
-              ? 'Time: ASAP'
-              : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch((payload['scheduledForMillis'] as num).toInt()))}',
+          _important(
+            (payload['scheduledForMillis'] as num?) == null
+                ? 'Time: ASAP'
+                : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch((payload['scheduledForMillis'] as num).toInt()))}',
+          ),
           bold: true,
         ),
       if (channel == 'delivery' &&
@@ -228,11 +241,13 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
       ...items,
       const WindowsPrintLine(''),
       WindowsPrintLine(
-        isReprint
-            ? 'REPRINT OF EXISTING ORDER'
-            : payload['isAddition'] == true
-            ? 'ADDITION TO EXISTING ORDER'
-            : 'NEW ORDER',
+        _important(
+          isReprint
+              ? 'REPRINT OF EXISTING ORDER'
+              : payload['isAddition'] == true
+              ? 'ADDITION TO EXISTING ORDER'
+              : 'NEW ORDER',
+        ),
         bold: true,
       ),
     ];
@@ -315,17 +330,19 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
             ),
           ),
       WindowsPrintLine(
-        payload['type'] == 'refundReceipt'
-            ? 'REFUND RECEIPT'
-            : payload['isDeliveryNote'] == true
-            ? 'DELIVERY / COLLECTION NOTE'
-            : payload['isPreReceipt'] == true
-            ? 'PRE RECEIPT - NOT PAID'
-            : payload['isPartPayment'] == true
-            ? 'PART PAYMENT - BALANCE DUE'
-            : payload['isReprint'] == true
-            ? 'REPRINT - PAID RECEIPT'
-            : 'PAID RECEIPT',
+        _important(
+          payload['type'] == 'refundReceipt'
+              ? 'REFUND RECEIPT'
+              : payload['isDeliveryNote'] == true
+              ? 'DELIVERY / COLLECTION NOTE'
+              : payload['isPreReceipt'] == true
+              ? 'PRE RECEIPT - NOT PAID'
+              : payload['isPartPayment'] == true
+              ? 'PART PAYMENT - BALANCE DUE'
+              : payload['isReprint'] == true
+              ? 'REPRINT - PAID RECEIPT'
+              : 'PAID RECEIPT',
+        ),
         alignment: WindowsPrintTextAlignment.center,
         bold: true,
       ),
@@ -351,7 +368,9 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         WindowsPrintLine('Table: ${tableLabel!.trim()}'),
       if (channel != 'dineIn')
         WindowsPrintLine(
-          '${channel == 'delivery' ? 'Delivery' : 'Collection'}: ${customerName?.trim().isNotEmpty == true ? customerName!.trim() : 'Customer'}',
+          _important(
+            '${channel == 'delivery' ? 'Delivery' : 'Collection'}: ${customerName?.trim().isNotEmpty == true ? customerName!.trim() : 'Customer'}',
+          ),
           bold: true,
         ),
       if (channel != 'dineIn')
@@ -360,9 +379,12 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         ),
       if (channel != 'dineIn')
         WindowsPrintLine(
-          (payload['scheduledForMillis'] as num?) == null
-              ? 'Time: ASAP'
-              : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch((payload['scheduledForMillis'] as num).toInt()))}',
+          _important(
+            (payload['scheduledForMillis'] as num?) == null
+                ? 'Time: ASAP'
+                : 'Time: ${formatAppDateTime(DateTime.fromMillisecondsSinceEpoch((payload['scheduledForMillis'] as num).toInt()))}',
+          ),
+          bold: true,
         ),
       if (channel == 'delivery' &&
           (payload['deliveryAddress'] as String?)?.trim().isNotEmpty == true)
@@ -413,10 +435,11 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     }
     lines.add(
       WindowsPrintLine(
-        payload['type'] == 'refundReceipt' ? 'REFUND TOTAL' : 'TOTAL',
-        rightText: _money(
-          (payload['totalMinor'] as num?)?.toInt() ?? 0,
-          currency,
+        _important(
+          payload['type'] == 'refundReceipt' ? 'REFUND TOTAL' : 'TOTAL',
+        ),
+        rightText: _important(
+          _money((payload['totalMinor'] as num?)?.toInt() ?? 0, currency),
         ),
         bold: true,
       ),
@@ -476,7 +499,11 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
         final change = (value['cashChangeBaseMinor'] as num?)?.toInt() ?? 0;
         if (change > 0) {
           lines.add(
-            WindowsPrintLine('Change', rightText: _money(change, currency)),
+            WindowsPrintLine(
+              _important('Change'),
+              rightText: _important(_money(change, currency)),
+              bold: true,
+            ),
           );
         }
       }
@@ -494,8 +521,8 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     if (balanceDue != null) {
       lines.add(
         WindowsPrintLine(
-          'BALANCE DUE',
-          rightText: _money(balanceDue, currency),
+          _important('BALANCE DUE'),
+          rightText: _important(_money(balanceDue, currency)),
           bold: true,
         ),
       );
@@ -518,4 +545,6 @@ class QueuedWindowsReceiptPrinter implements NativeReceiptPrinter {
     final absolute = amountMinor.abs();
     return '$sign$currencyCode ${absolute ~/ 100}.${(absolute % 100).toString().padLeft(2, '0')}';
   }
+
+  String _important(String value) => '** ${value.trim()} **';
 }
