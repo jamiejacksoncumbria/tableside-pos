@@ -1703,7 +1703,14 @@ class ProductionCommandRepository {
     required String flowStatus,
     required bool isDelayed,
     bool background = false,
-  }) {
+  }) async {
+    final request = <String, Object?>{
+      'tenantId': scope.tenantId,
+      'venueId': scope.venueId,
+      'ticketId': ticketId,
+      'flowStatus': flowStatus,
+      'isDelayed': isDelayed,
+    };
     final hub = VenueHubClientRegistry.instance;
     if (hub.requiresHub(scope)) {
       if (orderId == null || orderId.trim().isEmpty) {
@@ -1729,19 +1736,37 @@ class ProductionCommandRepository {
               eventType: 'order.productionTicketUpdated',
               payload: payload,
             );
-      return operation.then((_) {});
+      try {
+        await operation;
+        return;
+      } on Object catch (error, stackTrace) {
+        // Tickets created before the durable hub ledger was introduced can
+        // remain in Firestore after their order has already closed. The hub
+        // correctly refuses to mutate an order it does not own. Permit only
+        // those legacy cloud tickets to use the existing protected, audited
+        // server transition; locally-created hub tickets must never bypass
+        // the hub authority.
+        final message = '$error';
+        final legacyCloudTicket = !ticketId.startsWith('offline-');
+        if (!legacyCloudTicket || !message.contains('The order is not open.')) {
+          rethrow;
+        }
+        AppLogger.error(
+          'Legacy production ticket rejected by hub; using audited cloud transition',
+          error,
+          stackTrace,
+        );
+        final fallback = background
+            ? _callUnblocked('updateProductionTicket', request)
+            : _call('updateProductionTicket', request);
+        await fallback;
+        return;
+      }
     }
-    final request = <String, Object?>{
-      'tenantId': scope.tenantId,
-      'venueId': scope.venueId,
-      'ticketId': ticketId,
-      'flowStatus': flowStatus,
-      'isDelayed': isDelayed,
-    };
     final operation = background
         ? _callUnblocked('updateProductionTicket', request)
         : _call('updateProductionTicket', request);
-    return operation.then((_) {});
+    await operation;
   }
 
   /// Releases scheduled collection/delivery tickets whose venue lead-time

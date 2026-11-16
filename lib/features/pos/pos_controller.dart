@@ -1040,6 +1040,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
 
   Future<BluetoothProductionPrintResult> sendToProduction({
     required bool printRequired,
+    bool stockOverride = false,
   }) async {
     await _flushPendingDraftAdditions();
     final scope = ref.read(activeVenueScopeProvider);
@@ -1085,6 +1086,7 @@ class ActiveOrderController extends Notifier<PosOrder> {
             scope: scope,
             order: state,
             printRequired: printRequired,
+            stockOverride: stockOverride,
           );
       // The order document is now server-owned, so subscribe before local
       // printing. This lets a second device see the order immediately even if

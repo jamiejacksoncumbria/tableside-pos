@@ -37,6 +37,51 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
     });
   }
 
+  Future<BluetoothProductionPrintResult> _sendToProductionWithRecovery({
+    required bool printRequired,
+  }) async {
+    try {
+      return await ref
+          .read(activeOrderProvider.notifier)
+          .sendToProduction(printRequired: printRequired);
+    } on Object catch (error) {
+      final missingLegacyStock = '$error'.contains(
+        'An offline stock line is missing from the ledger.',
+      );
+      final session = ref.read(activeStaffPinSessionProvider);
+      final isManager =
+          session?.roles.any((role) => role == 'manager' || role == 'owner') ==
+          true;
+      if (!missingLegacyStock || !isManager || !mounted) rethrow;
+      final approved = await showAppDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.inventory_2_outlined),
+          title: const Text('Legacy stock details missing'),
+          content: const Text(
+            'This older open order was created before its stock recipe was saved in the venue hub ledger. '
+            'A manager may send it with an audited stock override, then check the affected stock manually.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Keep order open'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Send with stock override'),
+            ),
+          ],
+        ),
+      );
+      if (approved != true) rethrow;
+      return ref
+          .read(activeOrderProvider.notifier)
+          .sendToProduction(printRequired: printRequired, stockOverride: true);
+    }
+  }
+
   Future<void> _closeEmptyOrder() async {
     final reason = TextEditingController(text: 'All items removed');
     final confirmed = await showAppDialog<bool>(
@@ -998,9 +1043,8 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                 return;
                               }
                               try {
-                                final printResult = await ref
-                                    .read(activeOrderProvider.notifier)
-                                    .sendToProduction(
+                                final printResult =
+                                    await _sendToProductionWithRecovery(
                                       printRequired: printRequired,
                                     );
                                 if (!context.mounted) return;
@@ -1050,7 +1094,7 @@ class _OrderPanelState extends ConsumerState<_OrderPanel> {
                                   ref: ref,
                                   title: 'Order needs attention',
                                   message:
-                                      'The order or its local ticket could not be completed. It remains open for a safe retry.',
+                                      'The order remains open for a safe retry. $error',
                                   level: AppNotificationLevel.error,
                                 );
                               }

@@ -152,6 +152,23 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
     }
   }
 
+  Future<void> _selectFulfilmentOrder(PosOrder order) async {
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      ref.read(activeOrderProvider.notifier).openFulfilmentOrder(order);
+      ref.read(selectedTableProvider.notifier).select('');
+      if (mounted) Navigator.of(context).pop(true);
+    } on Object catch (error, stackTrace) {
+      AppLogger.error('Choose existing fulfilment order', error, stackTrace);
+      if (mounted) setState(() => _error = '$error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   Future<void> _startFulfilment(
     OrderChannel channel,
     VenueFulfilmentSettings settings,
@@ -676,8 +693,11 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
 
   @override
   Widget build(BuildContext context) {
+    final scope = ref.watch(activeVenueScopeProvider);
+    final currencyCode = ref.watch(tenantProfileProvider).currencyCode;
     final tablesState = ref.watch(diningTablesProvider);
     final tabsState = ref.watch(openNamedTabsProvider);
+    final fulfilmentState = ref.watch(fulfilmentOrdersProvider);
     final tables = tablesState.when(
       data: (items) => items,
       loading: () => const <DiningTable>[],
@@ -694,7 +714,24 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
         return const <OpenNamedTab>[];
       },
     );
-    final locationsLoading = tablesState.isLoading || tabsState.isLoading;
+    final fulfilmentOrders = fulfilmentState.when(
+      data: (items) => items
+          .where((order) => order.status != OrderStatus.closed)
+          .toList(growable: false),
+      loading: () => const <PosOrder>[],
+      error: (error, stackTrace) {
+        AppLogger.error(
+          'Load collection and delivery orders for new order',
+          error,
+          stackTrace,
+        );
+        return const <PosOrder>[];
+      },
+    );
+    final locationsLoading =
+        tablesState.isLoading ||
+        tabsState.isLoading ||
+        fulfilmentState.isLoading;
     final fulfilmentSettings = ref.watch(venueFulfilmentSettingsProvider);
     if (widget.initialChannel != null &&
         !_initialChannelHandled &&
@@ -799,18 +836,31 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                                     ).textTheme.labelLarge,
                                   ),
                                 ),
-                              for (final table in tables)
-                                ListTile(
-                                  enabled: !_saving,
-                                  leading: const Icon(
-                                    Icons.table_restaurant_rounded,
+                              if (tables.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 4,
                                   ),
-                                  title: Text(table.label),
-                                  subtitle: Text('${table.seats} seats'),
-                                  trailing: const Icon(
-                                    Icons.chevron_right_rounded,
+                                  child: Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      for (final table in tables)
+                                        IgnorePointer(
+                                          ignoring: _saving,
+                                          child: _TableButton(
+                                            table: table,
+                                            scope: scope,
+                                            currencyCode: currencyCode,
+                                            selected: false,
+                                            compact: false,
+                                            isTraining: false,
+                                            onTap: () => _selectTable(table),
+                                          ),
+                                        ),
+                                    ],
                                   ),
-                                  onTap: () => _selectTable(table),
                                 ),
                               if (tables.isNotEmpty && namedTabs.isNotEmpty)
                                 const Divider(height: 16),
@@ -841,30 +891,72 @@ class _OrderLocationPageState extends ConsumerState<_OrderLocationPage> {
                                     children: [
                                       for (final tab in namedTabs)
                                         SizedBox(
-                                          width: 132,
-                                          child: OutlinedButton.icon(
-                                            onPressed: _saving
-                                                ? null
-                                                : () => _selectNamedTab(tab),
-                                            icon: const Icon(
-                                              Icons.person_outline_rounded,
-                                              size: 18,
-                                            ),
-                                            label: Text(
-                                              tab.name,
-                                              maxLines: 2,
-                                              overflow: TextOverflow.ellipsis,
+                                          width: 170,
+                                          child: IgnorePointer(
+                                            ignoring: _saving,
+                                            child: _NamedTabButton(
+                                              tab: tab,
+                                              scope: scope,
+                                              currencyCode: currencyCode,
+                                              selected: false,
+                                              onTap: () => _selectNamedTab(tab),
                                             ),
                                           ),
                                         ),
                                     ],
                                   ),
                                 ),
-                              if (tables.isEmpty && namedTabs.isEmpty)
+                              if (fulfilmentOrders.isNotEmpty) ...[
+                                const Divider(height: 16),
+                                Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    4,
+                                    16,
+                                    4,
+                                  ),
+                                  child: Text(
+                                    'Open collections and deliveries',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.labelLarge,
+                                  ),
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 4,
+                                  ),
+                                  child: Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      for (final order in fulfilmentOrders)
+                                        SizedBox(
+                                          width: 190,
+                                          child: IgnorePointer(
+                                            ignoring: _saving,
+                                            child: _FulfilmentOrderButton(
+                                              order: order,
+                                              scope: scope,
+                                              currencyCode: currencyCode,
+                                              selected: false,
+                                              onTap: () =>
+                                                  _selectFulfilmentOrder(order),
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                              if (tables.isEmpty &&
+                                  namedTabs.isEmpty &&
+                                  fulfilmentOrders.isEmpty)
                                 const Padding(
                                   padding: EdgeInsets.all(16),
                                   child: Text(
-                                    'No tables or open named tabs are available.',
+                                    'No open tables, tabs, collections or deliveries are available.',
                                   ),
                                 ),
                             ],

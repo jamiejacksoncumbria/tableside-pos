@@ -277,7 +277,10 @@ class VenueOfflineCatalogue {
         );
       }
       final key = _lineLedgerKey(order.orderId, lineId);
-      final payload = linePayloads[key] ?? cloudStockLines[key];
+      final payload =
+          linePayloads[key] ??
+          cloudStockLines[key] ??
+          _safeLegacyUntrackedLine(line);
       if (payload != null) payload['quantity'] = line.quantity;
       _addConsumption(consumed, payload);
     }
@@ -295,6 +298,29 @@ class VenueOfflineCatalogue {
         );
       }
     }
+  }
+
+  /// Reconstructs only the one legacy case that is provably stock-neutral.
+  /// Older cloud order snapshots omitted the stock metadata now required by
+  /// the hub. A simple product with no stock tracking, recipe, variants or
+  /// modifier groups cannot consume stock, so allowing it does not weaken the
+  /// fail-closed rule. Anything that could carry a stock recipe still requires
+  /// the signed line snapshot (or an explicit manager override).
+  Map<String, Object?>? _safeLegacyUntrackedLine(OfflineProjectedLine line) {
+    final product = products[line.productId];
+    if (product == null ||
+        product.trackStock ||
+        product.stockComponents.isNotEmpty ||
+        product.variants.isNotEmpty ||
+        product.modifierGroupIds.isNotEmpty) {
+      return null;
+    }
+    return <String, Object?>{
+      'productId': product.id,
+      'quantity': line.quantity,
+      'trackStock': false,
+      'stockComponents': const <Object?>[],
+    };
   }
 
   void _addConsumption(Map<String, double> totals, Map<String, Object?>? line) {

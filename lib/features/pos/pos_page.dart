@@ -24,6 +24,7 @@ import '../fulfilment/customer_editor.dart';
 import '../fulfilment/fulfilment_domain.dart';
 import '../fulfilment/fulfilment_repository.dart';
 import '../notifications/notification_centre.dart';
+import '../printing/bluetooth_production_print_service.dart';
 import 'domain.dart';
 import 'pos_controller.dart';
 import 'pos_quick_search_field.dart';

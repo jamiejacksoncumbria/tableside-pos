@@ -13,6 +13,7 @@ import '../auth/staff_pin_gate.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
 import 'local_printer_device_identity.dart';
+import 'queued_native_print_worker.dart';
 import 'windows_print_queue.dart';
 import 'windows_print_queue_factory.dart';
 
@@ -62,7 +63,14 @@ class _VenuePrinterRoutingPageState
 
   Future<void> _loadLocalDevice() async {
     try {
-      final physicalDeviceId = await _identity.getOrCreate();
+      final scope = ref.read(activeVenueScopeProvider);
+      // Printer registrations are deliberately venue-scoped. Comparing the
+      // physical installation ID with a scoped registration ID made a
+      // correctly enrolled printer appear unauthorised and caused the live
+      // queue session to be rejected even though test prints still worked.
+      final localDeviceId = scope == null
+          ? await _identity.getOrCreate()
+          : await _identity.deviceIdForScope(scope);
       final selectedPrinter = _bluetooth.isSupported
           ? await _bluetooth.selectedDevice()
           : null;
@@ -71,7 +79,7 @@ class _VenuePrinterRoutingPageState
           : null;
       if (!mounted) return;
       setState(() {
-        _deviceId = physicalDeviceId;
+        _deviceId = localDeviceId;
         _selectedBluetoothPrinter = selectedPrinter;
         _selectedWindowsPrinter = selectedWindowsPrinter;
         if (_deviceName.text.trim().isEmpty) {
@@ -89,8 +97,8 @@ class _VenuePrinterRoutingPageState
 
   Future<void> _registerThisDevice({required VenueScope scope}) async {
     final user = FirebaseAuth.instance.currentUser;
-    final physicalDeviceId = _deviceId;
-    if (user == null || physicalDeviceId == null) {
+    final localDeviceId = _deviceId;
+    if (user == null || localDeviceId == null) {
       setState(() => _error = 'Sign in and wait for device setup to finish.');
       return;
     }
@@ -176,7 +184,12 @@ class _VenuePrinterRoutingPageState
         replaceExistingNamedDevice: replaceExistingNamedDevice,
       );
       await _identity.saveCredential(scope, deviceCredential);
+      // Start the protected live queue session immediately. Waiting for the
+      // shell's periodic heartbeat made a newly registered printer continue
+      // to look offline for up to thirty seconds.
+      await QueuedNativePrintWorker().maintainHeartbeat(scope);
       if (!mounted) return;
+      setState(() => _deviceId = deviceId);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('This device is registered as a shared venue printer.'),

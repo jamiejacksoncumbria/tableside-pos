@@ -258,6 +258,49 @@ void main() {
     );
   });
 
+  test(
+    'legacy baseline without stock metadata permits a provably untracked product',
+    () {
+      final snapshot = _snapshot();
+      final product =
+          (snapshot['products'] as List).single as Map<String, Object?>;
+      product
+        ..['trackStock'] = false
+        ..['stockComponents'] = <Object?>[]
+        ..['variants'] = <Object?>[]
+        ..['modifierGroupIds'] = <Object?>[];
+      final baseline = _event(1, 'order.cloudBaseline', {
+        'orderId': 'order-a',
+        'sourceOfflineHubEpoch': 1,
+        'openedAtUtc': DateTime.utc(2026, 9, 12, 12).toIso8601String(),
+        'tableId': 'table-a',
+        'lines': [
+          {
+            'id': 'line-a',
+            'productId': 'steak',
+            'name': 'Sirloin Steak',
+            'quantity': 1,
+            'unitPriceMinor': 2500,
+            'productionArea': 'kitchen',
+            'sent': false,
+          },
+        ],
+        'payments': <Object?>[],
+      });
+      final order = projectOfflineOrder([baseline]);
+
+      expect(
+        () => VenueOfflineCatalogue.fromSnapshot(snapshot).validateStockForSend(
+          [baseline],
+          order,
+          const ['line-a'],
+          managerOverride: false,
+        ),
+        returnsNormally,
+      );
+    },
+  );
+
   test('required printing fails closed without a matching route', () {
     final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
     final order = projectOfflineOrder([
