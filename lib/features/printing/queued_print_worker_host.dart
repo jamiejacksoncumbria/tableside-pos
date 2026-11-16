@@ -6,8 +6,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../offline/venue_hub_client_registry.dart';
+import '../../offline/venue_hub_platform.dart';
 import '../../offline/venue_hub_runtime.dart';
 import '../notifications/notification_centre.dart';
+import 'bluetooth_receipt_printer_factory.dart';
 import 'native_print_worker.dart';
 import 'queued_native_print_worker.dart';
 
@@ -57,6 +59,7 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     _scope = scope;
     _watchingLocalHubQueue = false;
     if (scope == null) return;
+    unawaited(_restoreAndroidPrinterService());
     final worker = _worker ??= QueuedNativePrintWorker();
     _subscribeToQueue(worker, scope);
     // The print worker is mounted before the asynchronous venue hub startup
@@ -88,6 +91,25 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     });
     unawaited(worker.maintainHeartbeat(scope));
     unawaited(_processAvailable(scope));
+  }
+
+  Future<void> _restoreAndroidPrinterService() async {
+    try {
+      final printer = createBluetoothReceiptPrinter();
+      if (!printer.isSupported) return;
+      final selected = await printer.selectedDevice();
+      if (selected == null) {
+        await AndroidVenueHubService.stopPrinter();
+      } else {
+        await AndroidVenueHubService.startPrinter();
+      }
+    } on Object catch (error, stackTrace) {
+      AppLogger.error(
+        'Restore Android printer background service',
+        error,
+        stackTrace,
+      );
+    }
   }
 
   void _subscribeToQueue(QueuedNativePrintWorker worker, VenueScope scope) {

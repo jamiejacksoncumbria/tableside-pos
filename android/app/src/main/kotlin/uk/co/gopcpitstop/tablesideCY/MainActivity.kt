@@ -37,6 +37,14 @@ class MainActivity : FlutterActivity() {
                     VenueHubForegroundService.stopClient(this)
                     result.success(null)
                 }
+                "startPrinter" -> {
+                    VenueHubForegroundService.startPrinter(this)
+                    result.success(null)
+                }
+                "stopPrinter" -> {
+                    VenueHubForegroundService.stopPrinter(this)
+                    result.success(null)
+                }
                 "isRunning" -> result.success(VenueHubForegroundService.isRunning)
                 "openBatterySettings" -> {
                     startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))

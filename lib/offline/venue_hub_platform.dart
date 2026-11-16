@@ -49,6 +49,18 @@ class AndroidVenueHubService {
     await _channel.invokeMethod<void>('stopClient');
   }
 
+  /// Keeps an Android printer worker's CPU and Wi-Fi connection available
+  /// while the screen is locked. This role is independent of hub authority.
+  static Future<void> startPrinter() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    await _channel.invokeMethod<void>('startPrinter');
+  }
+
+  static Future<void> stopPrinter() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    await _channel.invokeMethod<void>('stopPrinter');
+  }
+
   static Future<bool> isRunning() async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
       return false;

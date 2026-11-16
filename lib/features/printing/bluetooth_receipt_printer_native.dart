@@ -6,6 +6,7 @@ import 'package:print_bluetooth_thermal/print_bluetooth_thermal.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/date_formats.dart';
+import '../../offline/venue_hub_platform.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'receipt_paper_width.dart';
 
@@ -67,12 +68,17 @@ class _NativeBluetoothReceiptPrinter implements BluetoothReceiptPrinter {
       _paperWidthPreferenceKey(device.address),
       device.paperWidth.millimetres,
     );
+    // A selected Android printer is an unattended venue service even when
+    // this device is not the hub. Keep its CPU and Wi-Fi alive behind the lock
+    // screen so queued production tickets can still be claimed and printed.
+    await AndroidVenueHubService.startPrinter();
   }
 
   @override
   Future<void> clearSelectedDevice() async {
     await _preferences.remove(_namePreferenceKey);
     await _preferences.remove(_addressPreferenceKey);
+    await AndroidVenueHubService.stopPrinter();
   }
 
   @override
