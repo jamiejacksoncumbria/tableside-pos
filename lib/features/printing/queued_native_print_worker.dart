@@ -106,7 +106,10 @@ class QueuedNativePrintWorker {
     }
   }
 
-  Future<PrintWorkerResult> processNext(VenueScope scope) async {
+  Future<PrintWorkerResult> processNext(
+    VenueScope scope, {
+    bool localHubOnly = false,
+  }) async {
     final requiredTransport = _requiredTransport;
     if (requiredTransport == null) {
       return _notReady('This platform cannot run a native printer worker.');
@@ -161,6 +164,7 @@ class QueuedNativePrintWorker {
       deviceId: deviceId,
       deviceCredential: deviceCredential!,
       printedAwaitingCompletion: _printedAwaitingCompletion,
+      localHubOnly: localHubOnly,
     );
     try {
       return await worker.processNext();

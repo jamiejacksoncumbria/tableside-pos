@@ -49,7 +49,7 @@ class PrintJobRepository {
     final scope = VenueScope(tenantId: tenantId, venueId: venueId);
     final local =
         VenueHubRuntime.instance.localPrintJobs(scope) ??
-        (VenueHubClientRegistry.instance.hasUsableSession(scope)
+        (VenueHubClientRegistry.instance.requiresHub(scope)
             ? VenueHubClientRegistry.instance.watchPrintJobs(
                 scope,
                 statuses: const <String>{'queued'},
@@ -118,7 +118,7 @@ class PrintJobRepository {
     final scope = VenueScope(tenantId: tenantId, venueId: venueId);
     final local =
         VenueHubRuntime.instance.localPrintJobs(scope) ??
-        (VenueHubClientRegistry.instance.hasUsableSession(scope)
+        (VenueHubClientRegistry.instance.requiresHub(scope)
             ? VenueHubClientRegistry.instance.watchPrintJobs(
                 scope,
                 statuses: const <String>{'queued', 'claimed', 'failed'},
@@ -211,7 +211,7 @@ class PrintJobRepository {
     final scope = VenueScope(tenantId: tenantId, venueId: venueId);
     final local =
         VenueHubRuntime.instance.localPrintJobs(scope) ??
-        (VenueHubClientRegistry.instance.hasUsableSession(scope)
+        (VenueHubClientRegistry.instance.requiresHub(scope)
             ? VenueHubClientRegistry.instance.watchPrintJobs(
                 scope,
                 statuses: const <String>{'printed'},
@@ -284,6 +284,7 @@ class PrintJobRepository {
     required String venueId,
     required String deviceId,
     required String deviceCredential,
+    bool localHubOnly = false,
   }) async {
     final scope = VenueScope(tenantId: tenantId, venueId: venueId);
     final runtime = VenueHubRuntime.instance;
@@ -311,12 +312,19 @@ class PrintJobRepository {
         if (local != null) {
           return _fromLocal(tenantId, venueId, deviceId, local);
         }
+        if (localHubOnly) return null;
       } on Object catch (error, stackTrace) {
         // A printer may be enrolled at the venue while running on another
         // internet connection. Failure to reach the certificate-pinned LAN
         // queue must not strand server-created jobs: continue to the existing
         // device-credential-protected cloud claim below. The cloud operation
         // remains atomic, so this cannot print one cloud job twice.
+        if (localHubOnly) {
+          AppLogger.info(
+            'Venue hub LAN print check is temporarily unavailable; no cloud claim was attempted. ($error)',
+          );
+          return null;
+        }
         AppLogger.error(
           'Venue hub LAN print queue unavailable; trying secure cloud queue',
           error,
@@ -324,6 +332,7 @@ class PrintJobRepository {
         );
       }
     }
+    if (localHubOnly) return null;
     if (deviceCredential == 'venue-hub-device-credential') {
       // This marker can claim only the local encrypted queue. Never submit it
       // to Firebase as though it were a device credential: the server must

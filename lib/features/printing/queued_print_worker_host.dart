@@ -30,6 +30,7 @@ class QueuedPrintWorkerHost extends ConsumerStatefulWidget {
 class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
   QueuedNativePrintWorker? _worker;
   Timer? _retryTimer;
+  Timer? _lanQueueTimer;
   StreamSubscription<int>? _queuedJobsSubscription;
   StreamSubscription<VenueHubRuntimeStatus>? _hubStatusSubscription;
   VenueScope? _scope;
@@ -39,6 +40,7 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
   @override
   void dispose() {
     _retryTimer?.cancel();
+    _lanQueueTimer?.cancel();
     _queuedJobsSubscription?.cancel();
     _hubStatusSubscription?.cancel();
     super.dispose();
@@ -54,6 +56,7 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
   void _configure(VenueScope? scope) {
     if (!mounted || scope == _scope) return;
     _retryTimer?.cancel();
+    _lanQueueTimer?.cancel();
     _queuedJobsSubscription?.cancel();
     _hubStatusSubscription?.cancel();
     _scope = scope;
@@ -89,6 +92,24 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
       // an empty Cloud Function claim on a timer: fifty venues would otherwise
       // create thousands of unnecessary invocations every day.
     });
+    // EPOS 3 production jobs live in the encrypted hub queue. A printer on a
+    // separate Android terminal receives no Firebase signal for that local
+    // write, so use a fast certificate-pinned LAN check. localHubOnly keeps
+    // an empty or unavailable LAN queue from falling through to a billable
+    // Cloud Function claim. The authoritative hub process already receives
+    // immediate queue-stream events and does not need to poll itself.
+    _lanQueueTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      final printerRegistry = VenueHubPrinterClientRegistry.instance;
+      if (printerRegistry.requiresHub(scope) &&
+          printerRegistry.isDeviceEnrolled(scope) &&
+          !printerRegistry.isLocalHubHost(scope)) {
+        unawaited(_processAvailable(scope, localHubOnly: true));
+      }
+    });
+    AppLogger.info(
+      'Printer worker will check the venue hub LAN queue every 2 seconds '
+      'without using Firebase claims.',
+    );
     unawaited(worker.maintainHeartbeat(scope));
     unawaited(_processAvailable(scope));
   }
@@ -138,7 +159,10 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
         );
   }
 
-  Future<void> _processAvailable(VenueScope scope) async {
+  Future<void> _processAvailable(
+    VenueScope scope, {
+    bool localHubOnly = false,
+  }) async {
     if (_processing || !mounted || _scope != scope) return;
     final runtime = VenueHubRuntime.instance;
     if (VenueHubPrinterClientRegistry.instance.isLocalHubHost(scope) &&
@@ -159,7 +183,10 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     _processing = true;
     try {
       while (mounted && _scope == scope) {
-        final result = await worker.processNext(scope);
+        final result = await worker.processNext(
+          scope,
+          localHubOnly: localHubOnly,
+        );
         if (!mounted || _scope != scope) return;
         if (result == PrintWorkerResult.noWork) return;
         if (result == PrintWorkerResult.printed) {

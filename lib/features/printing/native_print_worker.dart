@@ -22,8 +22,8 @@ class NativePrintWorker {
     required this.deviceId,
     required this.deviceCredential,
     Set<String>? printedAwaitingCompletion,
-  }) : printedAwaitingCompletion =
-           printedAwaitingCompletion ?? <String>{};
+    this.localHubOnly = false,
+  }) : printedAwaitingCompletion = printedAwaitingCompletion ?? <String>{};
 
   final PrintJobRepository queue;
   final NativeReceiptPrinter printer;
@@ -32,6 +32,7 @@ class NativePrintWorker {
   final String deviceId;
   final String deviceCredential;
   final Set<String> printedAwaitingCompletion;
+  final bool localHubOnly;
 
   /// Call this from a native foreground/background service on a short timer,
   /// and also when the Firestore queue stream reports new work.
@@ -41,6 +42,7 @@ class NativePrintWorker {
       venueId: venueId,
       deviceId: deviceId,
       deviceCredential: deviceCredential,
+      localHubOnly: localHubOnly,
     );
     if (job == null) return PrintWorkerResult.noWork;
 
@@ -61,7 +63,11 @@ class NativePrintWorker {
         // retry its acknowledgement, never print a second kitchen ticket.
         printedAwaitingCompletion.add(job.idempotencyKey);
       } on Object catch (error, stackTrace) {
-        AppLogger.error('Print ticket ${job.idempotencyKey}', error, stackTrace);
+        AppLogger.error(
+          'Print ticket ${job.idempotencyKey}',
+          error,
+          stackTrace,
+        );
         await queue.complete(
           job: job,
           deviceCredential: deviceCredential,

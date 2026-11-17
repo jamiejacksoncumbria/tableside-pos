@@ -97,9 +97,21 @@ class VenueHubClientRegistry {
     DateTime? sinceUtc,
     int? limit,
   }) async* {
-    while (hasUsableSession(scope)) {
+    // Keep the stream alive while this venue uses a hub. Settings and alert
+    // widgets can subscribe during the short interval between venue selection
+    // and PIN-session installation. Previously that race closed the stream
+    // permanently and made the hub's queued, failed and printed tickets look
+    // empty until the whole page/app was recreated.
+    while (requiresHub(scope)) {
+      if (!hasUsableSession(scope)) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        continue;
+      }
       final client = clientFor(scope);
-      if (client == null) return;
+      if (client == null) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        continue;
+      }
       try {
         yield await client.fetchPrintJobs(
           statuses: statuses,
