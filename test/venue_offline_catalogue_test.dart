@@ -301,6 +301,58 @@ void main() {
     },
   );
 
+  test('an audited historical stock override does not poison later orders', () {
+    final snapshot = _snapshot();
+    final product =
+        (snapshot['products'] as List).single as Map<String, Object?>;
+    product
+      ..['trackStock'] = true
+      ..['stockOnHand'] = 10.0
+      ..['stockPerSale'] = 1.0
+      ..['stockComponents'] = <Object?>[];
+    final historical = <OfflineEvent>[
+      _event(1, 'order.itemAdded', {
+        'orderId': 'old-order',
+        'lineId': 'old-line',
+        'productId': 'steak',
+        'productName': 'Sirloin Steak',
+        'quantity': 1,
+        'unitPriceMinor': 2500,
+        'productionArea': 'kitchen',
+      }),
+      _event(2, 'order.sent', {
+        'orderId': 'old-order',
+        'lineIds': ['old-line'],
+        'stockOverride': true,
+      }),
+    ];
+    final current = <OfflineEvent>[
+      _event(3, 'order.opened', {'orderId': 'new-order'}),
+      _event(4, 'order.itemAdded', {
+        'orderId': 'new-order',
+        'lineId': 'new-line',
+        'productId': 'steak',
+        'productName': 'Sirloin Steak',
+        'quantity': 1,
+        'unitPriceMinor': 2500,
+        'productionArea': 'kitchen',
+        'trackStock': true,
+        'stockPerSale': 1.0,
+        'stockComponents': <Object?>[],
+      }),
+    ];
+
+    expect(
+      () => VenueOfflineCatalogue.fromSnapshot(snapshot).validateStockForSend(
+        [...historical, ...current],
+        projectOfflineOrder(current),
+        const ['new-line'],
+        managerOverride: false,
+      ),
+      returnsNormally,
+    );
+  });
+
   test('required printing fails closed without a matching route', () {
     final catalogue = VenueOfflineCatalogue.fromSnapshot(_snapshot());
     final order = projectOfflineOrder([

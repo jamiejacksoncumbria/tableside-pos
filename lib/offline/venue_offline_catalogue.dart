@@ -252,6 +252,14 @@ class VenueOfflineCatalogue {
         }
       } else if (event.type == 'order.sent') {
         if (event.sequence <= cloudLastSequence) continue;
+        // A manager stock override is an explicit, audited decision that this
+        // particular send will be reconciled manually. Replaying its missing
+        // legacy recipe on every later sale made one repaired order poison the
+        // whole venue ledger and incorrectly labelled every new order as old.
+        // Skip only the historical consumption calculation for that exact
+        // overridden event; current sends still require manager permission in
+        // validateEvent above.
+        if (event.payload['stockOverride'] == true) continue;
         final orderId = event.payload['orderId'];
         if (orderId is! String) {
           throw const VenueOfflineCatalogueException(

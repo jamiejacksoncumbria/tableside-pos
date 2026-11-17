@@ -21,6 +21,8 @@ import '../../offline/venue_hub_runtime.dart';
 /// services are a later device-agent step; this worker gives each registered
 /// Android or Windows device reliable foreground queue processing now.
 class QueuedNativePrintWorker {
+  static final QueuedNativePrintWorker instance = QueuedNativePrintWorker();
+
   QueuedNativePrintWorker({
     PrintJobRepository? queue,
     LocalPrinterDeviceIdentity? identity,
@@ -78,16 +80,16 @@ class QueuedNativePrintWorker {
   /// Keeps a registered foreground printer visible to the venue-wide delivery
   /// monitor even while it has no jobs. An unregistered till performs no
   /// heartbeat write, so this is safe to call on the shared app shell timer.
-  Future<void> maintainHeartbeat(VenueScope scope) async {
+  Future<bool> maintainHeartbeat(VenueScope scope) async {
     try {
-      if (Firebase.apps.isEmpty) return;
+      if (Firebase.apps.isEmpty) return false;
       final user = FirebaseAuth.instance.currentUser;
       final requiredTransport = _requiredTransport;
-      if (user == null || requiredTransport == null) return;
+      if (user == null || requiredTransport == null) return false;
       final deviceId = await _identity.deviceIdForScope(scope);
       final deviceCredential = await _identity.credential(scope);
-      if (deviceCredential == null || deviceCredential.isEmpty) return;
-      if (_realtime.isConfigured(scope, deviceId)) return;
+      if (deviceCredential == null || deviceCredential.isEmpty) return false;
+      if (_realtime.isConfigured(scope, deviceId)) return true;
       // issueRealtimePrinterSession validates the credential, venue,
       // enrollment, active state and transport on the trusted server.
       await _realtime.start(
@@ -95,10 +97,12 @@ class QueuedNativePrintWorker {
         deviceId: deviceId,
         deviceCredential: deviceCredential,
       );
+      return _realtime.isConfigured(scope, deviceId);
     } on Object catch (error) {
       AppLogger.info(
         'Printer realtime presence is offline; local hub printing remains active. ($error)',
       );
+      return false;
     }
   }
 

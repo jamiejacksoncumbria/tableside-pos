@@ -628,6 +628,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     MaterialPageRoute<void>(
                       builder: (_) => BluetoothPrinterSetupPage(
                         restaurantName: venueTradingName,
+                        scope: venueScope,
                         venueRoutingKey: venueScope == null
                             ? 'demo'
                             : '${venueScope.tenantId}_${venueScope.venueId}',

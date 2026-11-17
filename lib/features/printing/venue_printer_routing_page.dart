@@ -187,7 +187,13 @@ class _VenuePrinterRoutingPageState
       // Start the protected live queue session immediately. Waiting for the
       // shell's periodic heartbeat made a newly registered printer continue
       // to look offline for up to thirty seconds.
-      await QueuedNativePrintWorker().maintainHeartbeat(scope);
+      final liveSessionReady = await QueuedNativePrintWorker.instance
+          .maintainHeartbeat(scope);
+      if (!liveSessionReady) {
+        throw StateError(
+          'The printer was registered, but the secured live queue session was not accepted. Retry registration while online.',
+        );
+      }
       if (!mounted) return;
       setState(() => _deviceId = deviceId);
       ScaffoldMessenger.of(context).showSnackBar(

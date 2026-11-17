@@ -1,29 +1,48 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/tenant_scope.dart';
+import '../../data/printer_device_repository.dart';
+import '../../data/printer_route_repository.dart';
+import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
+import 'local_printer_device_identity.dart';
+import 'queued_native_print_worker.dart';
 import 'receipt_paper_width.dart';
 import 'venue_printer_routing_page.dart';
 
-class BluetoothPrinterSetupPage extends StatefulWidget {
+class BluetoothPrinterSetupPage extends ConsumerStatefulWidget {
   const BluetoothPrinterSetupPage({
     super.key,
     required this.restaurantName,
     required this.venueRoutingKey,
+    required this.scope,
   });
 
   final String restaurantName;
   final String venueRoutingKey;
+  final VenueScope? scope;
 
   @override
-  State<BluetoothPrinterSetupPage> createState() =>
+  ConsumerState<BluetoothPrinterSetupPage> createState() =>
       _BluetoothPrinterSetupPageState();
 }
 
-class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
+class _BluetoothPrinterSetupPageState
+    extends ConsumerState<BluetoothPrinterSetupPage> {
   final BluetoothReceiptPrinter _printer = createBluetoothReceiptPrinter();
+  final LocalPrinterDeviceIdentity _identity = LocalPrinterDeviceIdentity();
+  final PrinterDeviceRepository _printerDevices = PrinterDeviceRepository(
+    FirebaseFirestore.instance,
+  );
+  final PrinterRouteRepository _printerRoutes = PrinterRouteRepository(
+    FirebaseFirestore.instance,
+  );
 
   List<BluetoothReceiptPrinterDevice> _devices = const [];
   BluetoothReceiptPrinterDevice? _selected;
@@ -158,6 +177,7 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
     if (_savingRouting) return;
     setState(() => _savingRouting = true);
     try {
+      await _configureSecuredLiveQueue(routing);
       await _printer.saveProductionRouting(
         venueRoutingKey: widget.venueRoutingKey,
         routing: routing,
@@ -168,7 +188,7 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
         context,
         title: 'Printer routing saved',
         message: routing.enabled && routing.productionAreas.isNotEmpty
-            ? 'Live production routing saved for this venue.'
+            ? 'This printer is enrolled and its selected live routes are ready.'
             : 'Live production routing is off for this venue.',
         level: AppNotificationLevel.success,
       );
@@ -183,6 +203,91 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
       );
     } finally {
       if (mounted) setState(() => _savingRouting = false);
+    }
+  }
+
+  /// Makes the live path match the controls on this page. Test printing talks
+  /// directly to Bluetooth, while live tickets are durably queued and require
+  /// a venue-scoped device credential plus server routes. Previously the
+  /// switch saved only the local preference, leaving managers to discover a
+  /// second setup page after live jobs failed. Enabling an area now performs
+  /// the complete authorised configuration in one transaction-like workflow.
+  Future<void> _configureSecuredLiveQueue(
+    BluetoothProductionRouting routing,
+  ) async {
+    final scope = widget.scope;
+    final selected = _selected;
+    if (scope == null) {
+      throw StateError('Choose a venue before configuring live printing.');
+    }
+    if (selected == null) {
+      throw StateError('Select the Bluetooth printer first.');
+    }
+    if (FirebaseAuth.instance.currentUser == null) {
+      throw StateError('Sign in before configuring live printing.');
+    }
+    final hasSession = ref
+        .read(activeStaffPinSessionProvider.notifier)
+        .restoreCredentials();
+    if (!hasSession) {
+      throw StateError('Enter your staff PIN again before saving printers.');
+    }
+
+    final deviceId = await _identity.deviceIdForScope(scope);
+    final credential = await _printerDevices.register(
+      PrinterDevice(
+        id: deviceId,
+        venueId: scope.venueId,
+        name: selected.name,
+        platform: 'android',
+        // An ESC/POS printer can handle any ticket type. Route selection below
+        // determines which ones this particular installation actually gets.
+        productionAreas: productionRouteAreas,
+        transports: const ['bluetooth'],
+        active: true,
+      ),
+      tenantId: scope.tenantId,
+      // Selecting and enabling this physical printer is an explicit reconnect
+      // action. Transfer routes from a stale registration with the same name
+      // rather than leaving an unreachable device active.
+      replaceExistingNamedDevice: true,
+    );
+    await _identity.saveCredential(scope, credential);
+
+    final existingRoutes = await _printerRoutes.watchVenueRoutes(scope).first;
+    final byArea = {
+      for (final route in existingRoutes) route.productionArea: route,
+    };
+    for (final area in productionRouteAreas) {
+      final selectedHere =
+          routing.enabled && routing.productionAreas.contains(area);
+      final existing = byArea[area];
+      if (selectedHere) {
+        await _printerRoutes.saveRoute(
+          scope: scope,
+          productionArea: area,
+          primaryDeviceId: deviceId,
+          fallbackDeviceId: existing?.fallbackDeviceId == deviceId
+              ? null
+              : existing?.fallbackDeviceId,
+        );
+      } else if (existing?.primaryDeviceId == deviceId) {
+        // Removing this device from an area must not erase a separately
+        // configured fallback. Promote it to primary when available.
+        await _printerRoutes.saveRoute(
+          scope: scope,
+          productionArea: area,
+          primaryDeviceId: existing?.fallbackDeviceId,
+        );
+      }
+    }
+    final liveSessionReady = await QueuedNativePrintWorker.instance
+        .maintainHeartbeat(scope);
+    if (!liveSessionReady) {
+      throw StateError(
+        'The venue server did not accept this printer for live queue access. '
+        'The test connection is unchanged; check the staff permission and retry registration.',
+      );
     }
   }
 
@@ -326,19 +431,9 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                   ),
                   const SizedBox(height: 6),
                   const Text(
-                    'These choices enable direct printing when this device sends an order. The durable venue queue also requires this Android device to be enrolled and assigned in Venue printer routes.',
+                    'Choose the ticket types for this printer. Saving here enrols this Android device, secures its live queue, and assigns the venue routes automatically. Test and live printing use the same selected Bluetooth printer.',
                   ),
                   const SizedBox(height: 10),
-                  OutlinedButton.icon(
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const VenuePrinterRoutingPage(),
-                      ),
-                    ),
-                    icon: const Icon(Icons.route_rounded),
-                    label: const Text('Open venue printer routes'),
-                  ),
-                  const SizedBox(height: 8),
                   SwitchListTile.adaptive(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Enable live production printing'),
@@ -356,15 +451,15 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                               'kitchen',
                               'dessert',
                             };
-                            _saveRouting(
-                              BluetoothProductionRouting(
+                            setState(() {
+                              _routing = BluetoothProductionRouting(
                                 enabled: enabled,
                                 productionAreas:
                                     enabled && _routing.productionAreas.isEmpty
                                     ? allAreas
                                     : _routing.productionAreas,
-                              ),
-                            );
+                              );
+                            });
                           },
                   ),
                   Wrap(
@@ -375,6 +470,7 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                         ('bar', 'Bar'),
                         ('kitchen', 'Kitchen'),
                         ('dessert', 'Dessert'),
+                        ('receipt', 'Paid receipts'),
                       ])
                         FilterChip(
                           label: Text(area.$2),
@@ -388,12 +484,12 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                                   } else {
                                     areas.remove(area.$1);
                                   }
-                                  _saveRouting(
-                                    BluetoothProductionRouting(
+                                  setState(() {
+                                    _routing = BluetoothProductionRouting(
                                       enabled: _routing.enabled,
                                       productionAreas: areas,
-                                    ),
-                                  );
+                                    );
+                                  });
                                 },
                         ),
                     ],
@@ -402,6 +498,44 @@ class _BluetoothPrinterSetupPageState extends State<BluetoothPrinterSetupPage> {
                     const SizedBox(height: 8),
                     const Text(
                       'Select a paired printer before enabling routing.',
+                    ),
+                  ] else ...[
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed:
+                            (_routing.enabled &&
+                                    _routing.productionAreas.isEmpty) ||
+                                _savingRouting
+                            ? null
+                            : () => _saveRouting(_routing),
+                        icon: _savingRouting
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.verified_rounded),
+                        label: Text(
+                          _savingRouting
+                              ? 'Securing live printer…'
+                              : _routing.enabled
+                              ? 'Register and apply live routes'
+                              : 'Turn off live printing on this device',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const VenuePrinterRoutingPage(),
+                        ),
+                      ),
+                      icon: const Icon(Icons.route_rounded),
+                      label: const Text('Advanced shared routes'),
                     ),
                   ],
                 ],

@@ -60,7 +60,7 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     _watchingLocalHubQueue = false;
     if (scope == null) return;
     unawaited(_restoreAndroidPrinterService());
-    final worker = _worker ??= QueuedNativePrintWorker();
+    final worker = _worker ??= QueuedNativePrintWorker.instance;
     _subscribeToQueue(worker, scope);
     // The print worker is mounted before the asynchronous venue hub startup
     // completes. Rebind as soon as the encrypted hub queue becomes ready;
