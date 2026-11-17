@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_logger.dart';
+import '../../core/safe_dialog.dart';
 import '../../core/tenant_scope.dart';
 import '../../offline/venue_hub_client_registry.dart';
 import '../../offline/venue_hub_platform.dart';
@@ -31,16 +32,20 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
   QueuedNativePrintWorker? _worker;
   Timer? _retryTimer;
   Timer? _lanQueueTimer;
+  Timer? _printFailureRetryTimer;
   StreamSubscription<int>? _queuedJobsSubscription;
   StreamSubscription<VenueHubRuntimeStatus>? _hubStatusSubscription;
   VenueScope? _scope;
   bool _watchingLocalHubQueue = false;
   bool _processing = false;
+  bool _printerFailureActive = false;
+  bool _printerFailureDialogVisible = false;
 
   @override
   void dispose() {
     _retryTimer?.cancel();
     _lanQueueTimer?.cancel();
+    _printFailureRetryTimer?.cancel();
     _queuedJobsSubscription?.cancel();
     _hubStatusSubscription?.cancel();
     super.dispose();
@@ -57,10 +62,13 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     if (!mounted || scope == _scope) return;
     _retryTimer?.cancel();
     _lanQueueTimer?.cancel();
+    _printFailureRetryTimer?.cancel();
     _queuedJobsSubscription?.cancel();
     _hubStatusSubscription?.cancel();
     _scope = scope;
     _watchingLocalHubQueue = false;
+    _printerFailureActive = false;
+    _printerFailureDialogVisible = false;
     if (scope == null) return;
     unawaited(_restoreAndroidPrinterService());
     final worker = _worker ??= QueuedNativePrintWorker.instance;
@@ -191,6 +199,7 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
         if (result == PrintWorkerResult.noWork) return;
         if (result == PrintWorkerResult.printed) {
           AppLogger.info('Queued native printer: ticket printed.');
+          _resolvePrinterFailure(scope);
           continue;
         }
         AppLogger.error(
@@ -198,14 +207,19 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
           StateError('A queued ticket failed and will be retried or flagged.'),
           StackTrace.current,
         );
-        showAppNotification(
-          context,
-          ref: ref,
-          title: 'Printer job needs attention',
-          message:
-              'A queued ticket or paid receipt could not print. It will retry automatically.',
-          level: AppNotificationLevel.error,
-        );
+        _reportPrinterFailure(scope, worker.lastPrinterFailure);
+        // Completing a failed physical attempt puts the same durable job back
+        // into `queued`. Its stream notification can arrive while this method
+        // still owns `_processing`, so that wake-up is intentionally ignored.
+        // Schedule a fresh LAN-only pass after this call has unwound. This is
+        // what advances an unavailable printer through all three attempts and
+        // makes the job visibly `failed` in recovery instead of stranding it.
+        _printFailureRetryTimer?.cancel();
+        _printFailureRetryTimer = Timer(const Duration(seconds: 5), () {
+          if (mounted && _scope == scope) {
+            unawaited(_processAvailable(scope, localHubOnly: true));
+          }
+        });
         return;
       }
     } on Object catch (error, stackTrace) {
@@ -221,6 +235,68 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
       }
     } finally {
       _processing = false;
+    }
+  }
+
+  String _printerFailureKey(VenueScope scope) =>
+      'local-printer-failure-${scope.tenantId}-${scope.venueId}';
+
+  void _resolvePrinterFailure(VenueScope scope) {
+    if (!_printerFailureActive || !mounted || _scope != scope) return;
+    _printerFailureActive = false;
+    ref
+        .read(appNotificationsProvider.notifier)
+        .resolve(_printerFailureKey(scope));
+  }
+
+  void _reportPrinterFailure(VenueScope scope, String? technicalReason) {
+    if (!mounted || _scope != scope) return;
+    final reason = technicalReason?.trim();
+    final message = [
+      'This device could not print a queued ticket or receipt.',
+      'Make sure the printer is connected, has paper and is powered on. '
+          'If it was already on, switch it off, wait a few seconds and power it on again. '
+          'The ticket will retry automatically.',
+      if (reason != null && reason.isNotEmpty) 'Reported problem: $reason',
+    ].join('\n\n');
+    showAppNotification(
+      context,
+      ref: ref,
+      title: 'Printer connected to this device needs attention',
+      message: message,
+      level: AppNotificationLevel.error,
+      deduplicationKey: _printerFailureKey(scope),
+      requiresAttention: true,
+    );
+    if (_printerFailureActive || _printerFailureDialogVisible) return;
+    _printerFailureActive = true;
+    unawaited(_showPrinterFailureDialog(scope, message));
+  }
+
+  Future<void> _showPrinterFailureDialog(
+    VenueScope scope,
+    String message,
+  ) async {
+    if (!mounted || _scope != scope || _printerFailureDialogVisible) return;
+    _printerFailureDialogVisible = true;
+    try {
+      await showAppDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => AlertDialog(
+          icon: const Icon(Icons.print_disabled_rounded),
+          title: const Text('Printer is not responding'),
+          content: SingleChildScrollView(child: Text(message)),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Dismiss and keep working'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      _printerFailureDialogVisible = false;
     }
   }
 }

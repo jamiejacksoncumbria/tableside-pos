@@ -179,27 +179,31 @@ class VenueHubPrintQueue {
     }
     for (final entry in grouped.entries) {
       final route = routes[entry.key];
-      if (route == null || route.primaryDeviceId.isEmpty) {
-        // A requested ticket must never disappear merely because staging (or
-        // a venue change) has an incomplete route. Reject the send visibly so
-        // staff can correct routing and safely retry the unchanged order.
-        throw StateError(
-          'No active printer route is configured for ${entry.key}.',
-        );
-      }
+      final routeUnavailable =
+          route == null || route.primaryDeviceId.isEmpty;
       final id =
           'offline-$hubEpoch-${order.orderId}-${entry.key}-${lineIds.join('-')}';
       _jobs.putIfAbsent(
         id,
         () => VenueHubLocalPrintJob(
           id: id,
-          targetDeviceId: route.primaryDeviceId,
-          fallbackDeviceId: route.fallbackDeviceId,
+          // Keep an unrouted requested ticket as a durable failed job. It is
+          // then visible in recovery instead of disappearing in a deferred
+          // post-commit callback. After a manager fixes the route and presses
+          // retry, claim() safely replaces this sentinel with the active
+          // venue-scoped printer device.
+          targetDeviceId: routeUnavailable
+              ? 'unrouted'
+              : route.primaryDeviceId,
+          fallbackDeviceId: route?.fallbackDeviceId,
           orderId: order.orderId,
           productionArea: entry.key,
           createdAtUtc: TrustedClock.instance.nowUtc(),
           attempts: 0,
-          status: 'queued',
+          status: routeUnavailable ? 'failed' : 'queued',
+          failureReason: routeUnavailable
+              ? 'No active printer route is configured for ${entry.key}.'
+              : null,
           payload: <String, Object?>{
             'type': 'production',
             'ticketId': id,
@@ -232,7 +236,9 @@ class VenueHubPrintQueue {
         ),
       );
       AppLogger.info(
-        'Hub print queued: job=$id, area=${entry.key}, device=${route.primaryDeviceId}.',
+        routeUnavailable
+            ? 'Hub print recorded as failed: job=$id, area=${entry.key}, reason=no active route.'
+            : 'Hub print queued: job=$id, area=${entry.key}, device=${route.primaryDeviceId}.',
       );
     }
     await _persist();
@@ -313,9 +319,7 @@ class VenueHubPrintQueue {
   }) => _run(() async {
     if (!printRequired) return;
     final route = _routes()['receipt'];
-    if (route == null || route.primaryDeviceId.isEmpty) {
-      throw StateError('No active receipt printer route is configured.');
-    }
+    final routeUnavailable = route == null || route.primaryDeviceId.isEmpty;
     final id =
         'offline-$hubEpoch-${order.orderId}-receipt-${jobSuffix ?? order.lastSequence}';
     final total = order.totalMinor;
@@ -344,13 +348,16 @@ class VenueHubPrintQueue {
       id,
       () => VenueHubLocalPrintJob(
         id: id,
-        targetDeviceId: route.primaryDeviceId,
-        fallbackDeviceId: route.fallbackDeviceId,
+        targetDeviceId: routeUnavailable ? 'unrouted' : route.primaryDeviceId,
+        fallbackDeviceId: route?.fallbackDeviceId,
         orderId: order.orderId,
         productionArea: 'receipt',
         createdAtUtc: TrustedClock.instance.nowUtc(),
         attempts: 0,
-        status: 'queued',
+        status: routeUnavailable ? 'failed' : 'queued',
+        failureReason: routeUnavailable
+            ? 'No active receipt printer route is configured.'
+            : null,
         payload: <String, Object?>{
           'type': 'receipt',
           'isPreReceipt': isPreReceipt,
@@ -438,7 +445,9 @@ class VenueHubPrintQueue {
       ),
     );
     AppLogger.info(
-      'Hub receipt queued: job=$id, device=${route.primaryDeviceId}.',
+      routeUnavailable
+          ? 'Hub receipt recorded as failed: job=$id, reason=no active receipt route.'
+          : 'Hub receipt queued: job=$id, device=${route.primaryDeviceId}.',
     );
     await _persist();
   });

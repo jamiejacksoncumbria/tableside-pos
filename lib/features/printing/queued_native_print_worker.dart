@@ -37,7 +37,11 @@ class QueuedNativePrintWorker {
   final LocalPrinterDeviceIdentity _identity;
   final PrinterRealtimePresence _realtime = PrinterRealtimePresence();
   String? _lastReadinessDiagnostic;
+  String? _lastPrinterFailure;
   final Set<String> _printedAwaitingCompletion = <String>{};
+
+  /// Human-readable physical printer failure for the device-local alert.
+  String? get lastPrinterFailure => _lastPrinterFailure;
 
   String? get _requiredTransport {
     // `Platform` from dart:io throws at runtime in a browser. Web is a POS
@@ -167,8 +171,17 @@ class QueuedNativePrintWorker {
       localHubOnly: localHubOnly,
     );
     try {
-      return await worker.processNext();
+      final result = await worker.processNext();
+      if (result == PrintWorkerResult.failed) {
+        _lastPrinterFailure = worker.lastPrinterFailure;
+      } else if (result == PrintWorkerResult.printed) {
+        _lastPrinterFailure = null;
+      }
+      return result;
     } on Object catch (error, stackTrace) {
+      if (worker.lastPrinterFailure != null) {
+        _lastPrinterFailure = worker.lastPrinterFailure;
+      }
       if (error is ClientException || error is SocketException) {
         // A cloud claim can be committed immediately before its HTTP response
         // is interrupted. The server lets this same enrolled device resume

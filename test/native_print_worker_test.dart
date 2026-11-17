@@ -19,6 +19,23 @@ void main() {
     expect(await worker.processNext(), PrintWorkerResult.noWork);
     expect(queue.lastLocalHubOnly, isTrue);
   });
+
+  test('physical printer failure is retained for the device alert', () async {
+    final queue = _FailingPrintQueue();
+    final worker = NativePrintWorker(
+      queue: queue,
+      printer: _FailingPrinter(),
+      tenantId: 'tenant-a',
+      venueId: 'venue-a',
+      deviceId: 'printer-a',
+      deviceCredential: 'credential-a',
+    );
+
+    expect(await worker.processNext(), PrintWorkerResult.failed);
+    expect(worker.lastPrinterFailure, contains('printer is powered off'));
+    expect(queue.completedAsPrinted, isFalse);
+    expect(queue.failureReason, contains('printer is powered off'));
+  });
 }
 
 class _RecordingQueue extends PrintJobRepository {
@@ -45,4 +62,49 @@ class _UnusedPrinter implements NativeReceiptPrinter {
     required Map<String, Object?> payload,
     required String idempotencyKey,
   }) => throw StateError('No job should reach the printer in this test.');
+}
+
+class _FailingPrintQueue extends PrintJobRepository {
+  _FailingPrintQueue() : super.localOnly();
+
+  bool? completedAsPrinted;
+  String? failureReason;
+
+  @override
+  Future<PrintJob?> claimNext({
+    required String tenantId,
+    required String venueId,
+    required String deviceId,
+    required String deviceCredential,
+    bool localHubOnly = false,
+  }) async => PrintJob(
+    id: 'job-a',
+    tenantId: tenantId,
+    venueId: venueId,
+    targetDeviceId: deviceId,
+    orderId: 'order-a',
+    status: PrintJobStatus.claimed,
+    idempotencyKey: 'print-a',
+    createdAt: DateTime.utc(2026),
+    payload: const <String, Object?>{'type': 'production'},
+  );
+
+  @override
+  Future<void> complete({
+    required PrintJob job,
+    required String deviceCredential,
+    required bool printed,
+    String? failureReason,
+  }) async {
+    completedAsPrinted = printed;
+    this.failureReason = failureReason;
+  }
+}
+
+class _FailingPrinter implements NativeReceiptPrinter {
+  @override
+  Future<void> printTicket({
+    required Map<String, Object?> payload,
+    required String idempotencyKey,
+  }) => throw StateError('The printer is powered off.');
 }

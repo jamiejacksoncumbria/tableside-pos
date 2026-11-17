@@ -242,6 +242,51 @@ void main() {
     );
 
     test(
+      'requested ticket remains visible when its printer route is unavailable',
+      () async {
+        final harness = await _EposHarness.create();
+        addTearDown(harness.dispose);
+        harness.printQueue.installSnapshot(<String, Object?>{
+          ...harness.snapshot,
+          'printerRoutes': const <Object?>[],
+        });
+
+        await harness.send('order.opened', const <String, Object?>{
+          'orderId': 'order-unrouted',
+          'channel': 'dineIn',
+          'tableId': 'table-a',
+        });
+        await harness.send('order.itemsAdded', const <String, Object?>{
+          'orderId': 'order-unrouted',
+          'items': <Object?>[
+            <String, Object?>{
+              'lineId': 'line-curry',
+              'productId': 'curry',
+              'quantity': 1,
+              'channel': 'dineIn',
+            },
+          ],
+        });
+        await harness.send('order.sent', const <String, Object?>{
+          'orderId': 'order-unrouted',
+          'lineIds': <String>['line-curry'],
+          'printRequired': true,
+        });
+
+        final failed = harness.printQueue.visibleJobs.single;
+        expect(failed['status'], 'failed');
+        expect(failed['targetDeviceId'], 'unrouted');
+        expect(failed['failureReason'], contains('No active printer route'));
+
+        harness.printQueue.installSnapshot(harness.snapshot);
+        await harness.printQueue.retry(failed['id']! as String);
+        final repaired = await harness.printQueue.claim('printer-kitchen');
+        expect(repaired, isNotNull);
+        expect(repaired!['targetDeviceId'], 'printer-kitchen');
+      },
+    );
+
+    test(
       'manager adjustment, split bill and mixed currencies settle exactly once',
       () async {
         final harness = await _EposHarness.create();

@@ -46,17 +46,20 @@ class _PrintDeliveryMonitorHostState
   );
   StreamSubscription<List<PrintJob>>? _jobsSubscription;
   StreamSubscription<List<PrinterDevice>>? _devicesSubscription;
+  StreamSubscription<VenueHubRuntimeStatus>? _hubStatusSubscription;
   Timer? _ageTimer;
   VenueScope? _scope;
   String? _staffSessionId;
   List<PrintJob> _currentJobs = const [];
   List<PrinterDevice> _currentDevices = const [];
   Set<String> _activeAlertKeys = const {};
+  bool _usingLocalHubJobs = false;
 
   @override
   void dispose() {
     _jobsSubscription?.cancel();
     _devicesSubscription?.cancel();
+    _hubStatusSubscription?.cancel();
     _ageTimer?.cancel();
     super.dispose();
   }
@@ -79,18 +82,52 @@ class _PrintDeliveryMonitorHostState
     }
     _jobsSubscription?.cancel();
     _devicesSubscription?.cancel();
+    _hubStatusSubscription?.cancel();
     _ageTimer?.cancel();
     _resolveAllAlerts();
     _scope = scope;
     _staffSessionId = staffSessionId;
     _currentJobs = const [];
     _currentDevices = const [];
+    _usingLocalHubJobs = false;
     // The physical queue worker remains mounted and credential-authorised on
     // the PIN screen. This staff-facing alert monitor does not: it must not
     // retain cloud subscriptions or reveal operational job details after the
     // staff session locks.
     if (scope == null || staffSessionId == null) return;
 
+    _subscribeToJobs(scope);
+    // The monitor can mount just before the encrypted hub queue finishes
+    // starting. Rebind when it becomes authoritative; otherwise this widget
+    // can remain attached only to the legacy cloud queue and hide the exact
+    // local ticket that staff need to recover.
+    _hubStatusSubscription = VenueHubRuntime.instance.statuses.listen((_) {
+      if (!mounted || _scope != scope || _staffSessionId == null) return;
+      final localReady = VenueHubRuntime.instance.activeScope == scope;
+      if (localReady != _usingLocalHubJobs) _subscribeToJobs(scope);
+    });
+    _devicesSubscription = _devices
+        .watchVenueDevices(tenantId: scope.tenantId, venueId: scope.venueId)
+        .listen(
+          (devices) {
+            _currentDevices = devices;
+            _reconcile();
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            AppLogger.error(
+              'Print delivery monitor device stream',
+              error,
+              stackTrace,
+            );
+            _showMonitorConnectionFailure();
+          },
+        );
+    _ageTimer = Timer.periodic(const Duration(seconds: 5), (_) => _reconcile());
+  }
+
+  void _subscribeToJobs(VenueScope scope) {
+    _usingLocalHubJobs = VenueHubRuntime.instance.activeScope == scope;
+    unawaited(_jobsSubscription?.cancel());
     _jobsSubscription = _jobs
         .watchVenueJobs(tenantId: scope.tenantId, venueId: scope.venueId)
         .listen(
@@ -110,23 +147,6 @@ class _PrintDeliveryMonitorHostState
             _showMonitorConnectionFailure();
           },
         );
-    _devicesSubscription = _devices
-        .watchVenueDevices(tenantId: scope.tenantId, venueId: scope.venueId)
-        .listen(
-          (devices) {
-            _currentDevices = devices;
-            _reconcile();
-          },
-          onError: (Object error, StackTrace stackTrace) {
-            AppLogger.error(
-              'Print delivery monitor device stream',
-              error,
-              stackTrace,
-            );
-            _showMonitorConnectionFailure();
-          },
-        );
-    _ageTimer = Timer.periodic(const Duration(seconds: 5), (_) => _reconcile());
   }
 
   void _showMonitorConnectionFailure() {

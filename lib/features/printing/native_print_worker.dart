@@ -34,6 +34,11 @@ class NativePrintWorker {
   final Set<String> printedAwaitingCompletion;
   final bool localHubOnly;
 
+  /// The most recent physical printer error from this worker pass. Queue and
+  /// transport errors are deliberately excluded so the device does not tell
+  /// staff to power-cycle a printer when the actual problem is the network.
+  String? lastPrinterFailure;
+
   /// Call this from a native foreground/background service on a short timer,
   /// and also when the Firestore queue stream reports new work.
   Future<PrintWorkerResult> processNext() async {
@@ -63,6 +68,7 @@ class NativePrintWorker {
         // retry its acknowledgement, never print a second kitchen ticket.
         printedAwaitingCompletion.add(job.idempotencyKey);
       } on Object catch (error, stackTrace) {
+        lastPrinterFailure = error.toString();
         AppLogger.error(
           'Print ticket ${job.idempotencyKey}',
           error,
