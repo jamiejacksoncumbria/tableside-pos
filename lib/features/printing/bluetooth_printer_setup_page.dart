@@ -14,6 +14,7 @@ import 'bluetooth_receipt_printer_factory.dart';
 import 'local_printer_device_identity.dart';
 import 'queued_native_print_worker.dart';
 import 'receipt_paper_width.dart';
+import 'secured_printer_enrollment.dart';
 import 'venue_printer_routing_page.dart';
 
 class BluetoothPrinterSetupPage extends ConsumerStatefulWidget {
@@ -253,6 +254,7 @@ class _BluetoothPrinterSetupPageState
       replaceExistingNamedDevice: true,
     );
     await _identity.saveCredential(scope, credential);
+    await ensureSecuredVenueHubPrinterChannel(scope: scope, deviceId: deviceId);
 
     final existingRoutes = await _printerRoutes.watchVenueRoutes(scope).first;
     final byArea = {

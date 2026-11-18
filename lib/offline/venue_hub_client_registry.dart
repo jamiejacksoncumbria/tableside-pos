@@ -591,12 +591,20 @@ class VenueHubPrinterClientRegistry {
   VenueHubClient? _client;
   bool _clockReady = false;
   bool _localHubHost = false;
+  String? _configurationIssue;
 
   bool requiresHub(VenueScope scope) =>
       _scope == scope && _bootstrap?.enabled == true;
 
   bool isDeviceEnrolled(VenueScope scope) =>
       requiresHub(scope) && _client != null;
+
+  /// Explains why this device cannot claim production print jobs from the
+  /// venue hub. Shared-printer registration is a separate cloud credential;
+  /// exposing this state prevents the UI from reporting a printer as live
+  /// when its certificate-pinned production channel is not usable.
+  String? configurationIssue(VenueScope scope) =>
+      _scope == scope ? _configurationIssue : null;
 
   /// Whether this process owns the authoritative hub for [scope].
   ///
@@ -618,10 +626,22 @@ class VenueHubPrinterClientRegistry {
     _localHubHost =
         bootstrap.hubDeviceId == deviceId &&
         bootstrap.hubCredentialId == credential.credentialId;
-    if (!bootstrap.enabled) return;
+    if (!bootstrap.enabled) {
+      _configurationIssue = null;
+      return;
+    }
     final endpoint = endpointOverride ?? bootstrap.endpoint;
     final enrolled = bootstrap.credentials[credential.credentialId];
-    if (endpoint == null || enrolled?.deviceId != deviceId) return;
+    if (endpoint == null) {
+      _configurationIssue =
+          'The venue hub does not have a valid local network address.';
+      return;
+    }
+    if (enrolled?.deviceId != deviceId) {
+      _configurationIssue =
+          'This device is not enrolled for secure production printing at this venue.';
+      return;
+    }
     final trustedCertificate = await _secrets.read(
       key: _venueCertificateKey(scope),
     );
@@ -629,6 +649,8 @@ class VenueHubPrinterClientRegistry {
       // Printer claiming must never fall back to Android/Windows trust roots.
       // It carries operational authority even while no member of staff is
       // signed in, so absence of the venue pin is a hard failure.
+      _configurationIssue =
+          'Import the venue certificate on this device before enabling live production printing.';
       return;
     }
     _client = VenueHubClient(
@@ -643,6 +665,30 @@ class VenueHubPrinterClientRegistry {
         trustedCertificatePem: trustedCertificate,
       ),
     );
+    _configurationIssue = null;
+  }
+
+  /// Proves that the complete production path is usable, including the
+  /// device credential, pinned venue certificate and live HTTPS hub. This is
+  /// intentionally stronger than the Firebase printer heartbeat used to show
+  /// that a shared printer registration exists.
+  Future<bool> verifyConnection(VenueScope scope) async {
+    final client = _client;
+    if (client == null || !requiresHub(scope)) {
+      _clockReady = false;
+      _configurationIssue ??=
+          'This device is not ready to claim production print jobs from the venue hub.';
+      return false;
+    }
+    _clockReady = await client.isHealthy();
+    if (!_clockReady) {
+      _configurationIssue =
+          client.lastHealthFailure ??
+          'The venue hub is unavailable on the local network.';
+      return false;
+    }
+    _configurationIssue = null;
+    return true;
   }
 
   Future<Map<String, Object?>?> claim(VenueScope scope) async {
@@ -651,10 +697,9 @@ class VenueHubPrinterClientRegistry {
       throw StateError('This printer is not enrolled with the venue hub.');
     }
     if (!_clockReady) {
-      _clockReady = await client.isHealthy();
-      if (!_clockReady) {
+      if (!await verifyConnection(scope)) {
         throw StateError(
-          client.lastHealthFailure ??
+          _configurationIssue ??
               'The venue hub is unavailable on the local network.',
         );
       }
@@ -686,6 +731,7 @@ class VenueHubPrinterClientRegistry {
     _scope = null;
     _bootstrap = null;
     _localHubHost = false;
+    _configurationIssue = null;
   }
 }
 

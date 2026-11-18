@@ -9,11 +9,13 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/printer_device_repository.dart';
 import '../../data/printer_route_repository.dart';
+import '../../offline/venue_hub_client_registry.dart';
 import '../auth/staff_pin_gate.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
 import 'local_printer_device_identity.dart';
 import 'queued_native_print_worker.dart';
+import 'secured_printer_enrollment.dart';
 import 'windows_print_queue.dart';
 import 'windows_print_queue_factory.dart';
 
@@ -184,6 +186,14 @@ class _VenuePrinterRoutingPageState
         replaceExistingNamedDevice: replaceExistingNamedDevice,
       );
       await _identity.saveCredential(scope, deviceCredential);
+      // The Firebase printer credential above authorises cloud presence and
+      // routing. EPOS 3 production jobs are claimed from the venue hub over a
+      // separate certificate-pinned channel, so enrol and prove that channel
+      // before telling the manager that live printing is ready.
+      await ensureSecuredVenueHubPrinterChannel(
+        scope: scope,
+        deviceId: deviceId,
+      );
       // Start the protected live queue session immediately. Waiting for the
       // shell's periodic heartbeat made a newly registered printer continue
       // to look offline for up to thirty seconds.
@@ -457,26 +467,35 @@ class _VenuePrinterRoutingPageState
                                   device.id == _deviceId && device.active,
                             )
                             .firstOrNull;
-                    final enrolled = localDevice != null;
+                    final cloudEnrolled = localDevice != null;
+                    final hubPrinter = VenueHubPrinterClientRegistry.instance;
+                    final productionReady =
+                        cloudEnrolled &&
+                        (!hubPrinter.requiresHub(scope) ||
+                            hubPrinter.isDeviceEnrolled(scope));
+                    final productionIssue = hubPrinter.configurationIssue(
+                      scope,
+                    );
                     return Card(
-                      color: enrolled
+                      color: productionReady
                           ? Theme.of(context).colorScheme.secondaryContainer
                           : Theme.of(context).colorScheme.errorContainer,
                       child: ListTile(
                         leading: Icon(
-                          enrolled
+                          productionReady
                               ? Icons.verified_rounded
                               : Icons.print_disabled_rounded,
                         ),
                         title: Text(
-                          enrolled
+                          productionReady
                               ? 'This device is enrolled for live printing'
                               : 'This device is not enrolled for live printing',
                         ),
                         subtitle: Text(
-                          enrolled
+                          productionReady
                               ? 'Live queue access is authorised as ${localDevice.name}. Test and live tickets use different paths.'
-                              : 'A successful test print confirms only the cable/Bluetooth connection. Register or reconnect this device below before live tickets can leave the secured venue queue.',
+                              : productionIssue ??
+                                    'A successful test print confirms only the cable/Bluetooth connection. Register or reconnect this device below before live tickets can leave the secured venue queue.',
                         ),
                       ),
                     );

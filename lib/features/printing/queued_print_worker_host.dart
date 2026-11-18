@@ -40,6 +40,7 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
   bool _processing = false;
   bool _printerFailureActive = false;
   bool _printerFailureDialogVisible = false;
+  String? _lastProductionChannelIssue;
 
   @override
   void dispose() {
@@ -69,6 +70,7 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     _watchingLocalHubQueue = false;
     _printerFailureActive = false;
     _printerFailureDialogVisible = false;
+    _lastProductionChannelIssue = null;
     if (scope == null) return;
     unawaited(_restoreAndroidPrinterService());
     final worker = _worker ??= QueuedNativePrintWorker.instance;
@@ -108,11 +110,20 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
     // immediate queue-stream events and does not need to poll itself.
     _lanQueueTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       final printerRegistry = VenueHubPrinterClientRegistry.instance;
-      if (printerRegistry.requiresHub(scope) &&
-          printerRegistry.isDeviceEnrolled(scope) &&
-          !printerRegistry.isLocalHubHost(scope)) {
-        unawaited(_processAvailable(scope, localHubOnly: true));
+      if (!printerRegistry.requiresHub(scope) ||
+          printerRegistry.isLocalHubHost(scope)) {
+        return;
       }
+      if (!printerRegistry.isDeviceEnrolled(scope)) {
+        _reportProductionChannelIssue(
+          scope,
+          printerRegistry.configurationIssue(scope) ??
+              'This printer device is not enrolled with the venue hub.',
+        );
+        return;
+      }
+      _resolveProductionChannelIssue(scope);
+      unawaited(_processAvailable(scope, localHubOnly: true));
     });
     AppLogger.info(
       'Printer worker will check the venue hub LAN queue every 2 seconds '
@@ -240,6 +251,42 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
 
   String _printerFailureKey(VenueScope scope) =>
       'local-printer-failure-${scope.tenantId}-${scope.venueId}';
+
+  String _productionChannelFailureKey(VenueScope scope) =>
+      'production-printer-channel-${scope.tenantId}-${scope.venueId}';
+
+  void _reportProductionChannelIssue(VenueScope scope, String issue) {
+    if (!mounted || _scope != scope || _lastProductionChannelIssue == issue) {
+      return;
+    }
+    _lastProductionChannelIssue = issue;
+    final error = StateError(issue);
+    AppLogger.error(
+      'Production printer channel unavailable',
+      error,
+      StackTrace.current,
+    );
+    showAppNotification(
+      context,
+      ref: ref,
+      title: 'Live printing is not ready on this device',
+      message:
+          '$issue Open Settings > Venue printer routes and choose Register or reconnect this printer device.',
+      level: AppNotificationLevel.error,
+      deduplicationKey: _productionChannelFailureKey(scope),
+      requiresAttention: true,
+    );
+  }
+
+  void _resolveProductionChannelIssue(VenueScope scope) {
+    if (_lastProductionChannelIssue == null || !mounted || _scope != scope) {
+      return;
+    }
+    _lastProductionChannelIssue = null;
+    ref
+        .read(appNotificationsProvider.notifier)
+        .resolve(_productionChannelFailureKey(scope));
+  }
 
   void _resolvePrinterFailure(VenueScope scope) {
     if (!_printerFailureActive || !mounted || _scope != scope) return;
