@@ -3,6 +3,7 @@ import 'dart:async';
 import '../core/app_logger.dart';
 import '../core/trusted_clock.dart';
 import 'offline_event_ledger.dart';
+import 'offline_event.dart';
 import 'offline_order_projection.dart';
 
 class VenueHubLocalPrintJob {
@@ -162,39 +163,103 @@ class VenueHubPrintQueue {
     snapshot = Map<String, Object?>.from(value);
   }
 
-  Future<void> enqueueProduction({
+  /// Durably records every requested production-print intent.
+  ///
+  /// The caller must await this method before acknowledging `order.sent`.
+  /// Returning only after [_persist] closes the former failure window where
+  /// an order could be accepted but its print job existed only in memory (or
+  /// did not exist at all). The returned count is the number of newly-created
+  /// jobs; an idempotent command retry returns zero without duplicating paper.
+  Future<int> enqueueProduction({
     required OfflineOrderProjection order,
     required List<String> lineIds,
     required bool printRequired,
     required String createdByName,
   }) => _run(() async {
-    if (!printRequired) return;
+    if (!printRequired) {
+      AppLogger.info(
+        'Hub production print not requested: order=${order.orderId}, '
+        'lineCount=${lineIds.length}.',
+      );
+      return 0;
+    }
+    AppLogger.info(
+      'Hub production print intent received: order=${order.orderId}, '
+      'lineIds=${lineIds.join(',')}.',
+    );
     final routes = _routes();
     final grouped = <String, List<OfflineProjectedLine>>{};
+    final missingLineIds = <String>[];
     for (final id in lineIds) {
       final line = order.lines[id];
-      if (line == null) continue;
+      if (line == null) {
+        missingLineIds.add(id);
+        continue;
+      }
       final area = line.productionArea;
       grouped.putIfAbsent(area, () => []).add(line);
     }
+    var createdJobs = 0;
+    // A malformed projection must remain visible. Previously missing lines
+    // were silently skipped; if every line was absent this method persisted
+    // an empty queue and the venue received no ticket, warning or recovery
+    // record. Keep one failed diagnostic job so staff and support can see and
+    // retry/clear the exact affected order.
+    if (lineIds.isEmpty || missingLineIds.isNotEmpty) {
+      final diagnosticId =
+          'offline-$hubEpoch-${order.orderId}-production-intent-invalid-${lineIds.join('-')}';
+      if (!_jobs.containsKey(diagnosticId)) {
+        final reason = lineIds.isEmpty
+            ? 'The production print request did not contain any order lines.'
+            : 'The production print request referenced missing order lines: '
+                  '${missingLineIds.join(', ')}.';
+        _jobs[diagnosticId] = VenueHubLocalPrintJob(
+          id: diagnosticId,
+          targetDeviceId: 'unrouted',
+          orderId: order.orderId,
+          productionArea: 'production',
+          createdAtUtc: TrustedClock.instance.nowUtc(),
+          attempts: 0,
+          status: 'failed',
+          failureReason: reason,
+          payload: <String, Object?>{
+            'type': 'production',
+            'ticketId': diagnosticId,
+            'restaurantName':
+                snapshot['venueName'] ?? snapshot['tenantName'] ?? '',
+            'reference': order.orderId.split('-').last,
+            'productionArea': 'production',
+            'tableLabel': _tableLabel(order.tableId),
+            'tabName': order.tabName,
+            'channel': order.channel,
+            'customerName': order.customerName,
+            'createdByName': createdByName,
+            'lines': const <Map<String, Object?>>[],
+          },
+        );
+        createdJobs += 1;
+        AppLogger.error(
+          'Record invalid production print intent for order ${order.orderId}',
+          StateError(reason),
+          StackTrace.current,
+        );
+      }
+    }
     for (final entry in grouped.entries) {
       final route = routes[entry.key];
-      final routeUnavailable =
-          route == null || route.primaryDeviceId.isEmpty;
+      final routeUnavailable = route == null || route.primaryDeviceId.isEmpty;
       final id =
           'offline-$hubEpoch-${order.orderId}-${entry.key}-${lineIds.join('-')}';
-      _jobs.putIfAbsent(
-        id,
-        () => VenueHubLocalPrintJob(
+      final alreadyDurable = _jobs.containsKey(id);
+      if (!alreadyDurable) {
+        _jobs[id] = VenueHubLocalPrintJob(
           id: id,
           // Keep an unrouted requested ticket as a durable failed job. It is
           // then visible in recovery instead of disappearing in a deferred
           // post-commit callback. After a manager fixes the route and presses
           // retry, claim() safely replaces this sentinel with the active
           // venue-scoped printer device.
-          targetDeviceId: routeUnavailable
-              ? 'unrouted'
-              : route.primaryDeviceId,
+          targetDeviceId: routeUnavailable ? 'unrouted' : route.primaryDeviceId,
           fallbackDeviceId: route?.fallbackDeviceId,
           orderId: order.orderId,
           productionArea: entry.key,
@@ -233,16 +298,69 @@ class VenueHubPrintQueue {
                 )
                 .toList(growable: false),
           },
-        ),
-      );
+        );
+        createdJobs += 1;
+      }
       AppLogger.info(
-        routeUnavailable
+        alreadyDurable
+            ? 'Hub print intent already durable: job=$id, area=${entry.key}.'
+            : routeUnavailable
             ? 'Hub print recorded as failed: job=$id, area=${entry.key}, reason=no active route.'
             : 'Hub print queued: job=$id, area=${entry.key}, device=${route.primaryDeviceId}.',
       );
     }
     await _persist();
+    AppLogger.info(
+      'Hub production print intent persisted: order=${order.orderId}, '
+      'newJobs=$createdJobs, totalVisibleJobs=${_jobs.length}.',
+    );
+    return createdJobs;
   });
+
+  /// Repairs the narrow crash window between the immutable order-event write
+  /// and print-queue snapshot write. Job IDs are deterministic, so replaying
+  /// recent print intents can only restore a missing job; it cannot create a
+  /// second copy of an existing queued, failed or printed ticket.
+  Future<int> reconcileRecentProductionIntents({
+    required Iterable<OfflineEvent> events,
+    required Future<OfflineOrderProjection> Function(String orderId)
+    resolveOrder,
+    required String Function(String staffId) createdByName,
+    Duration lookback = const Duration(hours: 24),
+  }) async {
+    final cutoff = TrustedClock.instance.nowUtc().subtract(lookback);
+    var restored = 0;
+    for (final event in events) {
+      if (event.type != 'order.sent' ||
+          event.payload['printRequired'] != true ||
+          event.createdAtUtc.toUtc().isBefore(cutoff)) {
+        continue;
+      }
+      final orderId = event.payload['orderId'];
+      final rawLineIds = event.payload['lineIds'];
+      if (orderId is! String || rawLineIds is! List) {
+        AppLogger.error(
+          'Reconcile production print intent ${event.id}',
+          const FormatException('The saved print intent is invalid.'),
+          StackTrace.current,
+        );
+        continue;
+      }
+      restored += await enqueueProduction(
+        order: await resolveOrder(orderId),
+        lineIds: rawLineIds.whereType<String>().toList(growable: false),
+        printRequired: true,
+        createdByName: createdByName(event.staffId),
+      );
+    }
+    if (restored > 0) {
+      AppLogger.info(
+        'Recovered $restored missing production print job(s) from the '
+        'immutable venue ledger.',
+      );
+    }
+    return restored;
+  }
 
   /// Queues a clearly marked cancellation ticket when a manager removes an
   /// item which has already reached production. The sale adjustment remains

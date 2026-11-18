@@ -456,10 +456,7 @@ void main() {
           'quantity': 1,
           'channel': 'delivery',
           'modifierSelections': <Object?>[
-            <String, Object?>{
-              'groupId': 'curry-heat',
-              'optionId': 'extra-hot',
-            },
+            <String, Object?>{'groupId': 'curry-heat', 'optionId': 'extra-hot'},
           ],
         });
         await harness.send('order.sent', const <String, Object?>{
@@ -724,6 +721,98 @@ void main() {
         expect(verifiedRestart.visibleJobs.single['status'], 'printed');
       },
     );
+
+    test(
+      'restart reconstructs a print job when power fails after order commit',
+      () async {
+        final harness = await _EposHarness.create();
+        addTearDown(harness.dispose);
+        await harness.send('order.opened', const <String, Object?>{
+          'orderId': 'order-print-intent-crash',
+          'channel': 'dineIn',
+          'tableId': 'table-a',
+        });
+        await harness.send('order.itemAdded', const <String, Object?>{
+          'orderId': 'order-print-intent-crash',
+          'lineId': 'line-curry',
+          'productId': 'curry',
+          'quantity': 1,
+          'channel': 'dineIn',
+        });
+
+        // Reproduce the former loss window: the immutable order event reaches
+        // disk, then the process dies before the separate print queue write.
+        await harness.orderBook.commit(
+          OfflineEventDraft(
+            tenantId: _EposHarness.scope.tenantId,
+            venueId: _EposHarness.scope.venueId,
+            deviceId: 'terminal-a',
+            staffId: 'staff-a',
+            type: 'order.sent',
+            payload: const <String, Object?>{
+              'orderId': 'order-print-intent-crash',
+              'lineIds': <String>['line-curry'],
+              'printRequired': true,
+            },
+          ),
+          _EposHarness.hubEpoch,
+        );
+        expect(harness.printQueue.visibleJobs, isEmpty);
+
+        final restarted = harness.restartedPrintQueue();
+        addTearDown(restarted.dispose);
+        await restarted.initialize();
+        final restored = await restarted.reconcileRecentProductionIntents(
+          events: await harness.events(),
+          resolveOrder: harness.orderBook.order,
+          createdByName: (_) => 'Test Staff',
+        );
+
+        expect(restored, 1);
+        expect(restarted.visibleJobs, hasLength(1));
+        expect(restarted.visibleJobs.single['status'], 'queued');
+        expect(
+          restarted.visibleJobs.single['orderId'],
+          'order-print-intent-crash',
+        );
+        expect(
+          await restarted.reconcileRecentProductionIntents(
+            events: await harness.events(),
+            resolveOrder: harness.orderBook.order,
+            createdByName: (_) => 'Test Staff',
+          ),
+          0,
+          reason: 'Ledger reconciliation must never duplicate a ticket.',
+        );
+        expect(restarted.visibleJobs, hasLength(1));
+        expect(await restarted.claim('printer-kitchen'), isNotNull);
+      },
+    );
+
+    test('missing projected print lines create a visible failed job', () async {
+      final harness = await _EposHarness.create();
+      addTearDown(harness.dispose);
+      await harness.send('order.opened', const <String, Object?>{
+        'orderId': 'order-invalid-print-lines',
+        'channel': 'dineIn',
+        'tableId': 'table-a',
+      });
+      final order = await harness.orderBook.order('order-invalid-print-lines');
+
+      final created = await harness.printQueue.enqueueProduction(
+        order: order,
+        lineIds: const <String>['missing-line'],
+        printRequired: true,
+        createdByName: 'Test Staff',
+      );
+
+      expect(created, 1);
+      expect(harness.printQueue.visibleJobs, hasLength(1));
+      final failed = harness.printQueue.visibleJobs.single;
+      expect(failed['status'], 'failed');
+      expect(failed['targetDeviceId'], 'unrouted');
+      expect(failed['failureReason'], contains('missing order lines'));
+    });
   });
 }
 

@@ -71,7 +71,6 @@ class VenueHubRuntime {
   Future<void> Function()? _refreshAuthorityNow;
   StreamSubscription? _pendingSubscription;
   Timer? _authorityTimer;
-  Timer? _postCommitRetryTimer;
   Future<void>? _stopOperation;
   // Invalidates asynchronous work captured by an older hub generation. A
   // cloud refresh may already be in flight when a manager promotes a backup;
@@ -282,46 +281,21 @@ class VenueHubRuntime {
         ledger: _ledger,
       );
       await printQueue.initialize();
+      // Rebuild any production job lost to a power/process failure after the
+      // immutable order event was committed but before the queue snapshot was
+      // flushed. Deterministic job IDs make this safe and non-duplicating.
+      await printQueue.reconcileRecentProductionIntents(
+        events: await _ledger.eventsForVenue(
+          tenantId: scope.tenantId,
+          venueId: scope.venueId,
+          hubEpoch: bootstrap.hubEpoch,
+        ),
+        resolveOrder: orderBook.order,
+        createdByName: staffDisplayName,
+      );
       _printQueue = printQueue;
       _activeScope = scope;
       _activeBootstrap = bootstrap;
-      final pendingPostCommitEffects = <String, Future<void> Function()>{};
-      var postCommitRetryRunning = false;
-
-      // A sale is accepted as soon as its immutable event is committed to the
-      // encrypted ledger. Printing and live-view publication happen after that
-      // durability boundary and must never turn an accepted payment/order into
-      // a rejection. Their operations are idempotent, so transient failures can
-      // be retried safely without duplicating a physical ticket.
-      Future<void> retryPostCommitEffects() async {
-        if (postCommitRetryRunning || pendingPostCommitEffects.isEmpty) return;
-        postCommitRetryRunning = true;
-        try {
-          for (final entry in pendingPostCommitEffects.entries.toList()) {
-            try {
-              await entry.value();
-              pendingPostCommitEffects.remove(entry.key);
-              AppLogger.info(
-                'Recovered post-commit effects for offline event ${entry.key}.',
-              );
-            } catch (error, stackTrace) {
-              AppLogger.error(
-                'Retry post-commit effects for offline event ${entry.key}',
-                error,
-                stackTrace,
-              );
-            }
-          }
-        } finally {
-          postCommitRetryRunning = false;
-        }
-      }
-
-      _postCommitRetryTimer?.cancel();
-      _postCommitRetryTimer = Timer.periodic(
-        const Duration(seconds: 3),
-        (_) => unawaited(retryPostCommitEffects()),
-      );
       Future<void> installFreshSnapshot(Map<String, Object?> refreshed) async {
         if (refreshed['hubEpoch'] != bootstrap.hubEpoch ||
             refreshed['version'] is! int) {
@@ -428,16 +402,13 @@ class VenueHubRuntime {
             await publishOrders();
           }
 
-          try {
-            await applyPostCommitEffects();
-          } catch (error, stackTrace) {
-            pendingPostCommitEffects[event.id] = applyPostCommitEffects;
-            AppLogger.error(
-              'Defer post-commit effects for accepted offline event ${event.id}',
-              error,
-              stackTrace,
-            );
-          }
+          // Do not acknowledge an order/payment until every required durable
+          // print intent has been persisted. If the process dies after the
+          // immutable event commit, an idempotent client retry reaches this
+          // block again; startup reconciliation above also restores it. This
+          // prevents the previous false-success state where an order was sent
+          // but no queue/recovery record existed.
+          await applyPostCommitEffects();
           return event;
         },
       );
@@ -900,9 +871,7 @@ class VenueHubRuntime {
         // The native HTTPS listener is authoritative and remains usable over
         // LAN without internet. RTDB connectivity determines only whether
         // remote/mobile-data terminals can reach this hub.
-        VenueHubAvailability.markLanOnline(
-          internetAvailable: isConnected,
-        );
+        VenueHubAvailability.markLanOnline(internetAvailable: isConnected);
         if (isConnected && !wasRealtimeConnected) {
           // Realtime presence recovering is the earliest reliable indication
           // that Firebase is reachable again. Wake the durable outbox here;
@@ -1509,8 +1478,6 @@ class VenueHubRuntime {
     // awaiting I/O. This prevents an already-running authority refresh from
     // mutating a replacement runtime that starts during those awaits.
     _lifecycleGeneration++;
-    _postCommitRetryTimer?.cancel();
-    _postCommitRetryTimer = null;
     _authorityTimer?.cancel();
     _authorityTimer = null;
     _realtimeReconnectTimer?.cancel();
