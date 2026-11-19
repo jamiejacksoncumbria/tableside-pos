@@ -7,11 +7,13 @@ import '../../core/app_logger.dart';
 import '../../core/tenant_scope.dart';
 import '../../data/printer_device_repository.dart';
 import '../../data/printer_route_repository.dart';
+import '../../offline/venue_hub_client_registry.dart';
 import '../auth/staff_pin_gate.dart';
 import '../notifications/notification_centre.dart';
 import 'bluetooth_receipt_printer.dart';
 import 'bluetooth_receipt_printer_factory.dart';
 import 'local_printer_device_identity.dart';
+import 'native_print_worker.dart';
 import 'queued_native_print_worker.dart';
 import 'receipt_paper_width.dart';
 import 'secured_printer_enrollment.dart';
@@ -283,12 +285,31 @@ class _BluetoothPrinterSetupPageState
         );
       }
     }
+    // Route documents are cloud configuration, while EPOS 3 tickets are
+    // created from the hub's signed local snapshot. Refresh that snapshot now
+    // so the first order cannot be assigned to a stale device registration.
+    await VenueHubClientRegistry.instance.refreshCatalogue(scope);
     final liveSessionReady = await QueuedNativePrintWorker.instance
-        .maintainHeartbeat(scope);
+        .maintainHeartbeat(scope, forceRestart: true);
     if (!liveSessionReady) {
       throw StateError(
-        'The venue server did not accept this printer for live queue access. '
-        'The test connection is unchanged; check the staff permission and retry registration.',
+        QueuedNativePrintWorker.instance.lastSessionFailure ??
+            'The venue server did not accept this printer for live queue access. '
+                'The test connection is unchanged; check the staff permission and retry registration.',
+      );
+    }
+    // Exercise the same certificate-pinned queue used after an order. If an
+    // older ticket is already waiting, it prints now; a physical failure is
+    // returned to this setup screen instead of being silently left for the
+    // background timer.
+    final printResult = await QueuedNativePrintWorker.instance.processNext(
+      scope,
+      localHubOnly: true,
+    );
+    if (printResult == PrintWorkerResult.failed) {
+      throw StateError(
+        QueuedNativePrintWorker.instance.lastPrinterFailure ??
+            'The live queue reached this device, but the Bluetooth printer did not accept the ticket.',
       );
     }
   }

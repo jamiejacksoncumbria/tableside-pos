@@ -37,11 +37,19 @@ class QueuedNativePrintWorker {
   final LocalPrinterDeviceIdentity _identity;
   final PrinterRealtimePresence _realtime = PrinterRealtimePresence();
   String? _lastReadinessDiagnostic;
+  String? _lastSessionFailure;
   String? _lastPrinterFailure;
+  bool _hasStoredPrinterCredential = false;
   final Set<String> _printedAwaitingCompletion = <String>{};
 
   /// Human-readable physical printer failure for the device-local alert.
   String? get lastPrinterFailure => _lastPrinterFailure;
+
+  /// Explains why the registered worker cannot currently enter its live
+  /// queue. The host turns this into a visible device alert instead of leaving
+  /// authentication failures as debug-only messages.
+  String? get lastSessionFailure => _lastSessionFailure;
+  bool get hasStoredPrinterCredential => _hasStoredPrinterCredential;
 
   String? get _requiredTransport {
     // `Platform` from dart:io throws at runtime in a browser. Web is a POS
@@ -84,16 +92,40 @@ class QueuedNativePrintWorker {
   /// Keeps a registered foreground printer visible to the venue-wide delivery
   /// monitor even while it has no jobs. An unregistered till performs no
   /// heartbeat write, so this is safe to call on the shared app shell timer.
-  Future<bool> maintainHeartbeat(VenueScope scope) async {
+  Future<bool> maintainHeartbeat(
+    VenueScope scope, {
+    bool forceRestart = false,
+  }) async {
     try {
-      if (Firebase.apps.isEmpty) return false;
+      if (Firebase.apps.isEmpty) {
+        return _sessionNotReady('Firebase has not started on this device.');
+      }
       final user = FirebaseAuth.instance.currentUser;
       final requiredTransport = _requiredTransport;
-      if (user == null || requiredTransport == null) return false;
+      if (user == null) {
+        return _sessionNotReady(
+          'The device account is signed out, so live printing cannot authenticate.',
+        );
+      }
+      if (requiredTransport == null) {
+        return _sessionNotReady(
+          'This platform cannot run a native printer worker.',
+        );
+      }
       final deviceId = await _identity.deviceIdForScope(scope);
       final deviceCredential = await _identity.credential(scope);
-      if (deviceCredential == null || deviceCredential.isEmpty) return false;
-      if (_realtime.isConfigured(scope, deviceId)) return true;
+      _hasStoredPrinterCredential =
+          deviceCredential != null && deviceCredential.isNotEmpty;
+      if (deviceCredential == null || deviceCredential.isEmpty) {
+        return _sessionNotReady(
+          'This device has no venue printer credential. Register or reconnect it in printer settings.',
+        );
+      }
+      if (forceRestart) await _realtime.stop();
+      if (_realtime.isConfigured(scope, deviceId)) {
+        _lastSessionFailure = null;
+        return true;
+      }
       // issueRealtimePrinterSession validates the credential, venue,
       // enrollment, active state and transport on the trusted server.
       await _realtime.start(
@@ -101,13 +133,27 @@ class QueuedNativePrintWorker {
         deviceId: deviceId,
         deviceCredential: deviceCredential,
       );
-      return _realtime.isConfigured(scope, deviceId);
-    } on Object catch (error) {
-      AppLogger.info(
-        'Printer realtime presence is offline; local hub printing remains active. ($error)',
-      );
+      final configured = _realtime.isConfigured(scope, deviceId);
+      if (configured) _lastSessionFailure = null;
+      return configured;
+    } on Object catch (error, stackTrace) {
+      final diagnostic =
+          'The secured live printer session was rejected: $error';
+      if (_lastSessionFailure != diagnostic) {
+        AppLogger.error(
+          'Start secured live printer session',
+          error,
+          stackTrace,
+        );
+      }
+      _lastSessionFailure = diagnostic;
       return false;
     }
+  }
+
+  bool _sessionNotReady(String reason) {
+    _lastSessionFailure = reason;
+    return false;
   }
 
   Future<PrintWorkerResult> processNext(

@@ -332,7 +332,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
         if (!mounted) return;
         setState(() {
           _staff = cached;
-          _selectedUserId = cached.firstOrNull?.userId;
+          _selectedUserId = _preferredStaffId(cached);
           _loading = false;
           _error = 'Internet unavailable. Using the encrypted venue hub.';
         });
@@ -347,9 +347,10 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       final currentUserId = _currentFirebaseUser?.uid;
       setState(() {
         _staff = staff;
-        _selectedUserId = staff.any((item) => item.userId == currentUserId)
-            ? currentUserId
-            : staff.firstOrNull?.userId;
+        _selectedUserId = _preferredStaffId(
+          staff,
+          firebaseUserId: currentUserId,
+        );
         _loading = false;
       });
     } on Object catch (error, stackTrace) {
@@ -359,7 +360,7 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
       if (cached.isNotEmpty) {
         setState(() {
           _staff = cached;
-          _selectedUserId = cached.firstOrNull?.userId;
+          _selectedUserId = _preferredStaffId(cached);
           _loading = false;
           _error =
               'Cloud unavailable. Using the encrypted venue hub PIN service.';
@@ -375,9 +376,30 @@ class _StaffPinGateState extends ConsumerState<StaffPinGate>
 
   Future<void> _enterPin(VenuePinStaff staff) async {
     setState(() {
+      _selectedUserId = staff.userId;
       _pinEntryUserId = staff.userId;
       _error = null;
     });
+  }
+
+  /// Retains the operator's explicit staff selection when the list refreshes
+  /// after a failed PIN or a connectivity change. Previously every refresh
+  /// restored the first/Firebase user, making one tile appear permanently
+  /// selected even after another staff member had been chosen.
+  String? _preferredStaffId(
+    List<VenuePinStaff> staff, {
+    String? firebaseUserId,
+  }) {
+    final selectedUserId = _selectedUserId;
+    if (selectedUserId != null &&
+        staff.any((item) => item.userId == selectedUserId)) {
+      return selectedUserId;
+    }
+    if (firebaseUserId != null &&
+        staff.any((item) => item.userId == firebaseUserId)) {
+      return firebaseUserId;
+    }
+    return staff.firstOrNull?.userId;
   }
 
   /// Verifies a PIN entered on the locked screen.

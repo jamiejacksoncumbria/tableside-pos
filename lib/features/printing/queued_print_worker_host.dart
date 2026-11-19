@@ -97,7 +97,7 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
       }
     });
     _retryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      unawaited(worker.maintainHeartbeat(scope));
+      unawaited(_maintainPrinterSession(worker, scope));
       // Queue streams and the RTDB printer signal wake real jobs. Do not issue
       // an empty Cloud Function claim on a timer: fifty venues would otherwise
       // create thousands of unnecessary invocations every day.
@@ -129,8 +129,21 @@ class _QueuedPrintWorkerHostState extends ConsumerState<QueuedPrintWorkerHost> {
       'Printer worker will check the venue hub LAN queue every 2 seconds '
       'without using Firebase claims.',
     );
-    unawaited(worker.maintainHeartbeat(scope));
+    unawaited(_maintainPrinterSession(worker, scope));
     unawaited(_processAvailable(scope));
+  }
+
+  Future<void> _maintainPrinterSession(
+    QueuedNativePrintWorker worker,
+    VenueScope scope,
+  ) async {
+    final ready = await worker.maintainHeartbeat(scope);
+    if (!mounted || _scope != scope) return;
+    if (!ready &&
+        worker.hasStoredPrinterCredential &&
+        worker.lastSessionFailure != null) {
+      _reportProductionChannelIssue(scope, worker.lastSessionFailure!);
+    }
   }
 
   Future<void> _restoreAndroidPrinterService() async {

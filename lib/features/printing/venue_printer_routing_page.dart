@@ -198,10 +198,11 @@ class _VenuePrinterRoutingPageState
       // shell's periodic heartbeat made a newly registered printer continue
       // to look offline for up to thirty seconds.
       final liveSessionReady = await QueuedNativePrintWorker.instance
-          .maintainHeartbeat(scope);
+          .maintainHeartbeat(scope, forceRestart: true);
       if (!liveSessionReady) {
         throw StateError(
-          'The printer was registered, but the secured live queue session was not accepted. Retry registration while online.',
+          QueuedNativePrintWorker.instance.lastSessionFailure ??
+              'The printer was registered, but the secured live queue session was not accepted. Retry registration while online.',
         );
       }
       if (!mounted) return;
